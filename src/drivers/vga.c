@@ -32,16 +32,15 @@ const char* marquee_text = ">>> Mectov OS v10.5 - Pro Dashboard Enabled - TUI Sy
 int marquee_pos = 0; int marquee_counter = 0;
 void wait_retrace() { while (inb(0x3DA) & 0x08); while (!(inb(0x3DA) & 0x08)); }
 void update_marquee() {
-    marquee_counter++; if (marquee_counter < 350000) return; marquee_counter = 0;
+    marquee_counter++; if (marquee_counter < 10) return; marquee_counter = 0; // Speed up counter since it's driven by 50Hz timer now
     int text_len = 0; while(marquee_text[text_len]) text_len++;
-    wait_retrace();
     for (int i = 0; i < 80; i++) { int c_idx = (marquee_pos + i) % text_len; int v_idx = (24 * 80 + i) * 2; video_m[v_idx] = marquee_text[c_idx]; video_m[v_idx + 1] = 0x70; }
     marquee_pos = (marquee_pos + 1) % text_len;
 }
 
 int hud_counter = 0;
 void update_hud() {
-    hud_counter++; if (hud_counter < 600000) return; hud_counter = 0;
+    hud_counter++; if (hud_counter < 50) return; hud_counter = 0; // 50 ticks = 1 second at 50Hz
     unsigned char ch = bcd_to_bin(read_cmos(0x04)), cm = bcd_to_bin(read_cmos(0x02)), cs = bcd_to_bin(read_cmos(0x00));
     int wj = (ch + 7) % 24;
     int tb = boot_hour * 60 + boot_min, tc = ch * 60 + cm, diff = tc - tb; if (diff < 0) diff += 1440;
@@ -58,6 +57,5 @@ void update_hud() {
     h_str[i] = '\0';
     
     int start_x = 80 - i;
-    wait_retrace();
     for (int j = 0; j < i; j++) { d_char(start_x + j, 0, h_str[j], 0x1E); } 
 }
