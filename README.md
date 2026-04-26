@@ -1,61 +1,70 @@
-Mectov OS v11.0 (The Modular & Memory Update)
-=================================================
+Mectov OS v12.0 (The Foundation Update)
+========================================
 
-Mectov OS is a monolithic, bare-metal operating system kernel developed from scratch using C and x86 Assembly. Version 11.0 marks a major milestone with a fully modular architecture and the introduction of the Mectov Memory Manager (MMM).
+Mectov OS is a monolithic, bare-metal operating system kernel developed from scratch using C and x86 Assembly. Version 12.0 represents a significant architectural leap, moving from a polling-based system to a modern interrupt-driven framework.
 
-Modular Architecture
---------------------
-The project has been refactored into a structured hierarchy for professional-grade development:
-- `src/drivers/`: Low-level hardware drivers (VGA, Keyboard, ATA, Speaker).
-- `src/sys/`: Core system services (Memory Management, File System, Security).
-- `src/apps/`: Integrated applications (Nano Editor, Snake Game).
-- `src/include/`: Unified header files for inter-module communication.
+Project Overview
+----------------
+Mectov OS operates directly on PC hardware (VGA, ATA, PIT, PS/2) without any external libraries (Freestanding C). It features a modular architecture, advanced memory management, and a robust interrupt handling system, providing a solid foundation for future multitasking capabilities.
 
-Core Features
--------------
+Key Features
+------------
+
+### 🏗️ Core Architecture
+- **Interrupt-Driven System (IDT/ISR):** Implements a proper Interrupt Descriptor Table. Hardware events like keyboard input and timer ticks are handled via ISRs, eliminating inefficient CPU polling.
 - **Mectov Memory Manager (MMM):** 
     - Physical Memory Management (PMM) using Bitmap tracking.
-    - Simple Dynamic Allocation (`kmalloc`) for kernel services.
-    - Paging support as a foundation for advanced multitasking.
-- **Security & Integrity:**
-    - Secure Boot Login with masked password authentication.
-    - Persistent Screen Lock (`kunci`) and session protection.
-- **Hardware Interaction:**
-    - CPUID Identity Detection: Native identification of the host processor.
-    - Persistent Storage: ATA/IDE PIO driver for virtual hard disk support.
-    - Real-Time Clock: Localized WIB (UTC+7) hardware clock reading.
-- **User Interface (Mectov TUI):**
-    - Floating Window Manager with Live System HUD (Real-time Clock & Uptime).
-    - Stable Hardware Cursor and Smooth Marquee running text.
+    - Dynamic allocation via `kmalloc` and `kfree`.
+    - Paging support for memory protection and future process isolation.
+- **Modular Design:** Source code is surgically separated into `drivers/`, `sys/`, `apps/`, and `include/` for professional maintainability.
+
+### 🔐 Security & Persistence
+- **Secure Boot Login:** Initial access protection with masked password input.
+- **Persistent Storage:** Native ATA/IDE PIO driver for virtual hard disk support, ensuring files are saved across reboots.
+- **Screen Lock:** Immediate session locking via the `kunci` command.
+
+### 📟 User Interface (Mectov TUI)
+- **Live System HUD:** Real-time clock (WIB) and system uptime displayed in the dashboard, driven by the hardware timer.
 - **Command Shell (Mectovsh):**
-    - Tab Auto-complete and Command History (Up Arrow).
-    - Integrated Manual System (`man` command).
+    - Tab Auto-complete for all system commands.
+    - Command History accessed via the Up Arrow key.
+    - Buffered Keyboard Input to prevent keystroke loss during heavy tasks.
+- **Visuals:** Floating Window Manager illusion with drop shadows and smooth marquee running text.
 
-System Command Reference
-------------------------
-### Administration & Power
-- `mfetch`      : Detailed system info, CPU brand, and memory usage.
-- `mem`         : Display RAM statistics (Total, Used, Free).
-- `waktu`       : Display current WIB time (Jakarta).
-- `kunci`       : Lock the system session.
-- `matikan`     : Shutdown via ACPI.
-- `mulaiulang`  : Hardware CPU reset.
+### 🎮 Built-in Applications
+- **Mectovular (Snake Game):** High-performance Snake game with WASD and Arrow key support.
+- **Mectov Nano:** A lightweight terminal-based text editor for on-disk file manipulation.
+- **MectovScript v2.0:** A batch scripting engine for automating system tasks with tone synthesis support.
 
-### File & Scripting
+System Commands
+---------------
+- `mfetch`      : Detailed system info, CPU brand string (CPUID), and RAM usage.
+- `mem`         : Display real-time RAM statistics from MMM.
+- `waktu`       : Current WIB (Jakarta) time from hardware RTC.
 - `ls`, `buat`, `tulis`, `baca`, `hapus`: Persistent file management.
-- `edit [name]` : Open Mectov Nano text editor.
-- `jalankan`    : Execute MectovScript (.ms) batch files.
-- `ular`        : Launch the Mectov Snake game (WASD/Arrow keys).
+- `edit [file]` : Open the text editor.
+- `ular`        : Launch the Snake game.
+- `man [cmd]`   : Access the internal manual book for help.
+- `matikan`     : ACPI Shutdown.
+- `mulaiulang`  : Hardware CPU Reset.
 
 Installation and Execution
 --------------------------
+### Requirements
+- GCC (i386 multilib)
+- NASM
+- GNU Make
+- QEMU
+
 ### Building
-Requirements: `gcc`, `nasm`, `make`, `qemu`, `gcc-multilib`.
-    ./build.sh
+```bash
+./build.sh
+```
 
 ### Running
-    ./run.sh
-
+```bash
+./run.sh
+```
 *Note: Default system password is `mectov123`.*
 
 Created and maintained by Alif Fadlan.
