@@ -1,4 +1,4 @@
-// --- MECTOV OS v8.6 (Clean Stable Cursor Edition) ---
+// --- MECTOV OS v8.7 (Final Stable Fix) ---
 static inline unsigned char inb(unsigned short port) {
     unsigned char ret; __asm__ __volatile__ ( "inb %1, %0" : "=a"(ret) : "Nd"(port) ); return ret;
 }
@@ -15,57 +15,53 @@ static inline void outw(unsigned short port, unsigned short val) {
 unsigned char read_cmos(unsigned char reg) { outb(0x70, reg); return inb(0x71); }
 unsigned char bcd_to_bin(unsigned char bcd) { return ((bcd & 0xF0) >> 1) + ((bcd & 0xF0) >> 3) + (bcd & 0x0F); }
 
-// --- POWER ---
 void shutdown() { outw(0x604, 0x2000); }
 void reboot() { unsigned char g = 0x02; while (g & 0x02) g = inb(0x64); outb(0x64, 0xFE); }
 
-// --- HARDWARE CURSOR (Kursor Kedip Beneran) ---
 void update_hw_cursor(int x, int y) {
     unsigned short pos = y * 80 + x;
     outb(0x3D4, 0x0F); outb(0x3D5, (unsigned char) (pos & 0xFF));
     outb(0x3D4, 0x0E); outb(0x3D5, (unsigned char) ((pos >> 8) & 0xFF));
 }
 
-// --- HDD ATA ---
 void ata_wait_bsy() { while(inb(0x1F7) & 0x80); }
 void ata_wait_drq() { while(!(inb(0x1F7) & 0x08)); }
 void ata_read_sector(unsigned int lba, unsigned char* b) {
     ata_wait_bsy(); outb(0x1F6, 0xE0 | ((lba >> 24) & 0x0F)); outb(0x1F2, 1); outb(0x1F3, (unsigned char)lba);
     outb(0x1F4, (unsigned char)(lba >> 8)); outb(0x1F5, (unsigned char)(lba >> 16)); outb(0x1F7, 0x20);
     ata_wait_bsy(); ata_wait_drq();
-    for (int i = 0; i < 256; i++) { unsigned short w = inw(0x1F0); b[i * 2] = (unsigned char)w; b[i * 2 + 1] = (unsigned char)(w >> 8); }
+    for (int i = 0; i < 256; i++) { unsigned short word = inw(0x1F0); b[i * 2] = (unsigned char)word; b[i * 2 + 1] = (unsigned char)(word >> 8); }
 }
 void ata_write_sector(unsigned int lba, unsigned char* b) {
     ata_wait_bsy(); outb(0x1F6, 0xE0 | ((lba >> 24) & 0x0F)); outb(0x1F2, 1); outb(0x1F3, (unsigned char)lba);
     outb(0x1F4, (unsigned char)(lba >> 8)); outb(0x1F5, (unsigned char)(lba >> 16)); outb(0x1F7, 0x30);
     ata_wait_bsy(); ata_wait_drq();
-    for (int i = 0; i < 256; i++) { unsigned short w = b[i * 2] | (b[i * 2 + 1] << 8); outw(0x1F0, w); }
+    for (int i = 0; i < 256; i++) { unsigned short word = b[i * 2] | (b[i * 2 + 1] << 8); outw(0x1F0, word); }
     outb(0x1F7, 0xE7); ata_wait_bsy();
 }
 
-// --- AUDIO & DELAY ---
 void play_sound(unsigned int n) { unsigned int d = 1193180/n; outb(0x43,0xb6); outb(0x42,(unsigned char)d); outb(0x42,(unsigned char)(d>>8)); unsigned char t = inb(0x61); if(t!=(t|3)) outb(0x61,t|3); }
 void nosound() { outb(0x61, inb(0x61) & 0xFC); }
-void delay(int ms) { for (volatile int i = 0; i < ms; i++) { for (volatile int j = 0; j < 4000; j++) __asm__ __volatile__ ("pause"); } }
+int abort_ex = 0;
+void delay(int ms) { for (volatile int i = 0; i < ms; i++) { if (inb(0x64) & 1) if (inb(0x60) == 0x01) { abort_ex = 1; nosound(); } if (abort_ex) return; for (volatile int j = 0; j < 4000; j++) __asm__ __volatile__ ("pause"); } }
 void beep() { play_sound(1000); delay(100); nosound(); }
+void nada(int f, int d) { if (abort_ex) return; if (f > 0) play_sound(f); delay(d); nosound(); }
 
-// --- KEYBOARD ---
-int shift_pressed = 0, capslock_active = 0;
+int shift_p = 0, caps_a = 0;
 char scancode_to_char(unsigned char s) {
     unsigned char m_n[58] = { 0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' ', 0 };
     unsigned char m_s[58] = { 0, 0, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '\"', '~', 0, '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ', 0 };
     if (s < 58) {
         char c = m_n[s], cs = m_s[s]; int isl = (c >= 'a' && c <= 'z');
-        if (shift_pressed) return (isl && capslock_active) ? c : cs;
-        else return (isl && capslock_active) ? cs : c;
+        if (shift_p) return (isl && caps_a) ? c : cs;
+        else return (isl && caps_a) ? cs : c;
     }
     return 0;
 }
 
-// --- GUI ---
-volatile char* video_memory = (volatile char*) 0xb8000;
-unsigned char current_color = 0x0F; 
-int cursor_x = 0, cursor_y = 0;
+volatile char* video_m = (volatile char*) 0xb8000;
+unsigned char cur_col = 0x0F; 
+int cx = 0, cy = 0;
 #define WIN_X 2
 #define WIN_Y 2
 #define WIN_W 76
@@ -75,71 +71,84 @@ int cursor_x = 0, cursor_y = 0;
 #define CW (WIN_W - 2)
 #define CH (WIN_H - 2)
 
-void draw_char_at(int x, int y, char c, unsigned char color) { if (x >= 0 && x < 80 && y >= 0 && y < 25) { int i = (y * 80 + x) * 2; video_memory[i] = c; video_memory[i + 1] = color; } }
-void draw_desktop() { for (int y = 0; y < 24; y++) for (int x = 0; x < 80; x++) draw_char_at(x, y, 176, 0x09); for (int x = 0; x < 80; x++) draw_char_at(x, 24, ' ', 0x70); const char* t = " [ Mectov ]  v8.6  |  Hardware Blinking Cursor Active  "; for (int i = 0; t[i] != '\0' && i < 80; i++) draw_char_at(i, 24, t[i], 0x70); }
-void draw_window(int x, int y, int w, int h, const char* title) { for (int sy = y + 1; sy <= y + h; sy++) { draw_char_at(x + w, sy, ' ', 0x08); draw_char_at(x + w + 1, sy, ' ', 0x08); } for (int sx = x + 2; sx <= x + w + 1; sx++) draw_char_at(sx, y + h, ' ', 0x08); for (int i = x; i < x + w; i++) for (int j = y; j < y + h; j++) { if (j == y) draw_char_at(i, j, ' ', 0x1F); else if (i == x || i == x + w - 1 || j == y + h - 1) draw_char_at(i, j, 177, 0x1F); else draw_char_at(i, j, ' ', 0x0F); } int tl = 0; while(title[tl]) tl++; int tx = x + (w - tl) / 2; for(int i = 0; i < tl; i++) draw_char_at(tx + i, y, title[i], 0x1F); draw_char_at(x + w - 4, y, '[', 0x1F); draw_char_at(x + w - 3, y, 'X', 0x1C); draw_char_at(x + w - 2, y, ']', 0x1F); }
-void clear_workspace() { for (int y = CY; y < CY + CH - 1; y++) for (int x = CX; x < CX + CW; x++) draw_char_at(x, y, ' ', 0x0F); cursor_x = 0; cursor_y = 0; update_hw_cursor(CX, CY); }
-void scroll_workspace() { for (int y = CY; y < CY + CH - 2; y++) for (int x = CX; x < CX + CW; x++) { int s = ((y + 1) * 80 + x) * 2, d = (y * 80 + x) * 2; video_memory[d] = video_memory[s]; video_memory[d + 1] = video_memory[s + 1]; } int ly = CY + CH - 2; for (int x = CX; x < CX + CW; x++) draw_char_at(x, ly, ' ', 0x0F); cursor_y--; }
+void d_char(int x, int y, char c, unsigned char col) { if (x >= 0 && x < 80 && y >= 0 && y < 25) { int i = (y * 80 + x) * 2; video_m[i] = c; video_m[i + 1] = col; } }
+void d_desktop() { for (int y = 0; y < 24; y++) for (int x = 0; x < 80; x++) d_char(x, y, 176, 0x09); for (int x = 0; x < 80; x++) d_char(x, 24, ' ', 0x70); }
+void d_win(int x, int y, int w, int h, const char* t) { for (int i = x; i < x + w; i++) for (int j = y; j < y + h; j++) { if (j == y) d_char(i, j, ' ', 0x1F); else if (i == x || i == x + w - 1 || j == y + h - 1) d_char(i, j, 177, 0x1F); else d_char(i, j, ' ', 0x0F); } int tl = 0; while(t[tl]) tl++; int tx = x + (w - tl) / 2; for(int i = 0; i < tl; i++) d_char(tx + i, y, t[i], 0x1F); }
+void c_work() { for (int y = CY; y < CY + CH - 1; y++) for (int x = CX; x < CX + CW; x++) d_char(x, y, ' ', 0x0F); cx = 0; cy = 0; update_hw_cursor(CX, CY); }
+void s_work() { for (int y = CY; y < CY + CH - 2; y++) for (int x = CX; x < CX + CW; x++) { int s = ((y + 1) * 80 + x) * 2, d = (y * 80 + x) * 2; video_m[d] = video_m[s]; video_m[d + 1] = video_m[s + 1]; } int ly = CY + CH - 2; for (int x = CX; x < CX + CW; x++) d_char(x, ly, ' ', 0x0F); cy--; }
 
-void print(const char* str, unsigned char color) { int i = 0; while (str[i] != '\0') { if (str[i] == '\n') { cursor_x = 0; cursor_y++; } else { draw_char_at(CX + cursor_x, CY + cursor_y, str[i], color); cursor_x++; if (cursor_x >= CW) { cursor_x = 0; cursor_y++; } } if (cursor_y >= CH - 1) scroll_workspace(); i++; } update_hw_cursor(CX + cursor_x, CY + cursor_y); }
-void print_char(char c, unsigned char color) { if (c == '\n') { cursor_x = 0; cursor_y++; } else { draw_char_at(CX + cursor_x, CY + cursor_y, c, color); cursor_x++; if (cursor_x >= CW) { cursor_x = 0; cursor_y++; } } if (cursor_y >= CH - 1) scroll_workspace(); update_hw_cursor(CX + cursor_x, CY + cursor_y); }
+void print(const char* s, unsigned char col) { int i = 0; while (s[i] != '\0') { if (s[i] == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, s[i], col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); i++; } update_hw_cursor(CX + cx, CY + cy); }
+void p_char(char c, unsigned char col) { if (c == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, c, col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); update_hw_cursor(CX + cx, CY + cy); }
 
-// --- UTILS ---
 int strcmp(const char* s1, const char* s2) { while (*s1 && (*s1 == *s2)) { s1++; s2++; } return *(const unsigned char*)s1 - *(const unsigned char*)s2; }
+int strncmp(const char* s1, const char* s2, int n) { while (n && *s1 && (*s1 == *s2)) { ++s1; ++s2; --n; } if (n == 0) return 0; return (*(unsigned char *)s1 - *(unsigned char *)s2); }
 void strcpy(char* d, const char* s) { while ((*d++ = *s++)); }
+void p_int(int n, unsigned char c) { if (n < 0) { print("-", c); n = -n; } if (n == 0) { print("0", c); return; } char buf[10]; int i = 0; while (n > 0) { buf[i++] = (n % 10) + '0'; n /= 10; } for (int j = 0; j < i / 2; j++) { char t = buf[j]; buf[j] = buf[i - j - 1]; buf[i - j - 1] = t; } buf[i] = '\0'; print(buf, c); }
+int atoi(const char* s) { int r = 0, si = 1, i = 0; if (s[0] == '-') { si = -1; i++; } for (; s[i] != '\0'; ++i) { if (s[i] >= '0' && s[i] <= '9') r = r * 10 + s[i] - '0'; else break; } return si * r; }
 
-// --- VFS ---
 #define MAX_FILES 16
 #define MAX_FILENAME 16
 #define MAX_FILE_SIZE 1024
 typedef struct { char name[MAX_FILENAME]; char data[MAX_FILE_SIZE]; int size; int in_use; char padding[488]; } File;
-File filesystem[MAX_FILES];
-void vfs_save_to_disk() { unsigned char* p = (unsigned char*)filesystem; for (int i = 0; i < 48; i++) ata_write_sector(i + 1, p + (i * 512)); unsigned char s[512] = {0}; s[0] = 'M'; s[1] = 'E'; s[2] = 'C'; s[3] = 'T'; s[4] = 'O'; s[5] = 'V'; ata_write_sector(0, s); }
-int vfs_load_from_disk() { unsigned char s[512]; ata_read_sector(0, s); if (s[0] == 'M' && s[1] == 'E' && s[2] == 'C' && s[3] == 'T' && s[4] == 'O' && s[5] == 'V') { unsigned char* p = (unsigned char*)filesystem; for (int i = 0; i < 48; i++) ata_read_sector(i + 1, p + (i * 512)); return 1; } return 0; }
-int vfs_find_file(const char* n) { for (int i = 0; i < MAX_FILES; i++) if (filesystem[i].in_use && strcmp(filesystem[i].name, n) == 0) return i; return -1; }
-int vfs_create_file(const char* n) { if (vfs_find_file(n) != -1) return -2; for (int i = 0; i < MAX_FILES; i++) if (!filesystem[i].in_use) { strcpy(filesystem[i].name, n); filesystem[i].in_use = 1; filesystem[i].size = 0; filesystem[i].data[0] = '\0'; return i; } return -1; }
+File fs[MAX_FILES];
+void vfs_save() { unsigned char* p = (unsigned char*)fs; for (int i = 0; i < 48; i++) ata_write_sector(i + 1, p + (i * 512)); unsigned char s[512] = {0}; s[0] = 'M'; s[1] = 'E'; s[2] = 'C'; s[3] = 'T'; s[4] = 'O'; s[5] = 'V'; ata_write_sector(0, s); }
+int vfs_load() { unsigned char s[512]; ata_read_sector(0, s); if (s[0] == 'M' && s[1] == 'E' && s[2] == 'C' && s[3] == 'T' && s[4] == 'O' && s[5] == 'V') { unsigned char* p = (unsigned char*)fs; for (int i = 0; i < 48; i++) ata_read_sector(i + 1, p + (i * 512)); return 1; } return 0; }
+int vfs_find(const char* n) { for (int i = 0; i < MAX_FILES; i++) if (fs[i].in_use && strcmp(fs[i].name, n) == 0) return i; return -1; }
+int vfs_create(const char* n) { if (vfs_find(n) != -1) return -2; for (int i = 0; i < MAX_FILES; i++) if (!fs[i].in_use) { strcpy(fs[i].name, n); fs[i].in_use = 1; fs[i].size = 0; fs[i].data[0] = '\0'; return i; } return -1; }
 
-// --- EDITOR ---
-int editor_active = 0; char editor_buffer[MAX_FILE_SIZE], editor_filename[MAX_FILENAME]; int editor_cursor = 0;
-void start_editor(const char* f) { strcpy(editor_filename, f); int i = vfs_find_file(f); if (i >= 0) { strcpy(editor_buffer, filesystem[i].data); editor_cursor = filesystem[i].size; } else { editor_buffer[0] = '\0'; editor_cursor = 0; } editor_active = 1; clear_workspace(); print(editor_buffer, 0x0F); update_hw_cursor(CX + (editor_cursor % CW), CY + (editor_cursor / CW)); }
-void save_and_exit_editor() { int i = vfs_find_file(editor_filename); if (i == -1) i = vfs_create_file(editor_filename); if (i >= 0) { strcpy(filesystem[i].data, editor_buffer); filesystem[i].size = editor_cursor; } vfs_save_to_disk(); editor_active = 0; clear_workspace(); print("root@mectov:~# ", 0x0A); }
+int ed_a = 0; char ed_b[MAX_FILE_SIZE], ed_fn[MAX_FILENAME]; int ed_c = 0;
+void st_ed(const char* f) { strcpy(ed_fn, f); int i = vfs_find(f); if (i >= 0) { strcpy(ed_b, fs[i].data); ed_c = fs[i].size; } else { ed_b[0] = '\0'; ed_c = 0; } ed_a = 1; c_work(); print(ed_b, 0x0F); update_hw_cursor(CX + (ed_c % CW), CY + (ed_c / CW)); }
+void sa_ex_ed() { int i = vfs_find(ed_fn); if (i == -1) i = vfs_create(ed_fn); if (i >= 0) { strcpy(fs[i].data, ed_b); fs[i].size = ed_c; } vfs_save(); ed_a = 0; c_work(); print("root@mectov:~# ", 0x0A); }
 
-// --- SHELL ---
-char command_buffer[256]; int buffer_index = 0;
-void execute_command() { print("\n", 0x0F); command_buffer[buffer_index] = '\0'; 
-    if (strcmp(command_buffer, "matikan") == 0) shutdown();
-    else if (strcmp(command_buffer, "mulaiulang") == 0) reboot();
-    else if (strcmp(command_buffer, "clear") == 0) { clear_workspace(); }
-    else if (strcmp(command_buffer, "mfetch") == 0) { print("root@mectov-os\nv8.6 Stable Cursor Edition\n", 0x0B); }
-    else if (strcmp(command_buffer, "ls") == 0) { for (int i = 0; i < MAX_FILES; i++) if (filesystem[i].in_use) { print("- ", 0x0F); print(filesystem[i].name, 0x0B); print("\n", 0x0F); } }
-    else if (command_buffer[0] != '\0') { print("Command not found\n", 0x0C); }
-    buffer_index = 0; print("root@mectov:~# ", 0x0A);
+char cmd_b[256]; int b_idx = 0, is_script = 0;
+void ex_cmd();
+void run_script(const char* f) { int i = vfs_find(f); if (i < 0) return; is_script = 1; abort_ex = 0; char* d = fs[i].data; int l = fs[i].size, p = 0; while (p < l && !abort_ex) { b_idx = 0; while (p < l && d[p] != '\n' && d[p] != '\0') { if (b_idx < 255) cmd_b[b_idx++] = d[p]; p++; } cmd_b[b_idx] = '\0'; if (b_idx > 0) ex_cmd(); if (d[p] == '\n') p++; } is_script = 0; abort_ex = 0; }
+void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0'; 
+    if (strcmp(cmd_b, "matikan") == 0) shutdown();
+    else if (strcmp(cmd_b, "mulaiulang") == 0) reboot();
+    else if (strcmp(cmd_b, "clear") == 0) { c_work(); }
+    else if (strcmp(cmd_b, "waktu") == 0) { unsigned char j = bcd_to_bin(read_cmos(0x04)), m = bcd_to_bin(read_cmos(0x02)), d = bcd_to_bin(read_cmos(0x00)); int wj = (j + 7) % 24; print("WIB: ", 0x0B); p_int(wj, 0x0E); print(":", 0x0F); p_int(m, 0x0E); print(":", 0x0F); p_int(d, 0x0E); print("\n", 0x0F); }
+    else if (strcmp(cmd_b, "mfetch") == 0) { print("root@mectov-os\nv8.7 Final\n", 0x0B); }
+    else if (strcmp(cmd_b, "ls") == 0) { for (int i = 0; i < MAX_FILES; i++) if (fs[i].in_use) { print("- ", 0x0F); print(fs[i].name, 0x0B); print("\n", 0x0F); } }
+    else if (strncmp(cmd_b, "edit ", 5) == 0) { st_ed(&cmd_b[5]); b_idx = 0; return; }
+    else if (strncmp(cmd_b, "baca ", 5) == 0) { int i = vfs_find(&cmd_b[5]); if (i >= 0) print(fs[i].data, 0x0F); }
+    else if (strncmp(cmd_b, "hapus ", 6) == 0) { int i = vfs_find(&cmd_b[6]); if (i >= 0) { fs[i].in_use = 0; vfs_save(); } }
+    else if (strncmp(cmd_b, "nada ", 5) == 0) { int i = 5; while(cmd_b[i] == ' ') i++; int f = atoi(&cmd_b[i]); while(cmd_b[i] >= '0' && cmd_b[i] <= '9') i++; while(cmd_b[i] == ' ') i++; int d = atoi(&cmd_b[i]); if (f > 0 && d > 0) nada(f, d); }
+    else if (strncmp(cmd_b, "jalankan ", 9) == 0) { if (!is_script) { run_script(&cmd_b[9]); b_idx = 0; if (!is_script) print("root@mectov:~# ", 0x0A); return; } }
+    else if (cmd_b[0] != '\0') { print("Command not found\n", 0x0C); }
+    b_idx = 0; if (!is_script) print("root@mectov:~# ", 0x0A);
 }
 
 void kernel_main(void) {
-    vfs_load_from_disk(); 
-    draw_desktop(); draw_window(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS "); clear_workspace();
-    print("Welcome to Mectov OS v8.6\n", 0x0E);
-    print("Stable Text Cursor Active.\nroot@mectov:~# ", 0x0A);
-    unsigned char last_scancode = 0;
-    
+    vfs_load(); d_desktop(); d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Mectov Security Login "); c_work();
+    const char* pass = "mectov123"; char in[32]; int in_idx = 0;
+    print("Welcome to Mectov OS v8.7\nPassword: ", 0x0E);
+    int log = 0; unsigned char ls = 0;
+    while (!log) {
+        if (inb(0x64) & 1) {
+            unsigned char sc = inb(0x60);
+            if (sc < 0x80 && sc != ls) {
+                char c = scancode_to_char(sc);
+                if (c == '\n') { in[in_idx] = '\0'; if (strcmp(in, pass) == 0) log = 1; else { print("\nDenied!\nPassword: ", 0x0C); in_idx = 0; } }
+                else if (c == '\b' && in_idx > 0) { in_idx--; d_char(CX + 10 + in_idx, CY + 1, ' ', 0x0F); update_hw_cursor(CX + 10 + in_idx, CY + 1); }
+                else if (c != 0 && in_idx < 31) { in[in_idx++] = c; p_char('*', 0x0F); }
+                ls = sc;
+            } else if (sc >= 0x80) ls = 0;
+        }
+    }
+    beep(); c_work(); d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS ");
+    print("Login Success! Welcome Bos Alif.\nroot@mectov:~# ", 0x0A);
     while (1) {
         if (inb(0x64) & 1) {
             unsigned char sc = inb(0x60);
-            if (sc == 0x2A || sc == 0x36) shift_pressed = 1; else if (sc == 0xAA || sc == 0xB6) shift_pressed = 0; else if (sc == 0x3A) capslock_active = !capslock_active;
-            if (sc == 0x01 && last_scancode != 0x01) { if (editor_active) save_and_exit_editor(); last_scancode = sc; continue; }
-            if (sc < 0x80 && sc != last_scancode) {
+            if (sc == 0x2A || sc == 0x36) shift_p = 1; else if (sc == 0xAA || sc == 0xB6) shift_p = 0; else if (sc == 0x3A) caps_a = !caps_a;
+            if (sc == 0x01 && ls != 0x01) { if (ed_a) sa_ex_ed(); ls = sc; continue; }
+            if (sc < 0x80 && sc != ls) {
                 char c = scancode_to_char(sc);
-                if (editor_active) {
-                    if (c == '\b' && editor_cursor > 0) { editor_cursor--; editor_buffer[editor_cursor] = '\0'; clear_workspace(); print(editor_buffer, 0x0F); }
-                    else if (c != 0 && editor_cursor < MAX_FILE_SIZE-1) { editor_buffer[editor_cursor++] = c; print_char(c, 0x0F); }
-                } else {
-                    if (c == '\n') execute_command();
-                    else if (c == '\b') { if (buffer_index > 0) { buffer_index--; if (cursor_x > 0) { cursor_x--; draw_char_at(CX + cursor_x, CY + cursor_y, ' ', 0x0F); update_hw_cursor(CX + cursor_x, CY + cursor_y); } } }
-                    else if (c != 0) { draw_char_at(CX + cursor_x, CY + cursor_y, c, current_color); cursor_x++; if (cursor_x >= CW) { cursor_x = 0; cursor_y++; } if (cursor_y >= CH-1) scroll_workspace(); if (buffer_index < 255) { command_buffer[buffer_index] = c; buffer_index++; } update_hw_cursor(CX + cursor_x, CY + cursor_y); }
-                }
-                last_scancode = sc;
-            } else if (sc >= 0x80) last_scancode = 0;
+                if (ed_a) { if (c == '\b' && ed_c > 0) { ed_c--; ed_b[ed_c] = '\0'; c_work(); print(ed_b, 0x0F); } else if (c != 0 && ed_c < MAX_FILE_SIZE-1) { ed_b[ed_c++] = c; p_char(c, 0x0F); } }
+                else { if (c == '\n') ex_cmd(); else if (c == '\b') { if (b_idx > 0) { b_idx--; if (cx > 0) { cx--; d_char(CX + cx, CY + cy, ' ', 0x0F); update_hw_cursor(CX + cx, CY + cy); } } } else if (c != 0) { d_char(CX + cx, CY + cy, c, cur_col); cx++; if (cx >= CW) { cx = 0; cy++; } if (cy >= CH-1) s_work(); if (b_idx < 255) { cmd_b[b_idx] = c; b_idx++; } update_hw_cursor(CX + cx, CY + cy); } }
+                ls = sc;
+            } else if (sc >= 0x80) ls = 0;
         }
     }
 }
