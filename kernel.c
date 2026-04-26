@@ -17,6 +17,7 @@
 void kernel_main(void) {
     // 1. Memory & Interrupt Core (MUST BE FIRST)
     init_mem(32 * 1024 * 1024);
+    paging_init(); // AKTIFKAN VIRTUAL MEMORY
     idt_init();
     
     // 2. Drivers & Hardware
