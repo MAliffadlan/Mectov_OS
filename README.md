@@ -1,6 +1,6 @@
 # Mectov OS v17.0 (The Mectov Kernel)
 
-A bare-metal x86 operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX -- every byte runs directly on hardware.
+The Mectov Kernel operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX -- every byte runs directly on hardware.
 
 ## About
 
