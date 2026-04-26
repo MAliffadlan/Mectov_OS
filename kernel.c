@@ -1,0 +1,374 @@
+// --- MECTOV OS v3.0 (MEGA UPDATE: Virtual File System) ---
+static inline unsigned char inb(unsigned short port) {
+    unsigned char ret;
+    __asm__ __volatile__ ( "inb %1, %0" : "=a"(ret) : "Nd"(port) );
+    return ret;
+}
+
+static inline void outb(unsigned short port, unsigned char val) {
+    __asm__ __volatile__ ( "outb %0, %1" : : "a"(val), "Nd"(port) );
+}
+
+unsigned char read_cmos(unsigned char reg) {
+    outb(0x70, reg);
+    return inb(0x71);
+}
+
+unsigned char bcd_to_bin(unsigned char bcd) {
+    return ((bcd & 0xF0) >> 1) + ((bcd & 0xF0) >> 3) + (bcd & 0x0F);
+}
+
+void play_sound(unsigned int nFrequence) {
+    unsigned int Div = 1193180 / nFrequence;
+    outb(0x43, 0xb6); outb(0x42, (unsigned char)(Div)); outb(0x42, (unsigned char)(Div >> 8));
+    unsigned char tmp = inb(0x61);
+    if (tmp != (tmp | 3)) outb(0x61, tmp | 3);
+}
+
+void nosound() {
+    unsigned char tmp = inb(0x61) & 0xFC;
+    outb(0x61, tmp);
+}
+
+void beep() {
+    play_sound(1000); for (volatile int i = 0; i < 9000000; i++) { } nosound();
+}
+
+int shift_pressed = 0;
+int capslock_active = 0;
+
+char scancode_to_char(unsigned char scancode) {
+    unsigned char map_normal[58] = {
+        0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',   
+        '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',      
+        0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',   
+        0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0,      
+        '*', 0, ' ', 0
+    };
+    unsigned char map_shift[58] = {
+        0, 0, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b',   
+        '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',      
+        0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '\"', '~',   
+        0, '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0,      
+        '*', 0, ' ', 0
+    };
+
+    if (scancode < 58) {
+        char c = map_normal[scancode];
+        char c_shift = map_shift[scancode];
+        int is_letter = (c >= 'a' && c <= 'z');
+        if (shift_pressed) return (is_letter && capslock_active) ? c : c_shift;
+        else return (is_letter && capslock_active) ? c_shift : c;
+    }
+    return 0;
+}
+
+volatile char* video_memory = (volatile char*) 0xb8000;
+unsigned char current_color = 0x0F; 
+
+#define WIN_X 2
+#define WIN_Y 2
+#define WIN_W 76
+#define WIN_H 20
+#define CX (WIN_X + 1)
+#define CY (WIN_Y + 1)
+#define CW (WIN_W - 2)
+#define CH (WIN_H - 2)
+
+int cursor_x = 0;
+int cursor_y = 0;
+
+void draw_char_at(int x, int y, char c, unsigned char color) {
+    if (x >= 0 && x < 80 && y >= 0 && y < 25) {
+        int index = (y * 80 + x) * 2;
+        video_memory[index] = c;
+        video_memory[index + 1] = color;
+    }
+}
+
+void draw_desktop() {
+    for (int y = 0; y < 24; y++) for (int x = 0; x < 80; x++) draw_char_at(x, y, 176, 0x09);
+    for (int x = 0; x < 80; x++) draw_char_at(x, 24, ' ', 0x70); 
+    const char* taskbar_text = " [ Mectov ]    Terminal Aktif    |    Mectov OS v3.0 (VFS Edition) ";
+    for (int i = 0; taskbar_text[i] != '\0' && i < 80; i++) draw_char_at(i, 24, taskbar_text[i], 0x70); 
+}
+
+void draw_window(int x, int y, int w, int h, const char* title) {
+    for (int sy = y + 1; sy <= y + h; sy++) {
+        draw_char_at(x + w, sy, ' ', 0x08); draw_char_at(x + w + 1, sy, ' ', 0x08);
+    }
+    for (int sx = x + 2; sx <= x + w + 1; sx++) draw_char_at(sx, y + h, ' ', 0x08);
+
+    for (int i = x; i < x + w; i++) {
+        for (int j = y; j < y + h; j++) {
+            if (j == y) draw_char_at(i, j, ' ', 0x1F); 
+            else if (i == x || i == x + w - 1 || j == y + h - 1) draw_char_at(i, j, 177, 0x1F); 
+            else draw_char_at(i, j, ' ', 0x0F); 
+        }
+    }
+    int title_len = 0; while(title[title_len]) title_len++;
+    int title_x = x + (w - title_len) / 2;
+    for(int i = 0; i < title_len; i++) draw_char_at(title_x + i, y, title[i], 0x1F);
+    draw_char_at(x + w - 4, y, '[', 0x1F); draw_char_at(x + w - 3, y, 'X', 0x1C); draw_char_at(x + w - 2, y, ']', 0x1F);
+}
+
+void clear_workspace() {
+    for (int y = CY; y < CY + CH - 1; y++) {
+        for (int x = CX; x < CX + CW; x++) draw_char_at(x, y, ' ', 0x0F);
+    }
+    cursor_x = 0; cursor_y = 0;
+}
+
+void scroll_workspace() {
+    for (int y = CY; y < CY + CH - 2; y++) {
+        for (int x = CX; x < CX + CW; x++) {
+            int src_idx = ((y + 1) * 80 + x) * 2, dst_idx = (y * 80 + x) * 2;
+            video_memory[dst_idx] = video_memory[src_idx];
+            video_memory[dst_idx + 1] = video_memory[src_idx + 1];
+        }
+    }
+    int last_y = CY + CH - 2;
+    for (int x = CX; x < CX + CW; x++) draw_char_at(x, last_y, ' ', 0x0F);
+    cursor_y--;
+}
+
+void print(const char* str, unsigned char color) {
+    int i = 0;
+    while (str[i] != '\0') {
+        if (str[i] == '\n') {
+            cursor_x = 0; cursor_y++;
+        } else {
+            draw_char_at(CX + cursor_x, CY + cursor_y, str[i], color);
+            cursor_x++;
+            if (cursor_x >= CW) { cursor_x = 0; cursor_y++; }
+        }
+        if (cursor_y >= CH - 1) scroll_workspace();
+        i++;
+    }
+}
+
+void print_char(char c, unsigned char color) {
+    if (c == '\n') { cursor_x = 0; cursor_y++; } 
+    else { draw_char_at(CX + cursor_x, CY + cursor_y, c, color); cursor_x++; if (cursor_x >= CW) { cursor_x = 0; cursor_y++; } }
+    if (cursor_y >= CH - 1) scroll_workspace();
+}
+
+int strcmp(const char* s1, const char* s2) {
+    while (*s1 && (*s1 == *s2)) { s1++; s2++; }
+    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}
+
+int strncmp(const char* s1, const char* s2, int n) {
+    while (n && *s1 && (*s1 == *s2)) { ++s1; ++s2; --n; }
+    if (n == 0) return 0;
+    else return (*(unsigned char *)s1 - *(unsigned char *)s2);
+}
+
+void strcpy(char* dest, const char* src) {
+    while ((*dest++ = *src++));
+}
+
+void print_int(int num, unsigned char color) {
+    if (num < 0) { print("-", color); num = -num; }
+    if (num == 0) { print("0", color); return; }
+    char buf[10]; int i = 0;
+    while (num > 0) { buf[i++] = (num % 10) + '0'; num /= 10; }
+    for (int j = 0; j < i / 2; j++) { char temp = buf[j]; buf[j] = buf[i - j - 1]; buf[i - j - 1] = temp; }
+    buf[i] = '\0';
+    if (i == 1 && color == 0x0E) print("0", color); 
+    print(buf, color);
+}
+
+// ==========================================
+// VIRTUAL RAM FILE SYSTEM (VFS)
+// ==========================================
+#define MAX_FILES 16
+#define MAX_FILENAME 16
+#define MAX_FILE_SIZE 256
+
+typedef struct {
+    char name[MAX_FILENAME];
+    char data[MAX_FILE_SIZE];
+    int size;
+    int in_use;
+} File;
+
+File filesystem[MAX_FILES];
+
+void vfs_init() {
+    for (int i = 0; i < MAX_FILES; i++) {
+        filesystem[i].in_use = 0;
+        filesystem[i].size = 0;
+    }
+}
+
+int vfs_find_file(const char* name) {
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (filesystem[i].in_use && strcmp(filesystem[i].name, name) == 0) return i;
+    }
+    return -1; // Tidak ketemu
+}
+
+int vfs_create_file(const char* name) {
+    if (vfs_find_file(name) != -1) return -2; // File sudah ada
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (!filesystem[i].in_use) {
+            strcpy(filesystem[i].name, name);
+            filesystem[i].in_use = 1;
+            filesystem[i].size = 0;
+            filesystem[i].data[0] = '\0';
+            return i;
+        }
+    }
+    return -1; // Disk Penuh
+}
+
+// ==========================================
+// SHELL COMMAND LOGIC
+// ==========================================
+char command_buffer[256];
+int buffer_index = 0;
+
+void execute_command() {
+    print("\n", 0x0F); 
+    command_buffer[buffer_index] = '\0'; 
+
+    if (buffer_index == 0) {
+    } else if (strcmp(command_buffer, "halo") == 0) {
+        print("Hai Bos Alif! Mectov OS siap tempur.\n", 0x0B);
+    } else if (strcmp(command_buffer, "help") == 0) {
+        print("Perintah Sistem: halo, waktu, warna, clear, beep\n", 0x0E);
+        print("Perintah File  : ls, buat [nama], tulis [nama] [teks], baca [nama], hapus [nama]\n", 0x0A);
+    } else if (strcmp(command_buffer, "clear") == 0) {
+        clear_workspace();
+        
+    // --- FILE SYSTEM COMMANDS ---
+    } else if (strcmp(command_buffer, "ls") == 0) {
+        print("Daftar File di RAM Disk:\n", 0x0D);
+        int found = 0;
+        for (int i = 0; i < MAX_FILES; i++) {
+            if (filesystem[i].in_use) {
+                print("- ", 0x0F); print(filesystem[i].name, 0x0B);
+                print(" (", 0x08); print_int(filesystem[i].size, 0x08); print(" bytes)\n", 0x08);
+                found++;
+            }
+        }
+        if (found == 0) print("(Disk kosong, belum ada file)\n", 0x08);
+        
+    } else if (strncmp(command_buffer, "buat ", 5) == 0) {
+        char* filename = &command_buffer[5];
+        int res = vfs_create_file(filename);
+        if (res == -2) print("Error: File sudah ada!\n", 0x0C);
+        else if (res == -1) print("Error: RAM Disk penuh!\n", 0x0C);
+        else { print("File '", 0x0A); print(filename, 0x0E); print("' berhasil dibuat.\n", 0x0A); }
+        
+    } else if (strncmp(command_buffer, "baca ", 5) == 0) {
+        char* filename = &command_buffer[5];
+        int idx = vfs_find_file(filename);
+        if (idx == -1) print("Error: File tidak ditemukan!\n", 0x0C);
+        else {
+            print("--- Isi File: ", 0x0D); print(filename, 0x0E); print(" ---\n", 0x0D);
+            if (filesystem[idx].size == 0) print("(File kosong)\n", 0x08);
+            else { print(filesystem[idx].data, 0x0F); print("\n", 0x0F); }
+            print("------------------------\n", 0x0D);
+        }
+        
+    } else if (strncmp(command_buffer, "hapus ", 6) == 0) {
+        char* filename = &command_buffer[6];
+        int idx = vfs_find_file(filename);
+        if (idx == -1) print("Error: File tidak ditemukan!\n", 0x0C);
+        else {
+            filesystem[idx].in_use = 0; // Tandai kosong
+            print("File '", 0x0C); print(filename, 0x0E); print("' berhasil dihapus.\n", 0x0C);
+        }
+        
+    } else if (strncmp(command_buffer, "tulis ", 6) == 0) {
+        // Parse: tulis [filename] [teks yang panjang]
+        int i = 6;
+        while (command_buffer[i] == ' ') i++; // skip spasi
+        int name_start = i;
+        while (command_buffer[i] != ' ' && command_buffer[i] != '\0') i++; // cari ujung nama
+        
+        if (command_buffer[i] == '\0') {
+            print("Error: Format salah. Ketik: tulis [nama] [isi teks]\n", 0x0C);
+        } else {
+            command_buffer[i] = '\0'; // Potong string sementara untuk dapat nama
+            char* filename = &command_buffer[name_start];
+            char* text_to_write = &command_buffer[i + 1];
+            
+            int idx = vfs_find_file(filename);
+            if (idx == -1) {
+                // Auto create kalau blm ada
+                idx = vfs_create_file(filename);
+            }
+            
+            if (idx != -1) {
+                int t = 0;
+                // Append / nulis ulang isi file
+                while (text_to_write[t] != '\0' && t < MAX_FILE_SIZE - 1) {
+                    filesystem[idx].data[t] = text_to_write[t];
+                    t++;
+                }
+                filesystem[idx].data[t] = '\0';
+                filesystem[idx].size = t;
+                print("Teks berhasil disimpan ke dalam '", 0x0A); print(filename, 0x0E); print("'.\n", 0x0A);
+            } else {
+                print("Error gagal menulis file!\n", 0x0C);
+            }
+        }
+        
+    } else {
+        print("bash: ", 0x0C); print(command_buffer, 0x0C); print(": command not found\n", 0x0C); 
+    }
+
+    buffer_index = 0;
+    print("root@mectov:~# ", 0x0A); 
+}
+
+void kernel_main(void) {
+    vfs_init(); // Inisialisasi Harddisk Virtual RAM!
+    
+    draw_desktop();
+    draw_window(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS ");
+    clear_workspace();
+
+    print("===================================================\n", 0x0E);
+    print("  MECTOV OS v3.0 - VIRTUAL FILE SYSTEM MOUNTED!    \n", 0x0A);
+    print("===================================================\n", 0x0E);
+    print("Ketik 'help' untuk melihat perintah.\n\n", 0x0F);
+    print("root@mectov:~# ", 0x0A);
+
+    unsigned char last_scancode = 0;
+
+    while (1) {
+        if (inb(0x64) & 1) {
+            unsigned char scancode = inb(0x60); 
+
+            if (scancode == 0x2A || scancode == 0x36) shift_pressed = 1; 
+            else if (scancode == 0xAA || scancode == 0xB6) shift_pressed = 0; 
+            else if (scancode == 0x3A) capslock_active = !capslock_active; 
+
+            if (scancode < 0x80 && scancode != last_scancode) { 
+                char c = scancode_to_char(scancode);
+                if (c != 0) {
+                    if (c == '\n') execute_command(); 
+                    else if (c == '\b') {
+                        if (buffer_index > 0) {
+                            buffer_index--; 
+                            if (cursor_x > 0) { 
+                                cursor_x--; draw_char_at(CX + cursor_x, CY + cursor_y, ' ', 0x0F);
+                            }
+                        }
+                    } else {
+                        draw_char_at(CX + cursor_x, CY + cursor_y, c, current_color);
+                        cursor_x++; 
+                        if (cursor_x >= CW) { cursor_x = 0; cursor_y++; }
+                        if (cursor_y >= CH - 1) scroll_workspace();
+                        if (buffer_index < 255) { command_buffer[buffer_index] = c; buffer_index++; }
+                    }
+                }
+                last_scancode = scancode; 
+            } else if (scancode >= 0x80) last_scancode = 0; 
+        }
+    }
+}
