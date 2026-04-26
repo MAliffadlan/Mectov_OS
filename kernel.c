@@ -1,4 +1,4 @@
-// --- MECTOV OS v9.1 (Pro mfetch Update) ---
+// --- MECTOV OS v9.2 (Fancy Help Edition) ---
 static inline unsigned char inb(unsigned short port) {
     unsigned char ret; __asm__ __volatile__ ( "inb %1, %0" : "=a"(ret) : "Nd"(port) ); return ret;
 }
@@ -27,7 +27,7 @@ void detect_cpu() {
     cpu_brand[48] = '\0';
 }
 
-// --- UPTIME TRACKING ---
+// --- UPTIME ---
 unsigned char boot_sec, boot_min, boot_hour;
 void init_uptime() {
     boot_sec = bcd_to_bin(read_cmos(0x00));
@@ -101,7 +101,7 @@ void s_work() { for (int y = CY; y < CY + CH - 2; y++) for (int x = CX; x < CX +
 void print(const char* s, unsigned char col) { int i = 0; while (s[i] != '\0') { if (s[i] == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, s[i], col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); i++; } update_hw_cursor(CX + cx, CY + cy); }
 void p_char(char c, unsigned char col) { if (c == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, c, col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); update_hw_cursor(CX + cx, CY + cy); }
 
-const char* marquee_text = ">>> Mectov OS v9.1 - Advanced Identity Update - Custom Kernel Bare-Metal Project - Indonesia Raya <<<         ";
+const char* marquee_text = ">>> Mectov OS v9.2 - Fancy Help Menu Active - Custom Kernel Stability OK! - Indonesia Raya <<<         ";
 int marquee_pos = 0;
 int marquee_counter = 0;
 void wait_retrace() { while (inb(0x3DA) & 0x08); while (!(inb(0x3DA) & 0x08)); }
@@ -143,29 +143,24 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
     else if (strcmp(cmd_b, "waktu") == 0) { unsigned char j = bcd_to_bin(read_cmos(0x04)), m = bcd_to_bin(read_cmos(0x02)), d = bcd_to_bin(read_cmos(0x00)); int wj = (j + 7) % 24; print("WIB: ", 0x0B); p_int(wj, 0x0E); print(":", 0x0F); p_int(m, 0x0E); print(":", 0x0F); p_int(d, 0x0E); print("\n", 0x0F); }
     else if (strcmp(cmd_b, "mfetch") == 0) {
         unsigned char c_h = bcd_to_bin(read_cmos(0x04)), c_m = bcd_to_bin(read_cmos(0x02));
-        int total_boot_mins = boot_hour * 60 + boot_min;
-        int total_curr_mins = c_h * 60 + c_m;
-        int diff = total_curr_mins - total_boot_mins;
-        if (diff < 0) diff += 1440; // Handle midnight wrap
-        int up_h = diff / 60;
-        int up_m = diff % 60;
-        print("       .---.        ", 0x0B); print("root", 0x0A); print("@", 0x0F); print("mectov-os\n", 0x0B);
-        print("      /     \\       ", 0x0B); print("--------------\n", 0x0F);
-        print("     | () () |      ", 0x0B); print("OS: ", 0x0E); print("MectovOS v9.1\n", 0x0F);
-        print("      \\  ^  /       ", 0x0B); print("Kernel: ", 0x0E); print("Custom Monolithic\n", 0x0F);
-        print("       |||||        ", 0x0B); print("Uptime: ", 0x0E); p_int(up_h, 0x0F); print("h ", 0x0F); p_int(up_m, 0x0F); print("m\n", 0x0F);
-        print("       |||||        ", 0x0B); print("CPU: ", 0x0E); print(cpu_brand, 0x0A); print("\n", 0x0F);
-        print("                    ", 0x0B); print("Memory: ", 0x0E); print("12 GB / 12 GB\n", 0x0F);
-        print("                    ", 0x0B); print("Res: ", 0x0E); print("80x25 (Text Mode)\n", 0x0F);
-        print("                    ", 0x0B); print("WM: ", 0x0E); print("Mectov TUI v1.0\n\n", 0x0F);
-        for(int i=0; i<8; i++) { d_char(CX+20+i, CY+9, ' ', (i << 4)); } print("\n", 0x0F);
+        int total_boot_m = boot_hour * 60 + boot_min; int total_curr_m = c_h * 60 + c_m;
+        int diff = total_curr_m - total_boot_m; if (diff < 0) diff += 1440;
+        print("       .---.        root@mectov-os\n      /     \\       --------------\n     | () () |      CPU: ", 0x0B); print(cpu_brand, 0x0A);
+        print("\n      \\  ^  /       OS : MectovOS v9.2\n       |||||        Uptime: ", 0x0B); p_int(diff/60, 0x0F); print("h ", 0x0F); p_int(diff%60, 0x0F); print("m\n", 0x0F);
+        print("       |||||        Memory: 12 GB\n\n", 0x0B);
+        for(int i=0; i<8; i++) { d_char(CX+20+i, CY+7, ' ', (i << 4)); } print("\n", 0x0F);
     }
-    else if (strcmp(cmd_b, "warna") == 0) {
-        if (cur_col == 0x0F) cur_col = 0x0A; else if (cur_col == 0x0A) cur_col = 0x0B; else if (cur_col == 0x0B) cur_col = 0x0C; else cur_col = 0x0F;
-        print("Warna terminal diubah!\n", cur_col);
-    }
+    else if (strcmp(cmd_b, "warna") == 0) { if (cur_col == 0x0F) cur_col = 0x0A; else if (cur_col == 0x0A) cur_col = 0x0B; else if (cur_col == 0x0B) cur_col = 0x0C; else cur_col = 0x0F; print("Warna terminal diubah!\n", cur_col); }
     else if (strcmp(cmd_b, "beep") == 0) { beep(); }
-    else if (strcmp(cmd_b, "help") == 0) { print("mfetch, waktu, warna, clear, beep, matikan, mulaiulang, ls, edit, buat, tulis, baca, hapus, echo, tunggu, nada, jalankan\n", 0x0E); }
+    else if (strcmp(cmd_b, "help") == 0) {
+        print(" +------------------- HELP MENU - MECTOV OS -------------------+\n", 0x0B);
+        print(" | ", 0x0B); print("SISTEM      ", 0x0E); print("| mfetch, waktu, warna, clear, beep        |\n", 0x0F);
+        print(" | ", 0x0B); print("POWER       ", 0x0E); print("| matikan, mulaiulang                      |\n", 0x0F);
+        print(" | ", 0x0B); print("FILESYSTEM  ", 0x0E); print("| ls, buat, tulis, baca, edit, hapus       |\n", 0x0F);
+        print(" | ", 0x0B); print("SCRIPTING   ", 0x0E); print("| echo, tunggu, nada, jalankan             |\n", 0x0F);
+        print(" +-------------------------------------------------------------+\n", 0x0B);
+        print("  Petunjuk: Ketik perintah di atas lalu tekan [ENTER]\n", 0x08);
+    }
     else if (strcmp(cmd_b, "ls") == 0) { for (int i = 0; i < MAX_FILES; i++) if (fs[i].in_use) { print("- ", 0x0F); print(fs[i].name, 0x0B); print("\n", 0x0F); } }
     else if (strncmp(cmd_b, "buat ", 5) == 0) { if (vfs_create(&cmd_b[5]) >= 0) { vfs_save(); print("Created.\n", 0x0B); } }
     else if (strncmp(cmd_b, "edit ", 5) == 0) { if (!is_script) { st_ed(&cmd_b[5]); b_idx = 0; return; } }
@@ -195,7 +190,7 @@ void kernel_main(void) {
     vfs_load(); detect_cpu(); init_uptime();
     d_desktop(); d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Mectov Security Login "); c_work();
     const char* pass = "mectov123"; char in[32]; int in_idx = 0;
-    print("Welcome to Mectov OS v9.1\nPassword: ", 0x0E);
+    print("Welcome to Mectov OS v9.2\nPassword: ", 0x0E);
     int log = 0; unsigned char ls = 0;
     while (!log) {
         update_marquee();
@@ -211,7 +206,7 @@ void kernel_main(void) {
         }
     }
     beep(); c_work(); d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS ");
-    print("Login Success! Pro mfetch loaded.\nroot@mectov:~# ", 0x0A);
+    print("Login Success! Welcome Bos Alif.\nroot@mectov:~# ", 0x0A);
     while (1) {
         update_marquee();
         if (inb(0x64) & 1) {
