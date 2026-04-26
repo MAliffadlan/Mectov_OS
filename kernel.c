@@ -1,4 +1,4 @@
-// --- MECTOV OS v9.6 (The Apology Update - Final Stability) ---
+// --- MECTOV OS v9.6.1 (The Final Honor Update) ---
 static inline unsigned char inb(unsigned short port) {
     unsigned char ret; __asm__ __volatile__ ( "inb %1, %0" : "=a"(ret) : "Nd"(port) ); return ret;
 }
@@ -15,7 +15,7 @@ static inline void outw(unsigned short port, unsigned short val) {
 unsigned char read_cmos(unsigned char reg) { outb(0x70, reg); return inb(0x71); }
 unsigned char bcd_to_bin(unsigned char bcd) { return ((bcd & 0xF0) >> 1) + ((bcd & 0xF0) >> 3) + (bcd & 0x0F); }
 
-// --- CPUID ---
+// --- CPUID & UPTIME ---
 char cpu_brand[49];
 void detect_cpu() {
     unsigned int eax, ebx, ecx, edx;
@@ -26,8 +26,6 @@ void detect_cpu() {
     }
     cpu_brand[48] = '\0';
 }
-
-// --- UPTIME ---
 unsigned char boot_sec, boot_min, boot_hour;
 void init_uptime() { boot_sec = bcd_to_bin(read_cmos(0x00)); boot_min = bcd_to_bin(read_cmos(0x02)); boot_hour = bcd_to_bin(read_cmos(0x04)); }
 
@@ -35,6 +33,7 @@ void init_uptime() { boot_sec = bcd_to_bin(read_cmos(0x00)); boot_min = bcd_to_b
 void shutdown() { outw(0x604, 0x2000); }
 void reboot() { unsigned char g = 0x02; while (g & 0x02) g = inb(0x64); outb(0x64, 0xFE); }
 
+// --- HARDWARE CURSOR ---
 void update_hw_cursor(int x, int y) {
     unsigned short pos = y * 80 + x;
     outb(0x3D4, 0x0F); outb(0x3D5, (unsigned char) (pos & 0xFF));
@@ -79,7 +78,7 @@ char scancode_to_char(unsigned char s) {
     return 0;
 }
 
-// --- GUI ---
+// --- GUI & RENDERING ---
 volatile char* video_m = (volatile char*) 0xb8000;
 unsigned char cur_col = 0x0F; 
 int cx = 0, cy = 0;
@@ -97,18 +96,17 @@ void d_desktop() { for (int y = 0; y < 24; y++) for (int x = 0; x < 80; x++) d_c
 void d_win(int x, int y, int w, int h, const char* t) { for (int i = x; i < x + w; i++) for (int j = y; j < y + h; j++) { if (j == y) d_char(i, j, ' ', 0x1F); else if (i == x || i == x + w - 1 || j == y + h - 1) d_char(i, j, 177, 0x1F); else d_char(i, j, ' ', 0x0F); } int tl = 0; while(t[tl]) tl++; int tx = x + (w - tl) / 2; for(int i = 0; i < tl; i++) d_char(tx + i, y, t[i], 0x1F); }
 void c_work() { for (int y = CY; y < CY + CH - 1; y++) for (int x = CX; x < CX + CW; x++) d_char(x, y, ' ', 0x0F); cx = 0; cy = 0; update_hw_cursor(CX, CY); }
 void s_work() { for (int y = CY; y < CY + CH - 2; y++) for (int x = CX; x < CX + CW; x++) { int s = ((y + 1) * 80 + x) * 2, d = (y * 80 + x) * 2; video_m[d] = video_m[s]; video_m[d + 1] = video_m[s + 1]; } int ly = CY + CH - 2; for (int x = CX; x < CX + CW; x++) d_char(x, ly, ' ', 0x0F); cy--; }
-
 void print(const char* s, unsigned char col) { int i = 0; while (s[i] != '\0') { if (s[i] == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, s[i], col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); i++; } update_hw_cursor(CX + cx, CY + cy); }
 void p_char(char c, unsigned char col) { if (c == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, c, col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); update_hw_cursor(CX + cx, CY + cy); }
 
-const char* marquee_text = ">>> Mectov OS v9.6 - Stability OK! - Created by Bos Alif Fadlan - Indonesia Raya - Fix All Bugs <<<         ";
+const char* marquee_text = ">>> Mectov OS v9.6.1 - Final Honor Update - Created by Bos Alif Fadlan - WASD & Arrow Key Snake Game OK! <<<         ";
 int marquee_pos = 0; int marquee_counter = 0;
 void wait_retrace() { while (inb(0x3DA) & 0x08); while (!(inb(0x3DA) & 0x08)); }
 void update_marquee() {
     marquee_counter++; if (marquee_counter < 350000) return; marquee_counter = 0;
     int text_len = 0; while(marquee_text[text_len]) text_len++;
     wait_retrace();
-    for (int i = 0; i < 80; i++) { int char_idx = (marquee_pos + i) % text_len; int v_idx = (24 * 80 + i) * 2; video_m[v_idx] = marquee_text[char_idx]; video_m[v_idx + 1] = 0x70; }
+    for (int i = 0; i < 80; i++) { int c_idx = (marquee_pos + i) % text_len; int v_idx = (24 * 80 + i) * 2; video_m[v_idx] = marquee_text[c_idx]; video_m[v_idx + 1] = 0x70; }
     marquee_pos = (marquee_pos + 1) % text_len;
 }
 
@@ -135,9 +133,9 @@ int ed_a = 0; char ed_b[MAX_FILE_SIZE], ed_fn[MAX_FILENAME]; int ed_c = 0;
 void st_ed(const char* f) { strcpy(ed_fn, f); int i = vfs_find(f); if (i >= 0) { strcpy(ed_b, fs[i].data); ed_c = fs[i].size; } else { ed_b[0] = '\0'; ed_c = 0; } ed_a = 1; c_work(); print(ed_b, 0x0F); update_hw_cursor(CX + (ed_c % CW), CY + (ed_c / CW)); }
 void sa_ex_ed() { int i = vfs_find(ed_fn); if (i == -1) i = vfs_create(ed_fn); if (i >= 0) { strcpy(fs[i].data, ed_b); fs[i].size = ed_c; } vfs_save(); ed_a = 0; c_work(); print("root@mectov:~# ", 0x0A); }
 
-// --- SNAKE GAME FIXED ---
+// --- SNAKE GAME FIXED CONTROLS ---
 void start_ular() {
-    c_work(); d_win(15, 5, 50, 15, " Mectov Ular v1.1 - WASD Control ");
+    c_work(); d_win(15, 5, 50, 15, " Mectov Ular v1.2 - WASD / Arrows ");
     int sx[100], sy[100], len = 3, fx, fy, dir = 1, score = 0;
     for(int i=0; i<len; i++) { sx[i] = 25 - i; sy[i] = 12; } fx = 30; fy = 10;
     while(1) {
@@ -145,10 +143,10 @@ void start_ular() {
         if (inb(0x64) & 1) {
             unsigned char sc = inb(0x60);
             if (sc == 0x01) break; 
-            if (sc == 0x11 && dir != 2) dir = 0; // W
-            if (sc == 0x1F && dir != 0) dir = 2; // S
-            if (sc == 0x1E && dir != 1) dir = 3; // A
-            if (sc == 0x20 && dir != 3) dir = 1; // D
+            if ((sc == 0x11 || sc == 0x48) && dir != 2) dir = 0; // W / UP
+            if ((sc == 0x1F || sc == 0x50) && dir != 0) dir = 2; // S / DOWN
+            if ((sc == 0x1E || sc == 0x4B) && dir != 1) dir = 3; // A / LEFT
+            if ((sc == 0x20 || sc == 0x4D) && dir != 3) dir = 1; // D / RIGHT
         }
         for(int i=len-1; i>0; i--) { sx[i] = sx[i-1]; sy[i] = sy[i-1]; }
         if(dir==0) sy[0]--; else if(dir==1) sx[0]++; else if(dir==2) sy[0]++; else if(dir==3) sx[0]--;
@@ -169,7 +167,7 @@ void run_script(const char* f) { int i = vfs_find(f); if (i < 0) return; is_scri
 void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0'; 
     if (strcmp(cmd_b, "matikan") == 0) shutdown();
     else if (strcmp(cmd_b, "mulaiulang") == 0) reboot();
-    else if (strcmp(cmd_b, "ular") == 0) start_ular();
+    else if (strcmp(cmd_b, "ular") == 0) { start_ular(); b_idx = 0; return; }
     else if (strcmp(cmd_b, "clear") == 0) { c_work(); }
     else if (strcmp(cmd_b, "waktu") == 0) { unsigned char j = bcd_to_bin(read_cmos(0x04)), m = bcd_to_bin(read_cmos(0x02)), d = bcd_to_bin(read_cmos(0x00)); int wj = (j + 7) % 24; print("WIB: ", 0x0B); p_int(wj, 0x0E); print(":", 0x0F); p_int(m, 0x0E); print(":", 0x0F); p_int(d, 0x0E); print("\n", 0x0F); }
     else if (strcmp(cmd_b, "mfetch") == 0) {
@@ -177,7 +175,7 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
         int tb = boot_hour * 60 + boot_min, tc = ch * 60 + cm, diff = tc - tb; if (diff < 0) diff += 1440;
         int used_f = 0; for(int i=0; i<MAX_FILES; i++) if(fs[i].in_use) used_f++;
         print("       .---.        root@mectov-os\n      /     \\       --------------\n     | () () |      CPU: ", 0x0B); print(cpu_brand, 0x0A);
-        print("\n      \\  ^  /       OS : MectovOS v9.6\n       |||||        Uptime: ", 0x0B); p_int(diff/60, 0x0F); print("h ", 0x0F); p_int(diff%60, 0x0F); print("m\n", 0x0F);
+        print("\n      \\  ^  /       OS : MectovOS v9.6.1\n       |||||        Uptime: ", 0x0B); p_int(diff/60, 0x0F); print("h ", 0x0F); p_int(diff%60, 0x0F); print("m\n", 0x0F);
         print("       |||||        Storage: ", 0x0B); p_int(used_f, 0x0F); print("/16 Files\n\n", 0x0B);
         for(int i=0; i<8; i++) { d_char(CX+20+i, CY+8, ' ', (i << 4)); } print("\n", 0x0F);
     }
@@ -202,11 +200,7 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
     else if (strncmp(cmd_b, "jalankan ", 9) == 0) { if (!is_script) { run_script(&cmd_b[9]); b_idx = 0; if (!is_script) print("root@mectov:~# ", 0x0A); return; } }
     else if (strncmp(cmd_b, "tulis ", 6) == 0) {
         int i = 6; while (cmd_b[i] == ' ') i++; int ns = i; while (cmd_b[i] != ' ' && cmd_b[i] != '\0') i++; 
-        if (cmd_b[i] != '\0') {
-            cmd_b[i] = '\0'; char* fn = &cmd_b[ns]; char* tx = &cmd_b[i + 1];
-            int idx = vfs_find(fn); if (idx == -1) idx = vfs_create(fn);
-            if (idx >= 0) { strcpy(fs[idx].data, tx); fs[idx].size = 0; while(tx[fs[idx].size]) fs[idx].size++; vfs_save(); print("Stored.\n", 0x0B); }
-        }
+        if (cmd_b[i] != '\0') { cmd_b[i] = '\0'; char* fn = &cmd_b[ns]; char* tx = &cmd_b[i+1]; int idx = vfs_find(fn); if (idx == -1) idx = vfs_create(fn); if (idx >= 0) { strcpy(fs[idx].data, tx); fs[idx].size = 0; while(tx[fs[idx].size]) fs[idx].size++; vfs_save(); print("Stored.\n", 0x0B); } }
     } else if (cmd_b[0] != '\0') { print("Command not found\n", 0x0C); }
     b_idx = 0; if (!is_script) print("root@mectov:~# ", 0x0A);
 }
@@ -215,7 +209,7 @@ void kernel_main(void) {
     vfs_load(); detect_cpu(); init_uptime();
     d_desktop(); d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Mectov Security Login "); c_work();
     const char* pass = "mectov123"; char in[32]; int in_idx = 0;
-    print("Welcome to Mectov OS v9.6\nPassword: ", 0x0E);
+    print("Welcome to Mectov OS v9.6.1\nPassword: ", 0x0E);
     int log = 0; unsigned char ls = 0;
     while (!log) { rand_seed++; update_marquee();
         if (inb(0x64) & 1) {
