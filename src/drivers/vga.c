@@ -6,6 +6,14 @@ volatile char* video_m = (volatile char*) 0xb8000;
 unsigned char cur_col = 0x0F; 
 int cx = 0, cy = 0;
 
+void clear_screen() {
+    for (int i = 0; i < 80 * 25; i++) {
+        video_m[i * 2] = ' ';
+        video_m[i * 2 + 1] = 0x0F;
+    }
+    cx = 0; cy = 0;
+}
+
 void d_char(int x, int y, char c, unsigned char col) { if (x >= 0 && x < 80 && y >= 0 && y < 25) { int i = (y * 80 + x) * 2; video_m[i] = c; video_m[i + 1] = col; } }
 void d_desktop() { for (int y = 0; y < 24; y++) for (int x = 0; x < 80; x++) d_char(x, y, 176, 0x09); for (int x = 0; x < 80; x++) d_char(x, 24, ' ', 0x70); }
 void d_win(int x, int y, int w, int h, const char* t) { for (int i = x; i < x + w; i++) for (int j = y; j < y + h; j++) { if (j == y) d_char(i, j, ' ', 0x1F); else if (i == x || i == x + w - 1 || j == y + h - 1) d_char(i, j, 177, 0x1F); else d_char(i, j, ' ', 0x0F); } int tl = 0; while(t[tl]) tl++; int tx = x + (w - tl) / 2; for(int i = 0; i < tl; i++) d_char(tx + i, y, t[i], 0x1F); }

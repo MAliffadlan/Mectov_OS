@@ -15,17 +15,26 @@
 #include "src/include/timer.h"
 
 void kernel_main(void) {
+    // 0. UI Reset (Must be first to clear BIOS garbage)
+    clear_screen();
+    print("Mectov OS is starting...\n", 0x0F);
+
     // 1. Memory & Interrupt Core (MUST BE FIRST)
     init_mem(32 * 1024 * 1024);
-    paging_init(); // AKTIFKAN VIRTUAL MEMORY
+    paging_init(); 
+    print("[+] Virtual Memory Active (16MB Identity Map)\n", 0x0A);
     idt_init();
+    print("[+] IDT/ISR Handlers Registered\n", 0x0A);
     
     // 2. Drivers & Hardware
-    init_timer(50);    // 50Hz detak jantung
-    init_keyboard();   // Aktifkan Bel Rumah Keyboard
+    init_timer(50);    
+    init_keyboard();   
     detect_cpu();
     init_uptime();
     vfs_load(); 
+    print("[+] Hardware Drivers Loaded\n", 0x0A);
+    
+    delay(100); // Give user time to read status
     
     // 3. Enable Interrupts
     __asm__ __volatile__ ("sti"); 

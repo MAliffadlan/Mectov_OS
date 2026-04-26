@@ -28,10 +28,9 @@ void init_mem(uint32_t mem_size) {
 }
 
 void paging_init() {
-    // 1. Kosongkan Page Directory
-    for(int i = 0; i < 1024; i++) {
-        page_directory[i] = 0 | 2; // Read/Write, Not Present
-    }
+    // 1. Bersihkan Page Directory dan Tables
+    memset(page_directory, 0, sizeof(page_directory));
+    memset(page_tables, 0, sizeof(page_tables));
 
     // 2. Map 16MB pertama secara presisi (4 Page Tables)
     for(int t = 0; t < 4; t++) {
@@ -51,8 +50,6 @@ void paging_init() {
     __asm__ __volatile__("mov %%cr0, %0": "=r"(cr0));
     cr0 |= 0x80000000;
     __asm__ __volatile__("mov %0, %%cr0": : "r"(cr0));
-
-    print("[+] Paging Engine Enabled (Virtual Memory 16MB Active)\n", 0x0A);
 }
 
 void* kmalloc(uint32_t size) {

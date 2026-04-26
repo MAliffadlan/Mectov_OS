@@ -28,6 +28,11 @@ int strcmp(const char* s1, const char* s2) { while (*s1 && (*s1 == *s2)) { s1++;
 int strncmp(const char* s1, const char* s2, int n) { while (n && *s1 && (*s1 == *s2)) { ++s1; ++s2; --n; } if (n == 0) return 0; return (*(unsigned char *)s1 - *(unsigned char *)s2); }
 void strcpy(char* d, const char* s) { while ((*d++ = *s++)); }
 
+void memset(void* dest, uint8_t val, uint32_t len) {
+    uint8_t* ptr = (uint8_t*)dest;
+    while(len--) *ptr++ = val;
+}
+
 void p_int(int n, unsigned char c) { if (n < 0) { print("-", c); n = -n; } if (n == 0) { print("0", c); return; } char buf[10]; int i = 0; while (n > 0) { buf[i++] = (n % 10) + '0'; n /= 10; } for (int j = 0; j < i / 2; j++) { char t = buf[j]; buf[j] = buf[i - j - 1]; buf[i - j - 1] = t; } buf[i] = '\0'; print(buf, c); }
 
 int atoi(const char* s) { int r = 0, si = 1, i = 0; if (s[0] == '-') { si = -1; i++; } for (; s[i] != '\0'; ++i) { if (s[i] >= '0' && s[i] <= '9') r = r * 10 + s[i] - '0'; else break; } return si * r; }
