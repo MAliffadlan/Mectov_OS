@@ -8,8 +8,8 @@ static void timer_handler(registers_t* regs) {
     timer_ticks++;
     
     // Drive the 'heartbeat' for UI
-    update_marquee();
-    update_hud();
+    // update_marquee();
+    // update_hud();
 }
 
 void init_timer(uint32_t frequency) {

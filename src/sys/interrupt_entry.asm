@@ -30,6 +30,12 @@ idt_flush:
     lidt [eax]
     ret
 
+global isr_default
+isr_default:
+    push byte 0
+    push byte 255
+    jmp irq_common_stub
+
 %macro IRQ 2
   global irq%1
   irq%1:
