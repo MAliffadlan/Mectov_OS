@@ -76,7 +76,7 @@ void play_sound(unsigned int nFrequence) {
 void nosound() { outb(0x61, inb(0x61) & 0xFC); }
 
 void delay(int ms) {
-    for (volatile int i = 0; i < ms * 1500000; i++) {
+    for (volatile int i = 0; i < ms * 20000; i++) {
         __asm__ __volatile__ ("pause");
     } 
 }
