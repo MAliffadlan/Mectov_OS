@@ -106,7 +106,7 @@ int marquee_pos = 0;
 int marquee_counter = 0;
 void wait_retrace() { while (inb(0x3DA) & 0x08); while (!(inb(0x3DA) & 0x08)); }
 void update_marquee() {
-    marquee_counter++; if (marquee_counter < 600000) return; marquee_counter = 0;
+    marquee_counter++; if (marquee_counter < 350000) return; marquee_counter = 0;
     int text_len = 0; while(marquee_text[text_len]) text_len++;
     wait_retrace();
     for (int i = 0; i < 80; i++) { int char_idx = (marquee_pos + i) % text_len; int v_idx = (24 * 80 + i) * 2; video_m[v_idx] = marquee_text[char_idx]; video_m[v_idx + 1] = 0x70; }
