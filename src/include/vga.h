@@ -25,5 +25,6 @@ void update_hw_cursor(int x, int y);
 void wait_retrace();
 void update_marquee();
 void update_hud();
+void draw_startup_logo();
 
 #endif

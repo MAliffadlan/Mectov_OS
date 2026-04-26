@@ -22,6 +22,43 @@ void s_work() { for (int y = CY; y < CY + CH - 2; y++) for (int x = CX; x < CX +
 void print(const char* s, unsigned char col) { int i = 0; while (s[i] != '\0') { if (s[i] == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, s[i], col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); i++; } update_hw_cursor(CX + cx, CY + cy); }
 void p_char(char c, unsigned char col) { if (c == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, c, col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); update_hw_cursor(CX + cx, CY + cy); }
 
+void draw_startup_logo() {
+    clear_screen();
+    int start_y = 6;
+    int start_x = 30;
+
+    // Line 1: . --- . (Green)
+    const char* l1 = "      .---.      ";
+    for(int i=0; l1[i]; i++) d_char(start_x + i, start_y, l1[i], 0x0A);
+    
+    // Line 2: /     \ (Cyan)
+    const char* l2 = "     /     \\     ";
+    for(int i=0; l2[i]; i++) d_char(start_x + i, start_y + 1, l2[i], 0x0B);
+
+    // Line 3: | () () | (Cyan)
+    const char* l3 = "    | () () |    ";
+    for(int i=0; l3[i]; i++) d_char(start_x + i, start_y + 2, l3[i], 0x0B);
+
+    // Line 4: \  ^  / (Cyan)
+    const char* l4 = "     \\  ^  /     ";
+    for(int i=0; l4[i]; i++) d_char(start_x + i, start_y + 3, l4[i], 0x0B);
+
+    // Line 5: ||||| (Cyan)
+    const char* l5 = "      |||||      ";
+    for(int i=0; l5[i]; i++) d_char(start_x + i, start_y + 4, l5[i], 0x0B);
+
+    // Line 6: ||||| (Cyan)
+    const char* l6 = "      |||||      ";
+    for(int i=0; l6[i]; i++) d_char(start_x + i, start_y + 5, l6[i], 0x0B);
+
+    // MECTOV OS Text
+    const char* title = " M E C T O V   O S ";
+    int title_x = 40 - 9;
+    for(int i=0; title[i]; i++) d_char(title_x + i, start_y + 8, title[i], 0x0F);
+    
+    update_hw_cursor(0, 25); // Sembunyikan kursor di luar layar
+}
+
 void update_hw_cursor(int x, int y) {
     unsigned short pos = y * 80 + x;
     outb(0x3D4, 0x0F); outb(0x3D5, (unsigned char) (pos & 0xFF));

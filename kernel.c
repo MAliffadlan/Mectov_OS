@@ -34,12 +34,19 @@ void kernel_main(void) {
     vfs_load(); 
     print("[+] Hardware Drivers Loaded\n", 0x0A);
     
-    delay(100); // Give user time to read status
+    delay(500); 
     
-    // 3. Enable Interrupts
+    // 3. STARTUP SEQUENCE
+    draw_startup_logo();
+    nada(440, 150); // A4
+    nada(523, 150); // C5
+    nada(659, 300); // E5
+    delay(2000);    // Tampilkan logo selama 2 detik
+    
+    // 4. Enable Interrupts
     __asm__ __volatile__ ("sti"); 
     
-    // 4. Setup UI
+    // 5. Setup UI
     d_desktop(); 
     d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Mectov Security Login "); 
     c_work();
