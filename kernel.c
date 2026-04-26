@@ -143,8 +143,12 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
     else if (strcmp(cmd_b, "waktu") == 0) { unsigned char j = bcd_to_bin(read_cmos(0x04)), m = bcd_to_bin(read_cmos(0x02)), d = bcd_to_bin(read_cmos(0x00)); int wj = (j + 7) % 24; print("WIB: ", 0x0B); p_int(wj, 0x0E); print(":", 0x0F); p_int(m, 0x0E); print(":", 0x0F); p_int(d, 0x0E); print("\n", 0x0F); }
     else if (strcmp(cmd_b, "mfetch") == 0) {
         unsigned char c_h = bcd_to_bin(read_cmos(0x04)), c_m = bcd_to_bin(read_cmos(0x02));
-        int up_h = (c_h >= boot_hour) ? c_h - boot_hour : (24 - boot_hour) + c_h;
-        int up_m = (c_m >= boot_min) ? c_m - boot_min : (60 - boot_min) + c_m;
+        int total_boot_mins = boot_hour * 60 + boot_min;
+        int total_curr_mins = c_h * 60 + c_m;
+        int diff = total_curr_mins - total_boot_mins;
+        if (diff < 0) diff += 1440; // Handle midnight wrap
+        int up_h = diff / 60;
+        int up_m = diff % 60;
         print("       .---.        ", 0x0B); print("root", 0x0A); print("@", 0x0F); print("mectov-os\n", 0x0B);
         print("      /     \\       ", 0x0B); print("--------------\n", 0x0F);
         print("     | () () |      ", 0x0B); print("OS: ", 0x0E); print("MectovOS v9.1\n", 0x0F);
