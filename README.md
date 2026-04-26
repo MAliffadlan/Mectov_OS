@@ -10,28 +10,6 @@ Created by M Alif Fadlan.
 
 ---
 
-## Architecture
-
-```
-+---------------------------------------------------------+
-|                    GRUB Multiboot                       |
-+---------------------------------------------------------+
-|  boot.asm  -->  kernel.c  (kernel_main entry point)     |
-+---------------------------------------------------------+
-|  GDT (Ring 0+3)  |  IDT  |  TSS  |  Syscall (int 0x80) |
-+---------------------------------------------------------+
-|  PIT Timer  |  Keyboard  |  Mouse  |  Serial (COM1/2)  |
-+---------------------------------------------------------+
-|  Memory Manager    |  Task Scheduler  |  VFS + ATA PIO  |
-+---------------------------------------------------------+
-|  VGA/VESA Driver   |  Window Manager  |  PCI Scanner    |
-+---------------------------------------------------------+
-|  RTL8139 NIC  |  Network Stack (Ethernet/ARP/IP/UDP)    |
-+---------------------------------------------------------+
-|  Desktop  |  Taskbar  |  Start Menu  |  Applications    |
-+---------------------------------------------------------+
-```
-
 ### Target Platform
 - CPU: Intel x86 (i386), Protected Mode
 - Ring Levels: Ring 0 (Kernel) + Ring 3 segments ready (User Mode infrastructure)
