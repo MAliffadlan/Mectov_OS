@@ -1,4 +1,4 @@
-// --- MECTOV OS v5.0 (Automation & Scripting Edition) ---
+// --- MECTOV OS v6.0 (Persistent Storage Edition) ---
 static inline unsigned char inb(unsigned short port) {
     unsigned char ret;
     __asm__ __volatile__ ( "inb %1, %0" : "=a"(ret) : "Nd"(port) );
@@ -9,6 +9,16 @@ static inline void outb(unsigned short port, unsigned char val) {
     __asm__ __volatile__ ( "outb %0, %1" : : "a"(val), "Nd"(port) );
 }
 
+static inline unsigned short inw(unsigned short port) {
+    unsigned short ret;
+    __asm__ __volatile__ ( "inw %1, %0" : "=a"(ret) : "Nd"(port) );
+    return ret;
+}
+
+static inline void outw(unsigned short port, unsigned short val) {
+    __asm__ __volatile__ ( "outw %0, %1" : : "a"(val), "Nd"(port) );
+}
+
 unsigned char read_cmos(unsigned char reg) {
     outb(0x70, reg); return inb(0x71);
 }
@@ -17,6 +27,46 @@ unsigned char bcd_to_bin(unsigned char bcd) {
     return ((bcd & 0xF0) >> 1) + ((bcd & 0xF0) >> 3) + (bcd & 0x0F);
 }
 
+// --- ATA PIO (HARD DISK DRIVER) ---
+void ata_wait_bsy() { while(inb(0x1F7) & 0x80); }
+void ata_wait_drq() { while(!(inb(0x1F7) & 0x08)); }
+
+void ata_read_sector(unsigned int lba, unsigned char* buffer) {
+    ata_wait_bsy();
+    outb(0x1F6, 0xE0 | ((lba >> 24) & 0x0F));
+    outb(0x1F2, 1);
+    outb(0x1F3, (unsigned char)lba);
+    outb(0x1F4, (unsigned char)(lba >> 8));
+    outb(0x1F5, (unsigned char)(lba >> 16));
+    outb(0x1F7, 0x20); // Perintah Read
+    ata_wait_bsy();
+    ata_wait_drq();
+    for (int i = 0; i < 256; i++) {
+        unsigned short word = inw(0x1F0);
+        buffer[i * 2] = (unsigned char)word;
+        buffer[i * 2 + 1] = (unsigned char)(word >> 8);
+    }
+}
+
+void ata_write_sector(unsigned int lba, unsigned char* buffer) {
+    ata_wait_bsy();
+    outb(0x1F6, 0xE0 | ((lba >> 24) & 0x0F));
+    outb(0x1F2, 1);
+    outb(0x1F3, (unsigned char)lba);
+    outb(0x1F4, (unsigned char)(lba >> 8));
+    outb(0x1F5, (unsigned char)(lba >> 16));
+    outb(0x1F7, 0x30); // Perintah Write
+    ata_wait_bsy();
+    ata_wait_drq();
+    for (int i = 0; i < 256; i++) {
+        unsigned short word = buffer[i * 2] | (buffer[i * 2 + 1] << 8);
+        outw(0x1F0, word);
+    }
+    outb(0x1F7, 0xE7); // Flush
+    ata_wait_bsy();
+}
+
+// --- AUDIO DRIVER ---
 void play_sound(unsigned int nFrequence) {
     unsigned int Div = 1193180 / nFrequence;
     outb(0x43, 0xb6); outb(0x42, (unsigned char)(Div)); outb(0x42, (unsigned char)(Div >> 8));
@@ -25,7 +75,6 @@ void play_sound(unsigned int nFrequence) {
 }
 void nosound() { outb(0x61, inb(0x61) & 0xFC); }
 
-// Fungsi Delay Sederhana (Busy Loop) - Diperbesar untuk CPU Modern (1.6GHz+)
 void delay(int ms) {
     for (volatile int i = 0; i < ms * 1500000; i++) {
         __asm__ __volatile__ ("pause");
@@ -63,6 +112,7 @@ char scancode_to_char(unsigned char scancode) {
     return 0;
 }
 
+// --- WINDOW MANAGER TUI ---
 volatile char* video_memory = (volatile char*) 0xb8000;
 unsigned char current_color = 0x0F; 
 
@@ -88,7 +138,7 @@ void draw_char_at(int x, int y, char c, unsigned char color) {
 void draw_desktop() {
     for (int y = 0; y < 24; y++) for (int x = 0; x < 80; x++) draw_char_at(x, y, 176, 0x09);
     for (int x = 0; x < 80; x++) draw_char_at(x, 24, ' ', 0x70); 
-    const char* taskbar_text = " [ Mectov ]    Terminal Aktif    |    Mectov OS v5.0 (Automation Edition) ";
+    const char* taskbar_text = " [ Mectov ]    Terminal Aktif    |    Mectov OS v6.0 (Persistent Edition) ";
     for (int i = 0; taskbar_text[i] != '\0' && i < 80; i++) draw_char_at(i, 24, taskbar_text[i], 0x70); 
 }
 
@@ -186,22 +236,54 @@ int atoi(const char* str) {
     return sign * res;
 }
 
-// --- VIRTUAL RAM FILE SYSTEM (VFS) ---
+// --- FILE SYSTEM YANG DISIMPAN KE HARDDISK (PERSISTENT VFS) ---
 #define MAX_FILES 16
 #define MAX_FILENAME 16
 #define MAX_FILE_SIZE 1024
 
+// Struktur File diubah jadi 1536 Bytes (tepat 3 sektor disk) supaya penyimpanannya rapi
 typedef struct {
     char name[MAX_FILENAME];
     char data[MAX_FILE_SIZE];
     int size;
     int in_use;
+    char padding[488]; 
 } File;
 
 File filesystem[MAX_FILES];
 
 void vfs_init() {
     for (int i = 0; i < MAX_FILES; i++) { filesystem[i].in_use = 0; filesystem[i].size = 0; }
+}
+
+// SIMPAN KE DISK FISIK
+void vfs_save_to_disk() {
+    unsigned char* fs_ptr = (unsigned char*)filesystem;
+    // Ukuran FileSystem = 16 * 1536 = 24576 bytes = 48 Sector (512 bytes)
+    for (int i = 0; i < 48; i++) {
+        ata_write_sector(i + 1, fs_ptr + (i * 512));
+    }
+    // Tulis Signature MECTOV di Sektor ke-0 sebagai tanda Disk sudah di-Format
+    unsigned char sig[512] = {0};
+    sig[0] = 'M'; sig[1] = 'E'; sig[2] = 'C'; sig[3] = 'T'; sig[4] = 'O'; sig[5] = 'V';
+    ata_write_sector(0, sig);
+}
+
+// BACA DARI DISK FISIK
+int vfs_load_from_disk() {
+    unsigned char sig[512];
+    ata_read_sector(0, sig);
+    if (sig[0] == 'M' && sig[1] == 'E' && sig[2] == 'C' && sig[3] == 'T' && sig[4] == 'O' && sig[5] == 'V') {
+        unsigned char* fs_ptr = (unsigned char*)filesystem;
+        for (int i = 0; i < 48; i++) {
+            ata_read_sector(i + 1, fs_ptr + (i * 512));
+        }
+        return 1; // Sukses baca disk
+    } else {
+        vfs_init();
+        vfs_save_to_disk(); // Format Disk kosong baru
+        return 0; // Disk baru
+    }
 }
 
 int vfs_find_file(const char* name) {
@@ -245,9 +327,13 @@ void save_and_exit_editor() {
     int idx = vfs_find_file(editor_filename);
     if (idx == -1) idx = vfs_create_file(editor_filename);
     if (idx != -1) { strcpy(filesystem[idx].data, editor_buffer); filesystem[idx].size = editor_cursor; }
+    
+    // --- SAVE KE HARDDISK OTOMATIS SETIAP KALI EDIT ---
+    vfs_save_to_disk();
+
     editor_active = 0;
     draw_desktop(); draw_window(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS "); clear_workspace();
-    print("File '", 0x0A); print(editor_filename, 0x0E); print("' disimpan.\n", 0x0A);
+    print("File '", 0x0A); print(editor_filename, 0x0E); print("' disimpan permanen ke Harddisk!\n", 0x0B);
     print("root@mectov:~# ", 0x0A);
 }
 
@@ -256,36 +342,26 @@ char command_buffer[256];
 int buffer_index = 0;
 int is_script_running = 0;
 
-// Forward Declaration
 void execute_command();
 
 void run_script(const char* filename) {
     int idx = vfs_find_file(filename);
     if (idx == -1) {
-        print("Error: Script '", 0x0C); print(filename, 0x0E); print("' tidak ditemukan!\n", 0x0C);
-        return;
+        print("Error: Script tidak ditemukan!\n", 0x0C); return;
     }
-    
-    print("--- Menjalankan Script: ", 0x0D); print(filename, 0x0E); print(" ---\n", 0x0D);
-    
+    print("--- Menjalankan Script ---\n", 0x0D);
     char* data = filesystem[idx].data;
     int len = filesystem[idx].size;
     int i = 0;
-    
     is_script_running = 1;
     while (i < len) {
         buffer_index = 0;
-        // Baca 1 baris
         while (i < len && data[i] != '\n' && data[i] != '\0') {
             if (buffer_index < 255) command_buffer[buffer_index++] = data[i];
             i++;
         }
         command_buffer[buffer_index] = '\0';
-        
-        if (buffer_index > 0) {
-            execute_command(); // Eksekusi baris ini
-        }
-        
+        if (buffer_index > 0) execute_command(); 
         if (data[i] == '\n') i++;
     }
     is_script_running = 0;
@@ -301,8 +377,8 @@ void execute_command() {
         print("       .---.        ", 0x0B); print("root", 0x0A); print("@", 0x0F); print("mectov-os\n", 0x0B);
         print("      /     \\       ", 0x0B); print("--------------\n", 0x0F);
         print("     | () () |      ", 0x0B); print("OS", 0x0E); print(": Bare-metal x86\n", 0x0F);
-        print("      \\  ^  /       ", 0x0B); print("Kernel", 0x0E); print(": Custom C v5.0\n", 0x0F);
-        print("       |||||        ", 0x0B); print("Fitur", 0x0E); print(": Batch Scripting\n", 0x0F);
+        print("      \\  ^  /       ", 0x0B); print("Kernel", 0x0E); print(": Custom C v6.0\n", 0x0F);
+        print("       |||||        ", 0x0B); print("Disk", 0x0E); print(": Persistent ATA IDE\n", 0x0F);
         print("       |||||        ", 0x0B); print("Audio", 0x0E); print(": Synth Engine\n", 0x0F);
         print("                    ", 0x0B); print("Creator", 0x0E); print(": Bos Alif\n", 0x0F);
     } else if (strcmp(command_buffer, "help") == 0) {
@@ -317,24 +393,14 @@ void execute_command() {
         int ms = atoi(&command_buffer[7]);
         if (ms > 0) delay(ms);
     } else if (strncmp(command_buffer, "nada ", 5) == 0) {
-        int i = 5;
-        while(command_buffer[i] == ' ') i++;
-        int freq = atoi(&command_buffer[i]);
-        while(command_buffer[i] >= '0' && command_buffer[i] <= '9') i++;
-        while(command_buffer[i] == ' ') i++;
-        int dur = atoi(&command_buffer[i]);
-        if (freq > 0 && dur > 0) nada(freq, dur);
+        int i = 5; while(command_buffer[i] == ' ') i++; int freq = atoi(&command_buffer[i]);
+        while(command_buffer[i] >= '0' && command_buffer[i] <= '9') i++; while(command_buffer[i] == ' ') i++;
+        int dur = atoi(&command_buffer[i]); if (freq > 0 && dur > 0) nada(freq, dur);
     } else if (strncmp(command_buffer, "jalankan ", 9) == 0) {
-        if (!is_script_running) {
-            run_script(&command_buffer[9]);
-            buffer_index = 0;
-            if (!is_script_running) print("root@mectov:~# ", 0x0A);
-            return;
-        } else {
-            print("Error: Tidak bisa jalankan script dari dalam script!\n", 0x0C);
-        }
+        if (!is_script_running) { run_script(&command_buffer[9]); buffer_index = 0; if (!is_script_running) print("root@mectov:~# ", 0x0A); return; } 
+        else print("Error: Tidak bisa jalankan script dari dalam script!\n", 0x0C);
     } else if (strcmp(command_buffer, "ls") == 0) {
-        print("Daftar File di RAM Disk:\n", 0x0D);
+        print("Daftar File di Harddisk (ATA IDE):\n", 0x0D);
         int found = 0;
         for (int i = 0; i < MAX_FILES; i++) {
             if (filesystem[i].in_use) {
@@ -345,11 +411,10 @@ void execute_command() {
         }
         if (found == 0) print("(Disk kosong)\n", 0x08);
     } else if (strncmp(command_buffer, "buat ", 5) == 0) {
-        char* filename = &command_buffer[5];
-        int res = vfs_create_file(filename);
+        char* filename = &command_buffer[5]; int res = vfs_create_file(filename);
         if (res == -2) print("Error: File sudah ada!\n", 0x0C);
-        else if (res == -1) print("Error: RAM Disk penuh!\n", 0x0C);
-        else { print("File '", 0x0A); print(filename, 0x0E); print("' dibuat.\n", 0x0A); }
+        else if (res == -1) print("Error: Disk penuh!\n", 0x0C);
+        else { vfs_save_to_disk(); print("File dibuat di Harddisk.\n", 0x0B); }
     } else if (strncmp(command_buffer, "tulis ", 6) == 0) {
         int i = 6; while (command_buffer[i] == ' ') i++; int name_start = i;
         while (command_buffer[i] != ' ' && command_buffer[i] != '\0') i++; 
@@ -360,22 +425,18 @@ void execute_command() {
             if (idx != -1) {
                 int t = 0; while (txt[t] != '\0' && t < MAX_FILE_SIZE - 1) { filesystem[idx].data[t] = txt[t]; t++; }
                 filesystem[idx].data[t] = '\0'; filesystem[idx].size = t;
-                print("Disimpan.\n", 0x0A);
+                vfs_save_to_disk(); print("Disimpan ke Harddisk.\n", 0x0B);
             }
         }
     } else if (strncmp(command_buffer, "edit ", 5) == 0) {
-        if (!is_script_running) {
-            start_editor(&command_buffer[5]);
-            buffer_index = 0;
-            return;
-        }
+        if (!is_script_running) { start_editor(&command_buffer[5]); buffer_index = 0; return; }
     } else if (strncmp(command_buffer, "baca ", 5) == 0) {
         int idx = vfs_find_file(&command_buffer[5]);
         if (idx == -1) print("Error: File tidak ditemukan!\n", 0x0C);
         else { print(filesystem[idx].data, 0x0F); print("\n", 0x0F); }
     } else if (strncmp(command_buffer, "hapus ", 6) == 0) {
         int idx = vfs_find_file(&command_buffer[6]);
-        if (idx != -1) { filesystem[idx].in_use = 0; print("Dihapus.\n", 0x0C); }
+        if (idx != -1) { filesystem[idx].in_use = 0; vfs_save_to_disk(); print("Dihapus permanen dari Disk.\n", 0x0C); }
     } else {
         print("bash: ", 0x0C); print(command_buffer, 0x0C); print(": command not found\n", 0x0C); 
     }
@@ -385,13 +446,20 @@ void execute_command() {
 }
 
 void kernel_main(void) {
-    vfs_init(); 
     draw_desktop(); draw_window(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS "); clear_workspace();
 
     print("===================================================\n", 0x0A);
-    print("  MECTOV OS v5.0 - BATCH SCRIPTING ENGINE LOADED!  \n", 0x0E);
+    print("  MECTOV OS v6.0 - HARD DISK ATA/IDE INITIALIZED!  \n", 0x0E);
     print("===================================================\n", 0x0A);
-    print("Ketik 'help' untuk daftar perintah baru.\n\n", 0x0F);
+    
+    // LOAD DISK (ATA PIO)
+    int disk_status = vfs_load_from_disk();
+    if (disk_status == 1) {
+        print("[+] Disk Ditemukan! Memuat file lama dari MectovFS...\n\n", 0x0B);
+    } else {
+        print("[!] Disk Kosong. Mem-format MectovFS baru...\n\n", 0x0E);
+    }
+    
     print("root@mectov:~# ", 0x0A);
 
     unsigned char last_scancode = 0;
