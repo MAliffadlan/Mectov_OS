@@ -1,4 +1,4 @@
-Mectov OS v13.0 (The Memory & Stability Update)
+Mectov OS v13.0 (The Foundation Update)
 ================================================
 
 Mectov OS is a professional-grade, monolithic, bare-metal operating system kernel developed in C and x86 Assembly. Version 13.0 introduces stable Virtual Memory management and a redesigned interrupt handling framework to ensure high system reliability.
