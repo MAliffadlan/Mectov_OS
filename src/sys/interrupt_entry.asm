@@ -1,29 +1,6 @@
 [extern isr_handler]
 [extern irq_handler]
 
-; common_stub: Saves CPU state, calls C handler, restores state
-isr_common_stub:
-    pushad                    ; Push eax, ecx, edx, ebx, esp, ebp, esi, edi
-    mov ax, ds                ; Lower 16-bits of eax = ds
-    push eax                  ; Save ds
-
-    mov ax, 0x10              ; Load kernel data segment
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-
-    call isr_handler
-
-    pop eax                   ; Restore ds
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    popad                     ; POPAD
-    add esp, 8                ; Clean up error code and int number
-    iret                      ; Return from interrupt
-
 irq_common_stub:
     pushad
     mov ax, ds
@@ -34,7 +11,9 @@ irq_common_stub:
     mov fs, ax
     mov gs, ax
 
+    push esp          ; KIRIM POINTER KE STACK (ESP menunjuk ke struct registers)
     call irq_handler
+    add esp, 4        ; Bersihkan pointer
 
     pop eax
     mov ds, ax
@@ -51,7 +30,6 @@ idt_flush:
     lidt [eax]
     ret
 
-; ISR/IRQ Macro
 %macro IRQ 2
   global irq%1
   irq%1:
@@ -60,5 +38,5 @@ idt_flush:
     jmp irq_common_stub
 %endmacro
 
-IRQ 0, 32    ; Timer
-IRQ 1, 33    ; Keyboard
+IRQ 0, 32
+IRQ 1, 33
