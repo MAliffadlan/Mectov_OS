@@ -1,4 +1,4 @@
-// --- MECTOV OS v8.9 (The Marquee Update) ---
+// --- MECTOV OS v8.9.1 (Smooth Marquee Fix) ---
 static inline unsigned char inb(unsigned short port) {
     unsigned char ret; __asm__ __volatile__ ( "inb %1, %0" : "=a"(ret) : "Nd"(port) ); return ret;
 }
@@ -15,18 +15,15 @@ static inline void outw(unsigned short port, unsigned short val) {
 unsigned char read_cmos(unsigned char reg) { outb(0x70, reg); return inb(0x71); }
 unsigned char bcd_to_bin(unsigned char bcd) { return ((bcd & 0xF0) >> 1) + ((bcd & 0xF0) >> 3) + (bcd & 0x0F); }
 
-// --- POWER ---
 void shutdown() { outw(0x604, 0x2000); }
 void reboot() { unsigned char g = 0x02; while (g & 0x02) g = inb(0x64); outb(0x64, 0xFE); }
 
-// --- HARDWARE CURSOR ---
 void update_hw_cursor(int x, int y) {
     unsigned short pos = y * 80 + x;
     outb(0x3D4, 0x0F); outb(0x3D5, (unsigned char) (pos & 0xFF));
     outb(0x3D4, 0x0E); outb(0x3D5, (unsigned char) ((pos >> 8) & 0xFF));
 }
 
-// --- HDD ATA ---
 void ata_wait_bsy() { while(inb(0x1F7) & 0x80); }
 void ata_wait_drq() { while(!(inb(0x1F7) & 0x08)); }
 void ata_read_sector(unsigned int lba, unsigned char* b) {
@@ -43,7 +40,6 @@ void ata_write_sector(unsigned int lba, unsigned char* b) {
     outb(0x1F7, 0xE7); ata_wait_bsy();
 }
 
-// --- AUDIO & DELAY ---
 void play_sound(unsigned int n) { unsigned int d = 1193180/n; outb(0x43,0xb6); outb(0x42,(unsigned char)d); outb(0x42,(unsigned char)(d>>8)); unsigned char t = inb(0x61); if(t!=(t|3)) outb(0x61,t|3); }
 void nosound() { outb(0x61, inb(0x61) & 0xFC); }
 int abort_ex = 0;
@@ -51,11 +47,10 @@ void delay(int ms) { for (volatile int i = 0; i < ms; i++) { if (inb(0x64) & 1) 
 void beep() { play_sound(1000); delay(100); nosound(); }
 void nada(int f, int d) { if (abort_ex) return; if (f > 0) play_sound(f); delay(d); nosound(); }
 
-// --- KEYBOARD ---
 int shift_p = 0, caps_a = 0;
 char scancode_to_char(unsigned char s) {
-    unsigned char m_n[58] = { 0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' ', 0 };
-    unsigned char m_s[58] = { 0, 0, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '\"', '~', 0, '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ', 0 };
+    static unsigned char m_n[] = { 0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' ', 0 };
+    static unsigned char m_s[] = { 0, 0, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '\"', '~', 0, '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ', 0 };
     if (s < 58) {
         char c = m_n[s], cs = m_s[s]; int isl = (c >= 'a' && c <= 'z');
         if (shift_p) return (isl && caps_a) ? c : cs;
@@ -64,7 +59,6 @@ char scancode_to_char(unsigned char s) {
     return 0;
 }
 
-// --- GUI ---
 volatile char* video_m = (volatile char*) 0xb8000;
 unsigned char cur_col = 0x0F; 
 int cx = 0, cy = 0;
@@ -87,21 +81,29 @@ void print(const char* s, unsigned char col) { int i = 0; while (s[i] != '\0') {
 void p_char(char c, unsigned char col) { if (c == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, c, col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); update_hw_cursor(CX + cx, CY + cy); }
 
 // --- RUNNING TEXT (MARQUEE) ---
-const char* marquee_text = ">>> Mectov OS v8.9 - Created by M Alif Fadlan - Custom Kernel Bare-Metal Project - operating system kernel written from scratch in C and x86 <<<       ";
+const char* marquee_text = ">>> Mectov OS v8.9.1 - Created by Bos Alif Fadlan - Indonesia Raya - Custom Kernel Stability OK! <<<         ";
 int marquee_pos = 0;
 int marquee_counter = 0;
 
+void wait_retrace() {
+    while (inb(0x3DA) & 0x08);
+    while (!(inb(0x3DA) & 0x08));
+}
+
 void update_marquee() {
     marquee_counter++;
-    if (marquee_counter < 400000) return; // Control speed (Slower)
+    if (marquee_counter < 600000) return;
     marquee_counter = 0;
 
     int text_len = 0;
     while(marquee_text[text_len]) text_len++;
 
+    wait_retrace(); // Sinkronisasi dengan monitor
     for (int i = 0; i < 80; i++) {
         int char_idx = (marquee_pos + i) % text_len;
-        d_char(i, 24, marquee_text[char_idx], 0x70); // Render on bottom bar
+        int v_idx = (24 * 80 + i) * 2;
+        video_m[v_idx] = marquee_text[char_idx];
+        video_m[v_idx + 1] = 0x70;
     }
     marquee_pos = (marquee_pos + 1) % text_len;
 }
@@ -113,7 +115,6 @@ void strcpy(char* d, const char* s) { while ((*d++ = *s++)); }
 void p_int(int n, unsigned char c) { if (n < 0) { print("-", c); n = -n; } if (n == 0) { print("0", c); return; } char buf[10]; int i = 0; while (n > 0) { buf[i++] = (n % 10) + '0'; n /= 10; } for (int j = 0; j < i / 2; j++) { char t = buf[j]; buf[j] = buf[i - j - 1]; buf[i - j - 1] = t; } buf[i] = '\0'; print(buf, c); }
 int atoi(const char* s) { int r = 0, si = 1, i = 0; if (s[0] == '-') { si = -1; i++; } for (; s[i] != '\0'; ++i) { if (s[i] >= '0' && s[i] <= '9') r = r * 10 + s[i] - '0'; else break; } return si * r; }
 
-// --- VFS ---
 #define MAX_FILES 16
 #define MAX_FILENAME 16
 #define MAX_FILE_SIZE 1024
@@ -124,12 +125,10 @@ int vfs_load() { unsigned char s[512]; ata_read_sector(0, s); if (s[0] == 'M' &&
 int vfs_find(const char* n) { for (int i = 0; i < MAX_FILES; i++) if (fs[i].in_use && strcmp(fs[i].name, n) == 0) return i; return -1; }
 int vfs_create(const char* n) { if (vfs_find(n) != -1) return -2; for (int i = 0; i < MAX_FILES; i++) if (!fs[i].in_use) { strcpy(fs[i].name, n); fs[i].in_use = 1; fs[i].size = 0; fs[i].data[0] = '\0'; return i; } return -1; }
 
-// --- EDITOR ---
 int ed_a = 0; char ed_b[MAX_FILE_SIZE], ed_fn[MAX_FILENAME]; int ed_c = 0;
 void st_ed(const char* f) { strcpy(ed_fn, f); int i = vfs_find(f); if (i >= 0) { strcpy(ed_b, fs[i].data); ed_c = fs[i].size; } else { ed_b[0] = '\0'; ed_c = 0; } ed_a = 1; c_work(); print(ed_b, 0x0F); update_hw_cursor(CX + (ed_c % CW), CY + (ed_c / CW)); }
 void sa_ex_ed() { int i = vfs_find(ed_fn); if (i == -1) i = vfs_create(ed_fn); if (i >= 0) { strcpy(fs[i].data, ed_b); fs[i].size = ed_c; } vfs_save(); ed_a = 0; c_work(); print("root@mectov:~# ", 0x0A); }
 
-// --- SHELL ---
 char cmd_b[256]; int b_idx = 0, is_script = 0;
 void ex_cmd();
 void run_script(const char* f) { int i = vfs_find(f); if (i < 0) return; is_script = 1; abort_ex = 0; char* d = fs[i].data; int l = fs[i].size, p = 0; while (p < l && !abort_ex) { b_idx = 0; while (p < l && d[p] != '\n' && d[p] != '\0') { if (b_idx < 255) cmd_b[b_idx++] = d[p]; p++; } cmd_b[b_idx] = '\0'; if (b_idx > 0) ex_cmd(); if (d[p] == '\n') p++; } is_script = 0; abort_ex = 0; }
@@ -138,7 +137,7 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
     else if (strcmp(cmd_b, "mulaiulang") == 0) reboot();
     else if (strcmp(cmd_b, "clear") == 0) { c_work(); }
     else if (strcmp(cmd_b, "waktu") == 0) { unsigned char j = bcd_to_bin(read_cmos(0x04)), m = bcd_to_bin(read_cmos(0x02)), d = bcd_to_bin(read_cmos(0x00)); int wj = (j + 7) % 24; print("WIB: ", 0x0B); p_int(wj, 0x0E); print(":", 0x0F); p_int(m, 0x0E); print(":", 0x0F); p_int(d, 0x0E); print("\n", 0x0F); }
-    else if (strcmp(cmd_b, "mfetch") == 0) { print("root@mectov-os\nv8.9 Marquee Edition\n", 0x0B); }
+    else if (strcmp(cmd_b, "mfetch") == 0) { print("root@mectov-os\nv8.9.1 Stable\n", 0x0B); }
     else if (strcmp(cmd_b, "help") == 0) { print("System: mfetch, waktu, warna, clear, beep, matikan, mulaiulang\nFile  : ls, buat, tulis, edit, baca, hapus\nScript: echo, tunggu, nada, jalankan\n", 0x0E); }
     else if (strcmp(cmd_b, "ls") == 0) { for (int i = 0; i < MAX_FILES; i++) if (fs[i].in_use) { print("- ", 0x0F); print(fs[i].name, 0x0B); print("\n", 0x0F); } }
     else if (strncmp(cmd_b, "buat ", 5) == 0) { if (vfs_create(&cmd_b[5]) >= 0) { vfs_save(); print("Created.\n", 0x0B); } }
@@ -164,10 +163,10 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
 void kernel_main(void) {
     vfs_load(); d_desktop(); d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Mectov Security Login "); c_work();
     const char* pass = "mectov123"; char in[32]; int in_idx = 0;
-    print("Welcome to Mectov OS v8.9\nPassword: ", 0x0E);
+    print("Welcome to Mectov OS v8.9.1\nPassword: ", 0x0E);
     int log = 0; unsigned char ls = 0;
     while (!log) {
-        update_marquee(); // Update running text during login
+        update_marquee();
         if (inb(0x64) & 1) {
             unsigned char sc = inb(0x60);
             if (sc < 0x80 && sc != ls) {
@@ -180,9 +179,9 @@ void kernel_main(void) {
         }
     }
     beep(); c_work(); d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS ");
-    print("Login Success! Running Text Active.\nroot@mectov:~# ", 0x0A);
+    print("Login Success! Marquee Stabilized.\nroot@mectov:~# ", 0x0A);
     while (1) {
-        update_marquee(); // Update running text during shell
+        update_marquee();
         if (inb(0x64) & 1) {
             unsigned char sc = inb(0x60);
             if (sc == 0x2A || sc == 0x36) shift_p = 1; else if (sc == 0xAA || sc == 0xB6) shift_p = 0; else if (sc == 0x3A) caps_a = !caps_a;
