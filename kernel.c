@@ -387,6 +387,8 @@ void execute_command() {
         print("Script : echo [teks], tunggu [ms], nada [Hz] [ms], jalankan [file]\n", 0x0A);
     } else if (strcmp(command_buffer, "clear") == 0) {
         clear_workspace();
+    } else if (strcmp(command_buffer, "beep") == 0) {
+        beep();
     } else if (strncmp(command_buffer, "echo ", 5) == 0) {
         print(&command_buffer[5], 0x0F); print("\n", 0x0F);
     } else if (strncmp(command_buffer, "tunggu ", 7) == 0) {
