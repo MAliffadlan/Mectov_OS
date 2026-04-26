@@ -142,7 +142,7 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
     else if (strcmp(cmd_b, "clear") == 0) { c_work(); }
     else if (strcmp(cmd_b, "waktu") == 0) { unsigned char j = bcd_to_bin(read_cmos(0x04)), m = bcd_to_bin(read_cmos(0x02)), d = bcd_to_bin(read_cmos(0x00)); int wj = (j + 7) % 24; print("WIB: ", 0x0B); p_int(wj, 0x0E); print(":", 0x0F); p_int(m, 0x0E); print(":", 0x0F); p_int(d, 0x0E); print("\n", 0x0F); }
     else if (strcmp(cmd_b, "mfetch") == 0) {
-        unsigned char c_h = bcd_to_bin(read_cmos(0x04)), c_m = bcd_to_bin(read_cmos(0x02)), c_s = bcd_to_bin(read_cmos(0x00));
+        unsigned char c_h = bcd_to_bin(read_cmos(0x04)), c_m = bcd_to_bin(read_cmos(0x02));
         int up_h = (c_h >= boot_hour) ? c_h - boot_hour : (24 - boot_hour) + c_h;
         int up_m = (c_m >= boot_min) ? c_m - boot_min : (60 - boot_min) + c_m;
         print("       .---.        ", 0x0B); print("root", 0x0A); print("@", 0x0F); print("mectov-os\n", 0x0B);
@@ -154,16 +154,34 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
         print("                    ", 0x0B); print("Memory: ", 0x0E); print("12 GB / 12 GB\n", 0x0F);
         print("                    ", 0x0B); print("Res: ", 0x0E); print("80x25 (Text Mode)\n", 0x0F);
         print("                    ", 0x0B); print("WM: ", 0x0E); print("Mectov TUI v1.0\n\n", 0x0F);
-        print("                    ", 0x0F); // Color Blocks
-        for(int i=0; i<8; i++) { d_char(CX+20+i, CY+8, ' ', (i << 4)); } print("\n", 0x0F);
+        for(int i=0; i<8; i++) { d_char(CX+20+i, CY+9, ' ', (i << 4)); } print("\n", 0x0F);
     }
-    else if (strcmp(cmd_b, "help") == 0) { print("mfetch, waktu, warna, clear, beep, matikan, mulaiulang, ls, edit, buat, tulis\n", 0x0E); }
+    else if (strcmp(cmd_b, "warna") == 0) {
+        if (cur_col == 0x0F) cur_col = 0x0A; else if (cur_col == 0x0A) cur_col = 0x0B; else if (cur_col == 0x0B) cur_col = 0x0C; else cur_col = 0x0F;
+        print("Warna terminal diubah!\n", cur_col);
+    }
+    else if (strcmp(cmd_b, "beep") == 0) { beep(); }
+    else if (strcmp(cmd_b, "help") == 0) { print("mfetch, waktu, warna, clear, beep, matikan, mulaiulang, ls, edit, buat, tulis, baca, hapus, echo, tunggu, nada, jalankan\n", 0x0E); }
     else if (strcmp(cmd_b, "ls") == 0) { for (int i = 0; i < MAX_FILES; i++) if (fs[i].in_use) { print("- ", 0x0F); print(fs[i].name, 0x0B); print("\n", 0x0F); } }
     else if (strncmp(cmd_b, "buat ", 5) == 0) { if (vfs_create(&cmd_b[5]) >= 0) { vfs_save(); print("Created.\n", 0x0B); } }
     else if (strncmp(cmd_b, "edit ", 5) == 0) { if (!is_script) { st_ed(&cmd_b[5]); b_idx = 0; return; } }
     else if (strncmp(cmd_b, "baca ", 5) == 0) { int i = vfs_find(&cmd_b[5]); if (i >= 0) { print(fs[i].data, 0x0F); print("\n", 0x0F); } }
     else if (strncmp(cmd_b, "hapus ", 6) == 0) { int i = vfs_find(&cmd_b[6]); if (i >= 0) { fs[i].in_use = 0; vfs_save(); print("Deleted.\n", 0x0C); } }
     else if (strncmp(cmd_b, "echo ", 5) == 0) { print(&cmd_b[5], 0x0F); print("\n", 0x0F); }
+    else if (strncmp(cmd_b, "tunggu ", 7) == 0) { int ms = atoi(&cmd_b[7]); if (ms > 0) delay(ms); }
+    else if (strncmp(cmd_b, "nada ", 5) == 0) {
+        int i = 5; while(cmd_b[i] == ' ') i++; int f = atoi(&cmd_b[i]);
+        while(cmd_b[i] >= '0' && cmd_b[i] <= '9') i++; while(cmd_b[i] == ' ') i++;
+        int d = atoi(&cmd_b[i]); if (f > 0 && d > 0) nada(f, d);
+    }
+    else if (strncmp(cmd_b, "tulis ", 6) == 0) {
+        int i = 6; while (cmd_b[i] == ' ') i++; int ns = i; while (cmd_b[i] != ' ' && cmd_b[i] != '\0') i++; 
+        if (cmd_b[i] != '\0') {
+            cmd_b[i] = '\0'; char* fn = &cmd_b[ns]; char* tx = &cmd_b[i + 1];
+            int idx = vfs_find(fn); if (idx == -1) idx = vfs_create(fn);
+            if (idx >= 0) { strcpy(fs[idx].data, tx); fs[idx].size = 0; while(tx[fs[idx].size]) fs[idx].size++; vfs_save(); print("Stored.\n", 0x0B); }
+        }
+    }
     else if (strncmp(cmd_b, "jalankan ", 9) == 0) { if (!is_script) { run_script(&cmd_b[9]); b_idx = 0; if (!is_script) print("root@mectov:~# ", 0x0A); return; } }
     else if (cmd_b[0] != '\0') { print("Command not found\n", 0x0C); }
     b_idx = 0; if (!is_script) print("root@mectov:~# ", 0x0A);
