@@ -103,7 +103,7 @@ void open_terminal_app() {
     term_print("root@mectov:~# ", 0x0A);
     b_idx = 0;
     term.win_id = wm_open(60, 40, 630, 430, "Terminal",
-                          term_draw, term_key, term_tick);
+                          term_draw, term_key, term_tick, 0);
     term_open = (term.win_id >= 0);
 }
 

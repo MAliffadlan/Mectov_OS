@@ -3,7 +3,7 @@
 
 #include "taskbar.h"
 
-#define ICON_COUNT  4
+#define ICON_COUNT  6
 
 void desktop_draw();
 void desktop_handle_click(int mx, int my);

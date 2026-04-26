@@ -20,6 +20,7 @@
 #include "src/include/taskbar.h"
 #include "src/include/login.h"
 #include "src/include/task.h"
+#include "src/include/pci.h"
 
 // Forward declaration
 extern void init_double_buffer(void);
@@ -35,21 +36,32 @@ static void full_redraw() {
 void kernel_main(uint32_t magic, uint32_t addr) {
     multiboot_info_t* mbi = (multiboot_info_t*)addr;
     uint32_t fb_p = 0, fb_s = 0;
-    if (magic == 0x2BADB002 && mbi != NULL && (mbi->flags & (1 << 12))) {
-        fb_p = (uint32_t)mbi->framebuffer_addr;
-        fb_s = mbi->framebuffer_height * mbi->framebuffer_pitch;
-        init_vbe(fb_p, mbi->framebuffer_width, mbi->framebuffer_height, mbi->framebuffer_pitch, mbi->framebuffer_bpp);
+    uint32_t mem_size = 32 * 1024 * 1024; // Default fallback 32MB
+
+    if (magic == 0x2BADB002 && mbi != NULL) {
+        // Auto-detect RAM size from GRUB Multiboot header
+        if (mbi->flags & 1) {
+            // mem_upper is in KB and starts at 1MB
+            mem_size = (mbi->mem_upper * 1024) + (1024 * 1024);
+        }
+
+        if (mbi->flags & (1 << 12)) {
+            fb_p = (uint32_t)mbi->framebuffer_addr;
+            fb_s = mbi->framebuffer_height * mbi->framebuffer_pitch;
+            init_vbe(fb_p, mbi->framebuffer_width, mbi->framebuffer_height, mbi->framebuffer_pitch, mbi->framebuffer_bpp);
+        }
     }
     
     extern void init_gdt();
     init_gdt();
 
-    init_mem(32 * 1024 * 1024);
+    init_mem(mem_size);
     paging_init(fb_p, fb_s);
     idt_init();
     init_timer(50);
     init_keyboard();
     detect_cpu();
+    pci_scan();
     init_uptime();
     vfs_load();
 

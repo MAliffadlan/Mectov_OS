@@ -63,6 +63,6 @@ static void clock_tick(int id) { (void)id; }
 
 void open_clock_app() {
     if (clock_open && wm_is_open(clock_win_id)) { wm_raise(clock_win_id); return; }
-    clock_win_id = wm_open(200, 150, 300, 160, "Clock", clock_draw, clock_key, clock_tick);
+    clock_win_id = wm_open(200, 150, 300, 160, "Clock", clock_draw, clock_key, clock_tick, 0);
     clock_open = (clock_win_id >= 0);
 }

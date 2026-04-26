@@ -63,7 +63,7 @@ void st_ed(const char* f) {
     strcpy(title, "Editor: ");
     strcpy(title + 8, f);
     
-    nano_win_id = wm_open(150, 100, 420, 320, title, nano_draw, nano_key, nano_tick);
+    nano_win_id = wm_open(150, 100, 420, 320, title, nano_draw, nano_key, nano_tick, 0);
 }
 
 void sa_ex_ed() { 

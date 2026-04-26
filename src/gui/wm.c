@@ -38,7 +38,7 @@ void wm_raise(int id) {
 
 // ---- Open / Close ----
 int wm_open(int x, int y, int w, int h, const char* title,
-            WinDrawFn draw_fn, WinKeyFn key_fn, WinTickFn tick_fn) {
+            WinDrawFn draw_fn, WinKeyFn key_fn, WinTickFn tick_fn, WinMouseFn mouse_fn) {
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!wm_wins[i].visible) {
             wm_wins[i].id       = next_id++;
@@ -47,6 +47,7 @@ int wm_open(int x, int y, int w, int h, const char* title,
             wm_wins[i].draw_fn = draw_fn;
             wm_wins[i].key_fn  = key_fn;
             wm_wins[i].tick_fn = tick_fn;
+            wm_wins[i].mouse_fn= mouse_fn;
             wm_wins[i].visible = 1;
             wm_wins[i].dragging= 0;
             int k = 0;
@@ -178,6 +179,10 @@ void wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                 w->drag_mx = mx; w->drag_my = my;
                 w->drag_wx = w->x; w->drag_wy = w->y;
                 return;
+            }
+            // Content area click
+            if (w->mouse_fn) {
+                w->mouse_fn(w->id, mx - w->x, my - (w->y + TITLEBAR_H), btn);
             }
             return;
         }

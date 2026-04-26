@@ -7,6 +7,7 @@
 #include "../include/speaker.h"
 #include "../include/mem.h"
 #include "../include/apps.h"
+#include "../include/pci.h"
 
 char cmd_b[256]; int b_idx = 0;
 char hist_b[256];
@@ -23,6 +24,7 @@ void ex_cmd() {
         print("FILES : ls, buat, tulis, baca, hapus, edit\n", 0x0E);
         print("APPS  : ular, nada, beep, echo\n", 0x0E);
         print("POWER : matikan, mulaiulang\n", 0x0E);
+        print("HW    : lspci\n", 0x0E);
     }
     else if (strcmp(cmd_b, "clear") == 0) { 
         if (get_use_term_buf()) term_clear();
@@ -45,6 +47,17 @@ void ex_cmd() {
     }
     else if (strcmp(cmd_b, "matikan") == 0) shutdown();
     else if (strcmp(cmd_b, "mulaiulang") == 0) reboot();
+    else if (strcmp(cmd_b, "lspci") == 0) {
+        print("--- PCI Bus Devices ---\n", 0x0B);
+        for (int i = 0; i < pci_device_count; i++) {
+            pci_device_t *d = &pci_devices[i];
+            print(" ", 0x0F);
+            print(pci_vendor_name(d->vendor_id), 0x0A);
+            print(" | ", 0x07);
+            print(pci_class_name(d->class_code, d->subclass), 0x0E);
+            print("\n", 0x0F);
+        }
+    }
     else if (strcmp(cmd_b, "ular") == 0) start_ular();
     else if (strcmp(cmd_b, "kunci") == 0) lock_screen();
     else if (strcmp(cmd_b, "waktu") == 0) {

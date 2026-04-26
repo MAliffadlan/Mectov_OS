@@ -107,6 +107,6 @@ static void si_tick(int id) { (void)id; }
 
 void open_sysinfo_app() {
     if (si_open && wm_is_open(si_win_id)) { wm_raise(si_win_id); return; }
-    si_win_id = wm_open(120, 80, 460, 240, "System Info", si_draw, si_key, si_tick);
+    si_win_id = wm_open(120, 80, 460, 240, "System Info", si_draw, si_key, si_tick, 0);
     si_open = (si_win_id >= 0);
 }

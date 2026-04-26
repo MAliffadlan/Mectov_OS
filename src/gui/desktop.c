@@ -28,6 +28,8 @@ static void init_icons() {
     icons[1] = (Icon){ base_x + 1*gap, base_y, "Snake",    0x00205000, open_snake_wrapper  };
     icons[2] = (Icon){ base_x + 2*gap, base_y, "Clock",    0x00402000, open_clock_app      };
     icons[3] = (Icon){ base_x + 3*gap, base_y, "SysInfo",  0x00500020, open_sysinfo_app    };
+    icons[4] = (Icon){ base_x + 4*gap, base_y, "Explorer", 0x00FFBB55, open_explorer_app   };
+    icons[5] = (Icon){ base_x + 0*gap, base_y + 90, "PCI",  0x00007ACC, open_pci_app        };
 }
 
 // Draw a single desktop icon (48x48 box + label)
@@ -73,7 +75,7 @@ void desktop_draw() {
 
 void desktop_handle_click(int mx, int my) {
     if (start_menu_open) {
-        int sm_h = 130;
+        int sm_h = 160;
         int sm_w = 160;
         int sm_y = (int)fb_height - TASKBAR_H_PX - sm_h;
         if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
@@ -83,6 +85,7 @@ void desktop_handle_click(int mx, int my) {
                 else if (item == 1) st_ed("baru.txt");
                 else if (item == 2) open_sysinfo_app();
                 else if (item == 3) open_clock_app();
+                else if (item == 4) open_power_app();
             }
         }
         start_menu_open = 0;

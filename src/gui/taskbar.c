@@ -4,6 +4,8 @@
 #include "../include/mem.h"
 #include "../include/wm.h"
 #include "../include/timer.h"
+#include "../include/keyboard.h"
+#include "../include/ata.h"
 
 // Helpers
 static void draw_num2(int px, int py, unsigned char n, uint32_t fg, uint32_t bg) {
@@ -38,6 +40,27 @@ void taskbar_draw() {
         draw_rect(bar_x, ty + 10, fill, 8, GUI_CYAN);
     }
 
+    // System Tray (Left of the Clock)
+    int tray_x = (int)fb_width - 240;
+    
+    // Caps Lock indicator
+    if (caps_a) {
+        draw_rect(tray_x, ty + 6, 40, 16, 0x00FF8800); // Orange bg
+        draw_string_px(tray_x + 4, ty + 10, "CAPS", 0x00FFFFFF, 0x00FF8800);
+    } else {
+        draw_rect(tray_x, ty + 6, 40, 16, GUI_BORDER);
+        draw_string_px(tray_x + 4, ty + 10, "caps", 0x00888888, GUI_BORDER);
+    }
+    
+    // HDD indicator
+    if (hdd_activity > 0) {
+        draw_rect(tray_x + 46, ty + 8, 12, 12, 0x00FF0000); // Red light
+        hdd_activity--;
+    } else {
+        draw_rect(tray_x + 46, ty + 8, 12, 12, 0x00222222); // Dark light
+    }
+    draw_string_px(tray_x + 62, ty + 10, "HDD", GUI_TEXT_INV, GUI_TASKBAR);
+
     // Clock (center)
     unsigned char sec  = bcd_to_bin(read_cmos(0x00));
     unsigned char min  = bcd_to_bin(read_cmos(0x02));
@@ -68,7 +91,7 @@ void taskbar_draw() {
 
     // Draw Start Menu if open
     if (start_menu_open) {
-        int sm_h = 130;
+        int sm_h = 160;
         int sm_w = 160;
         int sm_y = ty - sm_h;
         draw_rect(2, sm_y, sm_w, sm_h, GUI_BG);
@@ -82,6 +105,7 @@ void taskbar_draw() {
         draw_string_px(14, sm_y + 58, "Editor", GUI_TEXT, GUI_BG);
         draw_string_px(14, sm_y + 82, "System Info", GUI_TEXT, GUI_BG);
         draw_string_px(14, sm_y + 106, "Clock", GUI_TEXT, GUI_BG);
+        draw_string_px(14, sm_y + 130, "Power", 0x00FF4444, GUI_BG); // Red power text
     }
 }
 
