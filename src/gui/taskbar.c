@@ -78,14 +78,15 @@ void taskbar_draw() {
     int wx = 70;
     for (int i = 0; i < MAX_WINDOWS && wx < (int)fb_width - 200; i++) {
         if (!wm_wins[i].visible) continue;
-        int focused = (wm_focused == wm_wins[i].id);
-        uint32_t bg2 = focused ? GUI_BTN_HOV : GUI_BTN;
+        int focused = (wm_focused == wm_wins[i].id) && !wm_wins[i].minimized;
+        uint32_t bg2 = wm_wins[i].minimized ? GUI_BORDER2 : (focused ? GUI_BTN_HOV : GUI_BTN);
         draw_rect(wx, ty + 2, 90, TASKBAR_H_PX - 4, bg2);
         draw_rect_border(wx, ty + 2, 90, TASKBAR_H_PX - 4, focused ? GUI_BORDER : GUI_BORDER2);
         char buf[10]; int k;
         for (k = 0; k < 9 && wm_wins[i].title[k]; k++) buf[k] = wm_wins[i].title[k];
         buf[k] = '\0';
-        draw_string_px(wx + 4, ty + 6, buf, focused ? GUI_TEXT : GUI_DIM, bg2);
+        uint32_t txt_col = wm_wins[i].minimized ? 0x00666666 : (focused ? GUI_TEXT : GUI_DIM);
+        draw_string_px(wx + 4, ty + 6, buf, txt_col, bg2);
         wx += 96;
     }
 
@@ -122,7 +123,28 @@ void taskbar_handle_click(int mx, int my) {
     int wx = 70;
     for (int i = 0; i < MAX_WINDOWS && wx < (int)fb_width - 200; i++) {
         if (!wm_wins[i].visible) continue;
-        if (mx >= wx && mx < wx + 90) { wm_raise(wm_wins[i].id); return; }
+        if (mx >= wx && mx < wx + 90) {
+            if (wm_wins[i].minimized) {
+                // Restore from minimize
+                wm_wins[i].minimized = 0;
+                wm_raise(wm_wins[i].id);
+            } else if (wm_focused == wm_wins[i].id) {
+                // Click focused window again = minimize
+                wm_wins[i].minimized = 1;
+                wm_focused = -1;
+                for (int zz = wm_zcount - 1; zz >= 0; zz--) {
+                    WmWin* nw = &wm_wins[wm_zorder[zz]];
+                    if (nw->visible && !nw->minimized) {
+                        wm_focused = nw->id;
+                        break;
+                    }
+                }
+            } else {
+                // Bring to front
+                wm_raise(wm_wins[i].id);
+            }
+            return;
+        }
         wx += 96;
     }
 }

@@ -6,18 +6,21 @@ static uint32_t page_directory[1024] __attribute__((aligned(4096)));
 static uint32_t page_tables[32][1024] __attribute__((aligned(4096)));  // 32 × 4MB = 128MB identity map
 static uint32_t fb_page_tables[2][1024] __attribute__((aligned(4096))); 
 
-static uint8_t mem_bitmap[MEMORY_BITMAP_SIZE];
+static uint8_t *mem_bitmap = NULL;
 static uint32_t total_pages = 0;
 static uint32_t used_pages = 0;
 
 void init_mem(uint32_t mem_size) {
     total_pages = mem_size / PAGE_SIZE;
+    mem_bitmap = (uint8_t*)kmalloc((total_pages / 8) + 1);
     used_pages = 0;
-    memset(mem_bitmap, 0, sizeof(mem_bitmap));
+    if (mem_bitmap) {
+        memset(mem_bitmap, 0, (total_pages / 8) + 1);
+    }
     uint32_t reserved_pages = 0x1000000 / PAGE_SIZE; // 16MB reserved for kernel/stack
     if (reserved_pages > total_pages) reserved_pages = total_pages;
     for (uint32_t i = 0; i < reserved_pages; i++) {
-        mem_bitmap[i / 8] |= (1 << (i % 8));
+        if (mem_bitmap) mem_bitmap[i / 8] |= (1 << (i % 8));
         used_pages++;
     }
 }
@@ -119,6 +122,22 @@ void kfree(void* p) {
     if (!p) return;
     block_meta *block = (block_meta*)p - 1;
     block->free = 1;
+
+    // Forward coalescing: merge with next block if it's also free
+    while (block->next && block->next->free) {
+        block->size += META_SIZE + block->next->size;
+        block->next = block->next->next;
+    }
+
+    // Backward coalescing: find previous block and merge if free
+    if (global_base != block) {
+        block_meta *prev = global_base;
+        while (prev && prev->next != block) prev = prev->next;
+        if (prev && prev->free) {
+            prev->size += META_SIZE + block->size;
+            prev->next = block->next;
+        }
+    }
 }
 
 unsigned int get_total_memory() { return total_pages * 4096; }

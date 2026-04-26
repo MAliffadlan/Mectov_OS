@@ -23,6 +23,9 @@ typedef struct {
     int dragging;
     int drag_mx, drag_my;  // mouse pos at drag start
     int drag_wx, drag_wy;  // window pos at drag start
+    int minimized;         // 1 = hidden in taskbar
+    int maximized;         // 1 = fullscreen
+    int saved_x, saved_y, saved_w, saved_h; // pre-maximize geometry
 } WmWin;
 
 extern WmWin wm_wins[MAX_WINDOWS];

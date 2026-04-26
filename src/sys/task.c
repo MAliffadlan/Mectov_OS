@@ -2,7 +2,7 @@
 #include "../include/mem.h"
 
 #define MAX_TASKS 8
-#define STACK_SIZE 4096
+#define STACK_SIZE 16384
 
 typedef struct {
     uint32_t esp;
@@ -32,7 +32,7 @@ int create_task(void (*entry)()) {
             // push eflags, cs, eip
             *(--stack) = 0x202;      // EFLAGS (Interrupts enabled)
             *(--stack) = 0x08;       // CS
-            *(--stack) = (uint32_t)entry; // EIP
+            *(--stack) = (uint32_t)(uintptr_t)entry; // EIP
             
             // push err_code, int_no
             *(--stack) = 0;

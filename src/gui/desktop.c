@@ -32,25 +32,112 @@ static void init_icons() {
     icons[5] = (Icon){ base_x + 0*gap, base_y + 90, "PCI",  0x00007ACC, open_pci_app        };
 }
 
-// Draw a single desktop icon (48x48 box + label)
 static void draw_icon(int i) {
     Icon* ic = &icons[i];
-    draw_rect(ic->x + 3, ic->y + 3, 48, 48, 0x00000000);
-    draw_rect(ic->x, ic->y, 48, 48, ic->color);
-    draw_rect_border(ic->x, ic->y, 48, 48, GUI_BORDER);
-    draw_char_px(ic->x + 16, ic->y + 16, ic->label[0], GUI_TEXT_INV, 0xFFFFFFFF);
-    draw_char_px(ic->x + 24, ic->y + 16, ic->label[1], GUI_TEXT_INV, 0xFFFFFFFF);
+    int ix = ic->x;
+    int iy = ic->y;
+    
+    // Draw soft shadow
+    draw_rect(ix + 2, iy + 2, 48, 48, 0x00111111);
+    
+    // Draw icon base background
+    draw_rect(ix, iy, 48, 48, ic->color);
+    draw_rect_border(ix, iy, 48, 48, GUI_BORDER);
+
+    // Draw procedural shapes based on label
+    if (strcmp(ic->label, "Terminal") == 0) {
+        draw_rect(ix + 6, iy + 6, 36, 36, 0x00000000); // Black screen
+        draw_rect_border(ix + 6, iy + 6, 36, 36, 0x00444444);
+        draw_string_px(ix + 10, iy + 10, ">_", 0x0000FF00, 0x00000000); // Green prompt
+    }
+    else if (strcmp(ic->label, "Snake") == 0) {
+        draw_rect(ix + 12, iy + 12, 8, 8, 0x00000000); // Snake tail
+        draw_rect(ix + 20, iy + 12, 16, 8, 0x00000000); // Snake body
+        draw_rect(ix + 28, iy + 20, 8, 16, 0x00000000); // Snake head
+        draw_rect(ix + 12, iy + 28, 8, 8, 0x00FF0000); // Apple
+    }
+    else if (strcmp(ic->label, "Clock") == 0) {
+        draw_rect(ix + 8, iy + 8, 32, 32, 0x00FFFFFF); // White clock face
+        draw_rect_border(ix + 8, iy + 8, 32, 32, 0x00222222);
+        draw_rect(ix + 23, iy + 14, 2, 10, 0x00000000); // Hour hand
+        draw_rect(ix + 23, iy + 23, 8, 2, 0x00000000); // Minute hand
+    }
+    else if (strcmp(ic->label, "SysInfo") == 0) {
+        draw_rect(ix + 12, iy + 12, 24, 24, 0x00111111); // CPU chip
+        // Pins
+        for (int p=14; p<34; p+=6) {
+            draw_rect(ix + 8, iy + p, 4, 2, 0x00CCCCCC); // Left pins
+            draw_rect(ix + 36, iy + p, 4, 2, 0x00CCCCCC); // Right pins
+            draw_rect(ix + p, iy + 8, 2, 4, 0x00CCCCCC); // Top pins
+            draw_rect(ix + p, iy + 36, 2, 4, 0x00CCCCCC); // Bottom pins
+        }
+    }
+    else if (strcmp(ic->label, "Explorer") == 0) {
+        draw_rect(ix + 6, iy + 12, 16, 8, 0x00FFCC00); // Folder tab
+        draw_rect(ix + 6, iy + 20, 36, 20, 0x00FFDD33); // Folder body
+        draw_rect_border(ix + 6, iy + 20, 36, 20, 0x00CCAA00);
+    }
+    else if (strcmp(ic->label, "PCI") == 0) {
+        draw_rect(ix + 8, iy + 10, 32, 24, 0x00004400); // PCB Board
+        draw_rect(ix + 14, iy + 16, 20, 12, 0x00111111); // IC
+        for(int p=10; p<36; p+=4) { // Gold contacts
+            draw_rect(ix + p, iy + 34, 2, 4, 0x00FFD700);
+        }
+    }
+
+    // Draw label
     int llen = strlen(ic->label);
-    int lx = ic->x + (48 - llen * 8) / 2;
-    draw_string_px(lx, ic->y + 52, ic->label, GUI_TEXT_INV, 0xFFFFFFFF);
+    int lx = ix + (48 - llen * 8) / 2;
+    draw_string_px(lx, iy + 52, ic->label, GUI_TEXT_INV, 0xFFFFFFFF);
 }
 
 void desktop_draw() {
     if (!is_vbe) return;
 
-    // Fast solid background instead of gradient to avoid memcpy overhead
     uint32_t area_h = fb_height - TASKBAR_H_PX;
-    draw_rect(0, 0, fb_width, area_h, GUI_DESKTOP);
+
+    // Cached gradient wallpaper (computed once, reused every frame)
+    static uint32_t *wp_cache = NULL;
+    static uint32_t wp_w = 0, wp_h = 0;
+
+    if (!wp_cache || wp_w != fb_width || wp_h != area_h) {
+        wp_w = fb_width;
+        wp_h = area_h;
+        if (wp_cache) kfree(wp_cache);
+        wp_cache = (uint32_t*)kmalloc(wp_w * wp_h * 4);
+        if (wp_cache) {
+            for (uint32_t y = 0; y < wp_h; y++) {
+                uint32_t t = (y * 255) / wp_h; // 0..255 top to bottom
+                // Top: deep navy (10, 15, 40) -> Bottom: charcoal (30, 30, 35)
+                uint32_t r = 10 + (t * 20) / 255;
+                uint32_t g = 15 + (t * 15) / 255;
+                uint32_t b = 40 + (t * (255 - 40)) / 510; // subtle fade to ~65
+
+                // Add a subtle teal band in the middle
+                if (t > 80 && t < 180) {
+                    uint32_t band = (t < 130) ? (t - 80) : (180 - t);
+                    g += band / 4;
+                    b += band / 6;
+                }
+
+                uint32_t color = (r << 16) | (g << 8) | b;
+                for (uint32_t x = 0; x < wp_w; x++) {
+                    wp_cache[y * wp_w + x] = color;
+                }
+            }
+        }
+    }
+
+    // Blit cached wallpaper
+    if (wp_cache) {
+        for (uint32_t y = 0; y < area_h; y++) {
+            memcpy((void*)&back_buffer[y * fb_width],
+                   (void*)&wp_cache[y * wp_w],
+                   wp_w * 4);
+        }
+    } else {
+        draw_rect(0, 0, fb_width, area_h, GUI_DESKTOP);
+    }
 
     // Marquee scrolling text at the top
     static int marquee_x = 1024;

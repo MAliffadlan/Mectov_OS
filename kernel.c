@@ -25,10 +25,35 @@
 // Forward declaration
 extern void init_double_buffer(void);
 
+static int fps_val = 0;
+static int fps_frames = 0;
+static uint32_t fps_last_tick = 0;
+
 static void full_redraw() {
     desktop_draw();
     wm_draw_all();
     taskbar_draw();
+
+    // FPS counter at top-right
+    char fps_buf[12];
+    int fi = 0;
+    int tmp = fps_val;
+    if (tmp == 0) { fps_buf[fi++] = '0'; }
+    else {
+        char rev[8]; int rl = 0;
+        while (tmp > 0) { rev[rl++] = '0' + tmp % 10; tmp /= 10; }
+        while (rl > 0) fps_buf[fi++] = rev[--rl];
+    }
+    fps_buf[fi++] = ' ';
+    fps_buf[fi++] = 'F';
+    fps_buf[fi++] = 'P';
+    fps_buf[fi++] = 'S';
+    fps_buf[fi] = '\0';
+
+    int fx = (int)fb_width - (fi * 8) - 8;
+    draw_rect(fx - 4, 22, fi * 8 + 8, 18, 0x00000000);
+    draw_string_px(fx, 23, fps_buf, 0x0000FF00, 0x00000000);
+
     draw_mouse_cursor(mouse_x, mouse_y);
     swap_buffers();
 }
@@ -58,7 +83,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     init_mem(mem_size);
     paging_init(fb_p, fb_s);
     idt_init();
-    init_timer(50);
+    init_timer(60);
     init_keyboard();
     detect_cpu();
     pci_scan();
@@ -119,7 +144,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         }
 
         uint32_t now = get_ticks();
-        if (now - last_clock_tick >= 50) {
+        if (now - last_clock_tick >= 60) {
             last_clock_tick = now;
             wm_tick_all();
             needs_redraw = 1;
@@ -128,10 +153,17 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         // Force continuous redraw for marquee animation
         needs_redraw = 1;
 
-        // Throttle rendering to ~25 FPS (every 2 ticks at 50Hz)
+        // Throttle rendering to ~30 FPS (every 2 ticks at 60Hz)
         if (needs_redraw && (now - last_frame_tick >= 2)) {
             needs_redraw = 0;
             last_frame_tick = now;
+            fps_frames++;
+            // Update FPS counter every second (60 ticks)
+            if (now - fps_last_tick >= 60) {
+                fps_val = fps_frames;
+                fps_frames = 0;
+                fps_last_tick = now;
+            }
             full_redraw();
         }
 

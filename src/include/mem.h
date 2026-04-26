@@ -4,7 +4,6 @@
 #include "types.h"
 
 #define PAGE_SIZE 4096
-#define MEMORY_BITMAP_SIZE (1024 * 1024 / 8)
 
 // Paging Flags
 #define PAGE_PRESENT 0x1

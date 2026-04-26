@@ -1,6 +1,7 @@
 #include "../include/wm.h"
 #include "../include/vga.h"
 #include "../include/utils.h"
+#include "../include/taskbar.h"
 
 WmWin wm_wins[MAX_WINDOWS];
 int   wm_focused = -1;
@@ -50,6 +51,8 @@ int wm_open(int x, int y, int w, int h, const char* title,
             wm_wins[i].mouse_fn= mouse_fn;
             wm_wins[i].visible = 1;
             wm_wins[i].dragging= 0;
+            wm_wins[i].minimized = 0;
+            wm_wins[i].maximized = 0;
             int k = 0;
             while (title[k] && k < 47) { wm_wins[i].title[k] = title[k]; k++; }
             wm_wins[i].title[k] = '\0';
@@ -83,12 +86,13 @@ void wm_close(int id) {
 // ---- Draw a single window ----
 static void draw_one(int idx) {
     WmWin* w = &wm_wins[idx];
-    if (!w->visible) return;
+    if (!w->visible || w->minimized) return;
     int x = w->x, y = w->y, ww = w->w, wh = w->h;
     int focused = (wm_focused == w->id);
 
     // Drop shadow
-    draw_rect(x + 6, y + 6, ww, wh, 0x00000000);
+    if (!w->maximized)
+        draw_rect(x + 6, y + 6, ww, wh, 0x00000000);
 
     // Outer glow
     uint32_t border = focused ? GUI_BORDER : GUI_BORDER2;
@@ -111,16 +115,32 @@ static void draw_one(int idx) {
     // Window body
     draw_rect(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, GUI_BG);
 
-    // Title text centered
+    // Title text (offset to the left to make room for 3 buttons)
     int tlen = strlen(w->title);
-    int tx = x + (ww - tlen * 8) / 2;
-    int ty = y + (TITLEBAR_H - 16) / 2;
-    draw_string_px(tx, ty, w->title, GUI_TEXT, 0xFFFFFFFF); // Transparent bg
+    int tx = x + (ww - 3 * TITLEBAR_H - tlen * 8) / 2;
+    if (tx < x + 4) tx = x + 4;
+    int tty = y + (TITLEBAR_H - 16) / 2;
+    draw_string_px(tx, tty, w->title, GUI_TEXT, 0xFFFFFFFF);
 
-    // Close button [X] at top-right
-    int cbx = x + ww - TITLEBAR_H;
-    draw_rect(cbx, y, TITLEBAR_H, TITLEBAR_H - 1, GUI_CLOSE);
-    draw_string_px(cbx + (TITLEBAR_H - 8) / 2, y + (TITLEBAR_H - 16) / 2, "x", GUI_WHITE, GUI_CLOSE);
+    // --- Titlebar buttons (right side): [_] [O] [X] ---
+    int btn_w = TITLEBAR_H;
+    int btn_h = TITLEBAR_H - 1;
+
+    // Minimize button [_]
+    int mbx = x + ww - 3 * btn_w;
+    draw_rect(mbx, y, btn_w, btn_h, 0x00448844);
+    draw_string_px(mbx + (btn_w - 8) / 2, tty, "_", GUI_WHITE, 0x00448844);
+
+    // Maximize button [O]
+    int maxbx = x + ww - 2 * btn_w;
+    uint32_t max_col = w->maximized ? 0x00886644 : 0x00446688;
+    draw_rect(maxbx, y, btn_w, btn_h, max_col);
+    draw_string_px(maxbx + (btn_w - 8) / 2, tty, "O", GUI_WHITE, max_col);
+
+    // Close button [X]
+    int cbx = x + ww - btn_w;
+    draw_rect(cbx, y, btn_w, btn_h, GUI_CLOSE);
+    draw_string_px(cbx + (btn_w - 8) / 2, tty, "x", GUI_WHITE, GUI_CLOSE);
 
     // Content area border
     draw_rect_border(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, border);
@@ -165,19 +185,56 @@ void wm_handle_mouse(int mx, int my, int btn, int pbtn) {
         int idx = wm_zorder[z];
         WmWin* w = &wm_wins[idx];
         if (!w->visible) continue;
+        if (w->minimized) continue;
         if (mx >= w->x && mx < w->x + w->w && my >= w->y && my < w->y + w->h) {
             wm_raise(w->id);
-            // Close button?
-            int cbx = w->x + w->w - TITLEBAR_H;
-            if (my < w->y + TITLEBAR_H && mx >= cbx) {
-                wm_close(w->id);
-                return;
-            }
-            // Titlebar drag?
             if (my < w->y + TITLEBAR_H) {
-                w->dragging = 1;
-                w->drag_mx = mx; w->drag_my = my;
-                w->drag_wx = w->x; w->drag_wy = w->y;
+                int btn_w = TITLEBAR_H;
+                int mbx  = w->x + w->w - 3 * btn_w; // minimize
+                int maxbx = w->x + w->w - 2 * btn_w; // maximize
+                int cbx   = w->x + w->w - btn_w;     // close
+
+                // Close button
+                if (mx >= cbx) {
+                    wm_close(w->id);
+                    return;
+                }
+                // Maximize button
+                if (mx >= maxbx) {
+                    if (w->maximized) {
+                        w->x = w->saved_x; w->y = w->saved_y;
+                        w->w = w->saved_w; w->h = w->saved_h;
+                        w->maximized = 0;
+                    } else {
+                        w->saved_x = w->x; w->saved_y = w->y;
+                        w->saved_w = w->w; w->saved_h = w->h;
+                        w->x = 0; w->y = 0;
+                        w->w = (int)fb_width;
+                        w->h = (int)fb_height - TASKBAR_H_PX;
+                        w->maximized = 1;
+                    }
+                    return;
+                }
+                // Minimize button
+                if (mx >= mbx) {
+                    w->minimized = 1;
+                    wm_focused = -1;
+                    // Focus next visible window
+                    for (int zz = wm_zcount - 1; zz >= 0; zz--) {
+                        WmWin* nw = &wm_wins[wm_zorder[zz]];
+                        if (nw->visible && !nw->minimized) {
+                            wm_focused = nw->id;
+                            break;
+                        }
+                    }
+                    return;
+                }
+                // Titlebar drag (only if not maximized)
+                if (!w->maximized) {
+                    w->dragging = 1;
+                    w->drag_mx = mx; w->drag_my = my;
+                    w->drag_wx = w->x; w->drag_wy = w->y;
+                }
                 return;
             }
             // Content area click
