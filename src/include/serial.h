@@ -5,7 +5,7 @@
 
 #define PORT_COM1 0x3F8
 #define PORT_COM2 0x2F8
-#define MODEM_PORT PORT_COM2
+#define MODEM_PORT PORT_COM1
 
 void init_serial();
 int serial_received();

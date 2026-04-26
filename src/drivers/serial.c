@@ -12,21 +12,28 @@ void init_serial() {
 }
 
 int serial_received() {
-    return inb(MODEM_PORT + 5) & 1;
+    uint8_t status = inb(MODEM_PORT + 5);
+    if (status == 0xFF) return 0; // Port is dead or unmapped
+    return status & 1;
 }
 
 char read_serial() {
-    while (serial_received() == 0);
-    return inb(MODEM_PORT);
+    int timeout = 100000;
+    while (serial_received() == 0 && timeout > 0) timeout--;
+    if (timeout > 0) return inb(MODEM_PORT);
+    return 0;
 }
 
 int is_transmit_empty() {
-    return inb(MODEM_PORT + 5) & 0x20;
+    uint8_t status = inb(MODEM_PORT + 5);
+    if (status == 0xFF) return 0; // Prevent infinite loop on dead port
+    return status & 0x20;
 }
 
 void write_serial(char a) {
-    while (is_transmit_empty() == 0);
-    outb(MODEM_PORT, a);
+    int timeout = 100000;
+    while (is_transmit_empty() == 0 && timeout > 0) timeout--;
+    if (timeout > 0) outb(MODEM_PORT, a);
 }
 
 void write_serial_string(const char* str) {

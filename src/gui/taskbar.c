@@ -13,6 +13,51 @@ static void draw_num2(int px, int py, unsigned char n, uint32_t fg, uint32_t bg)
     draw_string_px(px, py, buf, fg, bg);
 }
 
+static void draw_taskbar_icon(int ix, int iy, const char* title, int minimized) {
+    // Dim colors if minimized
+    uint32_t c_bg = minimized ? 0x00888888 : 0x00FFFFFF;
+    uint32_t c_blk = minimized ? 0x00444444 : 0x00000000;
+    uint32_t c_grn = minimized ? 0x00008800 : 0x0000FF00;
+
+    if (strncmp(title, "Terminal", 8) == 0) {
+        draw_rect(ix, iy, 16, 16, c_blk);
+        draw_rect_border(ix, iy, 16, 16, 0x00444444);
+        draw_string_px(ix + 2, iy + 4, ">_", c_grn, c_blk);
+    } else if (strncmp(title, "File Expl", 9) == 0) {
+        draw_rect(ix, iy + 4, 6, 4, minimized ? 0x00AA8800 : 0x00FFCC00);
+        draw_rect(ix, iy + 8, 16, 8, minimized ? 0x00AA9922 : 0x00FFDD33);
+        draw_rect_border(ix, iy + 8, 16, 8, 0x00CCAA00);
+    } else if (strncmp(title, "System In", 9) == 0) {
+        draw_rect(ix + 2, iy + 2, 12, 12, 0x00111111);
+        draw_rect(ix + 4, iy, 2, 2, 0x00CCCCCC); draw_rect(ix + 10, iy, 2, 2, 0x00CCCCCC);
+        draw_rect(ix + 4, iy + 14, 2, 2, 0x00CCCCCC); draw_rect(ix + 10, iy + 14, 2, 2, 0x00CCCCCC);
+        draw_rect(ix, iy + 4, 2, 2, 0x00CCCCCC); draw_rect(ix, iy + 10, 2, 2, 0x00CCCCCC);
+        draw_rect(ix + 14, iy + 4, 2, 2, 0x00CCCCCC); draw_rect(ix + 14, iy + 10, 2, 2, 0x00CCCCCC);
+    } else if (strncmp(title, "Clock", 5) == 0) {
+        draw_rect(ix, iy, 16, 16, c_bg);
+        draw_rect_border(ix, iy, 16, 16, 0x00222222);
+        draw_rect(ix + 7, iy + 3, 2, 5, c_blk);
+        draw_rect(ix + 7, iy + 7, 5, 2, c_blk);
+    } else if (strncmp(title, "PCI", 3) == 0) {
+        draw_rect(ix, iy + 4, 16, 8, minimized ? 0x00002200 : 0x00004400);
+        draw_rect(ix + 4, iy + 6, 8, 4, 0x00111111);
+    } else if (strncmp(title, "Mini Brow", 9) == 0 || strncmp(title, "Browser", 7) == 0) {
+        draw_rect(ix, iy, 16, 16, c_bg);
+        draw_rect_border(ix, iy, 16, 16, 0x000000FF);
+        draw_rect(ix + 4, iy + 4, 8, 2, 0x000000FF);
+        draw_rect(ix + 4, iy + 8, 8, 2, 0x000000FF);
+    } else if (strncmp(title, "Snake", 5) == 0) {
+        draw_rect(ix + 4, iy + 4, 4, 4, c_blk);
+        draw_rect(ix + 8, iy + 4, 4, 8, c_blk);
+        draw_rect(ix + 4, iy + 12, 4, 4, minimized ? 0x00880000 : 0x00FF0000);
+    } else {
+        // Default window icon
+        draw_rect(ix, iy, 16, 16, c_bg);
+        draw_rect(ix, iy, 16, 4, 0x000000AA);
+        draw_rect_border(ix, iy, 16, 16, 0x00000000);
+    }
+}
+
 int start_menu_open = 0;
 
 void taskbar_draw() {
@@ -65,14 +110,26 @@ void taskbar_draw() {
     unsigned char sec  = bcd_to_bin(read_cmos(0x00));
     unsigned char min  = bcd_to_bin(read_cmos(0x02));
     unsigned char hour = bcd_to_bin(read_cmos(0x04));
-    hour = (hour + 7) % 24; // WIB (UTC+7)
+    unsigned char dow  = read_cmos(0x06); // Day of week (1-7)
     
-    int cx2 = (int)(fb_width / 2) - 36;
-    draw_num2(cx2,      ty + 6, hour, GUI_TEXT_INV, GUI_TASKBAR);
-    draw_string_px(cx2 + 16, ty + 6, ":", GUI_TEXT_INV, GUI_TASKBAR);
-    draw_num2(cx2 + 22, ty + 6, min,  GUI_TEXT_INV, GUI_TASKBAR);
-    draw_string_px(cx2 + 38, ty + 6, ":", GUI_TEXT_INV, GUI_TASKBAR);
-    draw_num2(cx2 + 44, ty + 6, sec,  GUI_BORDER,   GUI_TASKBAR);
+    // Convert to WIB (UTC+7)
+    int h = hour + 7;
+    if (h >= 24) {
+        dow++;
+        if (dow > 7) dow = 1;
+    }
+    hour = h % 24;
+    
+    const char* days[] = {"???", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    if (dow > 7) dow = 0;
+
+    int cx2 = (int)(fb_width / 2) - 60;
+    draw_string_px(cx2,      ty + 6, days[dow], GUI_TEXT_INV, GUI_TASKBAR);
+    draw_num2(cx2 + 30, ty + 6, hour, GUI_TEXT_INV, GUI_TASKBAR);
+    draw_string_px(cx2 + 46, ty + 6, ":", GUI_TEXT_INV, GUI_TASKBAR);
+    draw_num2(cx2 + 52, ty + 6, min,  GUI_TEXT_INV, GUI_TASKBAR);
+    draw_string_px(cx2 + 68, ty + 6, ":", GUI_TEXT_INV, GUI_TASKBAR);
+    draw_num2(cx2 + 74, ty + 6, sec,  GUI_BORDER,   GUI_TASKBAR);
 
     // Window buttons
     int wx = 70;
@@ -80,14 +137,15 @@ void taskbar_draw() {
         if (!wm_wins[i].visible) continue;
         int focused = (wm_focused == wm_wins[i].id) && !wm_wins[i].minimized;
         uint32_t bg2 = wm_wins[i].minimized ? GUI_BORDER2 : (focused ? GUI_BTN_HOV : GUI_BTN);
-        draw_rect(wx, ty + 2, 90, TASKBAR_H_PX - 4, bg2);
-        draw_rect_border(wx, ty + 2, 90, TASKBAR_H_PX - 4, focused ? GUI_BORDER : GUI_BORDER2);
-        char buf[10]; int k;
-        for (k = 0; k < 9 && wm_wins[i].title[k]; k++) buf[k] = wm_wins[i].title[k];
-        buf[k] = '\0';
-        uint32_t txt_col = wm_wins[i].minimized ? 0x00666666 : (focused ? GUI_TEXT : GUI_DIM);
-        draw_string_px(wx + 4, ty + 6, buf, txt_col, bg2);
-        wx += 96;
+        
+        // Draw 32x24 button
+        draw_rect(wx, ty + 2, 32, TASKBAR_H_PX - 4, bg2);
+        draw_rect_border(wx, ty + 2, 32, TASKBAR_H_PX - 4, focused ? GUI_BORDER : GUI_BORDER2);
+        
+        // Draw 16x16 icon centered in the 32x24 button
+        draw_taskbar_icon(wx + 8, ty + 6, wm_wins[i].title, wm_wins[i].minimized);
+        
+        wx += 38; // 32px width + 6px margin
     }
 
     // Draw Start Menu if open
@@ -123,7 +181,7 @@ void taskbar_handle_click(int mx, int my) {
     int wx = 70;
     for (int i = 0; i < MAX_WINDOWS && wx < (int)fb_width - 200; i++) {
         if (!wm_wins[i].visible) continue;
-        if (mx >= wx && mx < wx + 90) {
+        if (mx >= wx && mx < wx + 32) { // 32px width
             if (wm_wins[i].minimized) {
                 // Restore from minimize
                 wm_wins[i].minimized = 0;
@@ -145,7 +203,7 @@ void taskbar_handle_click(int mx, int my) {
             }
             return;
         }
-        wx += 96;
+        wx += 38; // 32px width + 6px margin
     }
 }
 

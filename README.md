@@ -87,13 +87,14 @@ Created by M Alif Fadlan.
 
 ### 5. Taskbar (src/gui/taskbar.c)
 - "Mectov" start menu button with application launcher
-- Window buttons showing all open apps (minimized windows shown dimmed)
+- **Icon-only window buttons**: each open app is shown as a 16x16 pixel-art icon (matching desktop icons) instead of text labels — compact and visually clean
+- Minimized windows shown with dimmed icon colors
 - Click behavior: restore minimized, minimize focused, raise unfocused
 - System tray with:
   - CAPS indicator (orange when active)
   - HDD activity LED (red flash on disk I/O)
   - RAM usage bar (live percentage)
-  - Digital clock (WIB / UTC+7)
+  - Digital clock with **day of week** (e.g. `Sun 22:36:17`), adjusted for WIB / UTC+7 timezone including day roll-over
 
 ### 6. Network Stack (src/drivers/net.c + src/drivers/rtl8139.c)
 - **RTL8139 NIC Driver**: Full driver with PCI bus mastering, 4 TX descriptor rotation, RX ring buffer polling
@@ -128,8 +129,9 @@ Created by M Alif Fadlan.
 
 ### 8. Serial Port Driver (src/drivers/serial.c)
 - UART 16550A initialization (38400 baud, 8N1)
-- COM1 and COM2 support
-- Blocking read/write with FIFO buffer
+- COM1 and COM2 support with configurable `MODEM_PORT`
+- Timeout-protected read/write — prevents OS hang if serial port is disconnected or unmapped
+- Dead-port detection (0xFF status guard)
 - Used for browser proxy communication
 
 ### 9. PCI Bus Scanner (src/drivers/pci.c)
