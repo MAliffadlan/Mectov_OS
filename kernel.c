@@ -1,4 +1,4 @@
-// --- MECTOV OS v4.0 (Nano Editor + Neofetch) ---
+// --- MECTOV OS v5.0 (Automation & Scripting Edition) ---
 static inline unsigned char inb(unsigned short port) {
     unsigned char ret;
     __asm__ __volatile__ ( "inb %1, %0" : "=a"(ret) : "Nd"(port) );
@@ -24,7 +24,14 @@ void play_sound(unsigned int nFrequence) {
     if (tmp != (tmp | 3)) outb(0x61, tmp | 3);
 }
 void nosound() { outb(0x61, inb(0x61) & 0xFC); }
-void beep() { play_sound(1000); for (volatile int i = 0; i < 9000000; i++) {} nosound(); }
+
+// Fungsi Delay Sederhana (Busy Loop)
+void delay(int ms) {
+    for (volatile int i = 0; i < ms * 15000; i++) {} 
+}
+
+void beep() { play_sound(1000); delay(100); nosound(); }
+void nada(int freq, int dur) { if (freq > 0) play_sound(freq); delay(dur); nosound(); }
 
 int shift_pressed = 0;
 int capslock_active = 0;
@@ -79,7 +86,7 @@ void draw_char_at(int x, int y, char c, unsigned char color) {
 void draw_desktop() {
     for (int y = 0; y < 24; y++) for (int x = 0; x < 80; x++) draw_char_at(x, y, 176, 0x09);
     for (int x = 0; x < 80; x++) draw_char_at(x, 24, ' ', 0x70); 
-    const char* taskbar_text = " [ Mectov ]    Terminal Aktif    |    Mectov OS v4.0 (Studio Edition) ";
+    const char* taskbar_text = " [ Mectov ]    Terminal Aktif    |    Mectov OS v5.0 (Automation Edition) ";
     for (int i = 0; taskbar_text[i] != '\0' && i < 80; i++) draw_char_at(i, 24, taskbar_text[i], 0x70); 
 }
 
@@ -167,10 +174,20 @@ void print_int(int num, unsigned char color) {
     print(buf, color);
 }
 
+int atoi(const char* str) {
+    int res = 0, sign = 1, i = 0;
+    if (str[0] == '-') { sign = -1; i++; }
+    for (; str[i] != '\0'; ++i) {
+        if (str[i] >= '0' && str[i] <= '9') res = res * 10 + str[i] - '0';
+        else break; 
+    }
+    return sign * res;
+}
+
 // --- VIRTUAL RAM FILE SYSTEM (VFS) ---
 #define MAX_FILES 16
 #define MAX_FILENAME 16
-#define MAX_FILE_SIZE 512
+#define MAX_FILE_SIZE 1024
 
 typedef struct {
     char name[MAX_FILENAME];
@@ -215,40 +232,66 @@ void start_editor(const char* filename) {
         strcpy(editor_buffer, filesystem[idx].data);
         editor_cursor = filesystem[idx].size;
     } else {
-        editor_buffer[0] = '\0';
-        editor_cursor = 0;
+        editor_buffer[0] = '\0'; editor_cursor = 0;
     }
     editor_active = 1;
-    
-    draw_desktop();
-    draw_window(WIN_X, WIN_Y, WIN_W, WIN_H, " Mectov Nano Editor (Tekan ESC untuk Save & Exit) ");
-    clear_workspace();
+    draw_desktop(); draw_window(WIN_X, WIN_Y, WIN_W, WIN_H, " Mectov Nano Editor (Tekan ESC untuk Save & Exit) "); clear_workspace();
     print(editor_buffer, 0x0F);
 }
 
 void save_and_exit_editor() {
     int idx = vfs_find_file(editor_filename);
     if (idx == -1) idx = vfs_create_file(editor_filename);
-    
-    if (idx != -1) {
-        strcpy(filesystem[idx].data, editor_buffer);
-        filesystem[idx].size = editor_cursor;
-    }
-    
+    if (idx != -1) { strcpy(filesystem[idx].data, editor_buffer); filesystem[idx].size = editor_cursor; }
     editor_active = 0;
-    draw_desktop();
-    draw_window(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS ");
-    clear_workspace();
-    print("File '", 0x0A); print(editor_filename, 0x0E); print("' berhasil disimpan!\n", 0x0A);
+    draw_desktop(); draw_window(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS "); clear_workspace();
+    print("File '", 0x0A); print(editor_filename, 0x0E); print("' disimpan.\n", 0x0A);
     print("root@mectov:~# ", 0x0A);
 }
 
-// --- SHELL COMMAND LOGIC ---
+// --- SHELL COMMAND LOGIC & SCRIPT ENGINE ---
 char command_buffer[256];
 int buffer_index = 0;
+int is_script_running = 0;
+
+// Forward Declaration
+void execute_command();
+
+void run_script(const char* filename) {
+    int idx = vfs_find_file(filename);
+    if (idx == -1) {
+        print("Error: Script '", 0x0C); print(filename, 0x0E); print("' tidak ditemukan!\n", 0x0C);
+        return;
+    }
+    
+    print("--- Menjalankan Script: ", 0x0D); print(filename, 0x0E); print(" ---\n", 0x0D);
+    
+    char* data = filesystem[idx].data;
+    int len = filesystem[idx].size;
+    int i = 0;
+    
+    is_script_running = 1;
+    while (i < len) {
+        buffer_index = 0;
+        // Baca 1 baris
+        while (i < len && data[i] != '\n' && data[i] != '\0') {
+            if (buffer_index < 255) command_buffer[buffer_index++] = data[i];
+            i++;
+        }
+        command_buffer[buffer_index] = '\0';
+        
+        if (buffer_index > 0) {
+            execute_command(); // Eksekusi baris ini
+        }
+        
+        if (data[i] == '\n') i++;
+    }
+    is_script_running = 0;
+    print("--- Script Selesai ---\n", 0x0D);
+}
 
 void execute_command() {
-    print("\n", 0x0F); 
+    if (!is_script_running) print("\n", 0x0F); 
     command_buffer[buffer_index] = '\0'; 
 
     if (buffer_index == 0) {
@@ -256,15 +299,38 @@ void execute_command() {
         print("       .---.        ", 0x0B); print("root", 0x0A); print("@", 0x0F); print("mectov-os\n", 0x0B);
         print("      /     \\       ", 0x0B); print("--------------\n", 0x0F);
         print("     | () () |      ", 0x0B); print("OS", 0x0E); print(": Bare-metal x86\n", 0x0F);
-        print("      \\  ^  /       ", 0x0B); print("Kernel", 0x0E); print(": Custom C v4.0\n", 0x0F);
-        print("       |||||        ", 0x0B); print("Shell", 0x0E); print(": Mectovsh\n", 0x0F);
-        print("       |||||        ", 0x0B); print("WM", 0x0E); print(": Mectov TUI\n", 0x0F);
+        print("      \\  ^  /       ", 0x0B); print("Kernel", 0x0E); print(": Custom C v5.0\n", 0x0F);
+        print("       |||||        ", 0x0B); print("Fitur", 0x0E); print(": Batch Scripting\n", 0x0F);
+        print("       |||||        ", 0x0B); print("Audio", 0x0E); print(": Synth Engine\n", 0x0F);
         print("                    ", 0x0B); print("Creator", 0x0E); print(": Bos Alif\n", 0x0F);
     } else if (strcmp(command_buffer, "help") == 0) {
-        print("Perintah Sistem: mfetch, waktu, warna, clear, beep\n", 0x0E);
-        print("Perintah File  : ls, edit [nama], hapus [nama], baca [nama]\n", 0x0A);
+        print("Sistem : mfetch, waktu, warna, clear, beep\n", 0x0E);
+        print("File   : ls, edit [nama], hapus [nama], baca [nama], buat, tulis\n", 0x0E);
+        print("Script : echo [teks], tunggu [ms], nada [Hz] [ms], jalankan [file]\n", 0x0A);
     } else if (strcmp(command_buffer, "clear") == 0) {
         clear_workspace();
+    } else if (strncmp(command_buffer, "echo ", 5) == 0) {
+        print(&command_buffer[5], 0x0F); print("\n", 0x0F);
+    } else if (strncmp(command_buffer, "tunggu ", 7) == 0) {
+        int ms = atoi(&command_buffer[7]);
+        if (ms > 0) delay(ms);
+    } else if (strncmp(command_buffer, "nada ", 5) == 0) {
+        int i = 5;
+        while(command_buffer[i] == ' ') i++;
+        int freq = atoi(&command_buffer[i]);
+        while(command_buffer[i] >= '0' && command_buffer[i] <= '9') i++;
+        while(command_buffer[i] == ' ') i++;
+        int dur = atoi(&command_buffer[i]);
+        if (freq > 0 && dur > 0) nada(freq, dur);
+    } else if (strncmp(command_buffer, "jalankan ", 9) == 0) {
+        if (!is_script_running) {
+            run_script(&command_buffer[9]);
+            buffer_index = 0;
+            if (!is_script_running) print("root@mectov:~# ", 0x0A);
+            return;
+        } else {
+            print("Error: Tidak bisa jalankan script dari dalam script!\n", 0x0C);
+        }
     } else if (strcmp(command_buffer, "ls") == 0) {
         print("Daftar File di RAM Disk:\n", 0x0D);
         int found = 0;
@@ -276,48 +342,54 @@ void execute_command() {
             }
         }
         if (found == 0) print("(Disk kosong)\n", 0x08);
+    } else if (strncmp(command_buffer, "buat ", 5) == 0) {
+        char* filename = &command_buffer[5];
+        int res = vfs_create_file(filename);
+        if (res == -2) print("Error: File sudah ada!\n", 0x0C);
+        else if (res == -1) print("Error: RAM Disk penuh!\n", 0x0C);
+        else { print("File '", 0x0A); print(filename, 0x0E); print("' dibuat.\n", 0x0A); }
+    } else if (strncmp(command_buffer, "tulis ", 6) == 0) {
+        int i = 6; while (command_buffer[i] == ' ') i++; int name_start = i;
+        while (command_buffer[i] != ' ' && command_buffer[i] != '\0') i++; 
+        if (command_buffer[i] == '\0') print("Error: tulis [nama] [teks]\n", 0x0C);
+        else {
+            command_buffer[i] = '\0'; char* filename = &command_buffer[name_start]; char* txt = &command_buffer[i + 1];
+            int idx = vfs_find_file(filename); if (idx == -1) idx = vfs_create_file(filename);
+            if (idx != -1) {
+                int t = 0; while (txt[t] != '\0' && t < MAX_FILE_SIZE - 1) { filesystem[idx].data[t] = txt[t]; t++; }
+                filesystem[idx].data[t] = '\0'; filesystem[idx].size = t;
+                print("Disimpan.\n", 0x0A);
+            }
+        }
     } else if (strncmp(command_buffer, "edit ", 5) == 0) {
-        char* filename = &command_buffer[5];
-        start_editor(filename);
-        buffer_index = 0;
-        return; // Jangan print prompt shell karena masuk editor
+        if (!is_script_running) {
+            start_editor(&command_buffer[5]);
+            buffer_index = 0;
+            return;
+        }
     } else if (strncmp(command_buffer, "baca ", 5) == 0) {
-        char* filename = &command_buffer[5];
-        int idx = vfs_find_file(filename);
+        int idx = vfs_find_file(&command_buffer[5]);
         if (idx == -1) print("Error: File tidak ditemukan!\n", 0x0C);
-        else {
-            print("--- Isi File: ", 0x0D); print(filename, 0x0E); print(" ---\n", 0x0D);
-            if (filesystem[idx].size == 0) print("(File kosong)\n", 0x08);
-            else { print(filesystem[idx].data, 0x0F); print("\n", 0x0F); }
-            print("------------------------\n", 0x0D);
-        }
+        else { print(filesystem[idx].data, 0x0F); print("\n", 0x0F); }
     } else if (strncmp(command_buffer, "hapus ", 6) == 0) {
-        char* filename = &command_buffer[6];
-        int idx = vfs_find_file(filename);
-        if (idx == -1) print("Error: File tidak ditemukan!\n", 0x0C);
-        else {
-            filesystem[idx].in_use = 0; 
-            print("File '", 0x0C); print(filename, 0x0E); print("' berhasil dihapus.\n", 0x0C);
-        }
+        int idx = vfs_find_file(&command_buffer[6]);
+        if (idx != -1) { filesystem[idx].in_use = 0; print("Dihapus.\n", 0x0C); }
     } else {
         print("bash: ", 0x0C); print(command_buffer, 0x0C); print(": command not found\n", 0x0C); 
     }
 
     buffer_index = 0;
-    print("root@mectov:~# ", 0x0A); 
+    if (!is_script_running) print("root@mectov:~# ", 0x0A); 
 }
 
 void kernel_main(void) {
     vfs_init(); 
-    
-    draw_desktop();
-    draw_window(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS ");
-    clear_workspace();
+    draw_desktop(); draw_window(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS "); clear_workspace();
 
-    print("===================================================\n", 0x0B);
-    print("  MECTOV OS v4.0 - TEXT EDITOR & NEOFETCH LOADED!  \n", 0x0A);
-    print("===================================================\n", 0x0B);
-    print("Ketik 'mfetch' atau 'help'.\n\n", 0x0F);
+    print("===================================================\n", 0x0A);
+    print("  MECTOV OS v5.0 - BATCH SCRIPTING ENGINE LOADED!  \n", 0x0E);
+    print("===================================================\n", 0x0A);
+    print("Ketik 'help' untuk daftar perintah baru.\n\n", 0x0F);
     print("root@mectov:~# ", 0x0A);
 
     unsigned char last_scancode = 0;
@@ -330,7 +402,7 @@ void kernel_main(void) {
             else if (scancode == 0xAA || scancode == 0xB6) shift_pressed = 0; 
             else if (scancode == 0x3A) capslock_active = !capslock_active; 
 
-            if (scancode == 0x01 && last_scancode != 0x01) { // Tombol ESC Ditekan
+            if (scancode == 0x01 && last_scancode != 0x01) { 
                 if (editor_active) save_and_exit_editor();
                 last_scancode = scancode;
                 continue;
@@ -339,38 +411,29 @@ void kernel_main(void) {
             if (scancode < 0x80 && scancode != last_scancode) { 
                 char c = scancode_to_char(scancode);
                 
-                // MODE TEXT EDITOR
                 if (editor_active) {
                     if (c == '\b') {
                         if (editor_cursor > 0) {
-                            editor_cursor--;
-                            editor_buffer[editor_cursor] = '\0';
-                            clear_workspace();
-                            print(editor_buffer, 0x0F);
+                            editor_cursor--; editor_buffer[editor_cursor] = '\0';
+                            clear_workspace(); print(editor_buffer, 0x0F);
                         }
                     } else if (c != 0) {
                         if (editor_cursor < MAX_FILE_SIZE - 1) {
-                            editor_buffer[editor_cursor++] = c;
-                            editor_buffer[editor_cursor] = '\0';
+                            editor_buffer[editor_cursor++] = c; editor_buffer[editor_cursor] = '\0';
                             print_char(c, 0x0F);
                         }
                     }
-                } 
-                // MODE SHELL TERMINAL NORMAL
-                else {
+                } else {
                     if (c != 0) {
                         if (c == '\n') execute_command(); 
                         else if (c == '\b') {
                             if (buffer_index > 0) {
                                 buffer_index--; 
-                                if (cursor_x > 0) { 
-                                    cursor_x--; draw_char_at(CX + cursor_x, CY + cursor_y, ' ', 0x0F);
-                                }
+                                if (cursor_x > 0) { cursor_x--; draw_char_at(CX + cursor_x, CY + cursor_y, ' ', 0x0F); }
                             }
                         } else {
                             draw_char_at(CX + cursor_x, CY + cursor_y, c, current_color);
-                            cursor_x++; 
-                            if (cursor_x >= CW) { cursor_x = 0; cursor_y++; }
+                            cursor_x++; if (cursor_x >= CW) { cursor_x = 0; cursor_y++; }
                             if (cursor_y >= CH - 1) scroll_workspace();
                             if (buffer_index < 255) { command_buffer[buffer_index] = c; buffer_index++; }
                         }
