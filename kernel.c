@@ -1,4 +1,4 @@
-// --- MECTOV OS v8.8 (The All-In-One Ultimate Edition) ---
+// --- MECTOV OS v8.9 (The Marquee Update) ---
 static inline unsigned char inb(unsigned short port) {
     unsigned char ret; __asm__ __volatile__ ( "inb %1, %0" : "=a"(ret) : "Nd"(port) ); return ret;
 }
@@ -86,6 +86,26 @@ void s_work() { for (int y = CY; y < CY + CH - 2; y++) for (int x = CX; x < CX +
 void print(const char* s, unsigned char col) { int i = 0; while (s[i] != '\0') { if (s[i] == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, s[i], col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); i++; } update_hw_cursor(CX + cx, CY + cy); }
 void p_char(char c, unsigned char col) { if (c == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, c, col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); update_hw_cursor(CX + cx, CY + cy); }
 
+// --- RUNNING TEXT (MARQUEE) ---
+const char* marquee_text = ">>> Mectov OS v8.9 - Created by Bos Alif Fadlan - Custom Kernel Bare-Metal Project - Indonesia Raya <<<       ";
+int marquee_pos = 0;
+int marquee_counter = 0;
+
+void update_marquee() {
+    marquee_counter++;
+    if (marquee_counter < 50000) return; // Control speed
+    marquee_counter = 0;
+
+    int text_len = 0;
+    while(marquee_text[text_len]) text_len++;
+
+    for (int i = 0; i < 80; i++) {
+        int char_idx = (marquee_pos + i) % text_len;
+        d_char(i, 24, marquee_text[char_idx], 0x70); // Render on bottom bar
+    }
+    marquee_pos = (marquee_pos + 1) % text_len;
+}
+
 // --- UTILS ---
 int strcmp(const char* s1, const char* s2) { while (*s1 && (*s1 == *s2)) { s1++; s2++; } return *(const unsigned char*)s1 - *(const unsigned char*)s2; }
 int strncmp(const char* s1, const char* s2, int n) { while (n && *s1 && (*s1 == *s2)) { ++s1; ++s2; --n; } if (n == 0) return 0; return (*(unsigned char *)s1 - *(unsigned char *)s2); }
@@ -118,7 +138,7 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
     else if (strcmp(cmd_b, "mulaiulang") == 0) reboot();
     else if (strcmp(cmd_b, "clear") == 0) { c_work(); }
     else if (strcmp(cmd_b, "waktu") == 0) { unsigned char j = bcd_to_bin(read_cmos(0x04)), m = bcd_to_bin(read_cmos(0x02)), d = bcd_to_bin(read_cmos(0x00)); int wj = (j + 7) % 24; print("WIB: ", 0x0B); p_int(wj, 0x0E); print(":", 0x0F); p_int(m, 0x0E); print(":", 0x0F); p_int(d, 0x0E); print("\n", 0x0F); }
-    else if (strcmp(cmd_b, "mfetch") == 0) { print("root@mectov-os\nv8.8 Full Stable\n", 0x0B); }
+    else if (strcmp(cmd_b, "mfetch") == 0) { print("root@mectov-os\nv8.9 Marquee Edition\n", 0x0B); }
     else if (strcmp(cmd_b, "help") == 0) { print("System: mfetch, waktu, warna, clear, beep, matikan, mulaiulang\nFile  : ls, buat, tulis, edit, baca, hapus\nScript: echo, tunggu, nada, jalankan\n", 0x0E); }
     else if (strcmp(cmd_b, "ls") == 0) { for (int i = 0; i < MAX_FILES; i++) if (fs[i].in_use) { print("- ", 0x0F); print(fs[i].name, 0x0B); print("\n", 0x0F); } }
     else if (strncmp(cmd_b, "buat ", 5) == 0) { if (vfs_create(&cmd_b[5]) >= 0) { vfs_save(); print("Created.\n", 0x0B); } }
@@ -144,9 +164,10 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
 void kernel_main(void) {
     vfs_load(); d_desktop(); d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Mectov Security Login "); c_work();
     const char* pass = "mectov123"; char in[32]; int in_idx = 0;
-    print("Welcome to Mectov OS v8.8\nPassword: ", 0x0E);
+    print("Welcome to Mectov OS v8.9\nPassword: ", 0x0E);
     int log = 0; unsigned char ls = 0;
     while (!log) {
+        update_marquee(); // Update running text during login
         if (inb(0x64) & 1) {
             unsigned char sc = inb(0x60);
             if (sc < 0x80 && sc != ls) {
@@ -159,8 +180,9 @@ void kernel_main(void) {
         }
     }
     beep(); c_work(); d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS ");
-    print("Login Success! Welcome Bos Alif.\nroot@mectov:~# ", 0x0A);
+    print("Login Success! Running Text Active.\nroot@mectov:~# ", 0x0A);
     while (1) {
+        update_marquee(); // Update running text during shell
         if (inb(0x64) & 1) {
             unsigned char sc = inb(0x60);
             if (sc == 0x2A || sc == 0x36) shift_p = 1; else if (sc == 0xAA || sc == 0xB6) shift_p = 0; else if (sc == 0x3A) caps_a = !caps_a;
