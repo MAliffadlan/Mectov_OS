@@ -23,6 +23,7 @@ extern int pci_device_count;
 
 void pci_scan();
 uint32_t pci_read(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset);
+void pci_write(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint32_t value);
 const char* pci_class_name(uint8_t class_code, uint8_t subclass);
 const char* pci_vendor_name(uint16_t vendor_id);
 

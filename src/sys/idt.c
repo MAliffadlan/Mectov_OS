@@ -46,6 +46,10 @@ void idt_init() {
     idt_set_gate(33, (uint32_t)irq1,  0x08, 0x8E);
     idt_set_gate(44, (uint32_t)irq12, 0x08, 0x8E);
 
+    // Syscall gate: int 0x80, DPL=3 (callable from user mode)
+    extern void isr128();
+    idt_set_gate(0x80, (uint32_t)isr128, 0x08, 0xEE);
+
     idt_flush((uint32_t)&idt_ptr);
 }
 

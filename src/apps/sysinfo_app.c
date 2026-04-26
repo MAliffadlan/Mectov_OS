@@ -3,6 +3,7 @@
 #include "../include/mem.h"
 #include "../include/wm.h"
 #include "../include/timer.h"
+#include "../include/rtl8139.h"
 
 static int si_win_id = -1;
 static int si_open   = 0;
@@ -87,7 +88,7 @@ static void si_draw(int id, int cx, int cy, int cw, int ch) {
 
     // OS info
     draw_string_px(lx, ly, "OS:", GUI_DIM, 0xFFFFFFFF);
-    draw_string_px(lx + 40, ly, "Mectov OS v13.5 [VBE GUI]", GUI_TEXT, 0xFFFFFFFF);
+    draw_string_px(lx + 40, ly, "Mectov OS v15.0 [VBE GUI]", GUI_TEXT, 0xFFFFFFFF);
     ly += gap;
     draw_string_px(lx, ly, "Res:", GUI_DIM, 0xFFFFFFFF);
     char res[20]; int rp=0;
@@ -100,6 +101,27 @@ static void si_draw(int id, int cx, int cy, int cw, int ch) {
     for(int ri=tl-1;ri>=0;ri--)res[rp++]=tmp2[ri];
     res[rp]='\0';
     draw_string_px(lx + 40, ly, res, GUI_TEXT, 0xFFFFFFFF);
+    ly += gap;
+
+    // Network Info
+    draw_string_px(lx, ly, "Net:", GUI_DIM, 0xFFFFFFFF);
+    if (rtl_present) {
+        char mac_str[24];
+        int mi = 0;
+        for (int i = 0; i < 6; i++) {
+            uint8_t b = rtl_mac[i];
+            uint8_t hi = (b >> 4) & 0x0F;
+            uint8_t lo = b & 0x0F;
+            mac_str[mi++] = (hi > 9) ? ('A' + hi - 10) : ('0' + hi);
+            mac_str[mi++] = (lo > 9) ? ('A' + lo - 10) : ('0' + lo);
+            if (i < 5) mac_str[mi++] = ':';
+        }
+        mac_str[mi] = '\0';
+        draw_string_px(lx + 40, ly, "RTL8139 MAC ", GUI_TEXT, 0xFFFFFFFF);
+        draw_string_px(lx + 140, ly, mac_str, GUI_CYAN, 0xFFFFFFFF);
+    } else {
+        draw_string_px(lx + 40, ly, "No Network Card Detected", 0x00FF0000, 0xFFFFFFFF);
+    }
 }
 
 static void si_key(int id, char c, uint8_t sc) { (void)id;(void)c;(void)sc; }
@@ -107,6 +129,6 @@ static void si_tick(int id) { (void)id; }
 
 void open_sysinfo_app() {
     if (si_open && wm_is_open(si_win_id)) { wm_raise(si_win_id); return; }
-    si_win_id = wm_open(120, 80, 460, 240, "System Info", si_draw, si_key, si_tick, 0);
+    si_win_id = wm_open(120, 80, 460, 270, "System Info", si_draw, si_key, si_tick, 0);
     si_open = (si_win_id >= 0);
 }

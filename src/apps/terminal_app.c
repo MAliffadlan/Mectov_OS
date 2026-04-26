@@ -4,6 +4,10 @@
 #include "../include/shell.h"
 #include "../include/keyboard.h"
 #include "../include/mem.h"
+#include "../include/timer.h"
+
+// Forward declaration
+void ex_cmd_term(void);
 
 // ---- Terminal App ----
 // Each terminal has its own text buffer (80 cols x 28 rows)

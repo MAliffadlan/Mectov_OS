@@ -60,7 +60,7 @@ static void explorer_key(int id, char c, uint8_t sc) {
 }
 
 static void explorer_mouse(int id, int cx, int cy, int btn) {
-    (void)id;
+    (void)id; (void)cx;
     if (btn == 1) { // Left click
         if (cy >= 30) {
             int index = (cy - 30) / 24;

@@ -5,6 +5,7 @@
 uint32_t timer_ticks = 0;
 
 static void timer_handler(registers_t* regs) {
+    (void)regs;
     timer_ticks++;
     
     // Drive the 'heartbeat' for UI

@@ -30,6 +30,7 @@ static void init_icons() {
     icons[3] = (Icon){ base_x + 3*gap, base_y, "SysInfo",  0x00500020, open_sysinfo_app    };
     icons[4] = (Icon){ base_x + 4*gap, base_y, "Explorer", 0x00FFBB55, open_explorer_app   };
     icons[5] = (Icon){ base_x + 0*gap, base_y + 90, "PCI",  0x00007ACC, open_pci_app        };
+    icons[6] = (Icon){ base_x + 1*gap, base_y + 90, "Browser", 0x002244AA, open_browser_app    };
 }
 
 static void draw_icon(int i) {
@@ -83,6 +84,13 @@ static void draw_icon(int i) {
         for(int p=10; p<36; p+=4) { // Gold contacts
             draw_rect(ix + p, iy + 34, 2, 4, 0x00FFD700);
         }
+    }
+    else if (strcmp(ic->label, "Browser") == 0) {
+        draw_rect(ix + 6, iy + 6, 36, 36, 0x00FFFFFF); // White page
+        draw_rect_border(ix + 6, iy + 6, 36, 36, 0x000000FF); // Blue border
+        draw_rect(ix + 12, iy + 14, 24, 2, 0x000000FF); // Blue line
+        draw_rect(ix + 12, iy + 20, 24, 2, 0x000000FF);
+        draw_rect(ix + 12, iy + 26, 16, 2, 0x000000FF);
     }
 
     // Draw label

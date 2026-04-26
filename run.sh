@@ -24,4 +24,7 @@ qemu-system-i386 -enable-kvm -cpu host \
     -m 64 \
     -audiodev alsa,id=snd0 \
     -machine pcspk-audiodev=snd0 \
+    -net nic,model=rtl8139 -net user \
+    -chardev socket,id=modem,host=127.0.0.1,port=4444,server=on,wait=off \
+    -device isa-serial,chardev=modem \
     -drive file=disk.img,format=raw,index=0,media=disk

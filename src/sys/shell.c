@@ -8,6 +8,9 @@
 #include "../include/mem.h"
 #include "../include/apps.h"
 #include "../include/pci.h"
+#include "../include/net.h"
+#include "../include/rtl8139.h"
+#include "../include/timer.h"
 
 char cmd_b[256]; int b_idx = 0;
 char hist_b[256];
@@ -19,12 +22,13 @@ void ex_cmd() {
     if (b_idx > 0) strcpy(hist_b, cmd_b);
 
     if (strcmp(cmd_b, "help") == 0) {
-        print("--- MECTOV OS v13.5 HELP MENU ---\n", 0x0B);
+        print("--- MECTOV OS v15.0 HELP MENU ---\n", 0x0B);
         print("SISTEM: mfetch, waktu, warna, clear, mem, kunci\n", 0x0E);
         print("FILES : ls, buat, tulis, baca, hapus, edit\n", 0x0E);
         print("APPS  : ular, nada, beep, echo\n", 0x0E);
         print("POWER : matikan, mulaiulang\n", 0x0E);
         print("HW    : lspci\n", 0x0E);
+        print("NET   : ping [ip], host [domain]\n", 0x0E);
     }
     else if (strcmp(cmd_b, "clear") == 0) { 
         if (get_use_term_buf()) term_clear();
@@ -33,7 +37,7 @@ void ex_cmd() {
     else if (strcmp(cmd_b, "mfetch") == 0) {
         print("    .---.      ", 0x0A); print("root@mectov-os\n", 0x0B);
         print("   /     \\     ", 0x0A); print("--------------\n", 0x0F);
-        print("  | () () |    ", 0x0B); print("OS  : Mectov OS v13.5\n", 0x0F);
+        print("  | () () |    ", 0x0B); print("OS  : Mectov OS v15.0\n", 0x0F);
         print("   \\  ^  /     ", 0x0B); print("MODE: VBE High-Res 32-bit\n", 0x0F);
         print("    |||||      ", 0x0B); print("MEM : ", 0x0F); p_int(get_used_memory()/1024, 0x0F); print(" KB used\n", 0x0F);
     }
@@ -67,8 +71,8 @@ void ex_cmd() {
         h = (h + 7) % 24; // Convert UTC to WIB (UTC+7)
         print("Waktu sekarang (WIB): ", 0x0B);
         p_int(h, 0x0F); print(":", 0x0F);
-        if (m < 10) print("0", 0x0F); p_int(m, 0x0F); print(":", 0x0F);
-        if (s < 10) print("0", 0x0F); p_int(s, 0x0F); print("\n", 0x0F);
+        if (m < 10) { print("0", 0x0F); } p_int(m, 0x0F); print(":", 0x0F);
+        if (s < 10) { print("0", 0x0F); } p_int(s, 0x0F); print("\n", 0x0F);
     }
     else if (strcmp(cmd_b, "warna") == 0) {
         print("Fitur warna hanya untuk TTY (Text Mode).\n", 0x0E);
@@ -107,6 +111,100 @@ void ex_cmd() {
         int fid = vfs_find(fname);
         if (fid == -1) print("File tidak ditemukan.\n", 0x0C);
         else { fs[fid].in_use = 0; print("File dihapus.\n", 0x0A); vfs_save(); }
+    }
+    else if (strncmp(cmd_b, "ping ", 5) == 0) {
+        // Parse IP: "ping 10.0.2.2"
+        char* ip_str = cmd_b + 5;
+        uint8_t tip[4] = {0, 0, 0, 0};
+        int octet = 0, val = 0;
+        for (int i = 0; ip_str[i] && octet < 4; i++) {
+            if (ip_str[i] >= '0' && ip_str[i] <= '9') {
+                val = val * 10 + (ip_str[i] - '0');
+            } else if (ip_str[i] == '.') {
+                tip[octet++] = (uint8_t)val; val = 0;
+            }
+        }
+        if (octet < 4) tip[octet] = (uint8_t)val;
+
+        if (!rtl_present) {
+            print("No network card detected.\n", 0x0C);
+        } else {
+            print("PING ", 0x0B);
+            p_int(tip[0], 0x0F); print(".", 0x0F);
+            p_int(tip[1], 0x0F); print(".", 0x0F);
+            p_int(tip[2], 0x0F); print(".", 0x0F);
+            p_int(tip[3], 0x0F); print(" ...\n", 0x0F);
+
+            // If gateway MAC unknown, try ARP first
+            if (!net_ready) {
+                print("Resolving gateway (ARP)...\n", 0x07);
+                net_send_arp_request(gateway_ip);
+                // Wait up to 2 seconds for ARP reply
+                uint32_t arp_start = get_ticks();
+                while (!net_ready && (get_ticks() - arp_start) < 120) {
+                    net_poll();
+                }
+                if (!net_ready) {
+                    print("ARP timeout: gateway not found.\n", 0x0C);
+                    goto ping_done;
+                }
+                print("Gateway resolved!\n", 0x0A);
+            }
+
+            net_send_ping(tip);
+            // Wait up to 3 seconds for reply
+            uint32_t start = get_ticks();
+            while (!ping_replied && (get_ticks() - start) < 180) {
+                net_poll();
+            }
+            if (ping_replied) {
+                uint32_t ms = (ping_rtt * 1000) / 60;
+                print("Reply from ", 0x0A);
+                p_int(tip[0], 0x0F); print(".", 0x0F);
+                p_int(tip[1], 0x0F); print(".", 0x0F);
+                p_int(tip[2], 0x0F); print(".", 0x0F);
+                p_int(tip[3], 0x0F);
+                print(" time=", 0x0F); p_int(ms, 0x0A); print("ms\n", 0x0F);
+            } else {
+                print("Request timed out.\n", 0x0C);
+            }
+        }
+        ping_done: ;
+    }
+    else if (strncmp(cmd_b, "host ", 5) == 0) {
+        char* domain = cmd_b + 5;
+        if (!rtl_present) {
+            print("No network card detected.\n", 0x0C);
+        } else {
+            print("Resolving ", 0x0B); print(domain, 0x0F); print(" ...\n", 0x0F);
+            
+            if (!net_ready) {
+                net_send_arp_request(gateway_ip);
+                uint32_t arp_start = get_ticks();
+                while (!net_ready && (get_ticks() - arp_start) < 120) net_poll();
+                if (!net_ready) {
+                    print("Network timeout.\n", 0x0C);
+                    goto host_done;
+                }
+            }
+
+            net_send_dns_query(domain);
+            uint32_t start = get_ticks();
+            while (!dns_resolved && (get_ticks() - start) < 180) {
+                net_poll();
+            }
+
+            if (dns_resolved) {
+                print(domain, 0x0A); print(" has address ", 0x0F);
+                p_int(dns_resolved_ip[0], 0x0A); print(".", 0x0A);
+                p_int(dns_resolved_ip[1], 0x0A); print(".", 0x0A);
+                p_int(dns_resolved_ip[2], 0x0A); print(".", 0x0A);
+                p_int(dns_resolved_ip[3], 0x0A); print("\n", 0x0A);
+            } else {
+                print("Host not found (timeout).\n", 0x0C);
+            }
+        }
+        host_done: ;
     }
     else if (cmd_b[0] != '\0') { print("Command not found\n", 0x0C); }
     

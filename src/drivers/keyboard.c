@@ -12,6 +12,7 @@ static uint32_t kbd_head = 0;
 static uint32_t kbd_tail = 0;
 
 static void keyboard_handler(registers_t* regs) {
+    (void)regs;
     uint8_t scancode = inb(0x60);
     
     // Update shift/caps state

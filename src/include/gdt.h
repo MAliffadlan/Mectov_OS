@@ -22,5 +22,7 @@ struct gdt_ptr_struct {
 typedef struct gdt_ptr_struct gdt_ptr_t;
 
 void init_gdt();
+void tss_set_kernel_stack(uint32_t stack);
+extern uint32_t user_stack[1024];
 
 #endif

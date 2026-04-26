@@ -69,3 +69,31 @@ isr0:
     push byte 0
     jmp irq_common_stub
 
+; --- Syscall entry (int 0x80) ---
+global isr128
+isr128:
+    push byte 0       ; dummy err_code
+    push byte 0x80    ; int_no = 128
+    pushad
+    mov ax, ds
+    push eax
+    mov ax, 0x10      ; Switch to kernel data segment
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    push esp           ; Pass pointer to registers_t
+    extern isr_handler
+    call isr_handler
+    add esp, 4
+
+    pop eax
+    mov ds, ax         ; Restore user data segments
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    popad
+    add esp, 8         ; Clean int_no, err_code
+    iret
+

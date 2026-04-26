@@ -83,12 +83,29 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     init_mem(mem_size);
     paging_init(fb_p, fb_s);
     idt_init();
+    extern void init_syscalls(void);
+    init_syscalls();
     init_timer(60);
     init_keyboard();
     detect_cpu();
     pci_scan();
+    extern void init_rtl8139();
+    init_rtl8139();
+    extern void net_init();
+    net_init();
+    extern void init_serial();
+    init_serial();
     init_uptime();
     vfs_load();
+
+    // User Mode (Ring 3) infrastructure is READY:
+    //   - GDT has User Code (0x18) and User Data (0x20) segments
+    //   - TSS is loaded for kernel stack switching
+    //   - Syscall handler registered at int 0x80
+    // Currently disabled: apps use direct I/O (in/out) which needs Ring 0.
+    // To activate: refactor apps to use syscalls, then uncomment below:
+    // extern void switch_to_user_mode(void);
+    // switch_to_user_mode();
 
     // Allocate double buffer now that memory is ready
     init_double_buffer();
@@ -142,6 +159,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             wm_handle_key(c, sc);
             needs_redraw = 1;
         }
+
+        // Poll network for incoming packets
+        extern void net_poll();
+        net_poll();
 
         uint32_t now = get_ticks();
         if (now - last_clock_tick >= 60) {

@@ -17,6 +17,18 @@ uint32_t pci_read(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
     return inl(PCI_CONFIG_DATA);
 }
 
+void pci_write(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint32_t value) {
+    uint32_t address = (uint32_t)(
+        ((uint32_t)1 << 31)       |
+        ((uint32_t)bus << 16)     |
+        ((uint32_t)slot << 11)    |
+        ((uint32_t)func << 8)     |
+        (offset & 0xFC)
+    );
+    outl(PCI_CONFIG_ADDRESS, address);
+    outl(PCI_CONFIG_DATA, value);
+}
+
 const char* pci_class_name(uint8_t class_code, uint8_t subclass) {
     switch (class_code) {
         case 0x00:

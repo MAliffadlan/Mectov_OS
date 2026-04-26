@@ -38,6 +38,7 @@ void wm_raise(int id);
 int  wm_open(int x, int y, int w, int h, const char* title,
              WinDrawFn draw_fn, WinKeyFn key_fn, WinTickFn tick_fn, WinMouseFn mouse_fn);
 void wm_close(int id);
+int  wm_is_open(int id);
 void wm_draw_all();
 void wm_handle_mouse(int mx, int my, int btn, int pbtn);
 void wm_handle_key(char c, uint8_t sc);
