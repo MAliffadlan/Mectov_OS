@@ -87,13 +87,13 @@ void print(const char* s, unsigned char col) { int i = 0; while (s[i] != '\0') {
 void p_char(char c, unsigned char col) { if (c == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, c, col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); update_hw_cursor(CX + cx, CY + cy); }
 
 // --- RUNNING TEXT (MARQUEE) ---
-const char* marquee_text = ">>> Mectov OS v8.9 - Created by Bos Alif Fadlan - Custom Kernel Bare-Metal Project - Indonesia Raya <<<       ";
+const char* marquee_text = ">>> Mectov OS v8.9 - Created by M Alif Fadlan - Custom Kernel Bare-Metal Project - operating system kernel written from scratch in C and x86 <<<       ";
 int marquee_pos = 0;
 int marquee_counter = 0;
 
 void update_marquee() {
     marquee_counter++;
-    if (marquee_counter < 50000) return; // Control speed
+    if (marquee_counter < 400000) return; // Control speed (Slower)
     marquee_counter = 0;
 
     int text_len = 0;
