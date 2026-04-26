@@ -25,9 +25,11 @@ void play_sound(unsigned int nFrequence) {
 }
 void nosound() { outb(0x61, inb(0x61) & 0xFC); }
 
-// Fungsi Delay Sederhana (Busy Loop)
+// Fungsi Delay Sederhana (Busy Loop) - Diperbesar untuk CPU Modern (1.6GHz+)
 void delay(int ms) {
-    for (volatile int i = 0; i < ms * 15000; i++) {} 
+    for (volatile int i = 0; i < ms * 1500000; i++) {
+        __asm__ __volatile__ ("pause");
+    } 
 }
 
 void beep() { play_sound(1000); delay(100); nosound(); }
