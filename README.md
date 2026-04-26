@@ -1,54 +1,91 @@
-Mectov OS v7.0 (Security & Power Edition)
-========================================
+Mectov OS v10.5 (The Professional Bare-Metal Update)
+===================================================
 
-Mectov OS is a custom, bare-metal monolithic operating system kernel written from scratch in C and x86 Assembly. Version 7.0 introduces security features, power management, and persistent storage.
+Mectov OS is a monolithic, bare-metal operating system kernel developed from scratch using C and x86 Assembly. It is designed for educational research into low-level systems, hardware drivers, and kernel architecture.
 
-New Features in v7.0
---------------------
-- **Secure Boot Login:** Protected by password authentication with masked input (`*`).
-- **Power Management:** Native support for `matikan` (ACPI Shutdown) and `mulaiulang` (PS/2 CPU Reset).
-- **Boot Animation:** Professional kernel loading animation and splash screen.
-- **MectovScript v2.0:** Improved execution speed and emergency abort (ESC key).
+Project Overview
+----------------
+Unlike high-level applications, Mectov OS operates directly on PC hardware (VGA, ATA, PIT, PS/2). It implements its own Window Manager (TUI), Virtual File System, and Shell environment without any external libraries.
 
-System Commands
----------------
-### 🛠 System & Power
-- `mfetch`      : Show system info and ASCII art.
-- `waktu`       : Read hardware clock (RTC/CMOS).
-- `warna`       : Toggle terminal color themes.
-- `matikan`     : Power off the machine (ACPI).
-- `mulaiulang`  : Reboot the system.
-- `clear`       : Clear terminal workspace.
-- `beep`        : Test PC Speaker.
+Core Features
+-------------
+- **Security & Integrity:**
+    - Secure Boot Login with masked password authentication.
+    - Persistent Screen Lock (`kunci`) integrated with the security module.
+- **Hardware Interaction:**
+    - CPUID Identity Detection: Automatically identifies the host processor.
+    - Persistent Storage: Full ATA/IDE PIO driver for virtual hard disk support.
+    - Real-Time Clock: Localized WIB (UTC+7) hardware clock reading.
+    - Audio Synthesis: Native PC Speaker driver for tone and melody generation.
+- **User Interface (Mectov TUI):**
+    - Floating Window Manager illusion with drop shadows and desktop background.
+    - Live System HUD: Real-time clock and uptime display in the dashboard.
+    - Hardware Cursor: Stable blinking underscore cursor synchronization.
+    - Marquee System: Smooth running text on the bottom system bar.
+- **Command Shell (Mectovsh):**
+    - Tab Auto-complete: Intelligent command suggestion and completion.
+    - Command History: Access previously executed commands using the Up Arrow.
+    - Manual System: Built-in documentation via the `man` command.
+- **Embedded Applications:**
+    - Mectov Nano: A lightweight terminal-based text editor.
+    - Mectovular: A high-performance Snake game with WASD and Arrow key support.
+    - Scripting Engine: MectovScript v2.0 for automated batch task execution.
 
-### 📂 File System (Persistent ATA)
-- `ls`          : List all files on the virtual HDD.
-- `buat [name]` : Create a new empty file.
-- `edit [name]` : Open Mectov Nano text editor.
-- `baca [name]` : Print file content to terminal.
-- `hapus [name]`: Delete a file permanently.
-- `tulis [name] [text]`: Write text to a file via CLI.
+System Command Reference
+------------------------
+### Administration & Power
+- `mfetch`      : Comprehensive system information and hardware specs.
+- `help`        : Formatted ASCII table of all available commands.
+- `waktu`       : Display current WIB time (Jakarta).
+- `warna`       : Cycle through terminal color themes.
+- `matikan`     : Shutdown the system via ACPI.
+- `mulaiulang`  : Perform a hardware CPU reset.
+- `kunci`       : Lock the terminal session immediately.
+- `clear`       : Reset the terminal workspace.
 
-### 📜 Scripting (MectovScript)
-- `echo [text]` : Print text.
-- `tunggu [ms]` : Pause execution.
-- `nada [Hz] [ms]`: Play a specific tone.
-- `jalankan [file]`: Run a batch script file.
+### File Management
+- `ls`          : List persistent files on the ATA drive.
+- `buat [name]` : Initialize a new empty file.
+- `edit [name]` : Invoke the Mectov Nano editor.
+- `baca [name]` : Output file contents to the terminal.
+- `hapus [name]`: Permanently remove a file from disk.
+- `tulis [name] [text]`: Direct CLI write to a specific file.
 
-Building and Running
---------------------
-Requirements: `gcc`, `nasm`, `qemu`, `gcc-multilib`.
+### Scripting & Entertainment
+- `ular`        : Launch the Mectov Snake game.
+- `man [cmd]`   : Access the manual entry for a command.
+- `beep`        : Execute a system audio test.
+- `echo [text]` : Print string to the workspace.
+- `jalankan [file]`: Execute a MectovScript (.ms) file.
 
-Build:
+Installation and Execution
+--------------------------
+### Requirements
+- GCC (with multilib support for i386)
+- NASM (Netwide Assembler)
+- QEMU (PC System Emulator)
+
+### Building from Source
+Use the provided build script:
+    ./build.sh
+
+Manual build process:
     nasm -f elf32 boot.asm -o boot.o
     gcc -m32 -c kernel.c -o kernel.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
     ld -m elf_i386 -T linker.ld boot.o kernel.o -o myos.bin
 
-Run (with Full Features):
+### Running the System
+Use the provided run script:
+    ./run.sh
+
+Manual QEMU execution (with persistent storage and audio):
     qemu-system-i386 -kernel myos.bin -audiodev alsa,id=snd0 -machine pcspk-audiodev=snd0 -drive file=disk.img,format=raw,index=0,media=disk
 
-*Note: Default Password is `mectov123`*
+*Note: The default system password is `mectov123`.*
 
-License
--------
-Open-source educational software. Created by Alif Fadlan.
+Development
+-----------
+Mectov OS is an open-source project. All core logic resides within `kernel.c` and `boot.asm`.
+
+Created and maintained by Alif Fadlan.
+Licensed under the MIT License.
