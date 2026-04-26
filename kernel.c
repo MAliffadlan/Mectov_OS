@@ -121,6 +121,18 @@ void run_script(const char* f) { int i = vfs_find_file(f); if (i < 0) return; is
 void execute_command() { if (!is_script_running) print("\n", 0x0F); command_buffer[buffer_index] = '\0'; if (buffer_index == 0) {} 
     else if (strcmp(command_buffer, "matikan") == 0) shutdown();
     else if (strcmp(command_buffer, "mulaiulang") == 0) reboot();
+    else if (strcmp(command_buffer, "clear") == 0) { clear_workspace(); }
+    else if (strcmp(command_buffer, "waktu") == 0) {
+        unsigned char jam = bcd_to_bin(read_cmos(0x04));
+        unsigned char menit = bcd_to_bin(read_cmos(0x02));
+        unsigned char detik = bcd_to_bin(read_cmos(0x00));
+        // Konversi ke WIB (UTC+7)
+        int wib_jam = (jam + 7) % 24;
+        print("Waktu Indonesia Barat (WIB): ", 0x0B);
+        print_int(wib_jam, 0x0E); print(":", 0x0F);
+        print_int(menit, 0x0E); print(":", 0x0F);
+        print_int(detik, 0x0E); print("\n", 0x0F);
+    }
     else if (strcmp(command_buffer, "mfetch") == 0) { print("root@mectov-os\nOS: MectovOS v7.0\nKernel: Secure Monolithic\n", 0x0B); }
     else if (strcmp(command_buffer, "help") == 0) { print("Sys: mfetch, waktu, matikan, mulaiulang, clear\nFile: ls, edit, hapus, baca\nScript: echo, nada, jalankan\n", 0x0E); }
     else if (strcmp(command_buffer, "ls") == 0) { for (int i = 0; i < MAX_FILES; i++) if (filesystem[i].in_use) { print("- ", 0x0F); print(filesystem[i].name, 0x0B); print("\n", 0x0F); } }
