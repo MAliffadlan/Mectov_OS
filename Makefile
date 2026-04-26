@@ -15,7 +15,9 @@ SRCS = $(wildcard $(SRC_DIR)/drivers/*.c) \
        $(wildcard $(SRC_DIR)/apps/*.c) \
        kernel.c
 
-OBJS = $(SRCS:%.c=$(OBJ_DIR)/%.o) $(OBJ_DIR)/boot.o
+OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
+       $(SRCS:%.c=$(OBJ_DIR)/%.o) \
+       $(OBJ_DIR)/boot.o
 
 all: $(OBJ_DIR) myos.bin
 
@@ -26,6 +28,9 @@ $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)/src/apps
 
 $(OBJ_DIR)/boot.o: boot.asm
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(OBJ_DIR)/src/sys/interrupt_entry.o: src/sys/interrupt_entry.asm
 	$(AS) $(ASFLAGS) $< -o $@
 
 $(OBJ_DIR)/%.o: %.c
