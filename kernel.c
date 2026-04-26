@@ -1,4 +1,4 @@
-// --- MECTOV OS v10.0 (The Intelligence & Security Update) ---
+// --- MECTOV OS v10.5 (The HUD & Intelligence Update) ---
 static inline unsigned char inb(unsigned short port) {
     unsigned char ret; __asm__ __volatile__ ( "inb %1, %0" : "=a"(ret) : "Nd"(port) ); return ret;
 }
@@ -78,7 +78,7 @@ char scancode_to_char(unsigned char s) {
     return 0;
 }
 
-// --- GUI ---
+// --- GUI & RENDERING ---
 volatile char* video_m = (volatile char*) 0xb8000;
 unsigned char cur_col = 0x0F; 
 int cx = 0, cy = 0;
@@ -99,7 +99,7 @@ void s_work() { for (int y = CY; y < CY + CH - 2; y++) for (int x = CX; x < CX +
 void print(const char* s, unsigned char col) { int i = 0; while (s[i] != '\0') { if (s[i] == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, s[i], col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); i++; } update_hw_cursor(CX + cx, CY + cy); }
 void p_char(char c, unsigned char col) { if (c == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, c, col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); update_hw_cursor(CX + cx, CY + cy); }
 
-const char* marquee_text = ">>> Mectov OS v10.0 - Tab Auto-Complete Enabled - Secure Screen Lock Active - Indonesia Raya <<<         ";
+const char* marquee_text = ">>> Mectov OS v10.5 - Pro Dashboard Enabled - TUI System Stable - Indonesia Raya <<<         ";
 int marquee_pos = 0; int marquee_counter = 0;
 void wait_retrace() { while (inb(0x3DA) & 0x08); while (!(inb(0x3DA) & 0x08)); }
 void update_marquee() {
@@ -108,6 +108,30 @@ void update_marquee() {
     wait_retrace();
     for (int i = 0; i < 80; i++) { int c_idx = (marquee_pos + i) % text_len; int v_idx = (24 * 80 + i) * 2; video_m[v_idx] = marquee_text[c_idx]; video_m[v_idx + 1] = 0x70; }
     marquee_pos = (marquee_pos + 1) % text_len;
+}
+
+// --- SYSTEM HUD (LIVE DASHBOARD) ---
+int hud_counter = 0;
+void update_hud() {
+    hud_counter++; if (hud_counter < 600000) return; hud_counter = 0;
+    unsigned char ch = bcd_to_bin(read_cmos(0x04)), cm = bcd_to_bin(read_cmos(0x02)), cs = bcd_to_bin(read_cmos(0x00));
+    int wj = (ch + 7) % 24;
+    int tb = boot_hour * 60 + boot_min, tc = ch * 60 + cm, diff = tc - tb; if (diff < 0) diff += 1440;
+    int up_h = diff / 60; int up_m = diff % 60;
+    
+    char h_str[40]; int i = 0;
+    const char* t1 = " WIB "; while(*t1) h_str[i++] = *t1++;
+    h_str[i++] = (wj/10)+'0'; h_str[i++] = (wj%10)+'0'; h_str[i++] = ':';
+    h_str[i++] = (cm/10)+'0'; h_str[i++] = (cm%10)+'0'; h_str[i++] = ':';
+    h_str[i++] = (cs/10)+'0'; h_str[i++] = (cs%10)+'0';
+    const char* t2 = " | UP: "; while(*t2) h_str[i++] = *t2++;
+    if(up_h>9) { h_str[i++] = (up_h/10)+'0'; } h_str[i++] = (up_h%10)+'0'; h_str[i++] = 'h'; h_str[i++] = ' ';
+    if(up_m>9) { h_str[i++] = (up_m/10)+'0'; } h_str[i++] = (up_m%10)+'0'; h_str[i++] = 'm'; h_str[i++] = ' ';
+    h_str[i] = '\0';
+    
+    int start_x = 80 - i;
+    wait_retrace();
+    for (int j = 0; j < i; j++) { d_char(start_x + j, 0, h_str[j], 0x1E); } // Yellow on Blue Top Bar
 }
 
 // --- UTILS ---
@@ -141,7 +165,7 @@ void start_ular() {
     int sx[100], sy[100], len = 3, fx, fy, dir = 1, score = 0;
     for(int i=0; i<len; i++) { sx[i] = 25 - i; sy[i] = 12; } fx = 30; fy = 10;
     while(1) {
-        rand_seed++; update_marquee();
+        rand_seed++; update_marquee(); update_hud();
         if (inb(0x64) & 1) {
             unsigned char sc = inb(0x60);
             if (sc == 0x01) break; 
@@ -173,7 +197,7 @@ void lock_screen() {
 
 // --- SHELL ---
 char cmd_b[256], hist_b[256]; int b_idx = 0, is_script = 0;
-const char* cmd_list[] = {"mfetch", "waktu", "warna", "clear", "beep", "matikan", "mulaiulang", "ular", "ls", "buat", "tulis", "edit", "baca", "hapus", "echo", "tunggu", "nada", "jalankan", "kunci"};
+const char* cmd_list[] = {"mfetch", "waktu", "warna", "clear", "beep", "matikan", "mulaiulang", "ular", "ls", "buat", "tulis", "edit", "baca", "hapus", "echo", "tunggu", "nada", "jalankan", "kunci", "man"};
 
 void ex_cmd();
 void run_script(const char* f) { int i = vfs_find(f); if (i < 0) return; is_script = 1; abort_ex = 0; char* d = fs[i].data; int l = fs[i].size, p = 0; while (p < l && !abort_ex) { b_idx = 0; while (p < l && d[p] != '\n' && d[p] != '\0') { if (b_idx < 255) cmd_b[b_idx++] = d[p]; p++; } cmd_b[b_idx] = '\0'; if (b_idx > 0) ex_cmd(); if (d[p] == '\n') p++; } is_script = 0; abort_ex = 0; }
@@ -194,20 +218,31 @@ void ex_cmd() {
         int tb = boot_hour * 60 + boot_min, tc = ch * 60 + cm, diff = tc - tb; if (diff < 0) diff += 1440;
         int uf = 0; for(int i=0; i<MAX_FILES; i++) if(fs[i].in_use) uf++;
         print("       .---.        root@mectov-os\n      /     \\       --------------\n     | () () |      CPU: ", 0x0B); print(cpu_brand, 0x0A);
-        print("\n      \\  ^  /       OS : MectovOS v10.0\n       |||||        Uptime: ", 0x0B); p_int(diff/60, 0x0F); print("h ", 0x0F); p_int(diff%60, 0x0F); print("m\n", 0x0F);
+        print("\n      \\  ^  /       OS : MectovOS v10.5\n       |||||        Uptime: ", 0x0B); p_int(diff/60, 0x0F); print("h ", 0x0F); p_int(diff%60, 0x0F); print("m\n", 0x0F);
         print("       |||||        Storage: ", 0x0B); p_int(uf, 0x0F); print("/16 Files\n", 0x0B);
-        print("                    Tab Auto-Complete : OK\n\n", 0x0F);
+        print("                    Dashboard  : HUD Active\n\n", 0x0F);
         for(int i=0; i<8; i++) { d_char(CX+20+i, CY+8, ' ', (i << 4)); } print("\n", 0x0F);
     }
     else if (strcmp(cmd_b, "warna") == 0) { if (cur_col == 0x0F) cur_col = 0x0A; else if (cur_col == 0x0A) cur_col = 0x0B; else if (cur_col == 0x0B) cur_col = 0x0C; else cur_col = 0x0F; print("Warna diubah!\n", cur_col); }
     else if (strcmp(cmd_b, "beep") == 0) { beep(); }
     else if (strcmp(cmd_b, "help") == 0) {
-        print(" +------------------ HELP MENU - MECTOV OS v10.0 ------------------+\n", 0x0B);
+        print(" +------------------ HELP MENU - MECTOV OS v10.5 ------------------+\n", 0x0B);
         print(" | ", 0x0B); print("SISTEM      ", 0x0E); print("| mfetch, waktu, warna, clear, beep, ular, kunci |\n", 0x0F);
         print(" | ", 0x0B); print("POWER       ", 0x0E); print("| matikan, mulaiulang                            |\n", 0x0F);
         print(" | ", 0x0B); print("FILESYSTEM  ", 0x0E); print("| ls, buat, tulis, baca, edit, hapus             |\n", 0x0F);
         print(" | ", 0x0B); print("SCRIPTING   ", 0x0E); print("| echo, tunggu, nada, jalankan                   |\n", 0x0F);
+        print(" | ", 0x0B); print("MANUAL BOOK ", 0x0E); print("| man [perintah]                                 |\n", 0x0F);
         print(" +-----------------------------------------------------------------+\n", 0x0B);
+    }
+    else if (strncmp(cmd_b, "man ", 4) == 0) {
+        char* t = &cmd_b[4];
+        if (strcmp(t, "edit") == 0) { print("Mectov Nano v1.0. Editor teks sakti. Tekan ESC untuk save & exit.\n", 0x0E); }
+        else if (strcmp(t, "ular") == 0) { print("Game Snake Bare-metal. Kendali: W,A,S,D atau Panah. ESC keluar.\n", 0x0E); }
+        else if (strcmp(t, "kunci") == 0) { print("Kunci layar dadakan. Password default: mectov123.\n", 0x0E); }
+        else if (strcmp(t, "tulis") == 0) { print("Format: tulis [file] [teks]. Menulis teks langsung ke file.\n", 0x0E); }
+        else if (strcmp(t, "nada") == 0) { print("Format: nada [freq_Hz] [durasi_ms]. Sintesis audio PC speaker.\n", 0x0E); }
+        else if (strcmp(t, "jalankan") == 0) { print("Format: jalankan [file.ms]. Mengeksekusi script perintah mectov.\n", 0x0E); }
+        else { print("Manual tidak ditemukan untuk: ", 0x0C); print(t, 0x0C); print("\n", 0x0C); }
     }
     else if (strcmp(cmd_b, "ls") == 0) { for (int i = 0; i < MAX_FILES; i++) if (fs[i].in_use) { print("- ", 0x0F); print(fs[i].name, 0x0B); print("\n", 0x0F); } }
     else if (strncmp(cmd_b, "buat ", 5) == 0) { if (vfs_create(&cmd_b[5]) >= 0) { vfs_save(); print("Created.\n", 0x0B); } }
@@ -229,11 +264,11 @@ void kernel_main(void) {
     vfs_load(); detect_cpu(); init_uptime();
     d_desktop(); d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Mectov Security Login "); c_work();
     const char* pass = "mectov123"; char in[32]; int in_idx = 0;
-    print("Welcome to Mectov OS v10.0\nPassword: ", 0x0E);
+    print("Welcome to Mectov OS v10.5\nPassword: ", 0x0E);
     int log = 0; unsigned char ls = 0;
     while (1) {
         if (!log || is_locked) {
-            rand_seed++; update_marquee();
+            rand_seed++; update_marquee(); update_hud();
             if (inb(0x64) & 1) {
                 unsigned char sc = inb(0x60);
                 if (sc < 0x80 && sc != ls) {
@@ -247,20 +282,22 @@ void kernel_main(void) {
             continue;
         }
 
-        rand_seed++; update_marquee();
+        rand_seed++; update_marquee(); update_hud();
         if (inb(0x64) & 1) {
             unsigned char sc = inb(0x60);
             if (sc == 0x2A || sc == 0x36) shift_p = 1; else if (sc == 0xAA || sc == 0xB6) shift_p = 0; else if (sc == 0x3A) caps_a = !caps_a;
             
+            // HISTORY LOGIC
             if (sc == 0x48 && ls != 0x48 && !ed_a) {
                 while (cx > 15) { cx--; d_char(CX + cx, CY + cy, ' ', 0x0F); }
                 strcpy(cmd_b, hist_b); b_idx = 0; while(cmd_b[b_idx]) { d_char(CX + cx, CY + cy, cmd_b[b_idx], cur_col); cx++; b_idx++; }
                 update_hw_cursor(CX + cx, CY + cy); ls = sc; continue;
             }
 
+            // TAB AUTO-COMPLETE (Tab: 0x0F)
             if (sc == 0x0F && ls != 0x0F && !ed_a && b_idx > 0) {
                 cmd_b[b_idx] = '\0';
-                for (int i = 0; i < 19; i++) {
+                for (int i = 0; i < 20; i++) {
                     if (strncmp(cmd_b, cmd_list[i], b_idx) == 0) {
                         const char* match = cmd_list[i];
                         while (match[b_idx]) { d_char(CX + cx, CY + cy, match[b_idx], cur_col); cmd_b[b_idx] = match[b_idx]; cx++; b_idx++; }
