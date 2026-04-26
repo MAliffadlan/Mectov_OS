@@ -1,4 +1,4 @@
-// --- MECTOV OS v8.7 (Final Stable Fix) ---
+// --- MECTOV OS v8.8 (The All-In-One Ultimate Edition) ---
 static inline unsigned char inb(unsigned short port) {
     unsigned char ret; __asm__ __volatile__ ( "inb %1, %0" : "=a"(ret) : "Nd"(port) ); return ret;
 }
@@ -15,15 +15,18 @@ static inline void outw(unsigned short port, unsigned short val) {
 unsigned char read_cmos(unsigned char reg) { outb(0x70, reg); return inb(0x71); }
 unsigned char bcd_to_bin(unsigned char bcd) { return ((bcd & 0xF0) >> 1) + ((bcd & 0xF0) >> 3) + (bcd & 0x0F); }
 
+// --- POWER ---
 void shutdown() { outw(0x604, 0x2000); }
 void reboot() { unsigned char g = 0x02; while (g & 0x02) g = inb(0x64); outb(0x64, 0xFE); }
 
+// --- HARDWARE CURSOR ---
 void update_hw_cursor(int x, int y) {
     unsigned short pos = y * 80 + x;
     outb(0x3D4, 0x0F); outb(0x3D5, (unsigned char) (pos & 0xFF));
     outb(0x3D4, 0x0E); outb(0x3D5, (unsigned char) ((pos >> 8) & 0xFF));
 }
 
+// --- HDD ATA ---
 void ata_wait_bsy() { while(inb(0x1F7) & 0x80); }
 void ata_wait_drq() { while(!(inb(0x1F7) & 0x08)); }
 void ata_read_sector(unsigned int lba, unsigned char* b) {
@@ -40,6 +43,7 @@ void ata_write_sector(unsigned int lba, unsigned char* b) {
     outb(0x1F7, 0xE7); ata_wait_bsy();
 }
 
+// --- AUDIO & DELAY ---
 void play_sound(unsigned int n) { unsigned int d = 1193180/n; outb(0x43,0xb6); outb(0x42,(unsigned char)d); outb(0x42,(unsigned char)(d>>8)); unsigned char t = inb(0x61); if(t!=(t|3)) outb(0x61,t|3); }
 void nosound() { outb(0x61, inb(0x61) & 0xFC); }
 int abort_ex = 0;
@@ -47,6 +51,7 @@ void delay(int ms) { for (volatile int i = 0; i < ms; i++) { if (inb(0x64) & 1) 
 void beep() { play_sound(1000); delay(100); nosound(); }
 void nada(int f, int d) { if (abort_ex) return; if (f > 0) play_sound(f); delay(d); nosound(); }
 
+// --- KEYBOARD ---
 int shift_p = 0, caps_a = 0;
 char scancode_to_char(unsigned char s) {
     unsigned char m_n[58] = { 0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' ', 0 };
@@ -59,6 +64,7 @@ char scancode_to_char(unsigned char s) {
     return 0;
 }
 
+// --- GUI ---
 volatile char* video_m = (volatile char*) 0xb8000;
 unsigned char cur_col = 0x0F; 
 int cx = 0, cy = 0;
@@ -80,12 +86,14 @@ void s_work() { for (int y = CY; y < CY + CH - 2; y++) for (int x = CX; x < CX +
 void print(const char* s, unsigned char col) { int i = 0; while (s[i] != '\0') { if (s[i] == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, s[i], col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); i++; } update_hw_cursor(CX + cx, CY + cy); }
 void p_char(char c, unsigned char col) { if (c == '\n') { cx = 0; cy++; } else { d_char(CX + cx, CY + cy, c, col); cx++; if (cx >= CW) { cx = 0; cy++; } } if (cy >= CH - 1) s_work(); update_hw_cursor(CX + cx, CY + cy); }
 
+// --- UTILS ---
 int strcmp(const char* s1, const char* s2) { while (*s1 && (*s1 == *s2)) { s1++; s2++; } return *(const unsigned char*)s1 - *(const unsigned char*)s2; }
 int strncmp(const char* s1, const char* s2, int n) { while (n && *s1 && (*s1 == *s2)) { ++s1; ++s2; --n; } if (n == 0) return 0; return (*(unsigned char *)s1 - *(unsigned char *)s2); }
 void strcpy(char* d, const char* s) { while ((*d++ = *s++)); }
 void p_int(int n, unsigned char c) { if (n < 0) { print("-", c); n = -n; } if (n == 0) { print("0", c); return; } char buf[10]; int i = 0; while (n > 0) { buf[i++] = (n % 10) + '0'; n /= 10; } for (int j = 0; j < i / 2; j++) { char t = buf[j]; buf[j] = buf[i - j - 1]; buf[i - j - 1] = t; } buf[i] = '\0'; print(buf, c); }
 int atoi(const char* s) { int r = 0, si = 1, i = 0; if (s[0] == '-') { si = -1; i++; } for (; s[i] != '\0'; ++i) { if (s[i] >= '0' && s[i] <= '9') r = r * 10 + s[i] - '0'; else break; } return si * r; }
 
+// --- VFS ---
 #define MAX_FILES 16
 #define MAX_FILENAME 16
 #define MAX_FILE_SIZE 1024
@@ -96,10 +104,12 @@ int vfs_load() { unsigned char s[512]; ata_read_sector(0, s); if (s[0] == 'M' &&
 int vfs_find(const char* n) { for (int i = 0; i < MAX_FILES; i++) if (fs[i].in_use && strcmp(fs[i].name, n) == 0) return i; return -1; }
 int vfs_create(const char* n) { if (vfs_find(n) != -1) return -2; for (int i = 0; i < MAX_FILES; i++) if (!fs[i].in_use) { strcpy(fs[i].name, n); fs[i].in_use = 1; fs[i].size = 0; fs[i].data[0] = '\0'; return i; } return -1; }
 
+// --- EDITOR ---
 int ed_a = 0; char ed_b[MAX_FILE_SIZE], ed_fn[MAX_FILENAME]; int ed_c = 0;
 void st_ed(const char* f) { strcpy(ed_fn, f); int i = vfs_find(f); if (i >= 0) { strcpy(ed_b, fs[i].data); ed_c = fs[i].size; } else { ed_b[0] = '\0'; ed_c = 0; } ed_a = 1; c_work(); print(ed_b, 0x0F); update_hw_cursor(CX + (ed_c % CW), CY + (ed_c / CW)); }
 void sa_ex_ed() { int i = vfs_find(ed_fn); if (i == -1) i = vfs_create(ed_fn); if (i >= 0) { strcpy(fs[i].data, ed_b); fs[i].size = ed_c; } vfs_save(); ed_a = 0; c_work(); print("root@mectov:~# ", 0x0A); }
 
+// --- SHELL ---
 char cmd_b[256]; int b_idx = 0, is_script = 0;
 void ex_cmd();
 void run_script(const char* f) { int i = vfs_find(f); if (i < 0) return; is_script = 1; abort_ex = 0; char* d = fs[i].data; int l = fs[i].size, p = 0; while (p < l && !abort_ex) { b_idx = 0; while (p < l && d[p] != '\n' && d[p] != '\0') { if (b_idx < 255) cmd_b[b_idx++] = d[p]; p++; } cmd_b[b_idx] = '\0'; if (b_idx > 0) ex_cmd(); if (d[p] == '\n') p++; } is_script = 0; abort_ex = 0; }
@@ -108,13 +118,25 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
     else if (strcmp(cmd_b, "mulaiulang") == 0) reboot();
     else if (strcmp(cmd_b, "clear") == 0) { c_work(); }
     else if (strcmp(cmd_b, "waktu") == 0) { unsigned char j = bcd_to_bin(read_cmos(0x04)), m = bcd_to_bin(read_cmos(0x02)), d = bcd_to_bin(read_cmos(0x00)); int wj = (j + 7) % 24; print("WIB: ", 0x0B); p_int(wj, 0x0E); print(":", 0x0F); p_int(m, 0x0E); print(":", 0x0F); p_int(d, 0x0E); print("\n", 0x0F); }
-    else if (strcmp(cmd_b, "mfetch") == 0) { print("root@mectov-os\nv8.7 Final\n", 0x0B); }
+    else if (strcmp(cmd_b, "mfetch") == 0) { print("root@mectov-os\nv8.8 Full Stable\n", 0x0B); }
+    else if (strcmp(cmd_b, "help") == 0) { print("System: mfetch, waktu, warna, clear, beep, matikan, mulaiulang\nFile  : ls, buat, tulis, edit, baca, hapus\nScript: echo, tunggu, nada, jalankan\n", 0x0E); }
     else if (strcmp(cmd_b, "ls") == 0) { for (int i = 0; i < MAX_FILES; i++) if (fs[i].in_use) { print("- ", 0x0F); print(fs[i].name, 0x0B); print("\n", 0x0F); } }
-    else if (strncmp(cmd_b, "edit ", 5) == 0) { st_ed(&cmd_b[5]); b_idx = 0; return; }
-    else if (strncmp(cmd_b, "baca ", 5) == 0) { int i = vfs_find(&cmd_b[5]); if (i >= 0) print(fs[i].data, 0x0F); }
-    else if (strncmp(cmd_b, "hapus ", 6) == 0) { int i = vfs_find(&cmd_b[6]); if (i >= 0) { fs[i].in_use = 0; vfs_save(); } }
+    else if (strncmp(cmd_b, "buat ", 5) == 0) { if (vfs_create(&cmd_b[5]) >= 0) { vfs_save(); print("Created.\n", 0x0B); } }
+    else if (strncmp(cmd_b, "edit ", 5) == 0) { if (!is_script) { st_ed(&cmd_b[5]); b_idx = 0; return; } }
+    else if (strncmp(cmd_b, "baca ", 5) == 0) { int i = vfs_find(&cmd_b[5]); if (i >= 0) { print(fs[i].data, 0x0F); print("\n", 0x0F); } }
+    else if (strncmp(cmd_b, "hapus ", 6) == 0) { int i = vfs_find(&cmd_b[6]); if (i >= 0) { fs[i].in_use = 0; vfs_save(); print("Deleted.\n", 0x0C); } }
+    else if (strncmp(cmd_b, "echo ", 5) == 0) { print(&cmd_b[5], 0x0F); print("\n", 0x0F); }
+    else if (strncmp(cmd_b, "tunggu ", 7) == 0) { int ms = atoi(&cmd_b[7]); if (ms > 0) delay(ms); }
     else if (strncmp(cmd_b, "nada ", 5) == 0) { int i = 5; while(cmd_b[i] == ' ') i++; int f = atoi(&cmd_b[i]); while(cmd_b[i] >= '0' && cmd_b[i] <= '9') i++; while(cmd_b[i] == ' ') i++; int d = atoi(&cmd_b[i]); if (f > 0 && d > 0) nada(f, d); }
     else if (strncmp(cmd_b, "jalankan ", 9) == 0) { if (!is_script) { run_script(&cmd_b[9]); b_idx = 0; if (!is_script) print("root@mectov:~# ", 0x0A); return; } }
+    else if (strncmp(cmd_b, "tulis ", 6) == 0) {
+        int i = 6; while (cmd_b[i] == ' ') i++; int ns = i; while (cmd_b[i] != ' ' && cmd_b[i] != '\0') i++; 
+        if (cmd_b[i] != '\0') {
+            cmd_b[i] = '\0'; char* fn = &cmd_b[ns]; char* tx = &cmd_b[i + 1];
+            int idx = vfs_find(fn); if (idx == -1) idx = vfs_create(fn);
+            if (idx >= 0) { strcpy(fs[idx].data, tx); fs[idx].size = 0; while(tx[fs[idx].size]) fs[idx].size++; vfs_save(); print("Stored.\n", 0x0B); }
+        }
+    }
     else if (cmd_b[0] != '\0') { print("Command not found\n", 0x0C); }
     b_idx = 0; if (!is_script) print("root@mectov:~# ", 0x0A);
 }
@@ -122,7 +144,7 @@ void ex_cmd() { if (!is_script) print("\n", 0x0F); cmd_b[b_idx] = '\0';
 void kernel_main(void) {
     vfs_load(); d_desktop(); d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Mectov Security Login "); c_work();
     const char* pass = "mectov123"; char in[32]; int in_idx = 0;
-    print("Welcome to Mectov OS v8.7\nPassword: ", 0x0E);
+    print("Welcome to Mectov OS v8.8\nPassword: ", 0x0E);
     int log = 0; unsigned char ls = 0;
     while (!log) {
         if (inb(0x64) & 1) {
