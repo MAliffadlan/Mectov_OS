@@ -1,8 +1,8 @@
 #include "../include/ata.h"
 #include "../include/io.h"
 
-void ata_wait_bsy() { while(inb(0x1F7) & 0x80); }
-void ata_wait_drq() { while(!(inb(0x1F7) & 0x08)); }
+void ata_wait_bsy() { int t=100000; while((inb(0x1F7)&0x80)&&t--); }
+void ata_wait_drq() { int t=100000; while(!(inb(0x1F7)&0x08)&&t--); }
 void ata_read_sector(unsigned int lba, unsigned char* b) {
     ata_wait_bsy(); outb(0x1F6, 0xE0 | ((lba >> 24) & 0x0F)); outb(0x1F2, 1); outb(0x1F3, (unsigned char)lba);
     outb(0x1F4, (unsigned char)(lba >> 8)); outb(0x1F5, (unsigned char)(lba >> 16)); outb(0x1F7, 0x20);

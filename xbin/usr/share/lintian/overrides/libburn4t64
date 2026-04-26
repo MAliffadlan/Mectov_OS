@@ -1,0 +1,8 @@
+
+# libburn offers signal handlers which care for proper shutdown of busy drives.
+# The users of the library decide whether they employ such a handler or whether
+# they prefer an own handler which then has to operate libburn to perform the
+# necessary drive shutdown.
+libburn4t64 binary: exit-in-shared-library
+
+libburn4t64: package-name-doesnt-match-sonames libburn4

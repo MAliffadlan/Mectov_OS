@@ -1,4 +1,4 @@
-// --- MECTOV OS v12.0 (The Interrupt & Foundation Update) ---
+// --- MECTOV OS v13.5 GUI Edition ---
 #include "src/include/types.h"
 #include "src/include/vga.h"
 #include "src/include/keyboard.h"
@@ -13,120 +13,132 @@
 #include "src/include/io.h"
 #include "src/include/idt.h"
 #include "src/include/timer.h"
+#include "src/include/multiboot.h"
+#include "src/include/mouse.h"
+#include "src/include/wm.h"
+#include "src/include/desktop.h"
+#include "src/include/taskbar.h"
+#include "src/include/login.h"
+#include "src/include/task.h"
 
-void kernel_main(void) {
-    // 0. UI Reset (Must be first to clear BIOS garbage)
-    clear_screen();
-    print("Mectov OS is starting...\n", 0x0F);
+// Forward declaration
+extern void init_double_buffer(void);
 
-    // 1. Memory & Interrupt Core (MUST BE FIRST)
-    init_mem(32 * 1024 * 1024);
-    paging_init(); 
-    print("[+] Virtual Memory Active (16MB Identity Map)\n", 0x0A);
-    idt_init();
-    print("[+] IDT/ISR Handlers Registered\n", 0x0A);
+static void full_redraw() {
+    desktop_draw();
+    wm_draw_all();
+    taskbar_draw();
+    draw_mouse_cursor(mouse_x, mouse_y);
+    swap_buffers();
+}
+
+void kernel_main(uint32_t magic, uint32_t addr) {
+    multiboot_info_t* mbi = (multiboot_info_t*)addr;
+    uint32_t fb_p = 0, fb_s = 0;
+    if (magic == 0x2BADB002 && mbi != NULL && (mbi->flags & (1 << 12))) {
+        fb_p = (uint32_t)mbi->framebuffer_addr;
+        fb_s = mbi->framebuffer_height * mbi->framebuffer_pitch;
+        init_vbe(fb_p, mbi->framebuffer_width, mbi->framebuffer_height, mbi->framebuffer_pitch, mbi->framebuffer_bpp);
+    }
     
-    // 2. Drivers & Hardware
-    init_timer(50);    
-    init_keyboard();   
+    extern void init_gdt();
+    init_gdt();
+
+    init_mem(32 * 1024 * 1024);
+    paging_init(fb_p, fb_s);
+    idt_init();
+    init_timer(50);
+    init_keyboard();
     detect_cpu();
     init_uptime();
-    vfs_load(); 
-    print("[+] Hardware Drivers Loaded\n", 0x0A);
+    vfs_load();
+
+    // Allocate double buffer now that memory is ready
+    init_double_buffer();
     
-    delay(500); 
+    init_tasking();
+
+    __asm__ __volatile__ ("sti");
     
-    // 3. STARTUP SEQUENCE
+    extern void dummy_task_entry();
+    create_task(dummy_task_entry);
+
+    init_mouse();
+
     draw_startup_logo();
-    nada(440, 150); // A4
-    nada(523, 150); // C5
-    nada(659, 300); // E5
-    delay(2000);    // Tampilkan logo selama 2 detik
+    nada(440, 150); nada(523, 150); nada(659, 300);
+    delay(600);
+
+    wm_init();
+    cursor_saved_x = -1;
     
-    // 4. Enable Interrupts
-    __asm__ __volatile__ ("sti"); 
-    
-    // 5. Setup UI
-    d_desktop(); 
-    d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Mectov Security Login "); 
-    c_work();
-    
-    const char* pass = "mectov123"; 
-    char in[32]; 
-    int in_idx = 0;
-    print("Welcome to Mectov OS v12.0\n", 0x0E);
-    print("IDT Core : Active (Interrupt Driven)\n", 0x0A);
-    print("Password: ", 0x0E);
-    
-    int log = 0; 
-    
+    gui_login();
+
+    nada(659, 80); nada(784, 80); nada(1047, 150);
+    full_redraw();
+
+    // ---- Main GUI Event Loop ----
+    int prev_btn  = 0;
+    int prev_mx   = mouse_x, prev_my = mouse_y;
+    uint32_t last_clock_tick = 0;
+    uint32_t last_frame_tick = 0;
+    int needs_redraw = 1;
+
     while (1) {
-        if (!log || is_locked) {
-            uint8_t sc = k_get_scancode(); // Baca dari antrean, bukan polling hardware!
-            if (sc != 0 && sc < 0x80) {
-                char c = scancode_to_char(sc);
-                if (c == '\n') { 
-                    in[in_idx] = '\0'; 
-                    if (strcmp(in, pass) == 0) { 
-                        log = 1; is_locked = 0; beep(); 
-                        c_work(); 
-                        d_win(WIN_X, WIN_Y, WIN_W, WIN_H, " Terminal - Mectov OS "); 
-                        print("Login Success! Interrupt Engine OK.\nroot@mectov:~# ", 0x0A); 
-                    } else { 
-                        print("\nDenied!\nPassword: ", 0x0C); in_idx = 0; 
-                    } 
-                }
-                else if (c == '\b' && in_idx > 0) { 
-                    in_idx--; 
-                    d_char(CX + 10 + in_idx, CY + (is_locked?2:1), ' ', 0x0F); 
-                    update_hw_cursor(CX + 10 + in_idx, CY + (is_locked?2:1)); 
-                }
-                else if (c != 0 && in_idx < 31) { 
-                    in[in_idx++] = c; 
-                    p_char('*', 0x0F); 
-                }
+        int mx  = mouse_x, my = mouse_y;
+        int btn = (int)(uint32_t)mouse_btn;
+
+        if (mx != prev_mx || my != prev_my || btn != prev_btn) {
+            int in_taskbar = (my >= (int)fb_height - TASKBAR_H_PX);
+            if (!btn && prev_btn) {
+                if (!in_taskbar) desktop_handle_click(mx, my);
+                else             taskbar_handle_click(mx, my);
             }
-            __asm__ __volatile__ ("hlt");
-            continue;
+            wm_handle_mouse(mx, my, btn, prev_btn);
+            prev_btn = btn; prev_mx = mx; prev_my = my;
+            needs_redraw = 1;
         }
 
-        // --- Loop Terminal Utama ---
         uint8_t sc = k_get_scancode();
-        if (sc != 0) {
-            // Panah Atas (History)
-            if (sc == 0x48 && !ed_a) {
-                while (cx > 15) { cx--; d_char(CX + cx, CY + cy, ' ', 0x0F); }
-                strcpy(cmd_b, hist_b); b_idx = 0; 
-                while(cmd_b[b_idx]) { d_char(CX + cx, CY + cy, cmd_b[b_idx], cur_col); cx++; b_idx++; }
-                update_hw_cursor(CX + cx, CY + cy);
-            }
-            // Tab Auto-Complete
-            else if (sc == 0x0F && !ed_a && b_idx > 0) {
-                cmd_b[b_idx] = '\0';
-                for (int i = 0; i < 21; i++) {
-                    if (strncmp(cmd_b, cmd_list[i], b_idx) == 0) {
-                        const char* match = cmd_list[i];
-                        while (match[b_idx]) { d_char(CX + cx, CY + cy, match[b_idx], cur_col); cmd_b[b_idx] = match[b_idx]; cx++; b_idx++; }
-                        cmd_b[b_idx] = '\0'; update_hw_cursor(CX + cx, CY + cy); break;
-                    }
-                }
-            }
-            // ESC
-            else if (sc == 0x01) { if (ed_a) sa_ex_ed(); }
-            // Normal Keys (Make code only)
-            else if (sc < 0x80) {
-                char c = scancode_to_char(sc);
-                if (ed_a) {
-                    if (c == '\b' && ed_c > 0) { ed_c--; ed_b[ed_c] = '\0'; c_work(); print(ed_b, 0x0F); } 
-                    else if (c != 0 && ed_c < MAX_FILE_SIZE-1) { ed_b[ed_c++] = c; p_char(c, 0x0F); } 
-                } else {
-                    if (c == '\n') { ex_cmd(); }
-                    else if (c == '\b') { if (b_idx > 0) { b_idx--; if (cx > 15) { cx--; d_char(CX + cx, CY + cy, ' ', 0x0F); update_hw_cursor(CX + cx, CY + cy); } } } 
-                    else if (c != 0) { d_char(CX + cx, CY + cy, c, cur_col); cx++; if (cx >= CW) { cx = 0; cy++; } if (cy >= CH-1) s_work(); if (b_idx < 255) { cmd_b[b_idx] = c; b_idx++; } update_hw_cursor(CX + cx, CY + cy); } 
+        if (sc != 0 && sc < 0x80) {
+            char c = scancode_to_char(sc);
+            wm_handle_key(c, sc);
+            needs_redraw = 1;
+        }
+
+        uint32_t now = get_ticks();
+        if (now - last_clock_tick >= 50) {
+            last_clock_tick = now;
+            wm_tick_all();
+            needs_redraw = 1;
+        }
+
+        // Force continuous redraw for marquee animation
+        needs_redraw = 1;
+
+        // Throttle rendering to ~25 FPS (every 2 ticks at 50Hz)
+        if (needs_redraw && (now - last_frame_tick >= 2)) {
+            needs_redraw = 0;
+            last_frame_tick = now;
+            full_redraw();
+        }
+
+        __asm__ __volatile__ ("hlt");
+    }
+}
+
+volatile int dummy_task_runs = 0;
+void dummy_task_entry() {
+    while (1) {
+        dummy_task_runs++;
+        if (is_vbe && fb_addr) {
+            uint32_t color = (dummy_task_runs / 5000000) % 2 ? 0xFF0000 : 0x00FF00;
+            // Draw a 20x20 blinking square at the top right (over the marquee)
+            for (int y = 0; y < 20; y++) {
+                for (int x = 0; x < 20; x++) {
+                    fb_addr[(5 + y) * fb_width + (fb_width - 30 + x)] = color;
                 }
             }
         }
-        
-        __asm__ __volatile__ ("hlt"); // Idle gracefully
     }
 }

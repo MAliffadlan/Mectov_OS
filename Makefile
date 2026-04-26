@@ -13,6 +13,7 @@ OBJ_DIR = obj
 SRCS = $(wildcard $(SRC_DIR)/drivers/*.c) \
        $(wildcard $(SRC_DIR)/sys/*.c) \
        $(wildcard $(SRC_DIR)/apps/*.c) \
+       $(wildcard $(SRC_DIR)/gui/*.c) \
        kernel.c
 
 OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
@@ -26,6 +27,7 @@ $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)/src/drivers
 	mkdir -p $(OBJ_DIR)/src/sys
 	mkdir -p $(OBJ_DIR)/src/apps
+	mkdir -p $(OBJ_DIR)/src/gui
 
 $(OBJ_DIR)/boot.o: boot.asm
 	$(AS) $(ASFLAGS) $< -o $@

@@ -12,7 +12,8 @@
 #define PAGE_USER    0x4
 
 void init_mem(uint32_t mem_size);
-void paging_init(); // AKTIFKAN PAGING
+void paging_init(uint32_t fb_addr, uint32_t fb_size);
+ // AKTIFKAN PAGING
 void* kmalloc(uint32_t size);
 void kfree(void* ptr);
 

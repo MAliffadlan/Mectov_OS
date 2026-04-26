@@ -14,6 +14,7 @@ irq_common_stub:
     push esp          ; KIRIM POINTER KE STACK (ESP menunjuk ke struct registers)
     call irq_handler
     add esp, 4        ; Bersihkan pointer
+    mov esp, eax      ; --- MAGIC: Switch stack to the new task's ESP ---
 
     pop eax
     mov ds, ax
@@ -23,6 +24,20 @@ irq_common_stub:
     popad
     add esp, 8
     iret
+
+global gdt_flush
+gdt_flush:
+    mov eax, [esp+4]
+    lgdt [eax]
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    jmp 0x08:.flush
+.flush:
+    ret
 
 global idt_flush
 idt_flush:
@@ -46,3 +61,11 @@ isr_default:
 
 IRQ 0, 32
 IRQ 1, 33
+IRQ 12, 44
+
+global isr0
+isr0:
+    push byte 0
+    push byte 0
+    jmp irq_common_stub
+

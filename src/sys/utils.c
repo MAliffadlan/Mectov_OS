@@ -24,13 +24,47 @@ void init_uptime() { boot_sec = bcd_to_bin(read_cmos(0x00)); boot_min = bcd_to_b
 void shutdown() { outw(0x604, 0x2000); }
 void reboot() { unsigned char g = 0x02; while (g & 0x02) g = inb(0x64); outb(0x64, 0xFE); }
 
-int strcmp(const char* s1, const char* s2) { while (*s1 && (*s1 == *s2)) { s1++; s2++; } return *(const unsigned char*)s1 - *(const unsigned char*)s2; }
+int strlen(const char* s) {
+    int len = 0;
+    while (s[len]) len++;
+    return len;
+}
+
+int strcmp(const char* s1, const char* s2) {
+ while (*s1 && (*s1 == *s2)) { s1++; s2++; } return *(const unsigned char*)s1 - *(const unsigned char*)s2; }
 int strncmp(const char* s1, const char* s2, int n) { while (n && *s1 && (*s1 == *s2)) { ++s1; ++s2; --n; } if (n == 0) return 0; return (*(unsigned char *)s1 - *(unsigned char *)s2); }
 void strcpy(char* d, const char* s) { while ((*d++ = *s++)); }
 
 void memset(void* dest, uint8_t val, uint32_t len) {
-    uint8_t* ptr = (uint8_t*)dest;
-    while(len--) *ptr++ = val;
+    // Fill 4 bytes at a time using rep stosl
+    uint32_t fill = val | (val << 8) | (val << 16) | (val << 24);
+    uint32_t dwords = len / 4;
+    uint32_t rem = len % 4;
+    __asm__ __volatile__(
+        "rep stosl"
+        : "+D"(dest), "+c"(dwords)
+        : "a"(fill)
+        : "memory"
+    );
+    uint8_t* d8 = (uint8_t*)dest;
+    while (rem--) *d8++ = val;
+}
+
+void memcpy(void* dest, const void* src, uint32_t len) {
+    // Fast bulk copy using rep movsl (4 bytes at a time)
+    uint32_t dwords = len / 4;
+    uint32_t rem = len % 4;
+    __asm__ __volatile__(
+        "rep movsl"
+        : "+D"(dest), "+S"(src), "+c"(dwords)
+        :
+        : "memory"
+    );
+    if (rem) {
+        uint8_t* d8 = (uint8_t*)dest;
+        const uint8_t* s8 = (const uint8_t*)src;
+        while (rem--) *d8++ = *s8++;
+    }
 }
 
 void p_int(int n, unsigned char c) { if (n < 0) { print("-", c); n = -n; } if (n == 0) { print("0", c); return; } char buf[10]; int i = 0; while (n > 0) { buf[i++] = (n % 10) + '0'; n /= 10; } for (int j = 0; j < i / 2; j++) { char t = buf[j]; buf[j] = buf[i - j - 1]; buf[i - j - 1] = t; } buf[i] = '\0'; print(buf, c); }
