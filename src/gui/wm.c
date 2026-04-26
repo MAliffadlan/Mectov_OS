@@ -155,7 +155,7 @@ void wm_draw_all() {
 }
 
 // ---- Mouse handling ----
-void wm_handle_mouse(int mx, int my, int btn, int pbtn) {
+int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
     int click = btn && !pbtn;   // rising edge
     int release = !btn && pbtn; // falling edge
 
@@ -170,7 +170,7 @@ void wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                 if (wm_wins[i].y < 0) wm_wins[i].y = 0;
                 if (wm_wins[i].x + wm_wins[i].w > (int)fb_width)
                     wm_wins[i].x = (int)fb_width - wm_wins[i].w;
-                return;
+                return 1;
             }
         }
     }
@@ -178,7 +178,7 @@ void wm_handle_mouse(int mx, int my, int btn, int pbtn) {
         for (int i = 0; i < MAX_WINDOWS; i++) wm_wins[i].dragging = 0;
     }
 
-    if (!click) return;
+    if (!click) return 0;
 
     // Hit test front-to-back
     for (int z = wm_zcount - 1; z >= 0; z--) {
@@ -197,7 +197,7 @@ void wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                 // Close button
                 if (mx >= cbx) {
                     wm_close(w->id);
-                    return;
+                    return 1;
                 }
                 // Maximize button
                 if (mx >= maxbx) {
@@ -213,7 +213,7 @@ void wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                         w->h = (int)fb_height - TASKBAR_H_PX;
                         w->maximized = 1;
                     }
-                    return;
+                    return 1;
                 }
                 // Minimize button
                 if (mx >= mbx) {
@@ -227,7 +227,7 @@ void wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                             break;
                         }
                     }
-                    return;
+                    return 1;
                 }
                 // Titlebar drag (only if not maximized)
                 if (!w->maximized) {
@@ -235,15 +235,16 @@ void wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                     w->drag_mx = mx; w->drag_my = my;
                     w->drag_wx = w->x; w->drag_wy = w->y;
                 }
-                return;
+                return 1;
             }
             // Content area click
             if (w->mouse_fn) {
                 w->mouse_fn(w->id, mx - w->x, my - (w->y + TITLEBAR_H), btn);
             }
-            return;
+            return 1;
         }
     }
+    return 0;
 }
 
 void wm_handle_key(char c, uint8_t sc) {

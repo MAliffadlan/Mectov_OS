@@ -40,7 +40,7 @@ int  wm_open(int x, int y, int w, int h, const char* title,
 void wm_close(int id);
 int  wm_is_open(int id);
 void wm_draw_all();
-void wm_handle_mouse(int mx, int my, int btn, int pbtn);
+int wm_handle_mouse(int mx, int my, int btn, int pbtn);
 void wm_handle_key(char c, uint8_t sc);
 void wm_tick_all();
 

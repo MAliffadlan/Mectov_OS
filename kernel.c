@@ -144,11 +144,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
 
         if (mx != prev_mx || my != prev_my || btn != prev_btn) {
             int in_taskbar = (my >= (int)fb_height - TASKBAR_H_PX);
-            if (!btn && prev_btn) {
-                if (!in_taskbar) desktop_handle_click(mx, my);
-                else             taskbar_handle_click(mx, my);
+            if (!wm_handle_mouse(mx, my, btn, prev_btn)) {
+                if (!in_taskbar) {
+                    desktop_handle_mouse(mx, my, btn, prev_btn);
+                } else if (!btn && prev_btn) {
+                    taskbar_handle_click(mx, my);
+                }
             }
-            wm_handle_mouse(mx, my, btn, prev_btn);
             prev_btn = btn; prev_mx = mx; prev_my = my;
             needs_redraw = 1;
         }

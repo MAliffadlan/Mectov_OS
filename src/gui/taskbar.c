@@ -67,44 +67,66 @@ void taskbar_draw() {
     draw_rect(0, ty, fb_width, TASKBAR_H_PX, GUI_TASKBAR);
     draw_rect(0, ty, fb_width, 1, GUI_BORDER);
 
-    // "Mectov" logo button on the left
+    // "MectovOS" logo button on the left
     uint32_t btn_bg = start_menu_open ? GUI_BTN_HOV : GUI_BTN;
-    draw_rect(2, ty + 2, 60, TASKBAR_H_PX - 4, btn_bg);
-    draw_rect_border(2, ty + 2, 60, TASKBAR_H_PX - 4, GUI_BORDER);
-    draw_string_px(8, ty + 6, "Mectov", GUI_TEXT, btn_bg);
+    draw_rect(2, ty + 2, 76, TASKBAR_H_PX - 4, btn_bg);
+    draw_rect_border(2, ty + 2, 76, TASKBAR_H_PX - 4, GUI_BORDER);
+    draw_string_px(8, ty + 6, "MectovOS", GUI_TEXT, btn_bg);
 
-    // RAM bar (right side)
+    // System Tray (Right side before edge)
+    int tray_end = (int)fb_width - 10;
+    
+    // 1. RAM Bar
     unsigned int used_kb = get_used_memory() / 1024;
     unsigned int tot_kb  = get_total_memory() / 1024;
-    draw_string_px((int)fb_width - 140, ty + 6, "RAM:", GUI_TEXT_INV, GUI_TASKBAR);
-    int bar_x = (int)fb_width - 108, bar_w = 80;
+    int ram_pct = (tot_kb > 0) ? (used_kb * 100 / tot_kb) : 0;
+    
+    int bar_w = 60;
+    int bar_x = tray_end - bar_w;
     draw_rect(bar_x - 1, ty + 9, bar_w + 2, 10, GUI_BORDER2);
     if (tot_kb > 0) {
-        int fill = (int)(bar_w * (used_kb / (tot_kb / 100 + 1)) / 100);
+        int fill = (bar_w * ram_pct) / 100;
         if (fill > bar_w) fill = bar_w;
         draw_rect(bar_x, ty + 10, fill, 8, GUI_CYAN);
     }
-
-    // System Tray (Left of the Clock)
-    int tray_x = (int)fb_width - 240;
     
-    // Caps Lock indicator
-    if (caps_a) {
-        draw_rect(tray_x, ty + 6, 40, 16, 0x00FF8800); // Orange bg
-        draw_string_px(tray_x + 4, ty + 10, "CAPS", 0x00FFFFFF, 0x00FF8800);
-    } else {
-        draw_rect(tray_x, ty + 6, 40, 16, GUI_BORDER);
-        draw_string_px(tray_x + 4, ty + 10, "caps", 0x00888888, GUI_BORDER);
+    char pct_buf[16];
+    int p_idx = 0;
+    if (ram_pct >= 100) { pct_buf[p_idx++] = '1'; pct_buf[p_idx++] = '0'; pct_buf[p_idx++] = '0'; }
+    else {
+        if (ram_pct >= 10) pct_buf[p_idx++] = '0' + (ram_pct / 10);
+        pct_buf[p_idx++] = '0' + (ram_pct % 10);
     }
+    pct_buf[p_idx++] = '%'; 
+    pct_buf[p_idx] = '\0';
     
-    // HDD indicator
+    int ram_txt_x = bar_x - 40;
+    draw_string_px(ram_txt_x, ty + 6, "RAM", GUI_TEXT_INV, GUI_TASKBAR);
+    // Draw percentage inside the bar or just rely on the bar. Actually let's put it before the text if we want, or just "RAM:"
+    // The user wants "HDD: 0% | RAM: 0%" or similar. We'll use the bar for RAM.
+    
+    // 2. HDD Indicator
+    int hdd_x = ram_txt_x - 50;
+    draw_string_px(hdd_x, ty + 6, "HDD", GUI_TEXT_INV, GUI_TASKBAR);
     if (hdd_activity > 0) {
-        draw_rect(tray_x + 46, ty + 8, 12, 12, 0x00FF0000); // Red light
+        draw_rect(hdd_x + 30, ty + 8, 10, 10, 0x00FF0000); // Red light
         hdd_activity--;
     } else {
-        draw_rect(tray_x + 46, ty + 8, 12, 12, 0x00222222); // Dark light
+        draw_rect(hdd_x + 30, ty + 8, 10, 10, 0x00222222); // Dark light
     }
-    draw_string_px(tray_x + 62, ty + 10, "HDD", GUI_TEXT_INV, GUI_TASKBAR);
+    
+    // Separator line
+    draw_rect(hdd_x - 10, ty + 6, 1, 16, GUI_BORDER2);
+    
+    // 3. Caps Lock indicator
+    int caps_x = hdd_x - 50;
+    if (caps_a) {
+        draw_rect(caps_x, ty + 6, 32, 16, 0x00FF8800); // Orange bg
+        draw_string_px(caps_x + 4, ty + 10, "CAP", 0x00FFFFFF, 0x00FF8800);
+    } else {
+        draw_rect(caps_x, ty + 6, 32, 16, GUI_BORDER);
+        draw_string_px(caps_x + 4, ty + 10, "cap", 0x00888888, GUI_BORDER);
+    }
 
     // Clock (center)
     unsigned char sec  = bcd_to_bin(read_cmos(0x00));
@@ -132,7 +154,7 @@ void taskbar_draw() {
     draw_num2(cx2 + 74, ty + 6, sec,  GUI_BORDER,   GUI_TASKBAR);
 
     // Window buttons
-    int wx = 70;
+    int wx = 86;
     for (int i = 0; i < MAX_WINDOWS && wx < (int)fb_width - 200; i++) {
         if (!wm_wins[i].visible) continue;
         int focused = (wm_focused == wm_wins[i].id) && !wm_wins[i].minimized;
@@ -172,13 +194,13 @@ void taskbar_handle_click(int mx, int my) {
     int ty = (int)fb_height - TASKBAR_H_PX;
     if (my < ty) return;
     
-    // Mectov button click
-    if (mx >= 2 && mx <= 62) {
+    // MectovOS button click
+    if (mx >= 2 && mx <= 78) {
         start_menu_open = !start_menu_open;
         return;
     }
     
-    int wx = 70;
+    int wx = 86;
     for (int i = 0; i < MAX_WINDOWS && wx < (int)fb_width - 200; i++) {
         if (!wm_wins[i].visible) continue;
         if (mx >= wx && mx < wx + 32) { // 32px width

@@ -6,7 +6,7 @@
 #define ICON_COUNT  7
 
 void desktop_draw();
-void desktop_handle_click(int mx, int my);
+void desktop_handle_mouse(int mx, int my, int btn, int pbtn);
 
 #endif
 

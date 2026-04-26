@@ -18,7 +18,8 @@ SRCS = $(wildcard $(SRC_DIR)/drivers/*.c) \
 
 OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(SRCS:%.c=$(OBJ_DIR)/%.o) \
-       $(OBJ_DIR)/boot.o
+       $(OBJ_DIR)/boot.o \
+       $(OBJ_DIR)/wallpaper.o
 
 all: $(OBJ_DIR) myos.bin
 
@@ -34,6 +35,12 @@ $(OBJ_DIR)/boot.o: boot.asm
 
 $(OBJ_DIR)/src/sys/interrupt_entry.o: src/sys/interrupt_entry.asm
 	$(AS) $(ASFLAGS) $< -o $@
+
+$(OBJ_DIR)/wallpaper.o: $(OBJ_DIR)/wallpaper.bin
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+$(OBJ_DIR)/wallpaper.bin:
+	python3 scratch/build_wallpaper.py /home/mectov/.gemini/antigravity/brain/1701ced2-e485-4124-afac-9fa8400a902f/media__1777224290409.png $@
 
 $(OBJ_DIR)/%.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
