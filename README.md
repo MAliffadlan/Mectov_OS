@@ -1,91 +1,62 @@
-Mectov OS v10.5 (The Professional Bare-Metal Update)
-===================================================
+Mectov OS v11.0 (The Modular & Memory Update)
+=================================================
 
-Mectov OS is a monolithic, bare-metal operating system kernel developed from scratch using C and x86 Assembly. It is designed for educational research into low-level systems, hardware drivers, and kernel architecture.
+Mectov OS is a monolithic, bare-metal operating system kernel developed from scratch using C and x86 Assembly. Version 11.0 marks a major milestone with a fully modular architecture and the introduction of the Mectov Memory Manager (MMM).
 
-Project Overview
-----------------
-Unlike high-level applications, Mectov OS operates directly on PC hardware (VGA, ATA, PIT, PS/2). It implements its own Window Manager (TUI), Virtual File System, and Shell environment without any external libraries.
+Modular Architecture
+--------------------
+The project has been refactored into a structured hierarchy for professional-grade development:
+- `src/drivers/`: Low-level hardware drivers (VGA, Keyboard, ATA, Speaker).
+- `src/sys/`: Core system services (Memory Management, File System, Security).
+- `src/apps/`: Integrated applications (Nano Editor, Snake Game).
+- `src/include/`: Unified header files for inter-module communication.
 
 Core Features
 -------------
+- **Mectov Memory Manager (MMM):** 
+    - Physical Memory Management (PMM) using Bitmap tracking.
+    - Simple Dynamic Allocation (`kmalloc`) for kernel services.
+    - Paging support as a foundation for advanced multitasking.
 - **Security & Integrity:**
     - Secure Boot Login with masked password authentication.
-    - Persistent Screen Lock (`kunci`) integrated with the security module.
+    - Persistent Screen Lock (`kunci`) and session protection.
 - **Hardware Interaction:**
-    - CPUID Identity Detection: Automatically identifies the host processor.
-    - Persistent Storage: Full ATA/IDE PIO driver for virtual hard disk support.
+    - CPUID Identity Detection: Native identification of the host processor.
+    - Persistent Storage: ATA/IDE PIO driver for virtual hard disk support.
     - Real-Time Clock: Localized WIB (UTC+7) hardware clock reading.
-    - Audio Synthesis: Native PC Speaker driver for tone and melody generation.
 - **User Interface (Mectov TUI):**
-    - Floating Window Manager illusion with drop shadows and desktop background.
-    - Live System HUD: Real-time clock and uptime display in the dashboard.
-    - Hardware Cursor: Stable blinking underscore cursor synchronization.
-    - Marquee System: Smooth running text on the bottom system bar.
+    - Floating Window Manager with Live System HUD (Real-time Clock & Uptime).
+    - Stable Hardware Cursor and Smooth Marquee running text.
 - **Command Shell (Mectovsh):**
-    - Tab Auto-complete: Intelligent command suggestion and completion.
-    - Command History: Access previously executed commands using the Up Arrow.
-    - Manual System: Built-in documentation via the `man` command.
-- **Embedded Applications:**
-    - Mectov Nano: A lightweight terminal-based text editor.
-    - Mectovular: A high-performance Snake game with WASD and Arrow key support.
-    - Scripting Engine: MectovScript v2.0 for automated batch task execution.
+    - Tab Auto-complete and Command History (Up Arrow).
+    - Integrated Manual System (`man` command).
 
 System Command Reference
 ------------------------
 ### Administration & Power
-- `mfetch`      : Comprehensive system information and hardware specs.
-- `help`        : Formatted ASCII table of all available commands.
+- `mfetch`      : Detailed system info, CPU brand, and memory usage.
+- `mem`         : Display RAM statistics (Total, Used, Free).
 - `waktu`       : Display current WIB time (Jakarta).
-- `warna`       : Cycle through terminal color themes.
-- `matikan`     : Shutdown the system via ACPI.
-- `mulaiulang`  : Perform a hardware CPU reset.
-- `kunci`       : Lock the terminal session immediately.
-- `clear`       : Reset the terminal workspace.
+- `kunci`       : Lock the system session.
+- `matikan`     : Shutdown via ACPI.
+- `mulaiulang`  : Hardware CPU reset.
 
-### File Management
-- `ls`          : List persistent files on the ATA drive.
-- `buat [name]` : Initialize a new empty file.
-- `edit [name]` : Invoke the Mectov Nano editor.
-- `baca [name]` : Output file contents to the terminal.
-- `hapus [name]`: Permanently remove a file from disk.
-- `tulis [name] [text]`: Direct CLI write to a specific file.
-
-### Scripting & Entertainment
-- `ular`        : Launch the Mectov Snake game.
-- `man [cmd]`   : Access the manual entry for a command.
-- `beep`        : Execute a system audio test.
-- `echo [text]` : Print string to the workspace.
-- `jalankan [file]`: Execute a MectovScript (.ms) file.
+### File & Scripting
+- `ls`, `buat`, `tulis`, `baca`, `hapus`: Persistent file management.
+- `edit [name]` : Open Mectov Nano text editor.
+- `jalankan`    : Execute MectovScript (.ms) batch files.
+- `ular`        : Launch the Mectov Snake game (WASD/Arrow keys).
 
 Installation and Execution
 --------------------------
-### Requirements
-- GCC (with multilib support for i386)
-- NASM (Netwide Assembler)
-- QEMU (PC System Emulator)
-
-### Building from Source
-Use the provided build script:
+### Building
+Requirements: `gcc`, `nasm`, `make`, `qemu`, `gcc-multilib`.
     ./build.sh
 
-Manual build process:
-    nasm -f elf32 boot.asm -o boot.o
-    gcc -m32 -c kernel.c -o kernel.o -std=gnu99 -ffreestanding -O2 -Wall -Wextra
-    ld -m elf_i386 -T linker.ld boot.o kernel.o -o myos.bin
-
-### Running the System
-Use the provided run script:
+### Running
     ./run.sh
 
-Manual QEMU execution (with persistent storage and audio):
-    qemu-system-i386 -kernel myos.bin -audiodev alsa,id=snd0 -machine pcspk-audiodev=snd0 -drive file=disk.img,format=raw,index=0,media=disk
-
-*Note: The default system password is `mectov123`.*
-
-Development
------------
-Mectov OS is an open-source project. All core logic resides within `kernel.c` and `boot.asm`.
+*Note: Default system password is `mectov123`.*
 
 Created and maintained by Alif Fadlan.
 Licensed under the MIT License.
