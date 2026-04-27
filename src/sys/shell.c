@@ -11,6 +11,7 @@
 #include "../include/net.h"
 #include "../include/rtl8139.h"
 #include "../include/timer.h"
+#include "../include/loader.h"
 
 char cmd_b[256]; int b_idx = 0;
 char hist_b[256];
@@ -81,12 +82,15 @@ void ex_cmd() {
         char* fname = cmd_b + 9;
         int fid = vfs_find(fname);
         if (fid == -1) {
-            print("Script tidak ditemukan: ", 0x0C); print(fname, 0x0C); print("\n", 0x0C);
+            print("File tidak ditemukan: ", 0x0C); print(fname, 0x0C); print("\n", 0x0C);
         } else {
-            print("Menjalankan script: ", 0x0A); print(fname, 0x0A); print("\n", 0x0A);
-            // Sangat sederhana: print isi file karena engine script asli belum ada
-            print(fs[fid].data, 0x0F);
-            print("\n[Script selesai]\n", 0x0A);
+            print("Membuka aplikasi MCT: ", 0x0A); print(fname, 0x0A); print("\n", 0x0A);
+            int res = load_mct_app(fname);
+            if (res >= 0) {
+                print("[+] Task User Mode Dibuat! (Task ID: ", 0x0A); p_int(res, 0x0A); print(")\n", 0x0A);
+            } else {
+                print("[-] Gagal menjalankan! Error: ", 0x0C); p_int(res, 0x0C); print("\n", 0x0C);
+            }
         }
     }
     else if (strncmp(cmd_b, "buat ", 5) == 0) {

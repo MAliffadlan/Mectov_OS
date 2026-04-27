@@ -7,5 +7,6 @@ void init_tasking();
 int create_task(void (*entry)());
 int create_user_task(void (*entry)());
 uint32_t schedule(uint32_t esp);
+void task_exit(void);
 
 #endif

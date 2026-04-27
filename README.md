@@ -73,6 +73,20 @@ Created by M Alif Fadlan.
 - Focus management: minimizing a window auto-focuses the next visible window
 
 ### 4. Desktop Environment (src/gui/desktop.c)
+- **Current Version**: v18.0 "External"
+- **Kernel Architecture**: Monolithic (32-bit x86)
+- **Ring 3 User Mode**: Stable (Isolated Tasks)
+- **Executable Format**: .mct (Mectov Executable)
+- **Syscall API**: 14+ Functions (int 0x80)
+- **Filesystem**: Custom VFS (ATA/IDE Support)
+- **GUI**: VBE 800x600 32-bit, Window Manager, Double Buffering
+- **Networking**: TCP/IP Stack, RTL8139 Driver (Ping/DNS ready)
+
+### 🚀 Latest Updates (v18.0)
+- **New .mct Executable Format**: Support for standalone binary files.
+- **External App Loader**: Load and execute apps from VFS directly to Ring 3.
+- **Python Toolchain**: `build_mct.py` for compiling C to .mct and `inject_vfs.py` for disk management.
+- **Optimized UI Engine**: Unlocked rendering engine for maximum FPS.
 - **Custom Baked Wallpaper**: Full-color 800x600 32-bit BGRA image processed via a Python build script, converted into a raw binary, and injected directly into the kernel using `objcopy` as an `elf32-i386` object. Blitted instantly via `memcpy`.
 - **MenuetOS-Style Icons**: Highly detailed procedural pixel-art icons stacked vertically on the left side of the screen with transparent backgrounds and text drop-shadows.
 - **Draggable Persistent Icons**: Users can drag and drop icons to any location. Positions are automatically serialized to an `icons.cfg` file on the VFS and persist across system reboots.

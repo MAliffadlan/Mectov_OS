@@ -145,3 +145,16 @@ uint32_t schedule(uint32_t esp) {
     
     return tasks[next].esp;
 }
+
+// Terminate the current task — called from SYS_EXIT syscall
+void task_exit(void) {
+    if (current_task <= 0) return; // Never kill task 0 (kernel)
+    
+    tasks[current_task].state = 0; // Mark as free
+    num_tasks--;
+    
+    // This task is now dead. Halt and wait for scheduler to switch away.
+    // The timer IRQ will fire, scheduler will skip this task (state=0),
+    // and switch to the next ready task.
+    for (;;) __asm__("hlt");
+}

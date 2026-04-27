@@ -178,8 +178,8 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         // Force continuous redraw for marquee animation
         needs_redraw = 1;
 
-        // Throttle rendering to ~30 FPS (every 2 ticks at 60Hz)
-        if (needs_redraw && (now - last_frame_tick >= 2)) {
+        // Throttle rendering to ~60 FPS (every 1 tick at 60Hz)
+        if (needs_redraw && (now - last_frame_tick >= 1)) {
             needs_redraw = 0;
             last_frame_tick = now;
             fps_frames++;
@@ -190,24 +190,37 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                 fps_last_tick = now;
             }
             full_redraw();
-        }
+        } // <--- Added missing brace here
 
-        __asm__ __volatile__ ("hlt");
+        // Only halt if no ticks have passed during our rendering.
+        // If full_redraw() took longer than 1 tick, get_ticks() > now,
+        // so we skip hlt and immediately render the next frame to catch up!
+        if (get_ticks() == now) {
+            __asm__ __volatile__ ("hlt");
+        }
     }
 }
 
 #include "src/include/syscall.h"
 
-// Ring 3 user task — runs entirely in user mode.
-// Only communicates with kernel via int 0x80 syscalls.
+// ============================================================
+// Ring 3 User Task — runs entirely in user mode.
+// Demonstrates the new syscall API.
+// ============================================================
 void user_task_entry() {
-    // Simple blinking indicator: draw a small colored rect via syscall
+    // Blinking status indicator in top-right corner
     int tick = 0;
     while (1) {
-        uint32_t color = (tick & 1) ? 0x00FF00 : 0x00FFFF;
-        // Syscall 7: Draw Rect. Args packed: ebx=(x<<16|y), ecx=(w<<16|h), edx=color
-        syscall(7, (770 << 16) | 5, (16 << 16) | 16, color);
+        uint32_t color = (tick & 1) ? 0x00FF00 : 0x00AAAA;
+        
+        // Draw a status indicator rect (using new individual-arg syscall)
+        sys_draw_rect(770, 5, 16, 16, color);
+        
+        // Draw status text next to it
+        sys_draw_text(720, 7, "R3", 0x00FF00, 0x00000000);
+        
         tick++;
+        
         // Busy-wait delay (no privileged instructions!)
         for (volatile int i = 0; i < 2000000; i++);
     }
