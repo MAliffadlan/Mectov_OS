@@ -59,6 +59,24 @@ static void draw_taskbar_icon(int ix, int iy, const char* title, int minimized) 
 }
 
 int start_menu_open = 0;
+int calendar_open = 0;
+
+static int get_dow(int d, int m, int y) {
+    if (m < 3) { m += 12; y -= 1; }
+    int k = y % 100;
+    int j = y / 100;
+    int h = (d + 13 * (m + 1) / 5 + k + k / 4 + j / 4 + 5 * j) % 7;
+    return (h + 6) % 7; // 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
+}
+
+static int days_in_month(int m, int y) {
+    int days[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (m == 2) {
+        if (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) return 29;
+        return 28;
+    }
+    return days[m - 1];
+}
 
 void taskbar_draw() {
     if (!is_vbe) return;
@@ -102,8 +120,6 @@ void taskbar_draw() {
     
     int ram_txt_x = bar_x - 40;
     draw_string_px(ram_txt_x, ty + 6, "RAM", GUI_TEXT_INV, GUI_TASKBAR);
-    // Draw percentage inside the bar or just rely on the bar. Actually let's put it before the text if we want, or just "RAM:"
-    // The user wants "HDD: 0% | RAM: 0%" or similar. We'll use the bar for RAM.
     
     // 2. HDD Indicator
     int hdd_x = ram_txt_x - 50;
@@ -146,12 +162,15 @@ void taskbar_draw() {
     if (dow > 7) dow = 0;
 
     int cx2 = (int)(fb_width / 2) - 60;
-    draw_string_px(cx2,      ty + 6, days[dow], GUI_TEXT_INV, GUI_TASKBAR);
-    draw_num2(cx2 + 30, ty + 6, hour, GUI_TEXT_INV, GUI_TASKBAR);
-    draw_string_px(cx2 + 46, ty + 6, ":", GUI_TEXT_INV, GUI_TASKBAR);
-    draw_num2(cx2 + 52, ty + 6, min,  GUI_TEXT_INV, GUI_TASKBAR);
-    draw_string_px(cx2 + 68, ty + 6, ":", GUI_TEXT_INV, GUI_TASKBAR);
-    draw_num2(cx2 + 74, ty + 6, sec,  GUI_BORDER,   GUI_TASKBAR);
+    uint32_t clk_bg = calendar_open ? GUI_BTN_HOV : GUI_TASKBAR;
+    draw_rect(cx2 - 4, ty + 2, 106, TASKBAR_H_PX - 4, clk_bg); // Clock button background
+
+    draw_string_px(cx2,      ty + 6, days[dow], GUI_TEXT_INV, clk_bg);
+    draw_num2(cx2 + 30, ty + 6, hour, GUI_TEXT_INV, clk_bg);
+    draw_string_px(cx2 + 46, ty + 6, ":", GUI_TEXT_INV, clk_bg);
+    draw_num2(cx2 + 52, ty + 6, min,  GUI_TEXT_INV, clk_bg);
+    draw_string_px(cx2 + 68, ty + 6, ":", GUI_TEXT_INV, clk_bg);
+    draw_num2(cx2 + 74, ty + 6, sec,  GUI_BORDER,   clk_bg);
 
     // Window buttons
     int wx = 86;
@@ -160,33 +179,101 @@ void taskbar_draw() {
         int focused = (wm_focused == wm_wins[i].id) && !wm_wins[i].minimized;
         uint32_t bg2 = wm_wins[i].minimized ? GUI_BORDER2 : (focused ? GUI_BTN_HOV : GUI_BTN);
         
-        // Draw 32x24 button
         draw_rect(wx, ty + 2, 32, TASKBAR_H_PX - 4, bg2);
         draw_rect_border(wx, ty + 2, 32, TASKBAR_H_PX - 4, focused ? GUI_BORDER : GUI_BORDER2);
-        
-        // Draw 16x16 icon centered in the 32x24 button
         draw_taskbar_icon(wx + 8, ty + 6, wm_wins[i].title, wm_wins[i].minimized);
         
-        wx += 38; // 32px width + 6px margin
+        wx += 38;
     }
 
     // Draw Start Menu if open
     if (start_menu_open) {
-        int sm_h = 160;
+        int sm_h = 267;
         int sm_w = 160;
         int sm_y = ty - sm_h;
         draw_rect(2, sm_y, sm_w, sm_h, GUI_BG);
         draw_rect_border(2, sm_y, sm_w, sm_h, GUI_BORDER);
         
         draw_rect(2, sm_y, sm_w, 24, GUI_BTN);
-        draw_string_px(10, sm_y + 4, "Mectov OS", GUI_TEXT, GUI_BTN);
+        draw_string_px(10, sm_y + 4, "MectovOS Apps", GUI_TEXT, GUI_BTN);
         draw_rect(2, sm_y + 24, sm_w, 1, GUI_BORDER);
 
-        draw_string_px(14, sm_y + 34, "Terminal", GUI_TEXT, GUI_BG);
-        draw_string_px(14, sm_y + 58, "Editor", GUI_TEXT, GUI_BG);
-        draw_string_px(14, sm_y + 82, "System Info", GUI_TEXT, GUI_BG);
-        draw_string_px(14, sm_y + 106, "Clock", GUI_TEXT, GUI_BG);
-        draw_string_px(14, sm_y + 130, "Power", 0x00FF4444, GUI_BG); // Red power text
+        int oy = sm_y + 25;
+        draw_string_px(14, oy + 4, "Terminal", GUI_TEXT, GUI_BG); oy += 24;
+        draw_string_px(14, oy + 4, "Editor (Nano)", GUI_TEXT, GUI_BG); oy += 24;
+        draw_string_px(14, oy + 4, "File Explorer", GUI_TEXT, GUI_BG); oy += 24;
+        draw_string_px(14, oy + 4, "Mini Browser", GUI_TEXT, GUI_BG); oy += 24;
+        draw_string_px(14, oy + 4, "System Info", GUI_TEXT, GUI_BG); oy += 24;
+        draw_string_px(14, oy + 4, "Clock", GUI_TEXT, GUI_BG); oy += 24;
+        draw_string_px(14, oy + 4, "PCI Manager", GUI_TEXT, GUI_BG); oy += 24;
+        draw_string_px(14, oy + 4, "Snake Game", GUI_TEXT, GUI_BG); oy += 24;
+        
+        draw_rect(2, oy, sm_w, 1, GUI_BORDER); // Separator
+        oy += 1;
+        draw_string_px(14, oy + 4, "Shut Down", 0x00CC0000, GUI_BG); oy += 24;
+        draw_string_px(14, oy + 4, "Restart", 0x00DD6600, GUI_BG);
+    }
+
+    // Draw Calendar if open
+    if (calendar_open) {
+        unsigned char day_cmos = bcd_to_bin(read_cmos(0x07));
+        unsigned char mon_cmos = bcd_to_bin(read_cmos(0x08));
+        unsigned char yr_cmos  = bcd_to_bin(read_cmos(0x09));
+        int c_yr = 2000 + yr_cmos;
+        
+        int cal_w = 200;
+        int cal_h = 160;
+        int cal_x = cx2 - 40;
+        int cal_y = ty - cal_h;
+        
+        draw_rect(cal_x, cal_y, cal_w, cal_h, GUI_BG);
+        draw_rect_border(cal_x, cal_y, cal_w, cal_h, GUI_BORDER);
+        
+        draw_rect(cal_x, cal_y, cal_w, 24, GUI_BTN);
+        
+        const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        char date_str[32];
+        int idx = 0;
+        if (day_cmos >= 10) date_str[idx++] = '0' + (day_cmos / 10);
+        date_str[idx++] = '0' + (day_cmos % 10);
+        date_str[idx++] = ' ';
+        const char* ms = months[(mon_cmos - 1) % 12];
+        while (*ms) date_str[idx++] = *ms++;
+        date_str[idx++] = ' ';
+        date_str[idx++] = '2'; date_str[idx++] = '0';
+        date_str[idx++] = '0' + (yr_cmos / 10);
+        date_str[idx++] = '0' + (yr_cmos % 10);
+        date_str[idx] = '\0';
+        
+        draw_string_px(cal_x + 50, cal_y + 4, date_str, GUI_TEXT, GUI_BTN);
+        
+        // Days header
+        const char* d_labels[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
+        for (int i = 0; i < 7; i++) {
+            draw_string_px(cal_x + 10 + i * 26, cal_y + 30, d_labels[i], 0x00888888, GUI_BG);
+        }
+        
+        int start_dow = get_dow(1, mon_cmos, c_yr);
+        int total_days = days_in_month(mon_cmos, c_yr);
+        
+        int row = 0;
+        for (int d = 1; d <= total_days; d++) {
+            int col = (start_dow + d - 1) % 7;
+            char nbuf[3];
+            if (d < 10) { nbuf[0] = ' '; nbuf[1] = '0' + d; }
+            else { nbuf[0] = '0' + (d / 10); nbuf[1] = '0' + (d % 10); }
+            nbuf[2] = '\0';
+            
+            uint32_t c_fg = GUI_TEXT;
+            if (d == day_cmos) {
+                draw_rect(cal_x + 6 + col * 26, cal_y + 50 + row * 20 - 2, 22, 18, GUI_BTN_HOV);
+                c_fg = GUI_WHITE;
+            }
+            
+            draw_string_px(cal_x + 10 + col * 26, cal_y + 50 + row * 20, nbuf, c_fg, (d == day_cmos) ? GUI_BTN_HOV : GUI_BG);
+            
+            if (col == 6) row++;
+        }
     }
 }
 
@@ -197,19 +284,25 @@ void taskbar_handle_click(int mx, int my) {
     // MectovOS button click
     if (mx >= 2 && mx <= 78) {
         start_menu_open = !start_menu_open;
+        if (start_menu_open) calendar_open = 0;
+        return;
+    }
+    
+    int cx2 = (int)(fb_width / 2) - 60;
+    if (mx >= cx2 - 4 && mx <= cx2 + 102) {
+        calendar_open = !calendar_open;
+        if (calendar_open) start_menu_open = 0;
         return;
     }
     
     int wx = 86;
     for (int i = 0; i < MAX_WINDOWS && wx < (int)fb_width - 200; i++) {
         if (!wm_wins[i].visible) continue;
-        if (mx >= wx && mx < wx + 32) { // 32px width
+        if (mx >= wx && mx < wx + 32) {
             if (wm_wins[i].minimized) {
-                // Restore from minimize
                 wm_wins[i].minimized = 0;
                 wm_raise(wm_wins[i].id);
             } else if (wm_focused == wm_wins[i].id) {
-                // Click focused window again = minimize
                 wm_wins[i].minimized = 1;
                 wm_focused = -1;
                 for (int zz = wm_zcount - 1; zz >= 0; zz--) {
@@ -220,13 +313,12 @@ void taskbar_handle_click(int mx, int my) {
                     }
                 }
             } else {
-                // Bring to front
                 wm_raise(wm_wins[i].id);
             }
             return;
         }
-        wx += 38; // 32px width + 6px margin
+        wx += 38;
     }
 }
 
-void taskbar_tick() { /* clock updates on redraw */ }
+void taskbar_tick() { }

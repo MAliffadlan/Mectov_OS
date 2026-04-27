@@ -10,9 +10,31 @@ Created by M Alif Fadlan.
 
 ---
 
+## Architecture
+
+```
++---------------------------------------------------------+
+|                    GRUB Multiboot                       |
++---------------------------------------------------------+
+|  boot.asm  -->  kernel.c  (kernel_main entry point)     |
++---------------------------------------------------------+
+|  GDT (Ring 0+3)  |  IDT  |  TSS  |  Syscall (Active R3) |
++---------------------------------------------------------+
+|  PIT Timer  |  Keyboard  |  Mouse  |  Serial (COM1/2)  |
++---------------------------------------------------------+
+|  Memory Manager    |  Task Scheduler  |  VFS + ATA PIO  |
++---------------------------------------------------------+
+|  VGA/VESA Driver   |  Window Manager  |  PCI Scanner    |
++---------------------------------------------------------+
+|  RTL8139 NIC  |  Network Stack (Ethernet/ARP/IP/UDP)    |
++---------------------------------------------------------+
+|  Desktop  |  Taskbar  |  Start Menu  |  Applications    |
++---------------------------------------------------------+
+```
+
 ### Target Platform
-- CPU: Intel x86 (i386), Protected Mode
-- Ring Levels: Ring 0 (Kernel) + Ring 3 segments ready (User Mode infrastructure)
+- Ring Levels: Ring 0 (Kernel) + Ring 3 (User Mode) — ACTIVE and Stable
+- Scheduler: Preemptive Round-Robin, Ring-Aware Context Switching
 - Display: VESA VBE Linear Framebuffer, 32-bit color (800x600)
 - Storage: ATA PIO (IDE), 1MB virtual disk
 - Audio: PC Speaker via PIT Channel 2
@@ -80,15 +102,10 @@ Created by M Alif Fadlan.
 - **Terminal commands**: `ping [ip]` and `host [domain]`
 
 ### 7. User Mode & Syscall Infrastructure (src/sys/syscall.c + src/sys/gdt.c)
-- **GDT expanded** from 3 to 6 entries:
-  - Slot 0: Null
-  - Slot 1: Kernel Code (Ring 0, selector 0x08)
-  - Slot 2: Kernel Data (Ring 0, selector 0x10)
-  - Slot 3: User Code (Ring 3, selector 0x18)
-  - Slot 4: User Data (Ring 3, selector 0x20)
-  - Slot 5: TSS (selector 0x28)
-- **TSS (Task State Segment)**: Loaded at boot, stores kernel stack pointer (ESP0) for automatic Ring 3 → Ring 0 stack switching on interrupts
-- **Syscall interface**: `int 0x80` with DPL=3 IDT gate, dispatches via EAX register
+- **Ring 3 Stabilization**: Resolved a critical context-switching bug involving `push byte 0x80` sign-extension which previously caused kernel freezes.
+- **Ring-Aware Scheduler**: The scheduler now correctly manages `SS` and `ESP` switching via `iret` and updates `TSS.esp0` for every task to ensure safe kernel entries from Ring 3.
+- **Syscall interface**: `int 0x80` with DPL=3 IDT gate, allowing user programs to request kernel services like `draw_rect`, `print`, and `malloc`.
+- **Memory Isolation**: Identity-mapped memory (0-128MB) is configured with the User/Supervisor bit set to 1, allowing Ring 3 execution within the mapped physical range.
 
 ### 8. Serial Port Driver (src/drivers/serial.c)
 - UART 16550A initialization (38400 baud, 8N1)
@@ -156,6 +173,7 @@ make clean && make
 
 | Version | Highlights                                                                    |
 |---------|-------------------------------------------------------------------------------|
+| v17.1   | **Stable Ring 3 User Mode**, Ring-aware scheduler, TSS stack switching fix, Syscall graphics rendering. |
 | v17.0   | Terminus Bold font, Custom Wallpaper baking (objcopy), MenuetOS-style UI, Draggable persistent icons (saved to VFS), rendering optimizations via memcpy |
 | v16.0   | Network stack (RTL8139, Ethernet, ARP, IPv4, ICMP, UDP, DNS), Mini Browser, Serial driver, User Mode infrastructure |
 | v15.0   | Gradient wallpaper, procedural icons, window minimize/maximize, FPS counter |

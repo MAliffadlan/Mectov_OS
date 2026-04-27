@@ -21,7 +21,14 @@ void detect_cpu() {
 
 void init_uptime() { boot_sec = bcd_to_bin(read_cmos(0x00)); boot_min = bcd_to_bin(read_cmos(0x02)); boot_hour = bcd_to_bin(read_cmos(0x04)); }
 
-void shutdown() { outw(0x604, 0x2000); }
+void shutdown() {
+    // Modern ACPI shutdown via PM1a_CNT (works in QEMU PIIX4 / Bochs)
+    outw(0xB004, 0x2000);
+    // Fallback QEMU isa-debug-exit
+    outw(0x604, 0x2000);
+    // Fallback VirtualBox
+    outw(0x4004, 0x3400);
+}
 void reboot() { unsigned char g = 0x02; while (g & 0x02) g = inb(0x64); outb(0x64, 0xFE); }
 
 int strlen(const char* s) {

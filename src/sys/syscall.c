@@ -32,6 +32,16 @@ static void syscall_handler(registers_t* regs) {
             for(;;) __asm__("hlt");
             break;
         }
+        case 7: {
+            int x = regs->ebx >> 16;
+            int y = regs->ebx & 0xFFFF;
+            int w = regs->ecx >> 16;
+            int h = regs->ecx & 0xFFFF;
+            uint32_t color = (uint32_t)regs->edx;
+            draw_rect(x, y, w, h, color);
+            regs->eax = 0;
+            break;
+        }
         default:
             regs->eax = -1; // Unknown syscall
             break;

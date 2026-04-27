@@ -114,14 +114,16 @@ void kernel_main(uint32_t magic, uint32_t addr) {
 
     __asm__ __volatile__ ("sti");
     
-    extern void dummy_task_entry();
-    create_task(dummy_task_entry);
+    // Create a Ring 3 user task for testing
+    extern int create_user_task(void (*entry)());
+    extern void user_task_entry();
+    create_user_task(user_task_entry);
 
     init_mouse();
 
     draw_startup_logo();
     nada(440, 150); nada(523, 150); nada(659, 300);
-    delay(600);
+    // Removed 10-second delay(600) so it boots instantly without hanging on black screen
 
     wm_init();
     cursor_saved_x = -1;
@@ -194,18 +196,19 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     }
 }
 
-volatile int dummy_task_runs = 0;
-void dummy_task_entry() {
+#include "src/include/syscall.h"
+
+// Ring 3 user task — runs entirely in user mode.
+// Only communicates with kernel via int 0x80 syscalls.
+void user_task_entry() {
+    // Simple blinking indicator: draw a small colored rect via syscall
+    int tick = 0;
     while (1) {
-        dummy_task_runs++;
-        if (is_vbe && fb_addr) {
-            uint32_t color = (dummy_task_runs / 5000000) % 2 ? 0xFF0000 : 0x00FF00;
-            // Draw a 20x20 blinking square at the top right (over the marquee)
-            for (int y = 0; y < 20; y++) {
-                for (int x = 0; x < 20; x++) {
-                    fb_addr[(5 + y) * fb_width + (fb_width - 30 + x)] = color;
-                }
-            }
-        }
+        uint32_t color = (tick & 1) ? 0x00FF00 : 0x00FFFF;
+        // Syscall 7: Draw Rect. Args packed: ebx=(x<<16|y), ecx=(w<<16|h), edx=color
+        syscall(7, (770 << 16) | 5, (16 << 16) | 16, color);
+        tick++;
+        // Busy-wait delay (no privileged instructions!)
+        for (volatile int i = 0; i < 2000000; i++);
     }
 }

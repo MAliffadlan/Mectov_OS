@@ -54,8 +54,8 @@ void init_gdt() {
 
     gdt_flush((uint32_t)&gdt_ptr);
 
-    // Load TSS
-    __asm__ volatile("mov $0x2B, %%ax; ltr %%ax" ::: "ax");
+    // Load TSS (must use RPL=0 selector for LTR, which is 0x28)
+    __asm__ volatile("mov $0x28, %%ax; ltr %%ax" ::: "ax");
 }
 
 void tss_set_kernel_stack(uint32_t stack) {

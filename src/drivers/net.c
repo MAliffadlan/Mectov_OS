@@ -26,6 +26,28 @@ uint16_t ntohs(uint16_t val) {
     return (val >> 8) | (val << 8);
 }
 
+uint32_t htonl(uint32_t val) {
+    return ((val & 0xFF) << 24) | ((val & 0xFF00) << 8) | ((val >> 8) & 0xFF00) | ((val >> 24) & 0xFF);
+}
+uint32_t ntohl(uint32_t val) { return htonl(val); }
+
+// TCP Globals
+int tcp_state = 0; // TCP_CLOSED
+uint8_t tcp_target_ip[4] = {0};
+uint16_t tcp_local_port = 54321;
+uint16_t tcp_remote_port = 80;
+uint32_t tcp_seq_num = 0x11223344;
+uint32_t tcp_ack_num = 0;
+
+// TCP Pseudo-header for checksum
+typedef struct __attribute__((packed)) {
+    uint8_t src_ip[4];
+    uint8_t dst_ip[4];
+    uint8_t zeros;
+    uint8_t protocol;
+    uint16_t tcp_len;
+} tcp_pseudo_header_t;
+
 // IP checksum (RFC 1071)
 static uint16_t ip_checksum(void* data, uint32_t len) {
     uint32_t sum = 0;
@@ -190,6 +212,78 @@ static void net_send_udp(uint8_t* target_ip, uint16_t src_port, uint16_t dst_por
     net_send_eth(gateway_mac, ETH_TYPE_IP, pkt, total);
 }
 
+// TCP segment send helper
+static void net_send_tcp_segment(uint8_t flags, uint8_t* payload, uint32_t payload_len) {
+    if (!net_ready) return;
+
+    uint8_t pkt[1500];
+    ip_header_t* ip = (ip_header_t*)pkt;
+    tcp_header_t* tcp = (tcp_header_t*)(pkt + sizeof(ip_header_t));
+
+    uint32_t tcp_len = sizeof(tcp_header_t) + payload_len;
+    uint32_t total = sizeof(ip_header_t) + tcp_len;
+
+    ip->ver_ihl    = 0x45;
+    ip->tos        = 0;
+    ip->total_len  = htons(total);
+    ip->id         = htons(ip_id_counter++);
+    ip->flags_frag = 0;
+    ip->ttl        = 64;
+    ip->protocol   = IP_PROTO_TCP;
+    ip->checksum   = 0;
+    memcpy(ip->src_ip, my_ip, 4);
+    memcpy(ip->dst_ip, tcp_target_ip, 4);
+    ip->checksum   = ip_checksum(ip, sizeof(ip_header_t));
+
+    tcp->src_port = htons(tcp_local_port);
+    tcp->dst_port = htons(tcp_remote_port);
+    tcp->seq      = htonl(tcp_seq_num);
+    tcp->ack      = htonl(tcp_ack_num);
+    tcp->data_offset_res = (sizeof(tcp_header_t) / 4) << 4;
+    tcp->flags    = flags;
+    tcp->window_size = htons(8192);
+    tcp->checksum = 0;
+    tcp->urgent_ptr = 0;
+
+    if (payload_len > 0) {
+        memcpy(pkt + sizeof(ip_header_t) + sizeof(tcp_header_t), payload, payload_len);
+    }
+
+    // Compute TCP checksum with pseudo-header
+    uint8_t pseudo_buf[1500];
+    tcp_pseudo_header_t* psh = (tcp_pseudo_header_t*)pseudo_buf;
+    memcpy(psh->src_ip, my_ip, 4);
+    memcpy(psh->dst_ip, tcp_target_ip, 4);
+    psh->zeros = 0;
+    psh->protocol = IP_PROTO_TCP;
+    psh->tcp_len = htons(tcp_len);
+    
+    memcpy(pseudo_buf + sizeof(tcp_pseudo_header_t), tcp, tcp_len);
+    tcp->checksum = ip_checksum(pseudo_buf, sizeof(tcp_pseudo_header_t) + tcp_len);
+    // Write back computed checksum
+    memcpy(pkt + sizeof(ip_header_t), tcp, sizeof(tcp_header_t));
+
+    net_send_eth(gateway_mac, ETH_TYPE_IP, pkt, total);
+}
+
+void net_tcp_connect(uint8_t* target_ip, uint16_t port) {
+    if (!net_ready) return;
+    memcpy(tcp_target_ip, target_ip, 4);
+    tcp_remote_port = port;
+    tcp_seq_num = get_ticks() * 12345; // random ISN
+    tcp_ack_num = 0;
+    tcp_state = TCP_SYN_SENT;
+    
+    net_send_tcp_segment(TCP_SYN, 0, 0);
+    tcp_seq_num++; // SYN consumes one sequence number
+}
+
+void net_tcp_send(uint8_t* payload, uint32_t len) {
+    if (tcp_state != TCP_ESTABLISHED) return;
+    net_send_tcp_segment(TCP_ACK | TCP_PSH, payload, len);
+    tcp_seq_num += len;
+}
+
 // Convert "google.com" to "\x06google\x03com\x00"
 static int format_dns_name(char* qname, const char* domain) {
     int qpos = 0;
@@ -289,6 +383,45 @@ static void net_handle_dns(uint8_t* data, uint32_t len) {
     }
 }
 
+char tcp_rx_buf[4096];
+int tcp_rx_len = 0;
+
+// Handle incoming TCP
+static void net_handle_tcp(ip_header_t* ip, uint8_t* tcp_data, uint32_t tcp_len) {
+    (void)ip;
+    if (tcp_len < sizeof(tcp_header_t)) return;
+    tcp_header_t* tcp = (tcp_header_t*)tcp_data;
+
+    uint16_t src_port = ntohs(tcp->src_port);
+    uint16_t dst_port = ntohs(tcp->dst_port);
+
+    if (dst_port != tcp_local_port || src_port != tcp_remote_port) return;
+
+    if (tcp_state == TCP_SYN_SENT) {
+        if ((tcp->flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {
+            // Received SYN-ACK!
+            tcp_ack_num = ntohl(tcp->seq) + 1;
+            tcp_state = TCP_ESTABLISHED;
+            // Send ACK
+            net_send_tcp_segment(TCP_ACK, 0, 0);
+        }
+    } else if (tcp_state == TCP_ESTABLISHED) {
+        // Handle incoming data if any
+        uint8_t header_len = (tcp->data_offset_res >> 4) * 4;
+        uint32_t payload_len = tcp_len - header_len;
+        if (payload_len > 0) {
+            // Append to tcp_rx_buf
+            if (tcp_rx_len + payload_len < sizeof(tcp_rx_buf)) {
+                memcpy(tcp_rx_buf + tcp_rx_len, tcp_data + header_len, payload_len);
+                tcp_rx_len += payload_len;
+            }
+            // Send ACK
+            tcp_ack_num = ntohl(tcp->seq) + payload_len;
+            net_send_tcp_segment(TCP_ACK, 0, 0);
+        }
+    }
+}
+
 // Handle UDP
 static void net_handle_udp(ip_header_t* ip, uint8_t* udp_data, uint32_t udp_len) {
     (void)ip;
@@ -322,6 +455,8 @@ static void net_handle_ip(uint8_t* data, uint32_t len) {
         net_handle_icmp(ip, data + ihl, total - ihl);
     } else if (ip->protocol == IP_PROTO_UDP) {
         net_handle_udp(ip, data + ihl, total - ihl);
+    } else if (ip->protocol == IP_PROTO_TCP) {
+        net_handle_tcp(ip, data + ihl, total - ihl);
     }
 }
 

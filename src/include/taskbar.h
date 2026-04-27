@@ -8,6 +8,7 @@ void taskbar_handle_click(int mx, int my);
 void taskbar_tick();
 
 extern int start_menu_open;
+extern int calendar_open;
 
 #endif
 

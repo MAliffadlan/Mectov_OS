@@ -36,9 +36,9 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
 
     for(uint32_t t = 0; t < num_tables; t++) {
         for(unsigned int j = 0; j < 1024; j++) {
-            page_tables[t][j] = ((t * 1024 + j) * 4096) | 3; 
+            page_tables[t][j] = ((t * 1024 + j) * 4096) | 7; // Present, R/W, User
         }
-        page_directory[t] = ((uint32_t)page_tables[t]) | 3;
+        page_directory[t] = ((uint32_t)page_tables[t]) | 7;
     }
 
     // Map Framebuffer separately if it's above our identity mapped RAM
@@ -47,9 +47,9 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
         uint32_t base_phys = fb_paddr & 0xFFC00000;
         for(int t = 0; t < 2; t++) {
             for(int i = 0; i < 1024; i++) {
-                fb_page_tables[t][i] = (base_phys + (t * 1024 + i) * 4096) | 3;
+                fb_page_tables[t][i] = (base_phys + (t * 1024 + i) * 4096) | 7;
             }
-            page_directory[dir_start + t] = ((uint32_t)fb_page_tables[t]) | 3;
+            page_directory[dir_start + t] = ((uint32_t)fb_page_tables[t]) | 7;
         }
     }
 

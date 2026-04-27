@@ -269,19 +269,34 @@ static int drag_start_x = 0;
 static int drag_start_y = 0;
 
 void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
+    if (calendar_open) {
+        if (!btn && pbtn) calendar_open = 0;
+        return;
+    }
+
     if (start_menu_open) {
         if (!btn && pbtn) {
-            int sm_h = 160;
+            int sm_h = 267;
             int sm_w = 160;
             int sm_y = (int)fb_height - TASKBAR_H_PX - sm_h;
             if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
-                if (my >= sm_y + 24) {
-                    int item = (my - (sm_y + 24)) / 24;
-                    if (item == 0) open_terminal_app();
-                    else if (item == 1) st_ed("baru.txt");
-                    else if (item == 2) open_sysinfo_app();
-                    else if (item == 3) open_clock_app();
-                    else if (item == 4) open_power_app();
+                if (my >= sm_y + 25) {
+                    int rel_y = my - (sm_y + 25);
+                    if (rel_y < 8 * 24) {
+                        int item = rel_y / 24;
+                        if (item == 0) open_terminal_app();
+                        else if (item == 1) st_ed("baru.txt");
+                        else if (item == 2) open_explorer_app();
+                        else if (item == 3) open_browser_app();
+                        else if (item == 4) open_sysinfo_app();
+                        else if (item == 5) open_clock_app();
+                        else if (item == 6) open_pci_app();
+                        else if (item == 7) start_ular();
+                    } else if (rel_y >= 8 * 24 + 1) {
+                        int item = (rel_y - (8 * 24 + 1)) / 24;
+                        if (item == 0) shutdown();
+                        else if (item == 1) reboot();
+                    }
                 }
             }
             start_menu_open = 0;
