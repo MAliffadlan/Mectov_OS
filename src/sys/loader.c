@@ -3,52 +3,62 @@
 #include "../include/mem.h"
 #include "../include/task.h"
 #include "../include/utils.h"
+#include "../include/serial.h"
 
 int load_mct_app(const char* filename) {
+    write_serial_string("[LOADER] start\n");
+    
     int idx = vfs_find(filename);
     if (idx < 0) {
-        return -1; // File not found
+        write_serial_string("[LOADER] NOT FOUND\n");
+        return -1;
     }
     
-    // Check file size against header size
-    if (fs[idx].size < (int)sizeof(mct_header_t)) {
-        return -2; // File too small
-    }
+    if (fs[idx].size < (int)sizeof(mct_header_t)) return -2;
     
     mct_header_t* header = (mct_header_t*)fs[idx].data;
+    if (header->magic != MCT_MAGIC) return -3;
     
-    // Verify magic number
-    if (header->magic != MCT_MAGIC) {
-        return -3; // Invalid magic
-    }
-    
-    // Calculate total size needed
     uint32_t total_size = header->code_size + header->data_size;
-    if (total_size == 0 || total_size > 1024 * 1024) { // Max 1MB app size
-        return -4; // Invalid size
-    }
+    if (total_size == 0 || total_size > 1024 * 1024) return -4;
     
-    // Allocate memory for the app
-    // We use a FIXED memory address (32MB mark) so we can compile the app
-    // with a fixed base address (-Ttext 0x02000000) and avoid PIC/GOT issues!
     void* app_mem = (void*)0x02000000;
     
-    // Copy code
-    memcpy(app_mem, fs[idx].data + sizeof(mct_header_t), header->code_size);
-    
-    // Zero out data/bss section
-    memset((uint8_t*)app_mem + header->code_size, 0, header->data_size);
-    
-    // The entry point in the header is an offset relative to the start of the app memory
-    // Calculate the absolute virtual address
-    void (*entry_point)() = (void (*)())((uint32_t)app_mem + header->entry);
-    
-    // Create the user task
-    int task_id = create_user_task(entry_point);
-    if (task_id < 0) {
-        kfree(app_mem);
-        return -6; // Failed to create task
+    // Explicitly map the memory (Identity map for now, with User/RW/Present flags)
+    // Map enough pages to hold total_size
+    uint32_t num_pages = (total_size + 4095) / 4096;
+    if (num_pages == 0) num_pages = 1;
+    for (uint32_t i = 0; i < num_pages; i++) {
+        uint32_t addr = 0x02000000 + (i * 4096);
+        page_map(addr, addr, PAGE_PRESENT | PAGE_RW | PAGE_USER);
     }
     
-    return task_id; // Success
+    // CRITICAL for KVM: Flush TLB so instruction fetch sees the new mapping.
+    __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax", "memory");
+    
+    // Copy code + zero BSS
+    memcpy(app_mem, fs[idx].data + sizeof(mct_header_t), header->code_size);
+    memset((uint8_t*)app_mem + header->code_size, 0, header->data_size);
+    
+    // CRITICAL for KVM: Flush TLB so instruction fetch sees the new code.
+    // Without this, KVM may execute stale/garbage data from the old page content.
+    __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax", "memory");
+    
+    void (*entry_point)() = (void (*)())((uint32_t)app_mem + header->entry);
+    
+    // Serial marker 'L' = about to create task
+    write_serial_string("LOAD_MCT: Entry=");
+    write_serial_hex(header->entry);
+    write_serial_string(" First bytes=");
+    write_serial_hex(*(uint32_t*)entry_point);
+    write_serial_string("\n");
+    
+    int task_id = create_user_task(entry_point);
+    if (task_id < 0) {
+        write_serial_string("FAIL\n");
+        return -6;
+    }
+    
+    write_serial_string("OK\n");
+    return task_id;
 }

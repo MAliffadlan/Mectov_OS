@@ -88,6 +88,12 @@ void ex_cmd() {
             int res = load_mct_app(fname);
             if (res >= 0) {
                 print("[+] Task User Mode Dibuat! (Task ID: ", 0x0A); p_int(res, 0x0A); print(")\n", 0x0A);
+                
+                extern int term_app_running;
+                extern int term_app_task_id;
+                term_app_running = 1;
+                term_app_task_id = res;
+                return; // DO NOT PRINT PROMPT
             } else {
                 print("[-] Gagal menjalankan! Error: ", 0x0C); p_int(res, 0x0C); print("\n", 0x0C);
             }
@@ -145,7 +151,7 @@ void ex_cmd() {
                 net_send_arp_request(gateway_ip);
                 // Wait up to 2 seconds for ARP reply
                 uint32_t arp_start = get_ticks();
-                while (!net_ready && (get_ticks() - arp_start) < 120) {
+                while (!net_ready && (get_ticks() - arp_start) < 2000) {
                     net_poll();
                 }
                 if (!net_ready) {
@@ -158,7 +164,7 @@ void ex_cmd() {
             net_send_ping(tip);
             // Wait up to 3 seconds for reply
             uint32_t start = get_ticks();
-            while (!ping_replied && (get_ticks() - start) < 180) {
+            while (!ping_replied && (get_ticks() - start) < 3000) {
                 net_poll();
             }
             if (ping_replied) {
@@ -185,16 +191,16 @@ void ex_cmd() {
             if (!net_ready) {
                 net_send_arp_request(gateway_ip);
                 uint32_t arp_start = get_ticks();
-                while (!net_ready && (get_ticks() - arp_start) < 120) net_poll();
+                while (!net_ready && (get_ticks() - arp_start) < 2000) net_poll();
                 if (!net_ready) {
-                    print("Network timeout.\n", 0x0C);
+                    print("  [!] Gateway ARP timeout!\n", 0x0C);
                     goto host_done;
                 }
             }
 
             net_send_dns_query(domain);
             uint32_t start = get_ticks();
-            while (!dns_resolved && (get_ticks() - start) < 180) {
+            while (!dns_resolved && (get_ticks() - start) < 3000) {
                 net_poll();
             }
 
@@ -213,5 +219,9 @@ void ex_cmd() {
     else if (cmd_b[0] != '\0') { print("Command not found\n", 0x0C); }
     
     b_idx = 0; 
-    print("root@mectov:~# ", 0x0A); 
+    
+    extern int term_app_running;
+    if (!term_app_running) {
+        print("root@mectov:~# ", 0x0A); 
+    }
 }

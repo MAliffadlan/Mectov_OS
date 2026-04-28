@@ -18,6 +18,7 @@ export LD_LIBRARY_PATH=/home/mectov/my-os/xbin/usr/lib/x86_64-linux-gnu:$LD_LIBR
 grub-mkrescue -o mectov.iso iso >/dev/null 2>&1
 
 echo "[*] Menjalankan Mectov OS di QEMU (VBE GRUB Mode)..."
+echo "[*] Serial debug output -> serial_debug.log"
 qemu-system-i386 -enable-kvm -cpu host \
     -vga std \
     -cdrom mectov.iso \
@@ -25,6 +26,5 @@ qemu-system-i386 -enable-kvm -cpu host \
     -audiodev alsa,id=snd0 \
     -machine pcspk-audiodev=snd0 \
     -net nic,model=rtl8139 -net user \
-    -chardev socket,id=modem,host=127.0.0.1,port=4445,server=on,wait=off \
-    -device isa-serial,chardev=modem \
+    -serial file:serial_debug.log \
     -drive file=disk.img,format=raw,index=0,media=disk

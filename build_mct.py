@@ -20,7 +20,7 @@ def build_app(c_file, output_mct):
     with open(ld_file, "w") as f:
         f.write("""
 OUTPUT_FORMAT("elf32-i386")
-ENTRY(main)
+ENTRY(_start)
 SECTIONS {
     . = 0x02000000;
     .text : { *(.text*) }
@@ -34,7 +34,7 @@ SECTIONS {
     # -fno-stack-protector: don't require libc's stack check
     # -fno-pie -fno-pic: prevent GOT/PLT generation which breaks flat binaries
     try:
-        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-pie", "-fno-pic", "-O2", "-c", c_file, "-o", o_file], check=True)
+        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-pie", "-fno-pic", "-static", "-O0", "-s", "-c", c_file, "-o", o_file], check=True)
     except subprocess.CalledProcessError:
         print("[!] Compilation failed!")
         return
@@ -62,7 +62,18 @@ SECTIONS {
         return
 
     code_size = len(code_data)
-    entry_point = 0  # Selalu 0 karena linker script kita . = 0x0
+    entry_point = 0
+    try:
+        nm_out = subprocess.check_output(["nm", elf_file]).decode()
+        for line in nm_out.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[2] == "_start":
+                addr = int(parts[0], 16)
+                entry_point = addr - 0x02000000
+                break
+    except Exception as e:
+        print(f"[*] Warning: Could not find _start, using offset 0. {e}")
+        
     data_size = 16384 # Kasih 16KB untuk BSS (variabel global nol) dan memory runtime
 
     # Struct format: 4 uint32 (16 bytes header)
@@ -82,7 +93,7 @@ SECTIONS {
 
     # Cleanup temporary files
     os.remove(o_file)
-    os.remove(elf_file)
+    # os.remove(elf_file)
     os.remove(bin_file)
     os.remove(ld_file)
 

@@ -3,7 +3,7 @@
 
 #define MAX_FILES 16
 #define MAX_FILENAME 16
-#define MAX_FILE_SIZE 1024
+#define MAX_FILE_SIZE 4096
 
 typedef struct {
     char name[MAX_FILENAME];

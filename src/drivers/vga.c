@@ -46,6 +46,7 @@ uint32_t vga_to_rgb(unsigned char col) {
 // ============================================================
 void put_pixel(int x, int y, uint32_t color) {
     if (x < 0 || x >= (int)fb_width || y < 0 || y >= (int)fb_height) return;
+    mark_dirty(x, y, 1, 1);
     if (back_buffer)
         back_buffer[y * (bb_pitch / 4) + x] = color;
     else {
@@ -68,6 +69,7 @@ void draw_rect(int x, int y, int w, int h, uint32_t color) {
     int x1 = (x + w > (int)fb_width)  ? (int)fb_width  : (x + w);
     int y1 = (y + h > (int)fb_height) ? (int)fb_height : (y + h);
     if (x0 >= x1 || y0 >= y1) return;
+    mark_dirty(x0, y0, x1 - x0, y1 - y0);
 
     if (back_buffer) {
         uint32_t stride = bb_pitch / 4;
@@ -87,6 +89,32 @@ void draw_rect(int x, int y, int w, int h, uint32_t color) {
         for (int i = y0; i < y1; i++)
             for (int j = x0; j < x1; j++)
                 put_pixel(j, i, color);
+    }
+}
+
+void draw_rect_alpha(int x, int y, int w, int h, uint32_t color) {
+    // Clip to screen
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = (x + w > (int)fb_width)  ? (int)fb_width  : (x + w);
+    int y1 = (y + h > (int)fb_height) ? (int)fb_height : (y + h);
+    if (x0 >= x1 || y0 >= y1) return;
+    mark_dirty(x0, y0, x1 - x0, y1 - y0);
+
+    if (back_buffer) {
+        uint32_t stride = bb_pitch / 4;
+        // Pre-calculate 50% of the incoming color
+        uint32_t c_half = (color & 0xFEFEFE) >> 1;
+        for (int row = y0; row < y1; row++) {
+            uint32_t* dst = back_buffer + row * stride + x0;
+            for (int col = 0; col < (x1 - x0); col++) {
+                uint32_t bg = dst[col];
+                // Super fast 50% blend without multiplication/division!
+                dst[col] = ((bg & 0xFEFEFE) >> 1) + c_half;
+            }
+        }
+    } else {
+        draw_rect(x, y, w, h, color);
     }
 }
 
@@ -186,27 +214,52 @@ void init_double_buffer(void) {
 }
 
 // ============================================================
+// Dirty Rectangle Tracking
+// ============================================================
+int d_min_x = 9999, d_min_y = 9999, d_max_x = -1, d_max_y = -1;
+
+void mark_dirty(int x, int y, int w, int h) {
+    if (x < d_min_x) d_min_x = x;
+    if (y < d_min_y) d_min_y = y;
+    if (x + w > d_max_x) d_max_x = x + w;
+    if (y + h > d_max_y) d_max_y = y + h;
+}
+
+// ============================================================
 // swap_buffers — copy back_buffer to front framebuffer
 // ============================================================
 void swap_buffers(void) {
     if (!back_buffer || !fb_addr) return;
 
-    if (fb_bpp == 32 && fb_pitch == bb_pitch) {
-        // Ideal case: same pitch, bulk memcpy
-        memcpy(fb_addr, back_buffer, fb_width * fb_height * 4);
-    } else if (fb_bpp == 32) {
-        // Different pitch: copy row by row
-        for (uint32_t y = 0; y < fb_height; y++) {
-            uint32_t* src = back_buffer + y * fb_width;
-            uint32_t* dst = (uint32_t*)((uint8_t*)fb_addr + y * fb_pitch);
-            memcpy(dst, src, fb_width * 4);
+    if (d_min_x > d_max_x || d_min_y > d_max_y) return; // Nothing to draw
+
+    // Clip dirty rect to screen
+    if (d_min_x < 0) d_min_x = 0;
+    if (d_min_y < 0) d_min_y = 0;
+    if (d_max_x > (int)fb_width)  d_max_x = fb_width;
+    if (d_max_y > (int)fb_height) d_max_y = fb_height;
+
+    int w = d_max_x - d_min_x;
+    int h = d_max_y - d_min_y;
+
+    if (fb_bpp == 32) {
+        for (int y = d_min_y; y < d_max_y; y++) {
+            uint32_t* src = back_buffer + y * fb_width + d_min_x;
+            uint32_t* dst = (uint32_t*)((uint8_t*)fb_addr + y * fb_pitch) + d_min_x;
+            
+            uint32_t dwords = w;
+            __asm__ __volatile__(
+                "rep movsd"
+                : "+D"(dst), "+S"(src), "+c"(dwords)
+                :
+                : "memory"
+            );
         }
     } else if (fb_bpp == 24) {
-        // 24-bit: convert each pixel
-        for (uint32_t y = 0; y < fb_height; y++) {
-            uint32_t* src = back_buffer + y * fb_width;
-            uint8_t*  dst = (uint8_t*)fb_addr + y * fb_pitch;
-            for (uint32_t x = 0; x < fb_width; x++) {
+        for (int y = d_min_y; y < d_max_y; y++) {
+            uint32_t* src = back_buffer + y * fb_width + d_min_x;
+            uint8_t*  dst = (uint8_t*)fb_addr + y * fb_pitch + d_min_x * 3;
+            for (int x = 0; x < w; x++) {
                 uint32_t c = src[x];
                 dst[x * 3 + 0] = c & 0xFF;
                 dst[x * 3 + 1] = (c >> 8) & 0xFF;
@@ -214,12 +267,15 @@ void swap_buffers(void) {
             }
         }
     }
+
+    // Reset dirty rect
+    d_min_x = 9999; d_min_y = 9999; d_max_x = -1; d_max_y = -1;
 }
 
 // ============================================================
 // VSync — wait for vertical retrace via VGA status port
 // ============================================================
-void wait_vsync(void) {
+void wait_for_vsync(void) {
     // Wait until not in retrace
     while (inb(0x3DA) & 0x08);
     // Wait until retrace begins
@@ -422,11 +478,20 @@ static const unsigned char cursor_inner[20] = {
 uint32_t cursor_save_buf[12*20];
 int cursor_saved_x = -1, cursor_saved_y = -1;
 
+void restore_cursor_bg() {
+    if (!is_vbe || cursor_saved_x == -1 || cursor_saved_y == -1) return;
+    restore_bg(cursor_saved_x, cursor_saved_y, 12, 20, cursor_save_buf);
+    mark_dirty(cursor_saved_x, cursor_saved_y, 12, 20);
+    cursor_saved_x = -1;
+    cursor_saved_y = -1;
+}
+
 void draw_mouse_cursor(int x, int y) {
     if (!is_vbe) return;
-    // With double buffering, no save/restore needed — scene is redrawn each frame
-    // Just draw the cursor on top of the back buffer
+    
+    save_bg(x, y, 12, 20, cursor_save_buf);
     cursor_saved_x = x; cursor_saved_y = y;
+    
     for (int j = 0; j < 20; j++) {
         unsigned char mask = (j < 16) ? cursor_mask[j] : 0;
         unsigned char inner = (j < 16) ? cursor_inner[j] : 0;
@@ -437,4 +502,5 @@ void draw_mouse_cursor(int x, int y) {
             }
         }
     }
+    mark_dirty(x, y, 12, 20);
 }

@@ -15,33 +15,7 @@ extern int       is_vbe;
 extern uint32_t* back_buffer;   // Off-screen rendering target
 extern uint32_t  bb_pitch;      // Always width*4 (32-bit internal)
 
-// ---- GUI Theme Colors (Linux Mint XFCE) ----
-#define C_BLACK      0x00000000
-#define C_WHITE      0x00FFFFFF
-#define C_GREEN      0x0000FF00
-#define C_CYAN       0x0000FFFF
-#define C_BLUE       0x000000FF
-#define C_NAVY       0x00000080
-#define C_GRAY       0x00808080
-#define C_DARK_GRAY  0x00404040
-#define C_YELLOW     0x00FFFF00
-
-#define GUI_BG       0x00E5E5E5
-#define GUI_DESKTOP  0x002C2C2C
-#define GUI_BORDER   0x00888888
-#define GUI_BORDER2  0x00AAAAAA
-#define GUI_TASKBAR  0x001F1F1F
-#define GUI_TITLE_A  0x00D9D9D9
-#define GUI_TITLE_B  0x00F0F0F0
-#define GUI_BTN      0x00DDDDDD
-#define GUI_BTN_HOV  0x00EEEEEE
-#define GUI_CLOSE    0x00CC3333
-#define GUI_ICON_BG  0x00333333
-#define GUI_WHITE    0x00FFFFFF
-#define GUI_CYAN     0x0088CC88
-#define GUI_DIM      0x00444444
-#define GUI_TEXT     0x00222222
-#define GUI_TEXT_INV 0x00EEEEEE
+#include "theme.h"
 
 // ---- Text console constants ----
 #define CW 128
@@ -60,11 +34,13 @@ extern unsigned char cur_col;
 void init_vbe(uint32_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint8_t bpp);
 void init_double_buffer(void);  // Call after init_mem + paging_init
 void swap_buffers(void);        // Copy back_buffer → front buffer
-void wait_vsync(void);          // Wait for vertical retrace (optional)
+void wait_for_vsync(void);      // Wait for vertical retrace
+void mark_dirty(int x, int y, int w, int h); // Mark dirty rect
 
 // ---- Drawing primitives (all write to back_buffer) ----
 void put_pixel(int x, int y, uint32_t color);
 void draw_rect(int x, int y, int w, int h, uint32_t color);
+void draw_rect_alpha(int x, int y, int w, int h, uint32_t color);
 void draw_rect_border(int x, int y, int w, int h, uint32_t col);
 void draw_line(int x0, int y0, int x1, int y1, uint32_t color);
 void draw_circle(int xc, int yc, int r, uint32_t color);
@@ -93,6 +69,7 @@ void d_win(int x, int y, int w, int h, const char* t);
 
 // ---- Mouse cursor ----
 void draw_mouse_cursor(int x, int y);
+void restore_cursor_bg(void);
 extern uint32_t cursor_save_buf[12*20];
 extern int cursor_saved_x, cursor_saved_y;
 

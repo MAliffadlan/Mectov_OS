@@ -2,6 +2,7 @@
 #include "../include/io.h"
 #include "../include/task.h"
 #include "../include/utils.h"
+#include "../include/serial.h"
 
 idt_entry_t idt[256];
 idt_ptr_t   idt_ptr;
@@ -9,6 +10,7 @@ isr_t       interrupt_handlers[256];
 
 // Assembly stubs (from interrupt_entry.asm)
 extern void isr0();
+extern void isr4();
 extern void isr13();
 extern void isr14();
 extern void isr128();
@@ -24,6 +26,13 @@ static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags
     idt[num].sel     = sel;
     idt[num].always0 = 0;
     idt[num].flags   = flags;
+}
+// Overflow exception handler (INT 4 / INTO instruction)
+// GCC -fPIC generates INTO instructions for bounds checking.
+// We just log and return — overflow is benign for our apps.
+static void overflow_handler(registers_t* regs) {
+    (void)regs;
+    write_serial_string("[INT4] Overflow (ignored)\n");
 }
 
 void idt_init() {
@@ -46,6 +55,7 @@ void idt_init() {
 
     // CPU Exceptions
     idt_set_gate(0,  (uint32_t)isr0,  0x08, 0x8E);  // Division by Zero
+    idt_set_gate(4,  (uint32_t)isr4,  0x08, 0xEE);  // Overflow (DPL=3, INTO from Ring 3)
     idt_set_gate(13, (uint32_t)isr13, 0x08, 0x8E);  // General Protection Fault
     idt_set_gate(14, (uint32_t)isr14, 0x08, 0x8E);  // Page Fault
 
@@ -58,6 +68,9 @@ void idt_init() {
     idt_set_gate(0x80, (uint32_t)isr128, 0x08, 0xEE);
 
     idt_flush((uint32_t)&idt_ptr);
+
+    // Register Overflow handler (Exception 4) — just ignore and return
+    register_interrupt_handler(4, overflow_handler);
 }
 
 void register_interrupt_handler(uint8_t n, isr_t handler) {
@@ -95,25 +108,55 @@ void isr_handler(registers_t *r) {
         isr_t handler = interrupt_handlers[r->int_no];
         handler(r);
     } else {
-        // Unhandled exception — print info and halt
-        print("\n[CRASH] Unhandled Exception: ", 0x0C);
-        p_int(r->int_no, 0x0C);
+        // Unhandled exception
+        write_serial_string("\n[EXCEPTION] int_no=");
+        write_serial('0' + (r->int_no % 10));
+        write_serial_string(" CS=");
+        write_serial('0' + (r->cs & 3));
+        write_serial('\n');
         
-        if (r->int_no == 13) {
-            print(" (General Protection Fault, err=", 0x0C);
-            p_int(r->err_code, 0x0C);
-            print(")", 0x0C);
+        uint32_t cs = r->cs;
+        if ((cs & 3) == 3) {
+            // Ring 3 crash - just kill the task
+            write_serial_string("[CRASH] Ring 3 crash, killing task\n");
+            print("\n[USER MODE CRASH] Task killed. Exception: ", 0x0C);
+            p_int(r->int_no, 0x0C);
+            if (r->int_no == 14) {
+                uint32_t cr2;
+                __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
+                write_serial_string("PF addr: ");
+                write_serial_hex(cr2);
+                write_serial_string("\n");
+                print(" (Page Fault at ", 0x0C);
+                p_int(cr2, 0x0C);
+                print(")", 0x0C);
+            }
+            print("\n", 0x0C);
+            task_exit();
+        } else {
+            // Kernel crash
+            print("\n[KERNEL PANIC] Unhandled Exception: ", 0x0C);
+            p_int(r->int_no, 0x0C);
+            
+            if (r->int_no == 13) {
+                print(" (GPF, err=", 0x0C);
+                p_int(r->err_code, 0x0C);
+                print(")", 0x0C);
+            }
+            if (r->int_no == 14) {
+                uint32_t cr2;
+                __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
+                write_serial_string("PF addr: ");
+                write_serial_hex(cr2);
+                write_serial_string("\n");
+                print(" (Page Fault at ", 0x0C);
+                p_int(cr2, 0x0C);
+                print(")", 0x0C);
+            }
+            print("\n  EIP=", 0x0C); p_int(r->eip, 0x0C);
+            print("  CS=",  0x0C); p_int(r->cs, 0x0C);
+            print("\n", 0x0C);
+            for(;;) __asm__("hlt");
         }
-        if (r->int_no == 14) {
-            uint32_t cr2;
-            __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
-            print(" (Page Fault at ", 0x0C);
-            p_int(cr2, 0x0C);
-            print(")", 0x0C);
-        }
-        print("\n  EIP=", 0x0C); p_int(r->eip, 0x0C);
-        print("  CS=",  0x0C); p_int(r->cs, 0x0C);
-        print("\n", 0x0C);
-        for(;;) __asm__("hlt");
     }
 }

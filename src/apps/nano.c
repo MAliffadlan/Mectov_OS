@@ -26,7 +26,7 @@ static void nano_draw(int id, int cx, int cy, int cw, int ch) {
         x += 8;
     }
     // Draw cursor
-    if (get_ticks() & 16) draw_rect(cx + x, cy + y + 14, 8, 2, 0x0000FF88);
+    if ((get_ticks() / 500) & 1) draw_rect(cx + x, cy + y + 14, 8, 2, 0x0000FF88);
 }
 
 static void nano_key(int id, char c, uint8_t sc) {

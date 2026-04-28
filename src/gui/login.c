@@ -55,7 +55,7 @@ static void draw_login(int pass_len, int shake, int err) {
         draw_char_px(ibx + 6 + i*8, iby + 4, '*', GUI_TEXT, 0xFFFFFFFF);
         
     // Blinking cursor
-    uint32_t cur_col = (get_ticks() & 16) ? GUI_TEXT : GUI_WHITE;
+    uint32_t cur_col = ((get_ticks() / 500) & 1) ? GUI_TEXT : GUI_WHITE;
     int cursor_x = ibx + 6 + pass_len * 8;
     draw_rect(cursor_x, iby + 4, 2, 16, cur_col);
 

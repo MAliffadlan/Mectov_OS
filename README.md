@@ -158,6 +158,7 @@ Created by M Alif Fadlan.
 | Snake           | src/apps/snake.c        | Classic snake game                                |
 | Power Options   | src/apps/power_app.c    | Shut Down, Restart, and Lock Screen dialog        |
 | Mini Browser    | src/apps/browser_app.c  | Text-mode web browser via serial modem proxy      |
+| GUI Calculator  | apps/gcalc.c            | **Standalone Ring 3 .mct App** - External GUI calculator |
 
 ---
 
@@ -174,11 +175,31 @@ Created by M Alif Fadlan.
 
 ### Commands
 ```bash
-# Clean and build (auto-builds wallpaper via python script)
+# Clean and build the OS (auto-builds wallpaper via python script)
 make clean && make
 
 # Run in QEMU
 ./run.sh
+```
+
+### Compiling and Injecting Standalone Apps (.mct)
+Mectov OS supports external Ring 3 GUI applications. To build and install a standalone app like `gcalc`:
+
+```bash
+# 1. Compile C file to an object
+gcc -m32 -ffreestanding -fno-stack-protector -fno-pie -fno-pic -static -O0 -s -c apps/gcalc.c -o apps/gcalc.o
+
+# 2. Link object to memory address 0x02000000 (Ring 3 App Space)
+ld -m elf_i386 -Ttext 0x02000000 --entry _start apps/gcalc.o -o apps/gcalc.elf
+
+# 3. Extract pure binary from ELF
+objcopy -O binary apps/gcalc.elf apps/gcalc.bin
+
+# 4. Add Mectov Executable Header (.mct)
+python3 build_mct.py apps/gcalc.bin gcalc.mct
+
+# 5. Inject directly into the VFS partition of disk.img
+python3 inject_vfs.py disk.img gcalc.mct gcalc.mct
 ```
 
 ---
@@ -187,6 +208,7 @@ make clean && make
 
 | Version | Highlights                                                                    |
 |---------|-------------------------------------------------------------------------------|
+| v18.0   | **External App Ecosystem:** Standalone `.mct` binary loader, `build_mct.py` toolkit, `inject_vfs.py` disk manager. GUI Window IDs (WID) synchronized directly via Syscalls. Task Scheduler auto-recovering from gracefully killed Ring 3 apps. GUI Calculator (gcalc). |
 | v17.1   | **Stable Ring 3 User Mode**, Ring-aware scheduler, TSS stack switching fix, Syscall graphics rendering. |
 | v17.0   | Terminus Bold font, Custom Wallpaper baking (objcopy), MenuetOS-style UI, Draggable persistent icons (saved to VFS), rendering optimizations via memcpy |
 | v16.0   | Network stack (RTL8139, Ethernet, ARP, IPv4, ICMP, UDP, DNS), Mini Browser, Serial driver, User Mode infrastructure |

@@ -58,20 +58,17 @@ void memset(void* dest, uint8_t val, uint32_t len) {
 }
 
 void memcpy(void* dest, const void* src, uint32_t len) {
-    // Fast bulk copy using rep movsl (4 bytes at a time)
     uint32_t dwords = len / 4;
     uint32_t rem = len % 4;
+    
     __asm__ __volatile__(
-        "rep movsl"
-        : "+D"(dest), "+S"(src), "+c"(dwords)
-        :
+        "rep movsd\n\t"
+        "movl %3, %%ecx\n\t"
+        "rep movsb"
+        : "+D"(dest), "+S"(src)
+        : "c"(dwords), "g"(rem)
         : "memory"
     );
-    if (rem) {
-        uint8_t* d8 = (uint8_t*)dest;
-        const uint8_t* s8 = (const uint8_t*)src;
-        while (rem--) *d8++ = *s8++;
-    }
 }
 
 void p_int(int n, unsigned char c) { if (n < 0) { print("-", c); n = -n; } if (n == 0) { print("0", c); return; } char buf[10]; int i = 0; while (n > 0) { buf[i++] = (n % 10) + '0'; n /= 10; } for (int j = 0; j < i / 2; j++) { char t = buf[j]; buf[j] = buf[i - j - 1]; buf[i - j - 1] = t; } buf[i] = '\0'; print(buf, c); }

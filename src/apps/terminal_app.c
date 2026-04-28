@@ -22,7 +22,32 @@ typedef struct {
 } TermState;
 
 static TermState term;
-static int term_open = 0;
+int use_term_buf = 0; // used by ex_cmd() internally
+int term_open = 0;
+int term_app_running = 0;
+int term_app_task_id = -1;
+
+#define APP_KBD_BUF_SIZE 256
+static uint8_t app_kbd_buf[APP_KBD_BUF_SIZE];
+static int app_kbd_head = 0;
+static int app_kbd_tail = 0;
+
+void term_app_push_key(uint8_t sc) {
+    int next = (app_kbd_head + 1) % APP_KBD_BUF_SIZE;
+    if (next != app_kbd_tail) {
+        app_kbd_buf[app_kbd_head] = sc;
+        app_kbd_head = next;
+    }
+}
+
+uint8_t term_app_pop_key() {
+    if (app_kbd_head == app_kbd_tail) return 0;
+    uint8_t sc = app_kbd_buf[app_kbd_tail];
+    app_kbd_tail = (app_kbd_tail + 1) % APP_KBD_BUF_SIZE;
+    return sc;
+}
+
+// Window state
 static unsigned char term_cur_col = 0x0A;
 
 // Redirect print() calls to terminal buffer
@@ -68,12 +93,17 @@ static void term_draw(int id, int cx2, int cy2, int cw, int ch) {
         }
     }
     // Draw cursor blink
-    if (get_ticks() & 16)
+    if ((get_ticks() / 500) & 1)
         draw_rect(cx2 + term.cx*8, cy2 + term.cy*16 + 14, 8, 2, 0x0000FF88);
 }
 
 static void term_key(int id, char c, uint8_t sc) {
     (void)id;
+    if (term_app_running) {
+        term_app_push_key(sc);
+        return;
+    }
+    
     if (c == '\n') {
         term_putchar('\n', 0x0F);
         cmd_b[b_idx] = '\0';
@@ -94,7 +124,6 @@ static void term_tick(int id) { (void)id; }
 
 // Override print to go to terminal buffer
 // We set a flag so shell.c's print() calls go here
-static int use_term_buf = 0;
 // This is called by our patched print() in shell — see below
 
 void open_terminal_app() {
@@ -130,8 +159,11 @@ void ex_cmd_term() {
     use_term_buf = 0;
 }
 
-// p_char_gui: called by patched vga print when use_term_buf is set
+// p_char_gui: called by patched vga print when get_use_term_buf is true
 void p_char_gui(char c, unsigned char col) {
-    if (use_term_buf) term_putchar(c, col);
+    term_putchar(c, col);
 }
-int get_use_term_buf() { return use_term_buf; }
+
+int get_use_term_buf() { 
+    return term_open && (use_term_buf || term_app_running); 
+}

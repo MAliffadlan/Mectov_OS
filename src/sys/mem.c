@@ -60,6 +60,21 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     __asm__ __volatile__("mov %0, %%cr0": : "r"(cr0));
 }
 
+// Map a virtual address to a physical address explicitly
+void page_map(uint32_t vaddr, uint32_t paddr, uint32_t flags) {
+    uint32_t pd_idx = vaddr >> 22;
+    uint32_t pt_idx = (vaddr >> 12) & 0x3FF;
+    
+    // We reuse the static page tables for the first 128MB.
+    // If we map outside, we need dynamically allocated tables, but for now we just 
+    // update the static table entries.
+    if (pd_idx < 32) {
+        page_tables[pd_idx][pt_idx] = (paddr & 0xFFFFF000) | flags;
+        page_directory[pd_idx] = ((uint32_t)page_tables[pd_idx]) | 7;
+    }
+}
+
+
 typedef struct block_meta {
     uint32_t size;
     int free;

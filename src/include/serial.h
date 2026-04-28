@@ -13,5 +13,6 @@ char read_serial();
 int is_transmit_empty();
 void write_serial(char a);
 void write_serial_string(const char* str);
+void write_serial_hex(uint32_t val);
 
 #endif

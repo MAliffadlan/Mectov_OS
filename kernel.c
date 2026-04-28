@@ -28,15 +28,20 @@ extern void init_double_buffer(void);
 static int fps_val = 0;
 static int fps_frames = 0;
 static uint32_t fps_last_tick = 0;
+static uint32_t last_render_us = 0;
 
 static void full_redraw() {
+    uint32_t start_us = timer_get_us();
+
     desktop_draw();
     wm_draw_all();
     taskbar_draw();
 
-    // FPS counter at top-right
-    char fps_buf[12];
+    // Text buffer for FPS and Render Time
+    char fps_buf[32];
     int fi = 0;
+    
+    // FPS value
     int tmp = fps_val;
     if (tmp == 0) { fps_buf[fi++] = '0'; }
     else {
@@ -44,10 +49,18 @@ static void full_redraw() {
         while (tmp > 0) { rev[rl++] = '0' + tmp % 10; tmp /= 10; }
         while (rl > 0) fps_buf[fi++] = rev[--rl];
     }
-    fps_buf[fi++] = ' ';
-    fps_buf[fi++] = 'F';
-    fps_buf[fi++] = 'P';
-    fps_buf[fi++] = 'S';
+    fps_buf[fi++] = ' '; fps_buf[fi++] = 'F'; fps_buf[fi++] = 'P'; fps_buf[fi++] = 'S'; fps_buf[fi++] = ' ';
+    fps_buf[fi++] = '|'; fps_buf[fi++] = ' ';
+    
+    // Render time value
+    tmp = last_render_us;
+    if (tmp == 0) { fps_buf[fi++] = '0'; }
+    else {
+        char rev[16]; int rl = 0;
+        while (tmp > 0) { rev[rl++] = '0' + tmp % 10; tmp /= 10; }
+        while (rl > 0) fps_buf[fi++] = rev[--rl];
+    }
+    fps_buf[fi++] = ' '; fps_buf[fi++] = 'u'; fps_buf[fi++] = 's';
     fps_buf[fi] = '\0';
 
     int fx = (int)fb_width - (fi * 8) - 8;
@@ -55,7 +68,15 @@ static void full_redraw() {
     draw_string_px(fx, 23, fps_buf, 0x0000FF00, 0x00000000);
 
     draw_mouse_cursor(mouse_x, mouse_y);
+    
+    // Mark the whole screen dirty since full_redraw redraws everything
+    mark_dirty(0, 0, fb_width, fb_height);
+    
+    wait_for_vsync();
     swap_buffers();
+
+    uint32_t end_us = timer_get_us();
+    last_render_us = end_us - start_us;
 }
 
 void kernel_main(uint32_t magic, uint32_t addr) {
@@ -85,7 +106,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     idt_init();
     extern void init_syscalls(void);
     init_syscalls();
-    init_timer(60);
+    init_timer(1000); // 1000 Hz PIT for 1ms precision ticks
     init_keyboard();
     detect_cpu();
     pci_scan();
@@ -98,40 +119,27 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     init_uptime();
     vfs_load();
 
-    // User Mode (Ring 3) infrastructure is READY:
-    //   - GDT has User Code (0x18) and User Data (0x20) segments
-    //   - TSS is loaded for kernel stack switching
-    //   - Syscall handler registered at int 0x80
-    // Currently disabled: apps use direct I/O (in/out) which needs Ring 0.
-    // To activate: refactor apps to use syscalls, then uncomment below:
-    // extern void switch_to_user_mode(void);
-    // switch_to_user_mode();
-
-    // Allocate double buffer now that memory is ready
     init_double_buffer();
-    
     init_tasking();
 
     __asm__ __volatile__ ("sti");
     
-    // Create a Ring 3 user task for testing
-    extern int create_user_task(void (*entry)());
-    extern void user_task_entry();
-    create_user_task(user_task_entry);
+    // Removed dummy task creation
 
     init_mouse();
-
     draw_startup_logo();
     nada(440, 150); nada(523, 150); nada(659, 300);
-    // Removed 10-second delay(600) so it boots instantly without hanging on black screen
 
     wm_init();
     cursor_saved_x = -1;
-    
     gui_login();
 
     nada(659, 80); nada(784, 80); nada(1047, 150);
     full_redraw();
+
+    // Kalkulator akan dibuka jika user mengklik ikonnya di desktop
+    // extern int load_mct_app(const char*);
+    // load_mct_app("gcalc.mct");
 
     // ---- Main GUI Event Loop ----
     int prev_btn  = 0;
@@ -146,15 +154,25 @@ void kernel_main(uint32_t magic, uint32_t addr) {
 
         if (mx != prev_mx || my != prev_my || btn != prev_btn) {
             int in_taskbar = (my >= (int)fb_height - TASKBAR_H_PX);
-            if (!wm_handle_mouse(mx, my, btn, prev_btn)) {
+            int handled = wm_handle_mouse(mx, my, btn, prev_btn);
+            if (!handled) {
                 if (!in_taskbar) {
                     desktop_handle_mouse(mx, my, btn, prev_btn);
                 } else if (!btn && prev_btn) {
                     taskbar_handle_click(mx, my);
                 }
             }
+            
+            if (btn != prev_btn || handled) {
+                needs_redraw = 1;
+            } else {
+                // Pure mouse move: no full redraw needed
+                restore_cursor_bg();
+                draw_mouse_cursor(mx, my);
+                wait_for_vsync();
+                swap_buffers();
+            }
             prev_btn = btn; prev_mx = mx; prev_my = my;
-            needs_redraw = 1;
         }
 
         uint8_t sc = k_get_scancode();
@@ -164,37 +182,38 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             needs_redraw = 1;
         }
 
-        // Poll network for incoming packets
         extern void net_poll();
         net_poll();
 
         uint32_t now = get_ticks();
-        if (now - last_clock_tick >= 60) {
+        
+        // 1000 Hz timer => 1000 ticks = 1 second
+        if (now - last_clock_tick >= 1000) {
             last_clock_tick = now;
             wm_tick_all();
             needs_redraw = 1;
         }
 
-        // Force continuous redraw for marquee animation
-        needs_redraw = 1;
+        // (1) Pastiin timer 60 Hz doang yang jadi trigger render
+        if (now - last_frame_tick >= 16) {
+            needs_redraw = 1;
+        }
 
-        // Throttle rendering to ~60 FPS (every 1 tick at 60Hz)
-        if (needs_redraw && (now - last_frame_tick >= 1)) {
+        if (needs_redraw) {
             needs_redraw = 0;
             last_frame_tick = now;
             fps_frames++;
-            // Update FPS counter every second (60 ticks)
-            if (now - fps_last_tick >= 60) {
+            
+            // Update FPS counter every second (1000 ticks)
+            if (now - fps_last_tick >= 1000) {
                 fps_val = fps_frames;
                 fps_frames = 0;
                 fps_last_tick = now;
             }
             full_redraw();
-        } // <--- Added missing brace here
+        }
 
-        // Only halt if no ticks have passed during our rendering.
-        // If full_redraw() took longer than 1 tick, get_ticks() > now,
-        // so we skip hlt and immediately render the next frame to catch up!
+        // CPU friendly halt
         if (get_ticks() == now) {
             __asm__ __volatile__ ("hlt");
         }
@@ -203,25 +222,4 @@ void kernel_main(uint32_t magic, uint32_t addr) {
 
 #include "src/include/syscall.h"
 
-// ============================================================
-// Ring 3 User Task — runs entirely in user mode.
-// Demonstrates the new syscall API.
-// ============================================================
-void user_task_entry() {
-    // Blinking status indicator in top-right corner
-    int tick = 0;
-    while (1) {
-        uint32_t color = (tick & 1) ? 0x00FF00 : 0x00AAAA;
-        
-        // Draw a status indicator rect (using new individual-arg syscall)
-        sys_draw_rect(770, 5, 16, 16, color);
-        
-        // Draw status text next to it
-        sys_draw_text(720, 7, "R3", 0x00FF00, 0x00000000);
-        
-        tick++;
-        
-        // Busy-wait delay (no privileged instructions!)
-        for (volatile int i = 0; i < 2000000; i++);
-    }
-}
+// Removed dummy user task

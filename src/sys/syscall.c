@@ -15,7 +15,92 @@
 #include "../include/vfs.h"
 #include "../include/keyboard.h"
 #include "../include/mouse.h"
+#include "../include/serial.h"
+#include "../include/wm.h"
 
+// GUI Event structures for Ring 3
+#define MAX_EVENTS 64
+typedef struct {
+    int type; // 1 = paint, 2 = key, 3 = mouse
+    int x, y;
+    int key;
+} gui_event_t;
+
+typedef struct {
+    gui_event_t events[MAX_EVENTS];
+    int head;
+    int tail;
+} win_event_queue_t;
+
+// Display List for Window Drawing
+typedef struct {
+    int type; // 1 = rect, 2 = text
+    int x, y, w, h;
+    uint32_t color;
+    char text[32];
+} draw_cmd_t;
+
+#define MAX_DRAW_CMDS 128
+typedef struct {
+    draw_cmd_t cmds[MAX_DRAW_CMDS];
+    int count;
+    int pending_count;
+    draw_cmd_t pending_cmds[MAX_DRAW_CMDS];
+} win_canvas_t;
+
+static win_event_queue_t win_queues[MAX_WINDOWS];
+static win_canvas_t win_canvases[MAX_WINDOWS];
+
+static int get_win_index(int wid) {
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (wm_wins[i].visible && wm_wins[i].id == wid) return i;
+    }
+    
+    // Debug print
+    write_serial_string("get_win_index failed. &visible=");
+    write_serial_hex((uint32_t)&wm_wins[0].visible);
+    write_serial_string(" &id=");
+    write_serial_hex((uint32_t)&wm_wins[0].id);
+    write_serial('\n');
+    return -1;
+}
+
+static void push_event(int wid, int type, int x, int y, int key) {
+    int idx = get_win_index(wid);
+    if (idx < 0) return;
+    int t = win_queues[idx].tail;
+    int next = (t + 1) % MAX_EVENTS;
+    if (next != win_queues[idx].head) {
+        win_queues[idx].events[t].type = type;
+        win_queues[idx].events[t].x = x;
+        win_queues[idx].events[t].y = y;
+        win_queues[idx].events[t].key = key;
+        win_queues[idx].tail = next;
+    }
+}
+
+static void win_draw_cb(int id, int cx, int cy, int cw, int ch) {
+    (void)cw; (void)ch;
+    // Replay Display List
+    int idx = get_win_index(id);
+    if (idx < 0) return;
+    for (int i = 0; i < win_canvases[idx].count; i++) {
+        draw_cmd_t* cmd = &win_canvases[idx].cmds[i];
+        if (cmd->type == 1) { // rect
+            draw_rect(cx + cmd->x, cy + cmd->y, cmd->w, cmd->h, cmd->color);
+        } else if (cmd->type == 2) { // text
+            draw_string_px(cx + cmd->x, cy + cmd->y, cmd->text, cmd->color, 0);
+        }
+    }
+    // We don't push a Paint event every frame, we let the app decide when to update.
+}
+static void win_key_cb(int id, char c, uint8_t sc) {
+    (void)sc;
+    push_event(id, 2, 0, 0, c);
+}
+static void win_mouse_cb(int id, int cx, int cy, int btn) {
+    push_event(id, 3, cx, cy, btn);
+}
 // ============================================================
 // File Descriptor Table (per-system, simple implementation)
 // ============================================================
@@ -103,6 +188,8 @@ static void syscall_handler(registers_t* regs) {
             const char* msg = (const char*)regs->ebx;
             uint8_t color = (uint8_t)regs->ecx;
             if (safe_strlen(msg, 256) < 0) { regs->eax = (uint32_t)-1; break; }
+            // Serial marker: user app called SYS_PRINT
+            write_serial('P');
             print(msg, color);
             regs->eax = 0;
             break;
@@ -226,41 +313,93 @@ static void syscall_handler(registers_t* regs) {
 
         // ----- SYS_EXIT (10): Terminate current task -----
         case SYS_EXIT: {
-            print("[syscall] Task exited.\n", 0x0E);
+            write_serial('X'); // Serial marker: task exit
+            write_serial_string("SYS_EXIT\n");
+            
+            extern int term_app_running;
+            extern int term_app_task_id;
+            extern int get_current_task(void);
+            
+            if (term_app_running && get_current_task() == term_app_task_id) {
+                term_app_running = 0;
+                term_app_task_id = -1;
+                print("root@mectov:~# ", 0x0A);
+            } else {
+                print("[syscall] Task exited.\n", 0x0E);
+            }
             task_exit();
             // task_exit never returns, but just in case:
             for(;;) __asm__("hlt");
             break;
         }
 
-        // ----- SYS_DRAW_RECT (11): Draw rectangle -----
+        // ----- SYS_DRAW_RECT (11): Draw rectangle in window -----
         case SYS_DRAW_RECT: {
-            int x = (int)regs->ebx;
-            int y = (int)regs->ecx;
-            int w = (int)regs->edx;
-            int h = (int)regs->esi;
+            int wid = (int)regs->ebx;
+            int x = (int)regs->ecx;
+            int y = (int)regs->edx;
+            int w = (regs->esi >> 16) & 0xFFFF;
+            int h = regs->esi & 0xFFFF;
             uint32_t color = (uint32_t)regs->edi;
-            draw_rect(x, y, w, h, color);
+            
+            int idx = get_win_index(wid);
+            if (idx >= 0) {
+                if (win_canvases[idx].pending_count < MAX_DRAW_CMDS) {
+                    draw_cmd_t* cmd = &win_canvases[idx].pending_cmds[win_canvases[idx].pending_count++];
+                    cmd->type = 1; cmd->x = x; cmd->y = y; cmd->w = w; cmd->h = h; cmd->color = color;
+                } else {
+                    write_serial_string("SYS_DRAW_RECT: Full\n");
+                }
+            } else {
+                extern int get_current_task(void);
+                int tid = get_current_task();
+                write_serial_string("SYS_DRAW_RECT: Task ");
+                write_serial_hex(tid);
+                write_serial_string(" Invalid WID ");
+                write_serial_hex(wid);
+                write_serial('\n');
+            }
             regs->eax = 0;
             break;
         }
 
-        // ----- SYS_DRAW_TEXT (12): Draw text string -----
+        // ----- SYS_DRAW_TEXT (12): Draw text in window -----
         case SYS_DRAW_TEXT: {
-            int x = (int)regs->ebx;
-            int y = (int)regs->ecx;
-            const char* text = (const char*)regs->edx;
-            uint32_t fg = (uint32_t)regs->esi;
-            uint32_t bg = (uint32_t)regs->edi;
-            if (safe_strlen(text, 256) < 0) { regs->eax = (uint32_t)-1; break; }
-            draw_string_px(x, y, text, fg, bg);
+            int wid = (int)regs->ebx;
+            int x = (int)regs->ecx;
+            int y = (int)regs->edx;
+            const char* text = (const char*)regs->esi;
+            uint32_t color = (uint32_t)regs->edi;
+            if (safe_strlen(text, 31) < 0) { regs->eax = (uint32_t)-1; break; }
+            
+            int idx = get_win_index(wid);
+            if (idx >= 0) {
+                if (win_canvases[idx].pending_count < MAX_DRAW_CMDS) {
+                    draw_cmd_t* cmd = &win_canvases[idx].pending_cmds[win_canvases[idx].pending_count++];
+                    cmd->type = 2; cmd->x = x; cmd->y = y; cmd->color = color;
+                    int i = 0;
+                    while (text[i] && i < 31) { cmd->text[i] = text[i]; i++; }
+                    cmd->text[i] = '\0';
+                }
+            }
             regs->eax = 0;
             break;
         }
 
         // ----- SYS_GET_KEY (13): Non-blocking keyboard read -----
         case SYS_GET_KEY: {
-            uint8_t sc = k_get_scancode();
+            extern int term_app_running;
+            extern int term_app_task_id;
+            extern int get_current_task(void);
+            extern uint8_t term_app_pop_key(void);
+            
+            uint8_t sc = 0;
+            if (term_app_running && get_current_task() == term_app_task_id) {
+                sc = term_app_pop_key();
+            } else {
+                sc = k_get_scancode();
+            }
+            
             if (sc == 0 || sc >= 0x80) {
                 regs->eax = 0; // No key or key release
             } else {
@@ -274,6 +413,77 @@ static void syscall_handler(registers_t* regs) {
             regs->eax = (uint32_t)mouse_x;
             regs->ebx = (uint32_t)mouse_y;
             regs->ecx = (uint32_t)mouse_btn;
+            break;
+        }
+
+        // ----- SYS_CREATE_WINDOW (15) -----
+        case SYS_CREATE_WINDOW: {
+            int x = (int)regs->ebx;
+            int y = (int)regs->ecx;
+            int w = (int)regs->edx;
+            int h = (int)regs->esi;
+            const char* title = (const char*)regs->edi;
+            if (safe_strlen(title, 48) < 0) { regs->eax = (uint32_t)-1; break; }
+            int wid = wm_open(x, y, w, h, title, win_draw_cb, win_key_cb, NULL, win_mouse_cb);
+            
+            write_serial_string("SYS_CREATE_WINDOW returned ");
+            write_serial('0' + (wid / 10));
+            write_serial('0' + (wid % 10));
+            write_serial('\n');
+
+            int idx = get_win_index(wid);
+            if (idx >= 0) {
+                win_queues[idx].head = 0;
+                win_queues[idx].tail = 0;
+                win_canvases[idx].count = 0;
+                win_canvases[idx].pending_count = 0;
+                // Force an initial paint event so the app knows it can draw
+                push_event(wid, 1, 0, 0, 0);
+            }
+            regs->eax = (uint32_t)wid;
+            break;
+        }
+
+        // ----- SYS_GET_EVENT (16) -----
+        case SYS_GET_EVENT: {
+            int wid = (int)regs->ebx;
+            gui_event_t* ev_ptr = (gui_event_t*)regs->ecx;
+            if (!validate_user_ptr(ev_ptr, sizeof(gui_event_t))) { regs->eax = (uint32_t)-1; break; }
+            
+            int idx = get_win_index(wid);
+            if (idx >= 0) {
+                int h = win_queues[idx].head;
+                if (h != win_queues[idx].tail) {
+                    *ev_ptr = win_queues[idx].events[h];
+                    win_queues[idx].head = (h + 1) % MAX_EVENTS;
+                    regs->eax = 1; // Success
+                } else {
+                    regs->eax = 0; // No events
+                }
+            } else {
+                regs->eax = (uint32_t)-1;
+            }
+            break;
+        }
+
+        // ----- SYS_UPDATE_WINDOW (17) -----
+        case SYS_UPDATE_WINDOW: {
+            int wid = (int)regs->ebx;
+            int idx = get_win_index(wid);
+            if (idx >= 0) {
+                // Swap pending display list to active display list!
+                for (int i = 0; i < win_canvases[idx].pending_count; i++) {
+                    win_canvases[idx].cmds[i] = win_canvases[idx].pending_cmds[i];
+                }
+                win_canvases[idx].count = win_canvases[idx].pending_count;
+                write_serial_string("UPD_WIN ");
+                write_serial('0' + win_canvases[idx].count);
+                write_serial('\n');
+                win_canvases[idx].pending_count = 0; // Reset for next frame
+            } else {
+                write_serial_string("UPD_WIN: Invalid WID\n");
+            }
+            regs->eax = 0;
             break;
         }
 

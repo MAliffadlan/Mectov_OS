@@ -1,5 +1,7 @@
 #include "../include/task.h"
 #include "../include/mem.h"
+#include "../include/serial.h"
+#include "../include/io.h"
 
 #define MAX_TASKS 8
 #define KERNEL_STACK_SIZE 16384
@@ -34,38 +36,31 @@ void init_tasking() {
 int create_task(void (*entry)()) {
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == 0) {
-            tasks[i].state = 2; // Ready
+            // CRITICAL: Disable interrupts to prevent scheduler from
+            // picking up this half-initialized task!
+            __asm__ volatile("cli");
+            
             tasks[i].ring = 0;
             
-            // Build a fake interrupt frame on the kernel stack
-            // This frame will be "restored" by irq_common_stub
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
             
-            // Ring 0 interrupt frame (CPU does NOT push SS/ESP for same-ring)
-            // iret will pop: EIP, CS, EFLAGS
+            // Ring 0 interrupt frame
             *(--stack) = 0x202;      // EFLAGS (IF=1)
             *(--stack) = 0x08;       // CS (kernel code)
             *(--stack) = (uint32_t)(uintptr_t)entry; // EIP
-            
-            // err_code, int_no (skipped by add esp,8)
             *(--stack) = 0;          // err_code
             *(--stack) = 0;          // int_no
-            
-            // pushad order: EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
-            *(--stack) = 0; // eax
-            *(--stack) = 0; // ecx
-            *(--stack) = 0; // edx
-            *(--stack) = 0; // ebx
-            *(--stack) = 0; // esp (ignored by popad)
-            *(--stack) = 0; // ebp
-            *(--stack) = 0; // esi
-            *(--stack) = 0; // edi
-            
-            // Saved DS (kernel data segment)
-            *(--stack) = 0x10;
+            *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; // eax,ecx,edx,ebx
+            *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; // esp,ebp,esi,edi
+            *(--stack) = 0x10;       // DS (kernel data)
             
             tasks[i].esp = (uint32_t)stack;
             num_tasks++;
+            
+            // Set state LAST — only now is it safe for the scheduler
+            tasks[i].state = 2;
+            
+            __asm__ volatile("sti");
             return i;
         }
     }
@@ -74,17 +69,17 @@ int create_task(void (*entry)()) {
 
 // Create a Ring 3 (user) task
 int create_user_task(void (*entry)()) {
+    write_serial_string("[TASK] create_user_task\n");
+    
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == 0) {
-            tasks[i].state = 2; // Ready
+            // CRITICAL: Disable interrupts to prevent scheduler from
+            // picking up this half-initialized task!
+            __asm__ volatile("cli");
+            
             tasks[i].ring = 3;
             
-            // Build a fake interrupt frame on the KERNEL stack.
-            // When irq_common_stub restores this, iret sees CS=0x1B (Ring 3)
-            // and automatically pops SS:ESP too → jumps to user mode.
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
-            
-            // User stack top
             uint32_t user_esp = (uint32_t)&tasks[i].user_stack[USER_STACK_SIZE];
             
             // Ring 3 interrupt frame (iret pops: EIP, CS, EFLAGS, ESP, SS)
@@ -92,37 +87,40 @@ int create_user_task(void (*entry)()) {
             *(--stack) = user_esp;   // ESP (user stack pointer)
             *(--stack) = 0x202;      // EFLAGS (IF=1, IOPL=0)
             *(--stack) = 0x1B;       // CS  (user code 0x18 | RPL 3)
-            *(--stack) = (uint32_t)(uintptr_t)entry; // EIP (user entry point)
-            
-            // err_code, int_no (skipped by add esp,8)
+            *(--stack) = (uint32_t)(uintptr_t)entry; // EIP
             *(--stack) = 0;          // err_code
             *(--stack) = 0;          // int_no
-            
-            // pushad: EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
-            *(--stack) = 0; // eax
-            *(--stack) = 0; // ecx
-            *(--stack) = 0; // edx
-            *(--stack) = 0; // ebx
-            *(--stack) = 0; // esp (ignored by popad)
-            *(--stack) = 0; // ebp
-            *(--stack) = 0; // esi
-            *(--stack) = 0; // edi
-            
-            // Saved DS (user data segment)
-            *(--stack) = 0x23;
+            *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; // eax,ecx,edx,ebx
+            *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; // esp,ebp,esi,edi
+            *(--stack) = 0x23;       // DS (user data)
             
             tasks[i].esp = (uint32_t)stack;
             num_tasks++;
+            
+            write_serial_string("User ESP: ");
+            write_serial_hex(user_esp);
+            write_serial_string("\n");
+            
+            // Set state LAST — only now is it safe for the scheduler
+            tasks[i].state = 2;
+            
+            __asm__ volatile("sti");
+            
+            write_serial_string("[TASK] Ring 3 task created OK\n");
             return i;
         }
     }
+    write_serial_string("[TASK] No free slots!\n");
     return -1;
 }
 
 extern void tss_set_kernel_stack(uint32_t stack);
 
 uint32_t schedule(uint32_t esp) {
-    if (num_tasks <= 1 || current_task < 0) return esp;
+    if (current_task < 0) return esp;
+    
+    // If we're the only task AND we're active, no need to switch
+    if (num_tasks <= 1 && tasks[current_task].state != 0) return esp;
     
     // Save current task's register frame pointer
     tasks[current_task].esp = esp;
@@ -150,11 +148,21 @@ uint32_t schedule(uint32_t esp) {
 void task_exit(void) {
     if (current_task <= 0) return; // Never kill task 0 (kernel)
     
+    write_serial_string("[TASK] task_exit called for task ");
+    write_serial('0' + current_task);
+    write_serial('\n');
+    
     tasks[current_task].state = 0; // Mark as free
     num_tasks--;
     
-    // This task is now dead. Halt and wait for scheduler to switch away.
+    // Re-enable interrupts before halting! The syscall interrupt gate (isr128)
+    // auto-clears IF on entry. Without sti, hlt would wait forever since
     // The timer IRQ will fire, scheduler will skip this task (state=0),
     // and switch to the next ready task.
+    __asm__ volatile("sti");
     for (;;) __asm__("hlt");
+}
+
+int get_current_task(void) {
+    return current_task;
 }

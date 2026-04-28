@@ -41,3 +41,13 @@ void write_serial_string(const char* str) {
         write_serial(str[i]);
     }
 }
+
+void write_serial_hex(uint32_t val) {
+    write_serial('0');
+    write_serial('x');
+    for (int i = 28; i >= 0; i -= 4) {
+        int nibble = (val >> i) & 0xF;
+        if (nibble < 10) write_serial('0' + nibble);
+        else write_serial('A' + (nibble - 10));
+    }
+}

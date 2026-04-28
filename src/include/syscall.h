@@ -16,10 +16,13 @@
 #define SYS_GET_TICKS   8   // Get timer ticks → return ticks
 #define SYS_YIELD       9   // Yield CPU to scheduler
 #define SYS_EXIT        10  // Exit current task
-#define SYS_DRAW_RECT   11  // Draw rect. EBX=x, ECX=y, EDX=w, ESI=h, EDI=color
-#define SYS_DRAW_TEXT   12  // Draw text. EBX=x, ECX=y, EDX=str_ptr, ESI=fg, EDI=bg
+#define SYS_DRAW_RECT   11  // Draw rect. EBX=win_id, ECX=x, EDX=y, ESI=(w<<16)|h, EDI=color
+#define SYS_DRAW_TEXT   12  // Draw text. EBX=win_id, ECX=x, EDX=y, ESI=str_ptr, EDI=color
 #define SYS_GET_KEY     13  // Get keyboard char (non-blocking) → return char or 0
 #define SYS_GET_MOUSE   14  // Get mouse state → EAX=x, EBX=y, ECX=buttons
+#define SYS_CREATE_WINDOW 15 // EBX=x, ECX=y, EDX=w, ESI=h, EDI=title_ptr -> win_id
+#define SYS_GET_EVENT   16   // EBX=win_id, ECX=event_ptr
+#define SYS_UPDATE_WINDOW 17 // EBX=win_id
 
 // Initialize syscall handler (int 0x80)
 void init_syscalls(void);

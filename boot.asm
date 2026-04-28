@@ -10,8 +10,8 @@ align 4
     dd CHECKSUM
     dd 0, 0, 0, 0, 0 ; Address fields (unused for ELF)
     dd 0             ; Mode (0 = linear)
-    dd 800           ; Width
-    dd 600           ; Height
+    dd 1024          ; Width
+    dd 768           ; Height
     dd 32            ; Depth
 
 section .bss

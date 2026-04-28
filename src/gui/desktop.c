@@ -21,7 +21,9 @@ static Icon icons[ICON_COUNT];
 static uint32_t last_click_tick = 0;
 static int      last_click_icon = -1;
 
+extern int load_mct_app(const char*);
 static void open_snake_wrapper() { start_ular(); }
+static void open_gcalc_app() { load_mct_app("gcalc.mct"); }
 
 static void save_desktop_icons() {
     int idx = vfs_find("icons.cfg");
@@ -47,6 +49,7 @@ static void init_icons() {
     icons[4] = (Icon){ col_x, start_y + 4*gap_y, "Clock",    0, open_clock_app     };
     icons[5] = (Icon){ col_x, start_y + 5*gap_y, "PCI",      0, open_pci_app       };
     icons[6] = (Icon){ col_x, start_y + 6*gap_y, "Snake",    0, open_snake_wrapper };
+    icons[7] = (Icon){ col_x, start_y + 7*gap_y, "Calc",     0, open_gcalc_app     };
 
     // Load saved positions
     int idx = vfs_find("icons.cfg");
@@ -197,6 +200,25 @@ static void draw_snake_icon(int ix, int iy) {
     draw_rect(ix + 15, iy + 7, 4, 2, 0x0044AA22);
 }
 
+static void draw_calc_icon(int ix, int iy) {
+    // Body
+    draw_rect(ix + 6, iy + 2, 36, 40, 0x00444444);
+    draw_rect_border(ix + 6, iy + 2, 36, 40, 0x00777777);
+    // Display
+    draw_rect(ix + 10, iy + 6, 28, 10, 0x00AACC88);
+    draw_rect_border(ix + 10, iy + 6, 28, 10, 0x0088AA66);
+    // Text on display
+    draw_string_px(ix + 12, iy + 7, "123", 0x00000000, 0);
+    // Keys (3x3 grid for simplicity)
+    for(int r=0; r<3; r++) {
+        for(int c=0; c<3; c++) {
+            int kx = ix + 10 + c*10;
+            int ky = iy + 19 + r*7;
+            draw_rect(kx, ky, 8, 5, 0x00888888);
+        }
+    }
+}
+
 static void draw_icon(int i) {
     Icon* ic = &icons[i];
     int ix = ic->x;
@@ -210,6 +232,7 @@ static void draw_icon(int i) {
     else if (strcmp(ic->label, "Clock") == 0)     draw_clock_icon(ix, iy);
     else if (strcmp(ic->label, "PCI") == 0)       draw_pci_icon(ix, iy);
     else if (strcmp(ic->label, "Snake") == 0)     draw_snake_icon(ix, iy);
+    else if (strcmp(ic->label, "Calc") == 0)      draw_calc_icon(ix, iy);
 
     // Draw label with text shadow for readability on any wallpaper
     int llen = strlen(ic->label);
@@ -226,23 +249,25 @@ void desktop_draw() {
     uint32_t area_h = fb_height - TASKBAR_H_PX;
 
     // Blit wallpaper to back_buffer using fast memcpy (line by line)
+    // Wallpaper is baked at 1024x768 by build_wallpaper.py
     uint32_t* wp_ptr = _binary_obj_wallpaper_bin_start;
-    uint32_t copy_w = (fb_width < 800) ? fb_width : 800;
-    uint32_t copy_h = (area_h < 600) ? area_h : 600;
+    uint32_t wp_w = 1024, wp_h = 768;
+    uint32_t copy_w = (fb_width < wp_w) ? fb_width : wp_w;
+    uint32_t copy_h = (area_h < wp_h) ? area_h : wp_h;
     for (uint32_t y = 0; y < copy_h; y++) {
-        memcpy(&back_buffer[y * fb_width], &wp_ptr[y * 800], copy_w * 4);
+        memcpy(&back_buffer[y * fb_width], &wp_ptr[y * wp_w], copy_w * 4);
     }
 
-    // Fill remaining edges if screen is larger than 800x600 (not usually the case)
-    if (fb_width > 800) {
-        draw_rect(800, 0, fb_width - 800, area_h, 0x00111122);
+    // Fill remaining edges if screen is larger than wallpaper
+    if (fb_width > wp_w) {
+        draw_rect(wp_w, 0, fb_width - wp_w, area_h, 0x00111122);
     }
-    if (area_h > 600) {
-        draw_rect(0, 600, fb_width, area_h - 600, 0x00111122);
+    if (area_h > wp_h) {
+        draw_rect(0, wp_h, fb_width, area_h - wp_h, 0x00111122);
     }
 
     // Marquee scrolling text at the top
-    static int marquee_x = 1024;
+    static int marquee_x = 1280;
     marquee_x -= 2;
     const char* marquee_msg = "Mectov OS is still in early development phase. Expect bugs, system crashes, and unhandled exceptions. Proceed with caution. Created by M Alif Fadlan.";
     int msg_len = strlen(marquee_msg);
@@ -326,7 +351,7 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
     } else if (!btn && pbtn) {
         if (dragged_icon != -1) {
             uint32_t now = get_ticks();
-            if (last_click_icon == dragged_icon && (now - last_click_tick) < 30) {
+            if (last_click_icon == dragged_icon && (now - last_click_tick) < 500) {
                 if (icons[dragged_icon].action) icons[dragged_icon].action();
                 last_click_icon = -1;
             } else {

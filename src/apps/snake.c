@@ -28,9 +28,8 @@ void start_ular() {
 
         // Kontrol kecepatan ular pake timer ticks (bukan busy loop)
         uint32_t current_tick = get_ticks();
-        uint32_t speed = 8 - (len > 20 ? 5 : len / 4); // Makin panjang makin dikit tick jedanya
         
-        if (current_tick - last_move_tick >= speed) {
+        if (current_tick - last_move_tick > 166) {
             last_move_tick = current_tick;
 
             for(int i=len-1; i>0; i--) { sx[i] = sx[i-1]; sy[i] = sy[i-1]; }

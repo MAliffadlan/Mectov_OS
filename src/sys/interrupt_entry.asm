@@ -121,6 +121,16 @@ isr0:
     jmp isr_common_stub
 
 ; ============================================================
+; ISR 4: Overflow (INTO instruction, no error code)
+; DPL=3 in IDT so Ring 3 apps can trigger this safely.
+; ============================================================
+global isr4
+isr4:
+    push byte 0
+    push byte 4
+    jmp isr_common_stub
+
+; ============================================================
 ; ISR 13: General Protection Fault (has error code from CPU)
 ; ============================================================
 global isr13

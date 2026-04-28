@@ -58,6 +58,15 @@ int wm_open(int x, int y, int w, int h, const char* title,
             wm_wins[i].title[k] = '\0';
             if (wm_zcount < MAX_WINDOWS) wm_zorder[wm_zcount++] = i;
             wm_focused = wm_wins[i].id;
+            
+            write_serial_string("WM_OPEN id=");
+            write_serial_hex(wm_wins[i].id);
+            write_serial_string(" &visible=");
+            write_serial_hex((uint32_t)&wm_wins[i].visible);
+            write_serial_string(" &id=");
+            write_serial_hex((uint32_t)&wm_wins[i].id);
+            write_serial('\n');
+            
             return wm_wins[i].id;
         }
     }
@@ -73,6 +82,11 @@ int wm_is_open(int id) {
 }
 
 void wm_close(int id) {
+    write_serial_string("WM_CLOSE called from: ");
+    write_serial_hex((uint32_t)__builtin_return_address(0));
+    write_serial_string(" for id=");
+    write_serial_hex(id);
+    write_serial('\n');
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (wm_wins[i].visible && wm_wins[i].id == id) {
             wm_wins[i].visible = 0;
@@ -104,16 +118,22 @@ static void draw_one(int idx) {
         uint32_t r, g, b;
         if (focused) {
             r = 217 + (t * 10) / 255; g = 217 + (t * 10) / 255; b = 217 + (t * 10) / 255;
+            draw_rect(x, y + row, ww, 1, (r << 16) | (g << 8) | b);
         } else {
+            // Glassmorphism titlebar for inactive
             r = 230 - (t * 10) / 255; g = 230 - (t * 10) / 255; b = 230 - (t * 10) / 255;
+            draw_rect_alpha(x, y + row, ww, 1, (r << 16) | (g << 8) | b);
         }
-        draw_rect(x, y + row, ww, 1, (r << 16) | (g << 8) | b);
     }
     // Titlebar bottom accent
     draw_rect(x, y + TITLEBAR_H - 1, ww, 1, border);
 
-    // Window body
-    draw_rect(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, GUI_BG);
+    // Window body: Solid if focused, Glassmorphism (50% transparent) if inactive
+    if (focused) {
+        draw_rect(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, GUI_BG);
+    } else {
+        draw_rect_alpha(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, GUI_BG);
+    }
 
     // Title text (offset to the left to make room for 3 buttons)
     int tlen = strlen(w->title);
@@ -196,6 +216,7 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
 
                 // Close button
                 if (mx >= cbx) {
+                    write_serial_string("WM_CLOSE via MOUSE!\n");
                     wm_close(w->id);
                     return 1;
                 }
