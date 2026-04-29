@@ -97,10 +97,42 @@ static void term_draw(int id, int cx2, int cy2, int cw, int ch) {
         draw_rect(cx2 + term.cx*8, cy2 + term.cy*16 + 14, 8, 2, 0x0000FF88);
 }
 
+// Extended scancode state (0xE0 prefix)
+static int ext_sc_pending = 0;
+
 static void term_key(int id, char c, uint8_t sc) {
     (void)id;
     if (term_app_running) {
         term_app_push_key(sc);
+        return;
+    }
+    
+    // Handle extended scancode prefix (arrow keys etc)
+    if (sc == 0xE0) {
+        ext_sc_pending = 1;
+        return;
+    }
+    if (ext_sc_pending) {
+        ext_sc_pending = 0;
+        // Arrow keys after 0xE0 prefix
+        if (sc == 0x48) { // Up arrow
+            if (shell_history_up()) {
+                // Redraw the line
+                for (int i = 0; i < b_idx + 14; i++) term_putchar('\b', 0x00);
+                term_print("root@mectov:~# ", 0x0A);
+                term_print(cmd_b, 0x0F);
+            }
+            return;
+        }
+        if (sc == 0x50) { // Down arrow
+            if (shell_history_down()) {
+                for (int i = 0; i < b_idx + 14; i++) term_putchar('\b', 0x00);
+                term_print("root@mectov:~# ", 0x0A);
+                term_print(cmd_b, 0x0F);
+            }
+            return;
+        }
+        // Left/Right ignored for now
         return;
     }
     
@@ -113,11 +145,13 @@ static void term_key(int id, char c, uint8_t sc) {
     } else if (c == '\b' && b_idx > 0) {
         b_idx--;
         term_putchar('\b', 0x0F);
+    } else if (c == '\t') {
+        // Tab completion
+        shell_apply_tab();
     } else if (c != 0 && b_idx < 255) {
         cmd_b[b_idx++] = c;
         term_putchar(c, term_cur_col);
     }
-    (void)sc;
 }
 
 static void term_tick(int id) { (void)id; }

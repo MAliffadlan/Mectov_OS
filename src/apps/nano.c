@@ -6,8 +6,10 @@
 #include "../include/wm.h"
 #include "../include/timer.h"
 
+#define NANO_BUF_SIZE 4096
+
 int ed_a = 0; 
-char ed_b[MAX_FILE_SIZE]; 
+char ed_b[NANO_BUF_SIZE]; 
 char ed_fn[MAX_FILENAME]; 
 int ed_c = 0;
 static int nano_win_id = -1;
@@ -38,7 +40,7 @@ static void nano_key(int id, char c, uint8_t sc) {
     if (c == '\b' && ed_c > 0) {
         ed_c--;
         ed_b[ed_c] = '\0';
-    } else if (c != 0 && ed_c < MAX_FILE_SIZE - 1) {
+    } else if (c != 0 && ed_c < NANO_BUF_SIZE - 1) {
         ed_b[ed_c++] = c;
         ed_b[ed_c] = '\0';
     }
@@ -49,14 +51,16 @@ static void nano_tick(int id) { (void)id; }
 void st_ed(const char* f) { 
     if (nano_win_id >= 0 && wm_is_open(nano_win_id)) { wm_raise(nano_win_id); return; }
     strcpy(ed_fn, f); 
-    int i = vfs_find(f); 
-    if (i >= 0) { 
-        strcpy(ed_b, fs[i].data); 
-        ed_c = fs[i].size; 
-    } else { 
-        ed_b[0] = '\0'; 
-        ed_c = 0; 
-    } 
+    
+    // Try to read file via new VFS API
+    int sz = vfs_read_file(f, ed_b, NANO_BUF_SIZE - 1);
+    if (sz > 0) {
+        ed_b[sz] = '\0';
+        ed_c = sz;
+    } else {
+        ed_b[0] = '\0';
+        ed_c = 0;
+    }
     ed_a = 1; 
     
     char title[64];
@@ -67,12 +71,8 @@ void st_ed(const char* f) {
 }
 
 void sa_ex_ed() { 
-    int i = vfs_find(ed_fn); 
-    if (i == -1) i = vfs_create(ed_fn); 
-    if (i >= 0) { 
-        strcpy(fs[i].data, ed_b); 
-        fs[i].size = ed_c; 
-    } 
+    // Save via new VFS API
+    vfs_write_file(ed_fn, ed_b, ed_c);
     vfs_save(); 
     ed_a = 0; 
     nano_win_id = -1;

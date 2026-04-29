@@ -63,7 +63,7 @@ static void si_draw(int id, int cx, int cy, int cw, int ch) {
     rbuf[rpos++] = ' '; rbuf[rpos++] = 'K'; rbuf[rpos++] = 'B'; rbuf[rpos] = '\0';
     draw_string_px(lx + 40, ly, rbuf, GUI_TEXT, 0xFFFFFFFF);
     ly += 16;
-    draw_bar(lx, ly, cw - 24, 10, used_kb, tot_kb, GUI_CYAN);
+    draw_bar(lx, ly, cw - 24, 10, used_kb, tot_kb, GUI_TEAL);
     ly += gap;
 
     // Uptime
@@ -118,7 +118,7 @@ static void si_draw(int id, int cx, int cy, int cw, int ch) {
         }
         mac_str[mi] = '\0';
         draw_string_px(lx + 40, ly, "RTL8139 MAC ", GUI_TEXT, 0xFFFFFFFF);
-        draw_string_px(lx + 140, ly, mac_str, GUI_CYAN, 0xFFFFFFFF);
+        draw_string_px(lx + 140, ly, mac_str, GUI_TEAL, 0xFFFFFFFF);
     } else {
         draw_string_px(lx + 40, ly, "No Network Card Detected", 0x00FF0000, 0xFFFFFFFF);
     }

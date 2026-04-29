@@ -1,12 +1,14 @@
 #include "../include/utils.h"
 #include "../include/io.h"
 #include "../include/vga.h"
+#include "../include/rtc.h"
 
 char cpu_brand[49];
 unsigned char boot_sec, boot_min, boot_hour;
 unsigned int rand_seed = 0;
 
-unsigned char read_cmos(unsigned char reg) { outb(0x70, reg); return inb(0x71); }
+// Legacy CMOS read — NMI-safe version (bit 7 set to disable NMI)
+unsigned char read_cmos(unsigned char reg) { outb(0x70, reg | 0x80); return inb(0x71); }
 unsigned char bcd_to_bin(unsigned char bcd) { return ((bcd & 0xF0) >> 1) + ((bcd & 0xF0) >> 3) + (bcd & 0x0F); }
 
 void detect_cpu() {
@@ -19,17 +21,33 @@ void detect_cpu() {
     cpu_brand[48] = '\0';
 }
 
-void init_uptime() { boot_sec = bcd_to_bin(read_cmos(0x00)); boot_min = bcd_to_bin(read_cmos(0x02)); boot_hour = bcd_to_bin(read_cmos(0x04)); }
+void init_uptime() {
+    rtc_init();
+    rtc_time_t bt = rtc_read_time();
+    boot_sec = bt.second;
+    boot_min = bt.minute;
+    boot_hour = bt.hour;
+}
 
 void shutdown() {
-    // Modern ACPI shutdown via PM1a_CNT (works in QEMU PIIX4 / Bochs)
-    outw(0xB004, 0x2000);
-    // Fallback QEMU isa-debug-exit
-    outw(0x604, 0x2000);
-    // Fallback VirtualBox
-    outw(0x4004, 0x3400);
+    print("Shutting down...\n", 0x0C);
+    __asm__ volatile("cli");
+    outw(0xB004, 0x2000);   // ACPI PM1a_CNT (QEMU PIIX4)
+    outw(0x604, 0x2000);    // QEMU isa-debug-exit
+    outw(0x4004, 0x3400);   // VirtualBox fallback
+    // If all fail, halt CPU forever
+    for(;;) __asm__("hlt");
 }
-void reboot() { unsigned char g = 0x02; while (g & 0x02) g = inb(0x64); outb(0x64, 0xFE); }
+void reboot() {
+    print("Rebooting...\n", 0x0E);
+    __asm__ volatile("cli");
+    // Keyboard controller 8042 reset
+    unsigned char g;
+    do { g = inb(0x64); } while (g & 0x02);
+    outb(0x64, 0xFE);
+    // Fallback: halt if reset fails
+    for(;;) __asm__("hlt");
+}
 
 int strlen(const char* s) {
     int len = 0;

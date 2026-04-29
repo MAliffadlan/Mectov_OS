@@ -4,7 +4,7 @@
 #include "types.h"
 
 #define MAX_WINDOWS  8
-#define TITLEBAR_H   22   // pixels
+// TITLEBAR_H defined in theme.h (included via vga.h)
 
 typedef void (*WinDrawFn)(int id, int cx, int cy, int cw, int ch);
 typedef void (*WinKeyFn) (int id, char c, uint8_t sc);
@@ -26,6 +26,10 @@ typedef struct {
     int minimized;         // 1 = hidden in taskbar
     int maximized;         // 1 = fullscreen
     int saved_x, saved_y, saved_w, saved_h; // pre-maximize geometry
+    // Titlebar button hit-test positions (set by draw_one)
+    int close_cx, close_cy, close_r;
+    int max_cx,   max_cy,   max_r;
+    int min_cx,   min_cy,   min_r;
 } WmWin;
 
 extern WmWin wm_wins[MAX_WINDOWS];

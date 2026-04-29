@@ -15,6 +15,9 @@ void paging_init(uint32_t fb_addr, uint32_t fb_size);
  // AKTIFKAN PAGING
 void* kmalloc(uint32_t size);
 void kfree(void* ptr);
+void* krealloc(void* ptr, uint32_t new_size);
+void* kcalloc(uint32_t num, uint32_t size);
+void kmalloc_stats(void (*print_fn)(const char*, unsigned char));
 void page_map(uint32_t vaddr, uint32_t paddr, uint32_t flags);
 
 unsigned int get_total_memory();

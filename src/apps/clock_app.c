@@ -3,6 +3,7 @@
 #include "../include/wm.h"
 #include "../include/timer.h"
 #include "../include/font8x16.h"
+#include "../include/rtc.h"
 
 static int clock_win_id = -1;
 static int clock_open = 0;
@@ -11,12 +12,13 @@ static void clock_draw(int id, int cx, int cy, int cw, int ch) {
     (void)id;
     draw_rect(cx, cy, cw, ch, GUI_BG);
 
-    unsigned char sec  = bcd_to_bin(read_cmos(0x00));
-    unsigned char min  = bcd_to_bin(read_cmos(0x02));
-    unsigned char hour = bcd_to_bin(read_cmos(0x04));
-    unsigned char day  = bcd_to_bin(read_cmos(0x07));
-    unsigned char mon  = bcd_to_bin(read_cmos(0x08));
-    unsigned char yr   = bcd_to_bin(read_cmos(0x09));
+    rtc_time_t tm = rtc_read_time();
+    unsigned char sec  = tm.second;
+    unsigned char min  = tm.minute;
+    unsigned char hour = tm.hour;
+    unsigned char day  = tm.day;
+    unsigned char mon  = tm.month;
+    unsigned int  yr   = tm.year;
 
     hour = (hour + 7) % 24; // WIB (UTC+7)
 
@@ -37,7 +39,7 @@ static void clock_draw(int id, int cx, int cy, int cw, int ch) {
             unsigned char bits = font8x16_data[(unsigned char)tbuf[i]][row];
             for (int col2 = 0; col2 < 8; col2++) {
                 uint32_t color = (bits & (0x80 >> col2)) ?
-                    (tbuf[i] == ':' ? GUI_CYAN : GUI_TEXT) : GUI_BG;
+                    (tbuf[i] == ':' ? GUI_TEAL : GUI_TEXT) : GUI_BG;
                 put_pixel(tx + i*16 + col2*2,     ty + row*2,     color);
                 put_pixel(tx + i*16 + col2*2 + 1, ty + row*2,     color);
                 put_pixel(tx + i*16 + col2*2,     ty + row*2 + 1, color);

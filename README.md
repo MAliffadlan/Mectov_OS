@@ -1,10 +1,12 @@
-# Mectov OS v18.0  (The Mectov Kernel)
+# Mectov OS v19.0 — Modern UI Redesign
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
 ## About
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
+
+The v19.0 release introduces a **modern UI overhaul** inspired by contemporary design: glass-morphism icons, Catppuccin Mocha theme colors, rounded window corners with soft shadows, and a clean glossy taskbar.
 
 Created by **M Alif Fadlan**.
 
@@ -30,7 +32,7 @@ Created by **M Alif Fadlan**.
 +--------------------------------------------------------------------+
 |  MCT App Loader  |  Ring 3 User Tasks  |  Display List Renderer    |
 +--------------------------------------------------------------------+
-|  Desktop  |  Taskbar  |  Start Menu  |  8 Desktop Icons            |
+|  Desktop (Glass Icons)  |  Taskbar (Glossy)  |  Start Menu         |
 +--------------------------------------------------------------------+
 ```
 
@@ -70,12 +72,14 @@ Created by **M Alif Fadlan**.
 ### 3. Window Manager (src/gui/wm.c)
 - Double-buffered rendering (back buffer → front buffer swap) using fast `memcpy` with dirty region tracking
 - Z-ordered floating windows with proper overlap handling
-- Titlebar with gradient rendering (focused vs unfocused states)
+- **Rounded corners** (radius 8) on all windows with soft shadow drop for depth effect
+- Titlebar with Catppuccin Mocha gradient (focused vibrant vs unfocused dimmed)
 - Glassmorphism transparency effects on inactive windows
-- Three window control buttons per window:
-  - Minimize [_] : hides window to taskbar, click taskbar button to restore
-  - Maximize [O] : expands window to fill screen, click again to restore original size
-  - Close [x] : destroys window and triggers app cleanup
+- Three modern circle control buttons per window:
+  - Close (red circle) — destroys window and triggers app cleanup
+  - Maximize (green circle) — expands window to fill screen, click again to restore
+  - Minimize (yellow circle) — hides window to taskbar, click taskbar button to restore
+- Rounded buttons (radius 4) for close and shutdown dialogs
 - Mouse-driven drag-and-drop repositioning (disabled when maximized)
 - Click-through hit testing from front to back
 - Focus management: closing/minimizing a window auto-focuses the next visible window
@@ -83,21 +87,22 @@ Created by **M Alif Fadlan**.
 
 ### 4. Desktop Environment (src/gui/desktop.c)
 - **Custom Baked Wallpaper**: Full-color 1024×768 32-bit BGRA image processed via Python build script (`scratch/build_wallpaper.py`), converted into a raw binary, and injected directly into the kernel binary using `objcopy` as an `elf32-i386` object. Blitted instantly via `memcpy`.
-- **MenuetOS-Style Icons**: 8 highly detailed procedural pixel-art icons arranged vertically on the left side of the screen with transparent backgrounds and text drop-shadows
+- **Glass-morphism Icons**: 8 frosted-glass style desktop icons with semi-transparent dark backgrounds, thin white borders (dual-layer), soft drop shadows, and clean white glyphs. Arranged in an adaptive grid layout with 64px icon size.
 - **Draggable Persistent Icons**: Users can drag and drop icons to any location. Positions are automatically serialized to an `icons.cfg` file on the VFS and persist across system reboots
 - **Double-click to launch**: Applications open on double-click with configurable tick threshold
-- **Scrolling marquee banner** at the top of the desktop
+- **Start Menu**: Left-click taskbar button opens a clean dark-themed application launcher menu
 
 ### 5. Taskbar (src/gui/taskbar.c)
-- "MectovOS" start menu button with application launcher
-- **Icon-only window buttons**: each open app is shown as a 16×16 pixel-art icon (matching desktop icons) instead of text labels — compact and visually clean
-- Minimized windows shown with dimmed icon colors
+- "Start" start menu button with a clean dark application launcher
+- **Glossy dark background** with Catppuccin Mocha accent border at top
+- **Icon-only window buttons**: each open app shown as a simplified glyph in a rounded square tile (same glass-morphism style as desktop icons)
+- Minimized windows shown with dimmed icon opacity
 - Click behavior: restore minimized, minimize focused, raise unfocused
 - System tray with:
   - CAPS indicator (orange when active)
   - HDD activity LED (red flash on disk I/O)
   - RAM usage bar (live percentage)
-  - Digital clock with **day of week** (e.g. `Sun 22:36:17`), adjusted for WIB / UTC+7 timezone including day roll-over
+  - Digital clock with day of week (e.g. `Sun 22:36:17`), adjusted for WIB / UTC+7 timezone including day roll-over
 
 ### 6. Network Stack (src/drivers/net.c + src/drivers/rtl8139.c)
 - **RTL8139 NIC Driver**: Full driver with PCI bus mastering, 4 TX descriptor rotation, RX ring buffer polling
@@ -149,7 +154,7 @@ Created by **M Alif Fadlan**.
 
 ### 13. Boot and Security
 - Startup audio melody via PC Speaker
-- Password-protected login screen (default: `mectov123`)
+- Password-protected login screen (default: `mectov123`) with centered glass-panel UI
 - **Terminus Bold 16 font** for beautiful, highly readable typography (replaces standard VGA fonts)
 
 ---
@@ -161,26 +166,26 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 | # | Name | Args | Description |
 |---|------|------|-------------|
 | 1 | `SYS_PRINT` | EBX=str, ECX=color | Print string to screen |
-| 2 | `SYS_OPEN` | EBX=filename | Open/create VFS file → returns fd |
-| 3 | `SYS_READ` | EBX=fd, ECX=buf, EDX=size | Read from file → returns bytes read |
-| 4 | `SYS_WRITE` | EBX=fd, ECX=buf, EDX=size | Write to file → returns bytes written |
+| 2 | `SYS_OPEN` | EBX=filename | Open/create VFS file -> returns fd |
+| 3 | `SYS_READ` | EBX=fd, ECX=buf, EDX=size | Read from file -> returns bytes read |
+| 4 | `SYS_WRITE` | EBX=fd, ECX=buf, EDX=size | Write to file -> returns bytes written |
 | 5 | `SYS_CLOSE` | EBX=fd | Close file descriptor |
-| 6 | `SYS_MALLOC` | EBX=size | Allocate kernel heap memory → returns pointer |
+| 6 | `SYS_MALLOC` | EBX=size | Allocate kernel heap memory -> returns pointer |
 | 7 | `SYS_FREE` | EBX=ptr | Free allocated memory |
-| 8 | `SYS_GET_TICKS` | — | Get PIT timer ticks → returns uint32 |
+| 8 | `SYS_GET_TICKS` | — | Get PIT timer ticks -> returns uint32 |
 | 9 | `SYS_YIELD` | — | Yield CPU to scheduler |
 | 10 | `SYS_EXIT` | — | Terminate current task |
 | 11 | `SYS_DRAW_RECT` | EBX=wid, ECX=x, EDX=y, ESI=(w<<16\|h), EDI=color | Draw rectangle in window |
 | 12 | `SYS_DRAW_TEXT` | EBX=wid, ECX=x, EDX=y, ESI=str, EDI=color | Draw text in window |
 | 13 | `SYS_GET_KEY` | — | Get keyboard char (non-blocking) |
 | 14 | `SYS_GET_MOUSE` | — | Get mouse state (x, y, buttons) |
-| 15 | `SYS_CREATE_WINDOW` | EBX=x, ECX=y, EDX=w, ESI=h, EDI=title | Create GUI window → returns win_id |
+| 15 | `SYS_CREATE_WINDOW` | EBX=x, ECX=y, EDX=w, ESI=h, EDI=title | Create GUI window -> returns win_id |
 | 16 | `SYS_GET_EVENT` | EBX=wid, ECX=event_ptr | Get window event (paint/key/mouse) |
 | 17 | `SYS_UPDATE_WINDOW` | EBX=wid | Commit pending draw commands to display |
 
 ---
 
-## Applications Mectov OS Kernel
+## Applications
 
 | Application     | File                    | Type | Description                                      |
 |-----------------|-------------------------|------|--------------------------------------------------|
@@ -201,50 +206,50 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 
 ```
 my-os/
-├── boot.asm                    # Multiboot entry, VBE 1024x768 setup
-├── kernel.c                    # Main kernel loop, event handling, FPS counter
-├── linker.ld                   # Kernel linker script
-├── Makefile                    # Build system
-├── run.sh                      # Build + QEMU launch script
-├── build_mct.py                # .mct executable builder (C → MCT)
-├── inject_vfs.py               # VFS disk image injector
-├── apps/
-│   └── gcalc.c                 # Ring 3 GUI Calculator source
-├── src/
-│   ├── drivers/
-│   │   ├── ata.c               # ATA PIO disk driver
-│   │   ├── font8x16.c          # Terminus Bold 16 font data
-│   │   ├── keyboard.c          # PS/2 keyboard driver
-│   │   ├── mouse.c             # PS/2 mouse driver
-│   │   ├── net.c               # Network stack (Ethernet/ARP/IPv4/ICMP/UDP/DNS)
-│   │   ├── pci.c               # PCI bus scanner
-│   │   ├── rtl8139.c           # RTL8139 NIC driver
-│   │   ├── serial.c            # COM1/COM2 UART driver
-│   │   ├── speaker.c           # PC Speaker audio
-│   │   ├── timer.c             # PIT timer (1000Hz) + microsecond counter
-│   │   └── vga.c               # VESA framebuffer + double buffering
-│   ├── gui/
-│   │   ├── desktop.c           # Desktop icons, wallpaper, drag-and-drop
-│   │   ├── login.c             # Password login screen
-│   │   ├── taskbar.c           # Taskbar + system tray
-│   │   └── wm.c                # Window Manager (Z-order, titlebar, glassmorphism)
-│   ├── sys/
-│   │   ├── gdt.c               # GDT + TSS setup (Ring 0/3)
-│   │   ├── idt.c               # IDT + IRQ/ISR handlers
-│   │   ├── interrupt_entry.asm # Low-level interrupt stubs
-│   │   ├── loader.c            # .mct app loader (VFS → Ring 3)
-│   │   ├── mem.c               # Paging + heap allocator
-│   │   ├── security.c          # Login credentials
-│   │   ├── shell.c             # Text-mode shell commands
-│   │   ├── syscall.c           # Syscall dispatcher (17 functions)
-│   │   ├── task.c              # Preemptive scheduler + task management
-│   │   ├── utils.c             # String/memory utilities
-│   │   └── vfs.c               # Virtual File System
-│   ├── apps/                   # Ring 0 GUI applications
-│   └── include/                # Header files
-└── scratch/
-    ├── build_wallpaper.py      # PNG → raw BGRA converter
-    └── gen_font.py             # Font generation tool
++-- boot.asm                    # Multiboot entry, VBE 1024x768 setup
++-- kernel.c                    # Main kernel loop, event handling, FPS counter
++-- linker.ld                   # Kernel linker script
++-- Makefile                    # Build system
++-- run.sh                      # Build + QEMU launch script
++-- build_mct.py                # .mct executable builder (C -> MCT)
++-- inject_vfs.py               # VFS disk image injector
++-- apps/
+|   +-- gcalc.c                 # Ring 3 GUI Calculator source
++-- src/
+|   +-- drivers/
+|   |   +-- ata.c               # ATA PIO disk driver
+|   |   +-- font8x16.c          # Terminus Bold 16 font data
+|   |   +-- keyboard.c          # PS/2 keyboard driver
+|   |   +-- mouse.c             # PS/2 mouse driver
+|   |   +-- net.c               # Network stack (Ethernet/ARP/IPv4/ICMP/UDP/DNS)
+|   |   +-- pci.c               # PCI bus scanner
+|   |   +-- rtl8139.c           # RTL8139 NIC driver
+|   |   +-- serial.c            # COM1/COM2 UART driver
+|   |   +-- speaker.c           # PC Speaker audio
+|   |   +-- timer.c             # PIT timer (1000Hz) + microsecond counter
+|   |   +-- vga.c               # VESA framebuffer + double buffering
+|   +-- gui/
+|   |   +-- desktop.c           # Desktop icons, wallpaper, drag-and-drop
+|   |   +-- login.c             # Password login screen
+|   |   +-- taskbar.c           # Taskbar + system tray
+|   |   +-- wm.c                # Window Manager (Z-order, titlebar, glassmorphism)
+|   +-- sys/
+|   |   +-- gdt.c               # GDT + TSS setup (Ring 0/3)
+|   |   +-- idt.c               # IDT + IRQ/ISR handlers
+|   |   +-- interrupt_entry.asm # Low-level interrupt stubs
+|   |   +-- loader.c            # .mct app loader (VFS -> Ring 3)
+|   |   +-- mem.c               # Paging + heap allocator
+|   |   +-- security.c          # Login credentials
+|   |   +-- shell.c             # Text-mode shell commands
+|   |   +-- syscall.c           # Syscall dispatcher (17 functions)
+|   |   +-- task.c              # Preemptive scheduler + task management
+|   |   +-- utils.c             # String/memory utilities
+|   |   +-- vfs.c               # Virtual File System
+|   +-- apps/                   # Ring 0 GUI applications
+|   +-- include/                # Header files
++-- scratch/
+    +-- build_wallpaper.py      # PNG -> raw BGRA converter
+    +-- gen_font.py             # Font generation tool
 ```
 
 ---
@@ -295,7 +300,8 @@ python3 inject_vfs.py disk.img gcalc.mct gcalc.mct
 
 | Version | Highlights |
 |---------|------------|
-| v18.0   | **External App Ecosystem:** Standalone `.mct` binary format and loader, `build_mct.py` + `inject_vfs.py` toolchain, 17 Syscall API functions, GUI Display List renderer, Window event queues, Ring 3 GUI Calculator (`gcalc`), task scheduler auto-recovery on app exit, overflow exception handler (ISR 4), 1024×768 resolution upgrade. |
+| v19.0   | **Modern UI Redesign:** Glass-morphism desktop icons (frosted glass with soft shadows), Catppuccin Mocha theme colors, rounded window corners (radius 8), modern titlebar with circle control buttons (red/green/yellow), redesigned taskbar with glossy background, soft shadow utility for depth effects, clean login screen with centered glass panel. |
+| v18.0   | **External App Ecosystem:** Standalone `.mct` binary format and loader, `build_mct.py` + `inject_vfs.py` toolchain, 17 Syscall API functions, GUI Display List renderer, Window event queues, Ring 3 GUI Calculator (`gcalc`), task scheduler auto-recovery on app exit, overflow exception handler (ISR 4), 1024x768 resolution upgrade. |
 | v17.1   | **Stable Ring 3 User Mode**, Ring-aware scheduler, TSS stack switching fix, Syscall graphics rendering. |
 | v17.0   | Terminus Bold font, Custom Wallpaper baking (objcopy), MenuetOS-style UI, Draggable persistent icons (saved to VFS), rendering optimizations via memcpy. |
 | v16.0   | Network stack (RTL8139, Ethernet, ARP, IPv4, ICMP, UDP, DNS), Mini Browser, Serial driver, User Mode infrastructure. |

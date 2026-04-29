@@ -43,7 +43,7 @@ static void pci_draw(int id, int cx, int cy, int cw, int ch) {
     cnt[ci++] = ' '; cnt[ci++] = 'd'; cnt[ci++] = 'e'; cnt[ci++] = 'v';
     cnt[ci++] = 'i'; cnt[ci++] = 'c'; cnt[ci++] = 'e'; cnt[ci++] = 's';
     cnt[ci] = '\0';
-    draw_string_px(cx + cw - 90, cy + 2, cnt, GUI_CYAN, GUI_BORDER2);
+    draw_string_px(cx + cw - 90, cy + 2, cnt, GUI_TEAL, GUI_BORDER2);
 
     int max_rows = (ch - 24) / 18;
     int y = cy + 24;
@@ -67,7 +67,7 @@ static void pci_draw(int id, int cx, int cy, int cw, int ch) {
 
         // Vendor name
         const char* vname = pci_vendor_name(d->vendor_id);
-        draw_string_px(cx + 40, y + 1, vname, GUI_CYAN, row_bg);
+        draw_string_px(cx + 40, y + 1, vname, GUI_TEAL, row_bg);
 
         // Class name
         const char* cname = pci_class_name(d->class_code, d->subclass);

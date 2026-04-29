@@ -46,6 +46,12 @@ void draw_line(int x0, int y0, int x1, int y1, uint32_t color);
 void draw_circle(int xc, int yc, int r, uint32_t color);
 void fill_circle(int xc, int yc, int r, uint32_t color);
 
+// ---- New Modern Primitives ----
+void draw_rounded_rect(int x, int y, int w, int h, int r, uint32_t color);
+void draw_rounded_rect_border(int x, int y, int w, int h, int r, uint32_t col);
+void draw_gradient_v(int x, int y, int w, int h, uint32_t color_top, uint32_t color_bot);
+void draw_soft_shadow(int x, int y, int w, int h, int radius, uint32_t intensity);
+
 // ---- Text rendering ----
 void d_char(int x, int y, char c, unsigned char col);
 void draw_char_px(int px, int py, char c, uint32_t fg, uint32_t bg);

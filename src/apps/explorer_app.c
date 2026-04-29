@@ -20,19 +20,19 @@ static void explorer_draw(int id, int cx, int cy, int cw, int ch) {
     int y_offset = 30;
     int file_count = 0;
 
-    for (int i = 0; i < MAX_FILES; i++) {
-        if (fs[i].in_use) {
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (fs_nodes[i].in_use && fs_nodes[i].parent == current_dir) {
             // Hover effect can be complex without tracking mouse move, so we skip it.
             // Draw File Icon (a simple square)
             draw_rect(cx + 8, cy + y_offset, 16, 16, 0x00FFBB55); // Orange folder/file
             draw_rect(cx + 10, cy + y_offset + 2, 12, 12, 0x00FFDDAA);
 
             // File Name
-            draw_string_px(cx + 32, cy + y_offset, fs[i].name, GUI_TEXT, GUI_BG);
+            draw_string_px(cx + 32, cy + y_offset, fs_nodes[i].name, GUI_TEXT, GUI_BG);
 
             // Size
             char sz[16];
-            int size = fs[i].size;
+            int size = fs_nodes[i].size;
             int idx = 0;
             if (size == 0) { sz[idx++] = '0'; }
             else {
@@ -66,11 +66,11 @@ static void explorer_mouse(int id, int cx, int cy, int btn) {
             int index = (cy - 30) / 24;
             // Find the nth file
             int current = 0;
-            for (int i = 0; i < MAX_FILES; i++) {
-                if (fs[i].in_use) {
+            for (int i = 0; i < MAX_NODES; i++) {
+                if (fs_nodes[i].in_use && fs_nodes[i].parent == current_dir) {
                     if (current == index) {
-                        // Open this file in nano
-                        st_ed(fs[i].name);
+                        // Open this file in nano — pass the filename (st_ed resolves via VFS)
+                        st_ed(fs_nodes[i].name);
                         return;
                     }
                     current++;

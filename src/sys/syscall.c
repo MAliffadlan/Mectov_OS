@@ -17,6 +17,7 @@
 #include "../include/mouse.h"
 #include "../include/serial.h"
 #include "../include/wm.h"
+#include "../include/apps.h"
 
 // GUI Event structures for Ring 3
 #define MAX_EVENTS 64
@@ -110,8 +111,11 @@ static void win_mouse_cb(int id, int cx, int cy, int btn) {
 
 typedef struct {
     int state;       // FD_FREE or FD_OPEN
-    int vfs_index;   // Index into fs[] array
+    char path[MAX_PATH]; // File path
     int offset;      // Current read/write position
+    char* data;      // In-memory buffer (kmalloc'd)
+    int size;        // Current data size
+    int capacity;    // Allocated capacity
 } fd_entry_t;
 
 static fd_entry_t fd_table[MAX_FDS];
@@ -119,28 +123,40 @@ static fd_entry_t fd_table[MAX_FDS];
 static void fd_init(void) {
     for (int i = 0; i < MAX_FDS; i++) {
         fd_table[i].state = FD_FREE;
-        fd_table[i].vfs_index = -1;
+        fd_table[i].path[0] = '\0';
         fd_table[i].offset = 0;
+        fd_table[i].data = 0;
+        fd_table[i].size = 0;
+        fd_table[i].capacity = 0;
     }
 }
 
-static int fd_alloc(int vfs_idx) {
+static int fd_alloc(const char* path) {
     for (int i = 0; i < MAX_FDS; i++) {
         if (fd_table[i].state == FD_FREE) {
             fd_table[i].state = FD_OPEN;
-            fd_table[i].vfs_index = vfs_idx;
+            strcpy(fd_table[i].path, path);
             fd_table[i].offset = 0;
+            fd_table[i].data = 0;
+            fd_table[i].size = 0;
+            fd_table[i].capacity = 0;
             return i;
         }
     }
-    return -1; // No free FDs
+    return -1;
 }
 
 static void fd_free(int fd) {
     if (fd >= 0 && fd < MAX_FDS) {
         fd_table[fd].state = FD_FREE;
-        fd_table[fd].vfs_index = -1;
+        fd_table[fd].path[0] = '\0';
         fd_table[fd].offset = 0;
+        if (fd_table[fd].data) {
+            kfree(fd_table[fd].data);
+            fd_table[fd].data = 0;
+        }
+        fd_table[fd].size = 0;
+        fd_table[fd].capacity = 0;
     }
 }
 
@@ -202,14 +218,39 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
-            int idx = vfs_find(filename);
-            if (idx < 0) {
-                // File not found — auto-create
-                idx = vfs_create(filename);
-                if (idx < 0) { regs->eax = (uint32_t)-1; break; }
+            if (safe_strlen(filename, MAX_PATH) < 0) { regs->eax = (uint32_t)-1; break; }
+            int fd = fd_alloc(filename);
+            if (fd < 0) { regs->eax = (uint32_t)-1; break; }
+            
+            // Pre-load file contents into FD buffer if file exists
+            int node = vfs_get_node(filename);
+            if (node >= 0 && vfs_is_file(node)) {
+                // Allocate a reasonable buffer
+                fd_table[fd].data = (char*)kmalloc(MAX_FILE_SIZE);
+                if (fd_table[fd].data) {
+                    fd_table[fd].capacity = MAX_FILE_SIZE;
+                    int sz = vfs_read_file(filename, fd_table[fd].data, MAX_FILE_SIZE - 1);
+                    if (sz > 0) {
+                        fd_table[fd].data[sz] = '\0';
+                        fd_table[fd].size = sz;
+                    } else {
+                        fd_table[fd].data[0] = '\0';
+                        fd_table[fd].size = 0;
+                    }
+                }
+            } else {
+                // Create file first
+                int res = vfs_create_file(filename);
+                (void)res;
+                // Also allocate buffer
+                fd_table[fd].data = (char*)kmalloc(MAX_FILE_SIZE);
+                if (fd_table[fd].data) {
+                    fd_table[fd].capacity = MAX_FILE_SIZE;
+                    fd_table[fd].data[0] = '\0';
+                    fd_table[fd].size = 0;
+                }
             }
-            int fd = fd_alloc(idx);
-            regs->eax = (fd >= 0) ? (uint32_t)fd : (uint32_t)-1;
+            regs->eax = (uint32_t)fd;
             break;
         }
 
@@ -226,12 +267,14 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (uint32_t)-1; break;
             }
 
-            int vi = fd_table[fd].vfs_index;
+            if (!fd_table[fd].data) {
+                regs->eax = 0; break;
+            }
             int off = fd_table[fd].offset;
-            int avail = fs[vi].size - off;
-            if (avail <= 0) { regs->eax = 0; break; } // EOF
+            int avail = fd_table[fd].size - off;
+            if (avail <= 0) { regs->eax = 0; break; }
             int to_read = (size < avail) ? size : avail;
-            memcpy(buf, fs[vi].data + off, to_read);
+            memcpy(buf, fd_table[fd].data + off, to_read);
             fd_table[fd].offset += to_read;
             regs->eax = (uint32_t)to_read;
             break;
@@ -250,18 +293,26 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (uint32_t)-1; break;
             }
 
-            int vi = fd_table[fd].vfs_index;
-            int off = fd_table[fd].offset;
-            int space = MAX_FILE_SIZE - off;
-            if (space <= 0) { regs->eax = 0; break; } // Full
-            int to_write = (size < space) ? size : space;
-            memcpy(fs[vi].data + off, buf, to_write);
-            fd_table[fd].offset += to_write;
-            if (fd_table[fd].offset > fs[vi].size) {
-                fs[vi].size = fd_table[fd].offset;
+            if (!fd_table[fd].data) {
+                fd_table[fd].data = (char*)kmalloc(MAX_FILE_SIZE);
+                if (!fd_table[fd].data) { regs->eax = 0; break; }
+                fd_table[fd].capacity = MAX_FILE_SIZE;
+                fd_table[fd].data[0] = '\0';
+                fd_table[fd].size = 0;
             }
-            fs[vi].data[fs[vi].size] = '\0'; // null-terminate
-            vfs_save(); // Persist to disk
+            int off = fd_table[fd].offset;
+            int space = fd_table[fd].capacity - off;
+            if (space <= 0) { regs->eax = 0; break; }
+            int to_write = (size < space) ? size : space;
+            memcpy(fd_table[fd].data + off, buf, to_write);
+            fd_table[fd].offset += to_write;
+            if (fd_table[fd].offset > fd_table[fd].size) {
+                fd_table[fd].size = fd_table[fd].offset;
+            }
+            fd_table[fd].data[fd_table[fd].size] = '\0';
+            
+            // Persist to VFS
+            vfs_write_file(fd_table[fd].path, fd_table[fd].data, fd_table[fd].size);
             regs->eax = (uint32_t)to_write;
             break;
         }
@@ -271,6 +322,10 @@ static void syscall_handler(registers_t* regs) {
             int fd = (int)regs->ebx;
             if (fd < 0 || fd >= MAX_FDS || fd_table[fd].state != FD_OPEN) {
                 regs->eax = (uint32_t)-1; break;
+            }
+            // If there's data, flush to VFS on close
+            if (fd_table[fd].data && fd_table[fd].size > 0) {
+                vfs_write_file(fd_table[fd].path, fd_table[fd].data, fd_table[fd].size);
             }
             fd_free(fd);
             regs->eax = 0;

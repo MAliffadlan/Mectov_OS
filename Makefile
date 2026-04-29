@@ -19,7 +19,8 @@ SRCS = $(wildcard $(SRC_DIR)/drivers/*.c) \
 OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(SRCS:%.c=$(OBJ_DIR)/%.o) \
        $(OBJ_DIR)/boot.o \
-       $(OBJ_DIR)/wallpaper.o
+       $(OBJ_DIR)/wallpaper.o \
+       $(OBJ_DIR)/gcalc_mct.o
 
 all: $(OBJ_DIR) myos.bin
 
@@ -35,6 +36,9 @@ $(OBJ_DIR)/boot.o: boot.asm
 
 $(OBJ_DIR)/src/sys/interrupt_entry.o: src/sys/interrupt_entry.asm
 	$(AS) $(ASFLAGS) $< -o $@
+
+$(OBJ_DIR)/gcalc_mct.o: gcalc.mct
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
 $(OBJ_DIR)/wallpaper.o: $(OBJ_DIR)/wallpaper.bin
 	objcopy -I binary -O elf32-i386 -B i386 $< $@

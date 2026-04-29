@@ -188,6 +188,99 @@ void fill_circle(int xc, int yc, int r, uint32_t color) {
 }
 
 // ============================================================
+// ---- New Modern Primitives ----
+// ============================================================
+
+// Helper: compute corner fill width for rounded rect at a given scanline dy
+// Uses circle equation: dx = floor(sqrt(r^2 - dy^2))
+static int corner_dx(int dy, int r) {
+    int dx = 0;
+    while ((dx + 1)*(dx + 1) + dy*dy <= r*r) dx++;
+    return dx;
+}
+
+// Draw a filled rectangle with rounded corners
+void draw_rounded_rect(int x, int y, int w, int h, int r, uint32_t color) {
+    if (r <= 0) { draw_rect(x, y, w, h, color); return; }
+    if (r > w/2) r = w/2;
+    if (r > h/2) r = h/2;
+    
+    // Center body
+    draw_rect(x + r, y, w - 2*r, h, color);
+    // Left/right middle strips
+    draw_rect(x, y + r, r, h - 2*r, color);
+    draw_rect(x + w - r, y + r, r, h - 2*r, color);
+    
+    // Corners: for each scanline dy from 0..r, fill dx pixels from corner edges
+    for (int dy = 0; dy <= r; dy++) {
+        int dx = corner_dx(dy, r);
+        // Top-left & top-right
+        draw_rect(x + r - dx, y + dy, dx, 1, color);
+        draw_rect(x + w - r, y + dy, dx, 1, color);
+        // Bottom-left & bottom-right
+        draw_rect(x + r - dx, y + h - dy - 1, dx, 1, color);
+        draw_rect(x + w - r, y + h - dy - 1, dx, 1, color);
+    }
+}
+
+// Draw rounded rect border (outline only)
+void draw_rounded_rect_border(int x, int y, int w, int h, int r, uint32_t col) {
+    if (r <= 0) { draw_rect_border(x, y, w, h, col); return; }
+    if (r > w/2) r = w/2;
+    if (r > h/2) r = h/2;
+    
+    // Straight edges
+    draw_rect(x + r, y, w - 2*r, 1, col);           // top
+    draw_rect(x + r, y + h - 1, w - 2*r, 1, col);   // bottom
+    draw_rect(x, y + r, 1, h - 2*r, col);            // left
+    draw_rect(x + w - 1, y + r, 1, h - 2*r, col);    // right
+    
+    // Corner arcs (single pixel each angle)
+    for (int dy = 0; dy <= r; dy++) {
+        int dx = corner_dx(dy, r);
+        // Top-left: left edge of corner
+        put_pixel(x + r - dx, y + dy, col);
+        // Top-right: right edge
+        put_pixel(x + w - 1 - r + dx, y + dy, col);
+        // Bottom-left
+        put_pixel(x + r - dx, y + h - 1 - dy, col);
+        // Bottom-right
+        put_pixel(x + w - 1 - r + dx, y + h - 1 - dy, col);
+    }
+}
+
+// Vertical gradient fill
+void draw_gradient_v(int x, int y, int w, int h, uint32_t color_top, uint32_t color_bot) {
+    if (h <= 0) return;
+    uint32_t r0 = (color_top >> 16) & 0xFF;
+    uint32_t g0 = (color_top >> 8) & 0xFF;
+    uint32_t b0 = color_top & 0xFF;
+    uint32_t r1 = (color_bot >> 16) & 0xFF;
+    uint32_t g1 = (color_bot >> 8) & 0xFF;
+    uint32_t b1 = color_bot & 0xFF;
+    for (int row = 0; row < h; row++) {
+        uint32_t r = r0 + ((r1 - r0) * row) / h;
+        uint32_t g = g0 + ((g1 - g0) * row) / h;
+        uint32_t b = b0 + ((b1 - b0) * row) / h;
+        draw_rect(x, y + row, w, 1, (r << 16) | (g << 8) | b);
+    }
+}
+
+// Soft drop shadow using multiple alpha-blended layers
+void draw_soft_shadow(int x, int y, int w, int h, int radius, uint32_t intensity) {
+    if (radius <= 0 || radius > 12) return;
+    // Draw expanding rectangles centered on shadow area, blended with alpha
+    // Innermost layer = darkest. Outermost = faintest.
+    for (int layer = 0; layer < radius; layer++) {
+        int passes = (intensity * (radius - layer)) / (radius * 32);
+        if (passes < 1) passes = 1;
+        if (passes > 3) passes = 3;
+        for (int p = 0; p < passes; p++)
+            draw_rect_alpha(x + layer + 4, y + layer + 4, w - 2*(layer + 4), h - 2*(layer + 4), 0x00000000);
+    }
+}
+
+// ============================================================
 // Init VBE + allocate double buffer
 // ============================================================
 void init_vbe(uint32_t addr, uint32_t width, uint32_t height, uint32_t pitch, uint8_t bpp) {
@@ -388,7 +481,7 @@ void draw_startup_logo() {
     draw_rect_border(bx - 1, by - 1, bw + 2, bh + 2, GUI_BORDER);
 
     draw_string_px(bx + (bw - 21*8)/2, by + 14, "Mectov OS v13.5 [VBE]", GUI_TEXT, GUI_BG);
-    draw_string_px(bx + (bw - 22*8)/2, by + 38, "PROFESSIONAL  GUI  EDITION", GUI_CYAN, GUI_BG);
+    draw_string_px(bx + (bw - 22*8)/2, by + 38, "PROFESSIONAL  GUI  EDITION", GUI_BLUE, GUI_BG);
     draw_string_px(bx + (bw - 20*8)/2, by + 56, "Loading, please wait...", GUI_DIM,  GUI_BG);
 
     // Flush splash to screen immediately

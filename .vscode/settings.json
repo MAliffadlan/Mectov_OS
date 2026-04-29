@@ -1,0 +1,38 @@
+{
+  "files.exclude": {
+    // File-file binary di root (didaftarkan manual)
+    "calc.mct": true,
+    "echo_test.mct": true,
+    "gcalc.asm": true,
+    "gcalc.mct": true,
+    "gcalc.o": true,
+    "hello.mct": true,
+    "hello.c": false,
+    "boot.o": true,
+    "kernel.o": true,
+    "myos.bin": true,
+    "myos.elf": true,
+    "mectov.iso": true,
+    "core.img": true,
+    "disk.img": true,
+    "grub.bin": true,
+    "memdisk.tar": true,
+    "modem.py": false,
+    "build_mct.py": false,
+    "build.sh": false,
+    "inject_vfs.py": false,
+    "inject.py": false,
+    "qemu_int.log": true,
+    "qemu_ring3.log": true,
+    "obj": true,
+    "xbin": true,
+    "xorriso_bin": true
+  },
+  "files.associations": {
+    "*.asm": "assembly",
+    "*.s": "assembly",
+    "*.ld": "c",
+    "*.h": "c",
+    "*.c": "c"
+  }
+}

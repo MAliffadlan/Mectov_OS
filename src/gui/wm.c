@@ -103,71 +103,78 @@ static void draw_one(int idx) {
     if (!w->visible || w->minimized) return;
     int x = w->x, y = w->y, ww = w->w, wh = w->h;
     int focused = (wm_focused == w->id);
+    int radius = WIN_RADIUS;
 
-    // Drop shadow
-    if (!w->maximized)
-        draw_rect(x + 6, y + 6, ww, wh, 0x00000000);
-
-    // Outer glow
-    uint32_t border = focused ? GUI_BORDER : GUI_BORDER2;
-    draw_rect(x - 1, y - 1, ww + 2, wh + 2, border);
-
-    // Titlebar gradient (Mint gray)
-    for (int row = 0; row < TITLEBAR_H; row++) {
-        uint32_t t = (uint32_t)(row * 255) / TITLEBAR_H;
-        uint32_t r, g, b;
-        if (focused) {
-            r = 217 + (t * 10) / 255; g = 217 + (t * 10) / 255; b = 217 + (t * 10) / 255;
-            draw_rect(x, y + row, ww, 1, (r << 16) | (g << 8) | b);
-        } else {
-            // Glassmorphism titlebar for inactive
-            r = 230 - (t * 10) / 255; g = 230 - (t * 10) / 255; b = 230 - (t * 10) / 255;
-            draw_rect_alpha(x, y + row, ww, 1, (r << 16) | (g << 8) | b);
-        }
+    // ========== Soft Drop Shadow ==========
+    if (!w->maximized) {
+        draw_soft_shadow(x, y, ww, wh, 6, 255);
     }
-    // Titlebar bottom accent
-    draw_rect(x, y + TITLEBAR_H - 1, ww, 1, border);
 
-    // Window body: Solid if focused, Glassmorphism (50% transparent) if inactive
+    // ========== Window Body (rounded rect) ==========
+    uint32_t body_color = focused ? GUI_BG : GUI_BORDER2;
+    draw_rounded_rect(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, radius, body_color);
+
+    // ========== Titlebar (rounded top corners + gradient) ==========
     if (focused) {
-        draw_rect(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, GUI_BG);
+        draw_gradient_v(x, y, ww, TITLEBAR_H, GUI_TITLE_A, GUI_TITLE_B);
     } else {
-        draw_rect_alpha(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, GUI_BG);
+        draw_rounded_rect(x, y, ww, TITLEBAR_H, radius, GUI_TITLE_I);
     }
 
-    // Title text (offset to the left to make room for 3 buttons)
+    // Round the top-left corner of body so it merges with titlebar
+    // (titlebar covers upper portion; body gets the bottom corners only)
+    // The body already has full rounded rect, so the top corners of body
+    // will be behind the titlebar. That's fine.
+
+    // ========== Window border (rounded) ==========
+    if (focused) {
+        draw_rounded_rect_border(x, y, ww, wh, radius, GUI_BORDER);
+    } else {
+        draw_rounded_rect_border(x, y, ww, wh, radius, GUI_BORDER2);
+    }
+
+    // ========== Title text ==========
     int tlen = strlen(w->title);
-    int tx = x + (ww - 3 * TITLEBAR_H - tlen * 8) / 2;
-    if (tx < x + 4) tx = x + 4;
+    int btn_spacing = 14; // space reserved for 3 small circle buttons + padding
+    int tx = x + 8;
     int tty = y + (TITLEBAR_H - 16) / 2;
-    draw_string_px(tx, tty, w->title, GUI_TEXT, 0xFFFFFFFF);
+    draw_string_px(tx, tty, w->title, GUI_TEXT, focused ? GUI_TITLE_A : GUI_TITLE_I);
 
-    // --- Titlebar buttons (right side): [_] [O] [X] ---
-    int btn_w = TITLEBAR_H;
-    int btn_h = TITLEBAR_H - 1;
+    // ========== Titlebar buttons (right side): small circles ==========
+    int btn_r = 5;           // circle radius
+    int btn_y = y + TITLEBAR_H / 2;
 
-    // Minimize button [_]
-    int mbx = x + ww - 3 * btn_w;
-    draw_rect(mbx, y, btn_w, btn_h, 0x00448844);
-    draw_string_px(mbx + (btn_w - 8) / 2, tty, "_", GUI_WHITE, 0x00448844);
+    // Close button (rightmost)
+    int c_cx = x + ww - (btn_r + 8);
+    fill_circle(c_cx, btn_y, btn_r, focused ? GUI_CLOSE : GUI_DIM);
+    // X mark
+    draw_string_px(c_cx - 3, btn_y - 4, "x", GUI_WHITE, focused ? GUI_CLOSE : GUI_DIM);
+    w->close_cx = c_cx; w->close_cy = btn_y; w->close_r = btn_r;
 
-    // Maximize button [O]
-    int maxbx = x + ww - 2 * btn_w;
-    uint32_t max_col = w->maximized ? 0x00886644 : 0x00446688;
-    draw_rect(maxbx, y, btn_w, btn_h, max_col);
-    draw_string_px(maxbx + (btn_w - 8) / 2, tty, "O", GUI_WHITE, max_col);
+    // Maximize button
+    int m_cx = c_cx - (btn_r * 2 + 6);
+    fill_circle(m_cx, btn_y, btn_r, focused ? GUI_GREEN : GUI_DIM);
+    draw_string_px(m_cx - 3, btn_y - 4, "O", GUI_WHITE, focused ? GUI_GREEN : GUI_DIM);
+    w->max_cx = m_cx; w->max_cy = btn_y; w->max_r = btn_r;
 
-    // Close button [X]
-    int cbx = x + ww - btn_w;
-    draw_rect(cbx, y, btn_w, btn_h, GUI_CLOSE);
-    draw_string_px(cbx + (btn_w - 8) / 2, tty, "x", GUI_WHITE, GUI_CLOSE);
+    // Minimize button
+    int min_cx = m_cx - (btn_r * 2 + 6);
+    fill_circle(min_cx, btn_y, btn_r, focused ? GUI_YELLOW : GUI_DIM);
+    draw_string_px(min_cx - 3, btn_y - 4, "_", GUI_WHITE, focused ? GUI_YELLOW : GUI_DIM);
+    w->min_cx = min_cx; w->min_cy = btn_y; w->min_r = btn_r;
 
-    // Content area border
-    draw_rect_border(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, border);
+    // ========== Content area ==========
+    // Subtle inner border
+    draw_rect(x + 1, y + TITLEBAR_H + radius - 2, ww - 2, 1, 0x00252535);
 
     // Call app draw_fn with content area coords
-    if (w->draw_fn)
-        w->draw_fn(w->id, x + 1, y + TITLEBAR_H + 1, ww - 2, wh - TITLEBAR_H - 2);
+    if (w->draw_fn) {
+        int cx2 = x + 1;
+        int cy2 = y + TITLEBAR_H + 1;
+        int cw2 = ww - 2;
+        int ch2 = wh - TITLEBAR_H - 2;
+        w->draw_fn(w->id, cx2, cy2, cw2, ch2);
+    }
 }
 
 void wm_draw_all() {
@@ -209,19 +216,22 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
         if (mx >= w->x && mx < w->x + w->w && my >= w->y && my < w->y + w->h) {
             wm_raise(w->id);
             if (my < w->y + TITLEBAR_H) {
-                int btn_w = TITLEBAR_H;
-                int mbx  = w->x + w->w - 3 * btn_w; // minimize
-                int maxbx = w->x + w->w - 2 * btn_w; // maximize
-                int cbx   = w->x + w->w - btn_w;     // close
+                // ---- Circle button hit test ----
+                int dx, dy, dist2;
 
-                // Close button
-                if (mx >= cbx) {
+                // Close button (rightmost circle)
+                dx = mx - w->close_cx; dy = my - w->close_cy;
+                dist2 = dx*dx + dy*dy;
+                if (dist2 <= w->close_r * w->close_r + 4) {
                     write_serial_string("WM_CLOSE via MOUSE!\n");
                     wm_close(w->id);
                     return 1;
                 }
+
                 // Maximize button
-                if (mx >= maxbx) {
+                dx = mx - w->max_cx; dy = my - w->max_cy;
+                dist2 = dx*dx + dy*dy;
+                if (dist2 <= w->max_r * w->max_r + 4) {
                     if (w->maximized) {
                         w->x = w->saved_x; w->y = w->saved_y;
                         w->w = w->saved_w; w->h = w->saved_h;
@@ -236,11 +246,13 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                     }
                     return 1;
                 }
+
                 // Minimize button
-                if (mx >= mbx) {
+                dx = mx - w->min_cx; dy = my - w->min_cy;
+                dist2 = dx*dx + dy*dy;
+                if (dist2 <= w->min_r * w->min_r + 4) {
                     w->minimized = 1;
                     wm_focused = -1;
-                    // Focus next visible window
                     for (int zz = wm_zcount - 1; zz >= 0; zz--) {
                         WmWin* nw = &wm_wins[wm_zorder[zz]];
                         if (nw->visible && !nw->minimized) {

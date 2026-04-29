@@ -3,7 +3,7 @@
 #include "../include/serial.h"
 #include "../include/io.h"
 
-#define MAX_TASKS 8
+#define MAX_TASKS 64
 #define KERNEL_STACK_SIZE 16384
 #define USER_STACK_SIZE   8192
 

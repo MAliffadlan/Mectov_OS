@@ -8,19 +8,27 @@
 int load_mct_app(const char* filename) {
     write_serial_string("[LOADER] start\n");
     
-    int idx = vfs_find(filename);
-    if (idx < 0) {
+    // Use new VFS API
+    int node = vfs_get_node(filename);
+    if (node < 0 || vfs_is_dir(node)) {
         write_serial_string("[LOADER] NOT FOUND\n");
         return -1;
     }
     
-    if (fs[idx].size < (int)sizeof(mct_header_t)) return -2;
+    // Read the whole file into a temp buffer
+    uint8_t buf[65536]; // 64KB max for MCT
+    int sz = vfs_read_file(filename, (char*)buf, sizeof(buf));
+    if (sz < (int)sizeof(mct_header_t)) {
+        write_serial_string("[LOADER] too small\n");
+        return -2;
+    }
     
-    mct_header_t* header = (mct_header_t*)fs[idx].data;
+    mct_header_t* header = (mct_header_t*)buf;
     if (header->magic != MCT_MAGIC) return -3;
     
     uint32_t total_size = header->code_size + header->data_size;
     if (total_size == 0 || total_size > 1024 * 1024) return -4;
+    if ((int)(sizeof(mct_header_t) + total_size) > sz) return -5;
     
     void* app_mem = (void*)0x02000000;
     
@@ -37,7 +45,7 @@ int load_mct_app(const char* filename) {
     __asm__ volatile("mov %%cr3, %%eax; mov %%eax, %%cr3" ::: "eax", "memory");
     
     // Copy code + zero BSS
-    memcpy(app_mem, fs[idx].data + sizeof(mct_header_t), header->code_size);
+    memcpy(app_mem, buf + sizeof(mct_header_t), header->code_size);
     memset((uint8_t*)app_mem + header->code_size, 0, header->data_size);
     
     // CRITICAL for KVM: Flush TLB so instruction fetch sees the new code.

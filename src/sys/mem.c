@@ -155,6 +155,94 @@ void kfree(void* p) {
     }
 }
 
+void* krealloc(void* ptr, uint32_t new_size) {
+    if (!ptr) return kmalloc(new_size);
+    if (new_size == 0) { kfree(ptr); return NULL; }
+    if (new_size % 4 != 0) new_size += 4 - (new_size % 4);
+
+    block_meta *block = (block_meta*)ptr - 1;
+    if (block->size >= new_size) return ptr; // Already big enough
+
+    // Allocate new block, copy data, free old
+    void* new_ptr = kmalloc(new_size);
+    if (!new_ptr) return NULL;
+    uint32_t copy_size = block->size < new_size ? block->size : new_size;
+    memcpy(new_ptr, ptr, copy_size);
+    kfree(ptr);
+    return new_ptr;
+}
+
+void* kcalloc(uint32_t num, uint32_t size) {
+    uint32_t total = num * size;
+    void* ptr = kmalloc(total);
+    if (ptr) memset(ptr, 0, total);
+    return ptr;
+}
+
+void kmalloc_stats(void (*print_fn)(const char*, unsigned char)) {
+    char buf[64];
+    block_meta *curr = global_base;
+    uint32_t total_free = 0, total_used = 0, largest_free = 0, frag_count = 0;
+
+    while (curr) {
+        if (curr->free) {
+            total_free += curr->size;
+            if (curr->size > largest_free) largest_free = curr->size;
+            frag_count++;
+        } else {
+            total_used += curr->size;
+        }
+        curr = curr->next;
+    }
+
+    // Convert numbers to string and print
+    print_fn("Heap Allocator Stats:\n", 0x0B);
+    print_fn("  Heap Base      : 0x1000000\n", 0x0F);
+    print_fn("  Heap Used      : ", 0x0F);
+    // Simple int to string
+    int n = heap_used;
+    int i = 0;
+    if (n == 0) { buf[i++] = '0'; }
+    while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
+    buf[i] = '\0';
+    // Reverse
+    for (int j = 0; j < i/2; j++) { char t = buf[j]; buf[j] = buf[i-1-j]; buf[i-1-j] = t; }
+    buf[i] = ' '; buf[i+1] = 'B'; buf[i+2] = '\n'; buf[i+3] = '\0';
+    print_fn(buf, 0x0A);
+
+    n = total_used; i = 0;
+    if (n == 0) { buf[i++] = '0'; }
+    while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
+    buf[i] = '\0';
+    for (int j = 0; j < i/2; j++) { char t = buf[j]; buf[j] = buf[i-1-j]; buf[i-1-j] = t; }
+    buf[i] = ' '; buf[i+1] = 'B'; buf[i+2] = '\n'; buf[i+3] = '\0';
+    print_fn("  Total Used     : ", 0x0F); print_fn(buf, 0x0A);
+
+    n = total_free; i = 0;
+    if (n == 0) { buf[i++] = '0'; }
+    while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
+    buf[i] = '\0';
+    for (int j = 0; j < i/2; j++) { char t = buf[j]; buf[j] = buf[i-1-j]; buf[i-1-j] = t; }
+    buf[i] = ' '; buf[i+1] = 'B'; buf[i+2] = '\n'; buf[i+3] = '\0';
+    print_fn("  Total Free     : ", 0x0F); print_fn(buf, 0x0A);
+
+    n = largest_free; i = 0;
+    if (n == 0) { buf[i++] = '0'; }
+    while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
+    buf[i] = '\0';
+    for (int j = 0; j < i/2; j++) { char t = buf[j]; buf[j] = buf[i-1-j]; buf[i-1-j] = t; }
+    buf[i] = ' '; buf[i+1] = 'B'; buf[i+2] = '\n'; buf[i+3] = '\0';
+    print_fn("  Largest Free   : ", 0x0F); print_fn(buf, 0x0A);
+
+    n = frag_count; i = 0;
+    if (n == 0) { buf[i++] = '0'; }
+    while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
+    buf[i] = '\0';
+    for (int j = 0; j < i/2; j++) { char t = buf[j]; buf[j] = buf[i-1-j]; buf[i-1-j] = t; }
+    buf[i] = '\n'; buf[i+1] = '\0';
+    print_fn("  Free Fragments : ", 0x0F); print_fn(buf, 0x0A);
+}
+
 unsigned int get_total_memory() { return total_pages * 4096; }
 unsigned int get_used_memory() { return (16 * 1024 * 1024) + heap_used; }
 unsigned int get_free_memory() { return get_total_memory() - get_used_memory(); }

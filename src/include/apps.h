@@ -3,6 +3,8 @@
 
 #include "vfs.h"
 
+#define MAX_FILE_SIZE 4096
+
 // Snake
 void start_ular();
 
@@ -33,6 +35,7 @@ int get_use_term_buf();
 // Terminal shell bridge
 void ex_cmd_term();
 void term_print(const char* s, unsigned char color);
+void term_putchar(char c, unsigned char color);
 void p_char_gui(char c, unsigned char col);
 int  get_use_term_buf();
 
