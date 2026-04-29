@@ -180,7 +180,7 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 
 ---
 
-## Applications
+## Applications Mectov OS Kernel
 
 | Application     | File                    | Type | Description                                      |
 |-----------------|-------------------------|------|--------------------------------------------------|
