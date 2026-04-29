@@ -76,7 +76,7 @@ void d_win(int x, int y, int w, int h, const char* t);
 // ---- Mouse cursor ----
 void draw_mouse_cursor(int x, int y);
 void restore_cursor_bg(void);
-extern uint32_t cursor_save_buf[12*20];
+extern uint32_t cursor_save_buf[24*24];
 extern int cursor_saved_x, cursor_saved_y;
 
 // ---- Background save/restore (legacy, kept for login screen) ----

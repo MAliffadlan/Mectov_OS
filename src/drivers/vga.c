@@ -548,24 +548,69 @@ void restore_bg(int x, int y, int w, int h, uint32_t* buf) {
 // ============================================================
 // Mouse cursor — always drawn last, directly to back_buffer
 // ============================================================
-static const unsigned char cursor_mask[20] = {
-    0xC0,0xE0,0xF0,0xF8,0xFC,0xFE,0xFF,0xF8,
-    0xD8,0x8C,0x0C,0x06,0x06,0x03,0x03,0x01,
-    0x00,0x00,0x00,0x00
-};
-static const unsigned char cursor_inner[20] = {
-    0x00,0x40,0x60,0x70,0x78,0x7C,0x78,0x70,
-    0x50,0x08,0x04,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00
+// Modern High-Res Mouse Cursor (16x24)
+// ============================================================
+static const uint16_t cursor_mask[24] = {
+    0b1100000000000000,
+    0b1110000000000000,
+    0b1111000000000000,
+    0b1111100000000000,
+    0b1111110000000000,
+    0b1111111000000000,
+    0b1111111100000000,
+    0b1111111110000000,
+    0b1111111111000000,
+    0b1111111111100000,
+    0b1111111111110000,
+    0b1111111111111000,
+    0b1111111111111100,
+    0b1111111111111110,
+    0b1111111111000000,
+    0b1111111011100000,
+    0b1111100001110000,
+    0b1110000000111000,
+    0b1100000000011100,
+    0b0000000000001110,
+    0b0000000000000110,
+    0b0000000000000000,
+    0b0000000000000000,
+    0b0000000000000000
 };
 
-uint32_t cursor_save_buf[12*20];
+static const uint16_t cursor_inner[24] = {
+    0b0000000000000000,
+    0b0100000000000000,
+    0b0110000000000000,
+    0b0111000000000000,
+    0b0111100000000000,
+    0b0111110000000000,
+    0b0111111000000000,
+    0b0111111100000000,
+    0b0111111110000000,
+    0b0111111111000000,
+    0b0111111111100000,
+    0b0111111111110000,
+    0b0111111111111000,
+    0b0111111111111100,
+    0b0111111110000000,
+    0b0111110011000000,
+    0b0111000001100000,
+    0b0100000000110000,
+    0b0000000000011000,
+    0b0000000000001000,
+    0b0000000000000000,
+    0b0000000000000000,
+    0b0000000000000000,
+    0b0000000000000000
+};
+
+uint32_t cursor_save_buf[24*24];
 int cursor_saved_x = -1, cursor_saved_y = -1;
 
 void restore_cursor_bg() {
     if (!is_vbe || cursor_saved_x == -1 || cursor_saved_y == -1) return;
-    restore_bg(cursor_saved_x, cursor_saved_y, 12, 20, cursor_save_buf);
-    mark_dirty(cursor_saved_x, cursor_saved_y, 12, 20);
+    restore_bg(cursor_saved_x, cursor_saved_y, 24, 24, cursor_save_buf);
+    mark_dirty(cursor_saved_x, cursor_saved_y, 24, 24);
     cursor_saved_x = -1;
     cursor_saved_y = -1;
 }
@@ -573,18 +618,34 @@ void restore_cursor_bg() {
 void draw_mouse_cursor(int x, int y) {
     if (!is_vbe) return;
     
-    save_bg(x, y, 12, 20, cursor_save_buf);
+    save_bg(x, y, 24, 24, cursor_save_buf);
     cursor_saved_x = x; cursor_saved_y = y;
     
-    for (int j = 0; j < 20; j++) {
-        unsigned char mask = (j < 16) ? cursor_mask[j] : 0;
-        unsigned char inner = (j < 16) ? cursor_inner[j] : 0;
-        for (int i = 0; i < 8; i++) {
-            if (mask & (0x80 >> i)) {
-                uint32_t col = (inner & (0x80 >> i)) ? 0x00FFFFFF : 0x00000000;
+    // Draw fast 50% alpha drop shadow
+    for (int j = 0; j < 24; j++) {
+        uint16_t mask = cursor_mask[j];
+        for (int i = 0; i < 16; i++) {
+            if (mask & (0x8000 >> i)) {
+                int sx = x + i + 2;
+                int sy = y + j + 3;
+                if (sx < (int)fb_width && sy < (int)fb_height) {
+                    uint32_t* p = back_buffer + sy * (bb_pitch/4) + sx;
+                    *p = ((*p & 0xFEFEFE) >> 1); // 50% darken
+                }
+            }
+        }
+    }
+    
+    // Draw modern black-filled, white-outlined cursor
+    for (int j = 0; j < 24; j++) {
+        uint16_t mask = cursor_mask[j];
+        uint16_t inner = cursor_inner[j];
+        for (int i = 0; i < 16; i++) {
+            if (mask & (0x8000 >> i)) {
+                uint32_t col = (inner & (0x8000 >> i)) ? 0x00111111 : 0x00FFFFFF;
                 put_pixel(x + i, y + j, col);
             }
         }
     }
-    mark_dirty(x, y, 12, 20);
+    mark_dirty(x, y, 24, 24);
 }

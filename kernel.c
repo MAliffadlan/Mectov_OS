@@ -194,8 +194,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             needs_redraw = 1;
         }
 
-        // Disabled forced 60Hz redraw to fix FPS drops
-        // Redraw will only happen on events (mouse/kb/timer)
+        // Force 60Hz redraw to keep FPS high and UI feeling real-time
+        if (now - last_frame_tick >= 16) {
+            needs_redraw = 1;
+        }
 
         if (needs_redraw) {
             needs_redraw = 0;

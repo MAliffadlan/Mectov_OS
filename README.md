@@ -1,4 +1,4 @@
-# Mectov OS v20.0 — Modern UI Modernization & Performance Fixes
+# Mectov OS v21.0 — Premium UI Refinement & Real-time Performance
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,7 +6,7 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v20.0 release focuses on UI modernization and performance stability: professional squircle icon aesthetics, vibrant macOS-style window controls with indicator symbols, and a transition to event-driven rendering for optimized FPS.
+The v21.0 release introduces premium UI refinements: a high-resolution sleek mouse cursor with dynamic shadows, a classic 3-arc WiFi indicator in the taskbar, and a return to forced 60Hz real-time rendering for absolute smoothness.
 
 Created by M Alif Fadlan.
 
@@ -51,78 +51,60 @@ Created by M Alif Fadlan.
 
 ## Core Subsystems
 
-### 1. Memory Management (src/sys/mem.c)
-- Paging with CR0/CR3 control, identity-mapped up to 128MB
-- Dynamic framebuffer mapping for VESA addresses above physical RAM
-- Linked-list heap allocator with First-Fit search strategy
-- Working kmalloc() and kfree() with 4-byte alignment
-- Block coalescing on free: adjacent free blocks merge automatically to prevent heap fragmentation
-- Dynamic bitmap allocation scaled to actual detected RAM size
-- User-mode page mapping (PAGE_USER | PAGE_RW | PAGE_PRESENT) for Ring 3 app memory at 0x02000000
+### 1. Modern Mouse Cursor (src/drivers/vga.c)
+- High-Resolution Bitmap: Upgraded from 8x16 to a sleek 16x24 design.
+- Premium Contrast: Black inner fill with a crisp white outline for maximum visibility on any background.
+- Dynamic Drop Shadow: A real-time 50% alpha-blended shadow cast beneath the cursor for a depth effect.
+- Zero Lag: Optimized drawing logic with dirty-region tracking.
 
-### 2. Preemptive Multitasking (src/sys/task.c)
-- Round-robin scheduler driven by IRQ0 (PIT hardware timer at 1000Hz)
-- Full context switching: registers, EFLAGS, ESP per task
-- Per-task dual stacks: 16KB kernel stack + 8KB user stack
-- 8 task slots maximum (Task 0 = kernel main loop)
-- Ring-aware scheduling: handles both Ring 0 and Ring 3 tasks
-- Graceful task termination: task_exit() cleanly marks task as free, scheduler auto-recovers to next ready task
-- CPU-friendly idle: hlt instruction when no work to do
-
-### 3. Window Manager (src/gui/wm.c)
-- Double-buffered rendering (back buffer -> front buffer swap) using fast memcpy with dirty region tracking
-- Z-ordered floating windows with proper overlap handling
-- Rounded corners (radius 8) on all windows for a modern look
+### 2. Window Manager (src/gui/wm.c)
+- Double-buffered rendering using fast memcpy with dirty region tracking.
+- Z-ordered floating windows with proper overlap handling.
+- Rounded corners (radius 8) on all windows for a modern look.
 - Vibrant macOS-style "traffic light" control buttons with indicator symbols:
   - Close (vibrant red circle with 'X' symbol)
   - Minimize (vibrant yellow circle with '-' symbol)
   - Maximize (vibrant green circle with '+' symbol)
-- Titlebar with Catppuccin Mocha gradient (focused vibrant vs unfocused dimmed)
-- Mouse-driven drag-and-drop repositioning (disabled when maximized)
-- Focus management: closing/minimizing a window auto-focuses the next visible window
-- callback system for per-window app rendering and input
+- Clean Flat Aesthetic: Removed heavy shadows around windows to focus on a crisp, modern UI.
 
-### 4. Desktop Environment (src/gui/desktop.c)
-- Custom Baked Wallpaper: Full-color 1024x768 32-bit BGRA image processed via Python build script (scratch/build_wallpaper.py), converted into a raw binary, and injected directly into the kernel binary.
-- Professional Squircle Icons: High-end rounded-rect icons with minimalist glyphs and curated color palettes (Terminal: Dark Slate, Explorer: Vibrant Blue, etc.).
-- Unified Icon Parity: The taskbar uses the same squircle design language as the desktop for a cohesive visual experience.
-- Draggable Persistent Icons: Users can drag and drop icons to any location. Positions are saved to icons.cfg on the VFS and persist across system reboots.
-- Start Menu: Left-click taskbar button opens a clean application launcher menu.
-
-### 5. Taskbar (src/gui/taskbar.c)
+### 3. Taskbar & System Tray (src/gui/taskbar.c)
+- WiFi Status Indicator: Replaced the RAM bar with a classic 3-arc WiFi icon, representing the OS's network capability.
 - "Mectov OS" Start button with vertical separator line for distinct UI partitioning.
 - Glossy dark background with Catppuccin Mocha accent border.
 - Icon-only window buttons: each open app shown as a 16x16 squircle icon matching the desktop style.
 - System tray with:
   - CAPS indicator (vibrant red when active)
-  - RAM usage percentage
+  - HDD activity LED (red flash on disk I/O)
   - Digital clock with day of week, adjusted for UTC+7 (WIB) timezone.
 
-### 6. Network Stack (src/drivers/net.c + src/drivers/rtl8139.c)
-- RTL8139 NIC Driver: Full driver with PCI bus mastering, 4 TX descriptor rotation, RX ring buffer polling
-- Ethernet: 14-byte frame encapsulation with MAC addressing
-- ARP: IP-to-MAC resolution with request/reply handling
-- IPv4: Packet construction with TTL, checksum (RFC 1071), and protocol demux
-- ICMP: Echo Request/Reply — working ping command from terminal
-- UDP: Connectionless datagram protocol for DNS queries
-- DNS Client: Queries Google DNS (8.8.8.8), parses A records to resolve domain names
-- Terminal commands: ping [ip] and host [domain]
-
-### 7. User Mode & Syscall Infrastructure (src/sys/syscall.c + src/sys/gdt.c)
-- Ring 3 Isolation: User programs run in Ring 3 with separate user stacks. CPU automatically switches to kernel stack via TSS on syscall/interrupt entry.
-- Ring-Aware Scheduler: Correctly manages SS and ESP switching via iret and updates TSS.esp0 for every task.
-- Syscall interface: int 0x80 with 17 available functions.
-- Memory Isolation: Identity-mapped memory with PAGE_USER bit.
-- Display List Renderer: Ring 3 apps draw via system calls into a pending command buffer, replayed by the Window Manager.
-
-### 8. Performance Optimization (kernel.c)
-- Event-Driven Rendering: Removed forced 60Hz full-screen redraws. The OS now only redacts when a UI event occurs (mouse movement, clicks, keypresses, or clock ticks), significantly stabilizing FPS and reducing CPU overhead.
-- Optimized Shadow Rendering: Removed complex alpha-blended shadows to maintain a clean "flat" aesthetic and ensure maximum performance during window dragging.
+### 4. Real-time Rendering (kernel.c)
+- Forced 60Hz Loop: Reverted to a constant 16ms redraw cycle to ensure the FPS stays high (~60 FPS) and the interface feels ultra-responsive at all times.
+- Optimized Performance: By stripping away unneeded shadow logic, the system maintains high performance even under heavy window loads.
 - Microsecond Timing: Real-time FPS and render time measurement using PIT hardware counters.
+
+### 5. Desktop Environment (src/gui/desktop.c)
+- Custom Baked Wallpaper: Full-color 1024x768 image processed via Python build script.
+- Professional Squircle Icons: High-end rounded-rect icons with minimalist glyphs and curated color palettes.
+- Draggable Persistent Icons: Icon positions are saved to icons.cfg on the VFS and persist across system reboots.
+
+### 6. Memory Management (src/sys/mem.c)
+- Paging with CR0/CR3 control, identity-mapped up to 128MB.
+- Linked-list heap allocator with First-Fit search strategy.
+- Working kmalloc() and kfree() with 4-byte alignment and block coalescing.
+
+### 7. Preemptive Multitasking (src/sys/task.c)
+- Round-robin scheduler driven by IRQ0 (1000Hz).
+- Full context switching: registers, EFLAGS, ESP per task.
+- Per-task dual stacks: 16KB kernel stack + 8KB user stack.
+
+### 8. Network Stack (src/drivers/net.c + src/drivers/rtl8139.c)
+- RTL8139 NIC Driver: Full driver with PCI bus mastering.
+- Ethernet/ARP/IPv4/ICMP/UDP/DNS: Complete local stack.
+- Terminal commands: ping [ip] and host [domain].
 
 ### 9. Persistent File System (src/sys/vfs.c)
 - Virtual File System (16 file slots) with auto-save to disk.img via ATA PIO.
-- Persistence Fix: Verified file creation and writing to ensure configuration files (like icons.cfg) commit successfully to physical storage.
+- Persistence Fix: Reliable saving for configuration files like icons.cfg.
 
 ---
 
@@ -193,11 +175,11 @@ make clean && make
 
 | Version | Highlights |
 |---|---|
-| v20.0 | **Modern UI Modernization:** Professional squircle icon design, vibrant macOS-style window controls with symbols (X, -, +), taskbar layout separator, removal of shadows for clean flat look, and event-driven rendering for FPS stability. |
+| v21.0 | **Premium UI Refinement:** High-res sleek mouse cursor with dynamic shadow, classic 3-arc WiFi indicator in system tray, and return to forced 60Hz real-time rendering loop. |
+| v20.0 | Modern UI Modernization: Professional squircle icons, vibrant macOS buttons with symbols (X, -, +), taskbar separator, flat design removal of shadows. |
 | v19.0 | Modern UI Redesign: Glass-morphism icons, Catppuccin theme, rounded corners, glossy taskbar. |
 | v18.0 | External App Ecosystem: .mct format, syscalls, Ring 3 apps (Calculator). |
 | v17.0 | Terminus Bold font, Draggable icons, VFS persistence. |
-| v16.0 | Network stack, Mini Browser, ICMP/DNS support. |
 
 ---
 

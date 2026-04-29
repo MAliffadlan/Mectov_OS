@@ -232,29 +232,36 @@ void taskbar_draw() {
     if (hdd_activity > 0) hdd_activity--;
     tray_x = hdd_x - 6;
 
-    // 9. RAM usage compact bar
-    unsigned int used_kb = get_used_memory() / 1024;
-    unsigned int tot_kb  = get_total_memory() / 1024;
-    int ram_pct = (tot_kb > 0) ? (used_kb * 100 / tot_kb) : 0;
-    int ram_w = 36;
-    int ram_x = tray_x - ram_w;
-    draw_rounded_rect(ram_x, ty + 9, ram_w, 10, 2, GUI_BORDER2);
-    if (tot_kb > 0) {
-        int fill = (ram_w * ram_pct) / 100;
-        if (fill > ram_w) fill = ram_w;
-        if (fill > 0)
-            draw_rounded_rect(ram_x, ty + 9, fill, 10, 2, ram_pct > 80 ? 0x00FF5555 : GUI_TEAL);
+    // 9. WiFi Icon (replacing RAM usage)
+    int wifi_w = 16;
+    int wifi_x = tray_x - wifi_w;
+    
+    // Classic 16x14 WiFi Symbol (3 arcs + dot)
+    uint16_t wifi_icon[14] = {
+        0b0000000000000000,
+        0b0000111111110000, // Outer arc top
+        0b0011111111111100,
+        0b0111000000001110, // Outer arc tapers
+        0b1100011111100011, // Middle arc top
+        0b1000111111110001,
+        0b0001110000111000, // Middle arc tapers
+        0b0000001111000000, // Inner arc top
+        0b0000111111110000,
+        0b0000111001110000, // Inner arc tapers
+        0b0000000000000000, // Gap
+        0b0000000110000000, // Dot top
+        0b0000001111000000, // Dot middle
+        0b0000000110000000  // Dot bottom
+    };
+    
+    for(int r = 0; r < 14; r++) {
+        for(int c = 0; c < 16; c++) {
+            if(wifi_icon[r] & (0x8000 >> c)) {
+                put_pixel(wifi_x + c, ty + 7 + r, 0x00FFFFFF);
+            }
+        }
     }
-    char pct_buf[8];
-    int idx = 0;
-    if (ram_pct >= 100) { pct_buf[idx++] = '1'; pct_buf[idx++] = '0'; pct_buf[idx++] = '0'; }
-    else {
-        if (ram_pct >= 10) pct_buf[idx++] = '0' + (ram_pct / 10);
-        pct_buf[idx++] = '0' + (ram_pct % 10);
-    }
-    pct_buf[idx++] = '%'; pct_buf[idx] = '\0';
-    draw_string_px(ram_x + 2, ty + 8, pct_buf, 0x00FFFFFF, GUI_BORDER2);
-    tray_x = ram_x - 6;
+    tray_x = wifi_x - 10;
 
 
     // ---------- Separator between Start and Apps ----------
