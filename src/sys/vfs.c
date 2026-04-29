@@ -155,6 +155,11 @@ int vfs_load() {
     current_dir = meta[16] | (meta[17] << 8);
     if (current_dir < 0 || current_dir >= MAX_NODES || !fs_nodes[current_dir].in_use)
         current_dir = 0;
+
+    // Check Root node
+    if (!fs_nodes[0].in_use) {
+        return 0; // Root missing, invalid disk state
+    }
     
     return 1;
 }
@@ -244,7 +249,8 @@ int vfs_get_abs_path(int node_idx, char* buf, int buf_size) {
     int cur = node_idx;
     
     while (cur >= 0 && fs_nodes[cur].in_use) {
-        if (strlen(fs_nodes[cur].name) > 0) {
+        // Skip root name in stack as we start with /
+        if (cur != 0 && strlen(fs_nodes[cur].name) > 0) {
             strcpy(stack[sp++], fs_nodes[cur].name);
         }
         cur = fs_nodes[cur].parent;
@@ -349,6 +355,11 @@ int vfs_create_node(const char* name, fs_type_t type, int parent) {
             return i;
         }
     }
+    
+    // Debug info to serial port
+    extern void write_serial_string(const char*);
+    write_serial_string("VFS: FAILED to create node. Node table full or Root missing.\n");
+    
     return -1; // Full
 }
 

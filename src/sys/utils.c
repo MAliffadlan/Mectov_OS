@@ -29,6 +29,11 @@ void init_uptime() {
     boot_hour = bt.hour;
 }
 
+uint32_t get_uptime_seconds() {
+    extern uint32_t get_ticks(void);
+    return get_ticks() / 1000;  // 1000Hz timer
+}
+
 void shutdown() {
     print("Shutting down...\n", 0x0C);
     __asm__ volatile("cli");

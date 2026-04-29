@@ -33,6 +33,10 @@ static void save_desktop_icons() {
         buf[i*2]   = icons[i].x;
         buf[i*2+1] = icons[i].y;
     }
+    // Pastikan file icons.cfg ada, jika tidak, buat file-nya terlebih dahulu
+    if (vfs_get_node("icons.cfg") < 0) {
+        vfs_create_file("icons.cfg");
+    }
     vfs_write_file("icons.cfg", (const char*)buf, ICON_COUNT * 2 * sizeof(int));
     vfs_save();
 }
@@ -66,91 +70,103 @@ static void init_icons() {
     }
 }
 
-// ---- Glass-morphism icons (Frosted Glass style) ----
-// Semi-transparent dark bg + white border + subtle shadow + white glyph
-static void draw_modern_icon(int ix, int iy, const char* label, uint32_t accent) {
-    int irad = 14;
-    
-    // Drop shadow behind icon
-    draw_soft_shadow(ix - 2, iy - 2, ICON_W + 4, ICON_W + 4, 4, 3);
-    
-    // Frosted glass bg: semi-transparent dark + subtle accent tint
-    uint32_t glass_bg = 0x55222233; // translucent dark purple-ish
-    draw_rounded_rect(ix, iy, ICON_W, ICON_W, irad, glass_bg);
-    
-    // White border, thin (1px), slightly transparent for elegance
-    draw_rounded_rect_border(ix, iy, ICON_W, ICON_W, irad, 0x33FFFFFF);
-    // Inner brighter border (1px inset)
-    draw_rounded_rect_border(ix + 1, iy + 1, ICON_W - 2, ICON_W - 2, irad - 1, 0x18FFFFFF);
-    
-    // Center coordinates
-    int cx = ix + ICON_W/2;
-    int cy = iy + ICON_W/2;
+// ---- Modern Professional Icons (Squircle/iOS style) ----
+static void draw_pro_icon(int ix, int iy, const char* label) {
+    int cx = ix + ICON_W / 2;
+    int cy = iy + ICON_W / 2 - 6; // Center of the icon background
+    int bg_size = 44;
+    int bg_x = cx - bg_size / 2;
+    int bg_y = cy - bg_size / 2;
+    int radius = 10;
 
-    // White glyph
-    uint32_t glyph_col = 0x00FFFFFF;
+    // Draw subtle drop shadow for depth
+    draw_soft_shadow(bg_x, bg_y, bg_size, bg_size, radius, 140);
 
+    // Base colors for different apps
+    uint32_t bg_col = 0x00FFFFFF;
+    if (strcmp(label, "Terminal") == 0) bg_col = 0x002D3748; // Dark slate
+    else if (strcmp(label, "Explorer") == 0) bg_col = 0x003182CE; // Vibrant Blue
+    else if (strcmp(label, "SysInfo") == 0) bg_col = 0x00E2E8F0; // Light silver
+    else if (strcmp(label, "Clock") == 0) bg_col = 0x00FFFFFF; // Pure white
+    else if (strcmp(label, "PCI") == 0) bg_col = 0x00DD6B20; // Vibrant orange
+    else if (strcmp(label, "Browser") == 0) bg_col = 0x00319795; // Teal
+    else if (strcmp(label, "Snake") == 0) bg_col = 0x0038A169; // Green
+    else if (strcmp(label, "Calc") == 0) bg_col = 0x00718096; // Slate gray
+
+    // Draw base rounded squircle
+    draw_rounded_rect(bg_x, bg_y, bg_size, bg_size, radius, bg_col);
+
+    // Draw inner glyphs (Minimalist & Crisp)
     if (strcmp(label, "Terminal") == 0) {
-        draw_string_px(cx - 10, cy - 5, ">_", glyph_col, 0x00000000);
-    } else if (strcmp(label, "Browser") == 0) {
-        draw_circle(cx, cy - 1, 14, glyph_col);
-        draw_line(cx - 12, cy - 1, cx + 12, cy - 1, glyph_col);
-        draw_line(cx - 10, cy - 7, cx + 10, cy - 7, glyph_col);
-        draw_line(cx - 10, cy + 5, cx + 10, cy + 5, glyph_col);
-        draw_line(cx, cy - 15, cx, cy + 13, glyph_col);
+        draw_string_px(cx - 8, cy - 4, ">_", 0x0048BB78, bg_col);
     } else if (strcmp(label, "Explorer") == 0) {
-        draw_rect(cx - 14, cy - 4, 28, 18, glyph_col);
-        draw_rounded_rect(cx - 12, cy - 6, 14, 6, 2, glyph_col);
-        draw_rect(cx - 12, cy - 6, 14, 6, glyph_col);
+        // Folder glyph
+        draw_rect(cx - 12, cy - 10, 24, 18, 0x00FFFFFF);
+        draw_rect(cx - 12, cy - 12, 10, 2, 0x00EBF8FF);
+        draw_rect(cx - 12, cy - 6, 24, 2, 0x0090CDF4); // Inner line detail
     } else if (strcmp(label, "SysInfo") == 0) {
-        draw_circle(cx, cy - 1, 14, glyph_col);
-        draw_string_px(cx - 3, cy - 6, "i", 0x00222233, 0x00000000);
+        // Monitor glyph
+        draw_rect(cx - 12, cy - 10, 24, 16, 0x002D3748);
+        draw_rect(cx - 10, cy - 8, 20, 12, 0x00A0AEC0); // Screen
+        draw_rect(cx - 4, cy + 6, 8, 4, 0x002D3748); // Stand
+        draw_rect(cx - 8, cy + 10, 16, 2, 0x002D3748); // Base
     } else if (strcmp(label, "Clock") == 0) {
-        draw_circle(cx, cy - 1, 14, glyph_col);
-        draw_line(cx, cy - 1, cx, cy - 9, glyph_col);
-        draw_line(cx, cy - 1, cx + 6, cy - 1, glyph_col);
+        // Clock glyph
+        draw_circle(cx, cy, 14, 0x002D3748);
+        draw_circle(cx, cy, 13, 0x002D3748);
+        draw_line(cx, cy, cx, cy - 8, 0x00E53E3E); // Red minute hand
+        draw_line(cx, cy, cx + 6, cy + 6, 0x002D3748); // Dark hour hand
+        fill_circle(cx, cy, 2, 0x002D3748); // Center pivot
     } else if (strcmp(label, "PCI") == 0) {
-        draw_rounded_rect(cx - 12, cy - 10, 24, 20, 3, glyph_col);
-        for (int p = -2; p <= 2; p++) {
-            draw_rect(cx - 10 + p*5, cy - 15, 3, 5, glyph_col);
-            draw_rect(cx - 10 + p*5, cy + 10, 3, 5, glyph_col);
+        // Microchip glyph
+        draw_rect(cx - 10, cy - 10, 20, 20, 0x00FFFFFF);
+        for(int i=0; i<3; i++) {
+            draw_rect(cx - 14, cy - 6 + i*6, 4, 2, 0x00FFFFFF); // Left pins
+            draw_rect(cx + 10, cy - 6 + i*6, 4, 2, 0x00FFFFFF); // Right pins
+            draw_rect(cx - 6 + i*6, cy - 14, 2, 4, 0x00FFFFFF); // Top pins
+            draw_rect(cx - 6 + i*6, cy + 10, 2, 4, 0x00FFFFFF); // Bottom pins
         }
+    } else if (strcmp(label, "Browser") == 0) {
+        // Globe glyph
+        draw_circle(cx, cy, 14, 0x00FFFFFF);
+        draw_circle(cx, cy, 13, 0x00FFFFFF);
+        draw_line(cx - 14, cy, cx + 14, cy, 0x00FFFFFF); // Equator
+        draw_line(cx, cy - 14, cx, cy + 14, 0x00FFFFFF); // Prime meridian
+        draw_circle(cx, cy, 7, 0x00FFFFFF); // Inner lat/long illusion
     } else if (strcmp(label, "Snake") == 0) {
-        draw_rounded_rect(cx - 8, cy - 4, 16, 8, 4, glyph_col);
-        draw_rounded_rect(cx + 4, cy - 4, 8, 8, 3, glyph_col);
-        draw_rounded_rect(cx + 4, cy - 12, 8, 8, 3, glyph_col);
-        draw_rounded_rect(cx - 4, cy - 12, 8, 8, 3, 0x00FFFFFF);
+        // Snake glyph
+        draw_rect(cx - 10, cy - 4, 16, 6, 0x00FFFFFF); // Body horizontal
+        draw_rect(cx + 2, cy - 10, 6, 8, 0x00FFFFFF); // Head
+        draw_rect(cx - 10, cy + 2, 6, 6, 0x00FFFFFF); // Tail drop
+        draw_rect(cx + 4, cy - 8, 2, 2, 0x0038A169); // Eye (green to match bg)
     } else if (strcmp(label, "Calc") == 0) {
-        draw_rounded_rect(cx - 12, cy - 14, 24, 28, 4, glyph_col);
-        draw_rect(cx - 10, cy - 12, 20, 8, 0x00222233);
-        for (int r = 0; r < 3; r++)
-            for (int c = 0; c < 3; c++)
-                draw_rounded_rect(cx - 10 + c*7, cy - 2 + r*7, 6, 6, 2, 0x00222233);
+        // Calculator glyph
+        draw_rect(cx - 10, cy - 14, 20, 28, 0x00FFFFFF); // Body
+        draw_rect(cx - 8, cy - 12, 16, 6, 0x00E2E8F0); // Screen
+        for(int r=0; r<3; r++) {
+            for(int c=0; c<3; c++) {
+                draw_rect(cx - 8 + c*6, cy - 3 + r*6, 4, 4, 0x00A0AEC0); // Buttons
+            }
+        }
+    } else {
+        // Generic App glyph
+        draw_rect(cx - 8, cy - 10, 16, 20, 0x002D3748);
+        draw_rect(cx - 4, cy - 6, 8, 2, 0x00A0AEC0);
+        draw_rect(cx - 4, cy - 2, 8, 2, 0x00A0AEC0);
+        draw_rect(cx - 4, cy + 2, 8, 2, 0x00A0AEC0);
     }
-}
-
-static uint32_t get_accent(const char* label) {
-    if (strcmp(label, "Terminal") == 0) return GUI_GREEN;
-    if (strcmp(label, "Browser") == 0)  return GUI_BLUE;
-    if (strcmp(label, "Explorer") == 0) return GUI_YELLOW;
-    if (strcmp(label, "SysInfo") == 0)  return 0x0044BBFF;
-    if (strcmp(label, "Clock") == 0)    return GUI_YELLOW;
-    if (strcmp(label, "PCI") == 0)      return 0x00448888;
-    if (strcmp(label, "Snake") == 0)    return GUI_GREEN;
-    if (strcmp(label, "Calc") == 0)     return 0x00AAAAAA;
-    return GUI_BLUE;
 }
 
 static void draw_icon(int i) {
     Icon* ic = &icons[i];
-    uint32_t accent = get_accent(ic->label);
-    draw_modern_icon(ic->x, ic->y, ic->label, accent);
+    draw_pro_icon(ic->x, ic->y, ic->label);
 
-    // Label below icon: centered, with subtle shadow
+    // Label below icon: white text with black drop shadow
     int llen = strlen(ic->label);
     int lx = ic->x + (ICON_W - llen * 8) / 2;
-    draw_string_px(lx + 1, ic->y + ICON_W + 3, ic->label, 0x00222233, 0x00000000);
-    draw_string_px(lx, ic->y + ICON_W + 2, ic->label, GUI_TEXT, 0x00000000);
+    // 0xFFFFFFFF bg makes the background transparent in draw_char_px
+    draw_string_px(lx + 1, ic->y + ICON_W - 6, ic->label, 0x00000000, 0xFFFFFFFF); // Shadow
+    draw_string_px(lx, ic->y + ICON_W - 7, ic->label, 0x00FFFFFF, 0xFFFFFFFF); // White text
 }
 
 extern uint32_t _binary_obj_wallpaper_bin_start[];
@@ -199,7 +215,7 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
 
     if (start_menu_open) {
         if (!btn && pbtn) {
-            int sm_h = 280;
+            int sm_h = 304;
             int sm_w = 170;
             int sm_y = ty - sm_h;
             if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
@@ -214,7 +230,8 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
                     else if (item == 5) open_clock_app();
                     else if (item == 6) open_pci_app();
                     else if (item == 7) start_ular();
-                    else if (item == 8) shutdown();
+                    else if (item == 8) { extern void reboot(void); reboot(); }
+                    else if (item == 9) shutdown();
                 }
             }
             start_menu_open = 0;

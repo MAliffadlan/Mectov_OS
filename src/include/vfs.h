@@ -16,7 +16,7 @@ typedef struct {
     int size;            // Untuk FILE: size data
     int data_sector;     // Untuk FILE: ATA sector start data
     int in_use;
-    char pad[504];       // Total 512 bytes per node
+    char pad[460];       // Total 512 bytes per node
 } __attribute__((packed)) fs_node_t;
 
 extern fs_node_t fs_nodes[MAX_NODES];

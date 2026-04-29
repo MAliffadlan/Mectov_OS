@@ -378,7 +378,8 @@ static void syscall_handler(registers_t* regs) {
             if (term_app_running && get_current_task() == term_app_task_id) {
                 term_app_running = 0;
                 term_app_task_id = -1;
-                print("root@mectov:~# ", 0x0A);
+                print("root@mectov", 0x0A);
+                print(" ~$ ", 0x0F);
             } else {
                 print("[syscall] Task exited.\n", 0x0E);
             }

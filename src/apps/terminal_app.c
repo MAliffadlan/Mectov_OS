@@ -80,16 +80,16 @@ void term_print(const char* s, unsigned char color) {
 
 static void term_draw(int id, int cx2, int cy2, int cw, int ch) {
     (void)id; (void)cw; (void)ch;
-    // Dark terminal background
-    draw_rect(cx2, cy2, cw, ch, 0x00000000);
+    // Modern dark terminal background (Catppuccin Crust)
+    draw_rect(cx2, cy2, cw, ch, 0x0011111B);
 
     // Render text buffer
     for (int r = 0; r < TERM_ROWS; r++) {
         for (int c2 = 0; c2 < TERM_COLS; c2++) {
             char ch2 = term.buf[r][c2];
             uint8_t vc = term.col[r][c2];
-            uint32_t fg = (ch2 && vc) ? vga_to_rgb(vc) : 0x00001808;
-            draw_char_px(cx2 + c2*8, cy2 + r*16, ch2 ? ch2 : ' ', fg, 0x00000000);
+            uint32_t fg = (ch2 && vc) ? vga_to_rgb(vc) : 0x00A6E3A1;
+            draw_char_px(cx2 + c2*8, cy2 + r*16, ch2 ? ch2 : ' ', fg, 0x0011111B);
         }
     }
     // Draw cursor blink
@@ -118,16 +118,18 @@ static void term_key(int id, char c, uint8_t sc) {
         if (sc == 0x48) { // Up arrow
             if (shell_history_up()) {
                 // Redraw the line
-                for (int i = 0; i < b_idx + 14; i++) term_putchar('\b', 0x00);
-                term_print("root@mectov:~# ", 0x0A);
+                for (int i = 0; i < b_idx + 16; i++) term_putchar('\b', 0x00);
+                term_print("root@mectov", 0x0A);
+                term_print(" ~$ ", 0x0F);
                 term_print(cmd_b, 0x0F);
             }
             return;
         }
         if (sc == 0x50) { // Down arrow
             if (shell_history_down()) {
-                for (int i = 0; i < b_idx + 14; i++) term_putchar('\b', 0x00);
-                term_print("root@mectov:~# ", 0x0A);
+                for (int i = 0; i < b_idx + 16; i++) term_putchar('\b', 0x00);
+                term_print("root@mectov", 0x0A);
+                term_print(" ~$ ", 0x0F);
                 term_print(cmd_b, 0x0F);
             }
             return;
@@ -166,8 +168,10 @@ void open_terminal_app() {
     for (int r = 0; r < TERM_ROWS; r++)
         for (int c2 = 0; c2 < TERM_COLS; c2++) { term.buf[r][c2] = 0; term.col[r][c2] = 0; }
     term.cx = 0; term.cy = 0;
-    term_print("Mectov OS v13.5 Terminal [GUI]\n", 0x0B);
-    term_print("root@mectov:~# ", 0x0A);
+    term_print("Mectov OS v18.0 Terminal [GUI]\n", 0x0B);
+    term_print("Welcome Bos Alif! System ready.\n\n", 0x0D);
+    term_print("root@mectov", 0x0A);
+    term_print(" ~$ ", 0x0F);
     b_idx = 0;
     term.win_id = wm_open(60, 40, 630, 430, "Terminal",
                           term_draw, term_key, term_tick, 0);

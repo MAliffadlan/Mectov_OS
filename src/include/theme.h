@@ -36,12 +36,12 @@
 
 // Accent colors
 #define GUI_BLUE     0x0089B4FA  // Soft blue accent
-#define GUI_GREEN    0x00A6E3A1  // Soft green
-#define GUI_YELLOW   0x00F9E2AF  // Soft yellow
-#define GUI_CLOSE    0x00F38BA8  // Soft red for close
+#define GUI_GREEN    0x0027C93F  // Vibrant macOS Green
+#define GUI_YELLOW   0x00FFBD2E  // Vibrant macOS Yellow
+#define GUI_CLOSE    0x00FF5F56  // Vibrant macOS Red
 #define GUI_MAGENTA  0x00CBA6F7  // Soft purple
 #define GUI_TEAL     0x0094E2D5  // Soft teal
-#define GUI_RED      0x00F38BA8  // Soft red (alias for close)
+#define GUI_RED      0x00FF5F56  // Alias for close
 
 // Icon backgrounds
 #define GUI_ICON_BG  0x00222233

@@ -14,60 +14,71 @@ static void draw_num2(int px, int py, unsigned char n, uint32_t fg, uint32_t bg)
     draw_string_px(px, py, buf, fg, bg);
 }
 
-// Modern flat icon (16x16) for taskbar buttons
+// Modern squircle icon (16x16) for taskbar buttons
 static void draw_taskbar_icon(int ix, int iy, const char* title, int minimized) {
-    uint32_t fill = minimized ? GUI_BORDER2 : GUI_BTN_HOV;
+    (void)minimized; // Button state is handled by the wrapper button
+    int cx = ix + 8;
+    int cy = iy + 8;
+    
+    // Base colors (must match desktop.c exactly)
+    uint32_t bg_col = 0x00FFFFFF;
+    if (strncmp(title, "Terminal", 8) == 0) bg_col = 0x002D3748;
+    else if (strncmp(title, "File Expl", 9) == 0) bg_col = 0x003182CE;
+    else if (strncmp(title, "System In", 9) == 0) bg_col = 0x00E2E8F0;
+    else if (strncmp(title, "Clock", 5) == 0) bg_col = 0x00FFFFFF;
+    else if (strncmp(title, "PCI", 3) == 0) bg_col = 0x00DD6B20;
+    else if (strncmp(title, "Mini Brow", 9) == 0 || strncmp(title, "Browser", 7) == 0) bg_col = 0x00319795;
+    else if (strncmp(title, "Snake", 5) == 0) bg_col = 0x0038A169;
+    else if (strncmp(title, "Calc", 4) == 0) bg_col = 0x00718096;
+    else bg_col = 0x002D3748;
 
+    // Draw base squircle 16x16
+    draw_rounded_rect(ix, iy, 16, 16, 4, bg_col);
+
+    // Draw inner minimalist glyphs (scaled down from desktop.c)
     if (strncmp(title, "Terminal", 8) == 0) {
-        // Terminal icon: black screen with ">_" prompt
-        draw_rounded_rect(ix, iy, 16, 16, 2, 0x001E1E2E);
-        draw_rounded_rect_border(ix, iy, 16, 16, 2, GUI_BORDER);
-        draw_string_px(ix + 2, iy + 4, ">_", GUI_GREEN, 0x001E1E2E);
+        draw_string_px(ix, iy + 4, ">_", 0x0048BB78, bg_col);
     } else if (strncmp(title, "File Expl", 9) == 0) {
-        // Folder icon
-        draw_rect(ix, iy + 4, 6, 4, GUI_YELLOW);
-        draw_rect(ix, iy + 8, 16, 8, 0x00E5A50A);
-        draw_rounded_rect_border(ix, iy + 8, 16, 8, 2, 0x00CC8800);
+        draw_rect(cx - 5, cy - 4, 10, 8, 0x00FFFFFF);
+        draw_rect(cx - 5, cy - 5, 4, 1, 0x00EBF8FF);
+        draw_rect(cx - 5, cy - 2, 10, 1, 0x0090CDF4); 
     } else if (strncmp(title, "System In", 9) == 0) {
-        // Monitor icon
-        draw_rounded_rect(ix + 1, iy + 1, 14, 10, 2, GUI_BLUE);
-        draw_rect(ix + 5, iy + 11, 6, 3, GUI_TEXT);
-        draw_rect(ix + 3, iy + 14, 10, 2, GUI_TEXT);
+        draw_rect(cx - 5, cy - 4, 10, 7, 0x002D3748);
+        draw_rect(cx - 4, cy - 3, 8, 5, 0x00A0AEC0); 
+        draw_rect(cx - 2, cy + 3, 4, 2, 0x002D3748); 
     } else if (strncmp(title, "Clock", 5) == 0) {
-        fill_circle(ix + 8, iy + 8, 7, GUI_YELLOW);
-        fill_circle(ix + 8, iy + 8, 5, 0x001E1E2E);
-        draw_line(ix + 8, iy + 8, ix + 8, iy + 4, GUI_YELLOW);
-        draw_line(ix + 8, iy + 8, ix + 12, iy + 8, GUI_YELLOW);
+        draw_circle(cx, cy, 6, 0x002D3748);
+        draw_line(cx, cy, cx, cy - 3, 0x00E53E3E); 
+        draw_line(cx, cy, cx + 2, cy + 2, 0x002D3748); 
     } else if (strncmp(title, "PCI", 3) == 0) {
-        // Chip icon
-        draw_rect(ix + 2, iy + 2, 12, 12, 0x00333344);
-        draw_rect(ix + 4, iy, 8, 2, 0x00888888);
-        draw_rect(ix + 4, iy + 14, 8, 2, 0x00888888);
-        draw_rect(ix, iy + 4, 2, 8, 0x00888888);
-        draw_rect(ix + 14, iy + 4, 2, 8, 0x00888888);
+        draw_rect(cx - 4, cy - 4, 8, 8, 0x00FFFFFF);
+        for(int i=0; i<2; i++) {
+            draw_rect(cx - 6, cy - 2 + i*4, 2, 1, 0x00FFFFFF); 
+            draw_rect(cx + 4, cy - 2 + i*4, 2, 1, 0x00FFFFFF); 
+            draw_rect(cx - 2 + i*4, cy - 6, 1, 2, 0x00FFFFFF); 
+            draw_rect(cx - 2 + i*4, cy + 4, 1, 2, 0x00FFFFFF); 
+        }
     } else if (strncmp(title, "Mini Brow", 9) == 0 || strncmp(title, "Browser", 7) == 0) {
-        // Globe icon
-        fill_circle(ix + 8, iy + 8, 7, GUI_BLUE);
-        draw_circle(ix + 8, iy + 8, 7, 0x004477CC);
-        draw_line(ix + 3, iy + 7, ix + 13, iy + 7, 0x004477CC);
-        draw_line(ix + 3, iy + 9, ix + 13, iy + 9, 0x004477CC);
-        draw_rect(ix + 6, iy + 2, 4, 12, 0x004477CC);
+        draw_circle(cx, cy, 6, 0x00FFFFFF);
+        draw_line(cx - 6, cy, cx + 6, cy, 0x00FFFFFF); 
+        draw_line(cx, cy - 6, cx, cy + 6, 0x00FFFFFF); 
+        draw_circle(cx, cy, 3, 0x00FFFFFF); 
     } else if (strncmp(title, "Snake", 5) == 0) {
-        // Snake icon
-        draw_rect(ix + 6, iy + 2, 4, 4, GUI_GREEN);
-        draw_rect(ix + 10, iy + 6, 4, 4, GUI_GREEN);
-        draw_rect(ix + 6, iy + 10, 4, 4, GUI_GREEN);
-        draw_rect(ix + 2, iy + 6, 4, 4, GUI_GREEN);
-        fill_circle(ix + 2, iy + 2, 2, 0x00FF4400); // head
-    } else if (strncmp(title, "Power", 5) == 0) {
-        // Power icon
-        draw_line(ix + 8, iy + 2, ix + 8, iy + 8, 0x00FF4444);
-        draw_circle(ix + 8, iy + 10, 6, 0x00FF4444);
+        draw_rect(cx - 4, cy - 1, 6, 2, 0x00FFFFFF); 
+        draw_rect(cx, cy - 4, 2, 3, 0x00FFFFFF); 
+        draw_rect(cx - 4, cy + 1, 2, 3, 0x00FFFFFF); 
+        put_pixel(cx + 1, cy - 3, 0x0038A169); 
+    } else if (strncmp(title, "Calc", 4) == 0) {
+        draw_rect(cx - 4, cy - 6, 8, 12, 0x00FFFFFF); 
+        draw_rect(cx - 3, cy - 5, 6, 3, 0x00E2E8F0); 
+        for(int r=0; r<2; r++) {
+            for(int c=0; c<2; c++) {
+                draw_rect(cx - 3 + c*4, cy - 1 + r*4, 2, 2, 0x00A0AEC0); 
+            }
+        }
     } else {
-        // Default app icon: rounded rect with accent
-        draw_rounded_rect(ix, iy, 16, 16, 3, GUI_ICON_BG);
-        draw_rounded_rect_border(ix, iy, 16, 16, 3, GUI_BORDER);
-        draw_rect(ix + 2, iy + 2, 12, 3, GUI_BLUE);
+        // Fallback
+        draw_rect(cx - 3, cy - 4, 6, 8, 0x00FFFFFF);
     }
 }
 
@@ -99,69 +110,141 @@ void taskbar_draw() {
     draw_rect(0, ty, fb_width, TASKBAR_H_PX, GUI_TASKBAR);
     draw_rect(0, ty, fb_width, 1, GUI_BORDER);
 
-    // ---------- Start button (rounded) ----------
+    // ---------- Start button (Modern Flat, Mectov OS) ----------
     int start_x = 4;
-    int start_w = 70;
-    int start_h = TASKBAR_H_PX - 6;
-    int start_y = ty + 3;
-    uint32_t sbg = start_menu_open ? GUI_BTN_HOV : GUI_BTN;
-    draw_rounded_rect(start_x, start_y, start_w, start_h, BTN_RADIUS, sbg);
-    draw_rounded_rect_border(start_x, start_y, start_w, start_h, BTN_RADIUS, GUI_BORDER);
-    // Logo text
-    draw_string_px(start_x + 8, start_y + (start_h - 16) / 2, "MectovOS", GUI_TEXT, sbg);
+    int start_w = 86; // Kept the same width so hit-boxes in desktop.c stay valid
+    int start_h = TASKBAR_H_PX - 8;
+    int start_y = ty + 4;
+    
+    // Active state uses a slightly lighter color
+    uint32_t btn_bg = start_menu_open ? 0x003B3B4F : 0x002B2B3C;
+    draw_rounded_rect(start_x, start_y, start_w, start_h, 6, btn_bg);
+    
+    // Subtle border for definition
+    draw_rounded_rect_border(start_x, start_y, start_w, start_h, 6, 0x001A1A2A);
 
-    // ---------- System Tray (right side) ----------
-    int tray_x = (int)fb_width - 8;
-    int tray_entry_h = TASKBAR_H_PX - 4;
+    // Text "Mectov OS"
+    uint32_t text_col = 0x00FFFFFF; // Crisp white
+    int t_len = 9 * 8; // Mectov OS = 9 chars * 8 px width
+    int tx = start_x + (start_w - t_len) / 2;
+    int ty_text = start_y + (start_h - 16) / 2;
+    
+    draw_string_px(tx, ty_text, "Mectov OS", text_col, btn_bg);
 
-    // Helper: tray section
-    #define TRAY_SPACING(gap) tray_x -= (gap)
+    // ---------- System Tray (right side, ToaruOS style) ----------
+    int tray_x = (int)fb_width - 6;
+    int tray_cy = ty + TASKBAR_H_PX / 2; // center Y
 
-    // 1. Clock (rightmost)
+    // 1. Power button icon (rightmost)
+    int pwr_r = 7;
+    int pwr_x = tray_x - pwr_r - 2;
+    draw_circle(pwr_x, tray_cy, pwr_r, 0x00FF5555);
+    draw_circle(pwr_x, tray_cy, pwr_r - 1, 0x00FF5555); // make it slightly thicker
+    // erase the top to create the gap
+    draw_rect(pwr_x - 3, tray_cy - pwr_r - 2, 7, 6, GUI_TASKBAR);
+    // draw the vertical line inside the gap
+    draw_rect(pwr_x - 1, tray_cy - pwr_r - 2, 3, pwr_r + 2, 0x00FF5555);
+    tray_x = pwr_x - pwr_r - 8;
+
+    // 2. Separator
+    draw_rect(tray_x, ty + 7, 1, TASKBAR_H_PX - 14, GUI_BORDER2);
+    tray_x -= 8;
+
+    // 3. Clock: HH:MM:SS
     rtc_time_t tm = rtc_read_time();
     unsigned char sec  = tm.second;
     unsigned char min  = tm.minute;
     unsigned char hour = tm.hour;
     unsigned char dow  = tm.dow;
+    unsigned char c_day = tm.day;
+    unsigned char c_mon = tm.month;
+    unsigned int  c_yr  = tm.year;
     // Convert to WIB (UTC+7)
     int h_tmp = hour + 7;
-    if (h_tmp >= 24) { dow++; if (dow > 7) dow = 1; }
+    if (h_tmp >= 24) { dow++; if (dow > 7) dow = 1; c_day++; }
     hour = h_tmp % 24;
-    const char* days[] = {"???", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-    if (dow > 7) dow = 0;
 
+    // Time string "HH:MM:SS"
+    char time_str[9];
+    time_str[0] = '0' + hour / 10; time_str[1] = '0' + hour % 10;
+    time_str[2] = ':';
+    time_str[3] = '0' + min / 10; time_str[4] = '0' + min % 10;
+    time_str[5] = ':';
+    time_str[6] = '0' + sec / 10; time_str[7] = '0' + sec % 10;
+    time_str[8] = '\0';
+
+    int time_w = 8 * 8; // 8 chars * 8px
+    int time_x = tray_x - time_w;
     int clk_bg = calendar_open ? GUI_BTN_HOV : GUI_TASKBAR;
-    // Clock background button
-    int clk_w = 84;
-    int clk_x = tray_x - clk_w - 2;
-    draw_rounded_rect(clk_x, ty + 3, clk_w, TASKBAR_H_PX - 6, BTN_RADIUS, clk_bg);
-    draw_rounded_rect_border(clk_x, ty + 3, clk_w, TASKBAR_H_PX - 6, BTN_RADIUS, calendar_open ? GUI_BORDER : GUI_BORDER2);
-    int clk_tx = clk_x + 4;
-    draw_string_px(clk_tx, ty + 6, days[dow], GUI_TEXT_INV, clk_bg);
-    draw_num2(clk_tx + 28, ty + 6, hour, GUI_TEXT, clk_bg);
-    draw_string_px(clk_tx + 44, ty + 6, ":", GUI_TEXT, clk_bg);
-    draw_num2(clk_tx + 50, ty + 6, min,  GUI_TEXT, clk_bg);
-    tray_x = clk_x - 4;
+    draw_string_px(time_x, ty + 6, time_str, GUI_TEXT, clk_bg);
+    tray_x = time_x - 10;
 
-    // 2. Separator
-    draw_rect(tray_x - 1, ty + 8, 1, 12, GUI_BORDER2);
+    // 4. Separator
+    draw_rect(tray_x, ty + 7, 1, TASKBAR_H_PX - 14, GUI_BORDER2);
     tray_x -= 8;
 
-    // 3. RAM indicator (compact)
+    // 5. Date: "DayName  Month Day"  (e.g. "Wednesday  April 29")
+    const char* day_names[] = {"???", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+    const char* month_names[] = {"???","January","February","March","April","May","June",
+                                  "July","August","September","October","November","December"};
+    if (dow > 7) dow = 0;
+    if (c_mon > 12) c_mon = 0;
+    
+    // Build date string: "DayName  Month Day"
+    char date_str2[48];
+    int di2 = 0;
+    const char* dn = day_names[dow];
+    while (*dn) date_str2[di2++] = *dn++;
+    date_str2[di2++] = ' '; date_str2[di2++] = ' ';
+    const char* mn = month_names[c_mon];
+    while (*mn) date_str2[di2++] = *mn++;
+    date_str2[di2++] = ' ';
+    if (c_day >= 10) date_str2[di2++] = '0' + c_day / 10;
+    date_str2[di2++] = '0' + c_day % 10;
+    date_str2[di2] = '\0';
+
+    int date_w = di2 * 8;
+    int date_x = tray_x - date_w;
+    draw_string_px(date_x, ty + 6, date_str2, GUI_TEXT_INV, clk_bg);
+    // Save clk_x for calendar click detection
+    int clk_x = date_x - 4;
+    int clk_w = tray_x + 8 - date_x + time_w + 18;
+    tray_x = date_x - 10;
+
+    // 6. Separator
+    draw_rect(tray_x, ty + 7, 1, TASKBAR_H_PX - 14, GUI_BORDER2);
+    tray_x -= 8;
+
+    // 7. Caps Lock indicator
+    int caps_x = tray_x - 26;
+    if (caps_a) {
+        draw_rounded_rect(caps_x, ty + 6, 24, 16, 3, GUI_CLOSE);
+        draw_string_px(caps_x + 4, ty + 8, "CAP", 0x00FFFFFF, GUI_CLOSE);
+    } else {
+        draw_rounded_rect(caps_x, ty + 6, 24, 16, 3, GUI_BORDER2);
+        draw_string_px(caps_x + 4, ty + 8, "cap", GUI_DIM, GUI_BORDER2);
+    }
+    tray_x = caps_x - 6;
+
+    // 8. HDD activity dot
+    int hdd_x = tray_x - 12;
+    fill_circle(hdd_x + 5, tray_cy, 4, hdd_activity > 0 ? 0x00FF4444 : GUI_BORDER2);
+    if (hdd_activity > 0) hdd_activity--;
+    tray_x = hdd_x - 6;
+
+    // 9. RAM usage compact bar
     unsigned int used_kb = get_used_memory() / 1024;
     unsigned int tot_kb  = get_total_memory() / 1024;
     int ram_pct = (tot_kb > 0) ? (used_kb * 100 / tot_kb) : 0;
-    int ram_w = 44;
+    int ram_w = 36;
     int ram_x = tray_x - ram_w;
-    // RAM bar background
-    draw_rounded_rect(ram_x, ty + 10, ram_w, 8, 2, GUI_BORDER2);
+    draw_rounded_rect(ram_x, ty + 9, ram_w, 10, 2, GUI_BORDER2);
     if (tot_kb > 0) {
         int fill = (ram_w * ram_pct) / 100;
         if (fill > ram_w) fill = ram_w;
         if (fill > 0)
-            draw_rounded_rect(ram_x, ty + 10, fill, 8, 2, ram_pct > 80 ? 0x00FF5555 : GUI_TEAL);
+            draw_rounded_rect(ram_x, ty + 9, fill, 10, 2, ram_pct > 80 ? 0x00FF5555 : GUI_TEAL);
     }
-    // RAM percentage text
     char pct_buf[8];
     int idx = 0;
     if (ram_pct >= 100) { pct_buf[idx++] = '1'; pct_buf[idx++] = '0'; pct_buf[idx++] = '0'; }
@@ -170,28 +253,16 @@ void taskbar_draw() {
         pct_buf[idx++] = '0' + (ram_pct % 10);
     }
     pct_buf[idx++] = '%'; pct_buf[idx] = '\0';
-    // Draw small text over RAM bar
-    draw_string_px(ram_x + 2, ty + 9, pct_buf, 0x00FFFFFF, GUI_BORDER2);
+    draw_string_px(ram_x + 2, ty + 8, pct_buf, 0x00FFFFFF, GUI_BORDER2);
     tray_x = ram_x - 6;
 
-    // 4. HDD activity dot
-    int hdd_x = tray_x - 14;
-    fill_circle(hdd_x + 5, ty + TASKBAR_H_PX / 2, 4, hdd_activity > 0 ? 0x00FF4444 : GUI_BORDER2);
-    if (hdd_activity > 0) hdd_activity--;
-    tray_x = hdd_x - 8;
 
-    // 5. Caps Lock indicator
-    int caps_x = tray_x - 26;
-    if (caps_a) {
-        draw_rounded_rect(caps_x, ty + 6, 24, 16, 3, GUI_CLOSE);
-        draw_string_px(caps_x + 4, ty + 10, "CAP", 0x00FFFFFF, GUI_CLOSE);
-    } else {
-        draw_rounded_rect(caps_x, ty + 6, 24, 16, 3, GUI_BORDER2);
-        draw_string_px(caps_x + 4, ty + 10, "cap", GUI_DIM, GUI_BORDER2);
-    }
+    // ---------- Separator between Start and Apps ----------
+    int sep_x = 4 + 86 + 6; // start_x + start_w + padding
+    draw_rect(sep_x, ty + 7, 1, TASKBAR_H_PX - 14, 0x00AAAAAA); // Brighter white/gray
 
     // ---------- Window buttons ----------
-    int wx = start_x + start_w + 8;
+    int wx = sep_x + 8;
     int btn_w = 34;
     int btn_h = TASKBAR_H_PX - 6;
     for (int i = 0; i < MAX_WINDOWS && wx + btn_w + 2 < tray_x; i++) {
@@ -211,7 +282,7 @@ void taskbar_draw() {
 
     // ========== Draw Start Menu (drop-up, rounded) ==========
     if (start_menu_open) {
-        int sm_h = 280;
+        int sm_h = 304;
         int sm_w = 170;
         int sm_y = ty - sm_h;
         // Shadow
@@ -228,15 +299,18 @@ void taskbar_draw() {
         struct { const char* label; int len; } items[] = {
             {"Terminal", 8}, {"Editor (Nano)", 13}, {"File Explorer", 13},
             {"Mini Browser", 12}, {"System Info", 11}, {"Clock", 5},
-            {"PCI Manager", 11}, {"Snake Game", 10}, {"Power Off", 8},
+            {"PCI Manager", 11}, {"Snake Game", 10}, {"Restart", 7}, {"Power Off", 9},
         };
         int oy = sm_y + 32;
-        for (int n = 0; n < 9; n++) {
+        for (int n = 0; n < 10; n++) {
             uint32_t item_bg = GUI_BG;
             // Highlight on hover simulation (none since no mouse tracking here)
-            if (n == 8) { // Power off item
+            if (n == 9) { // Power off item
                 draw_rect(4, oy, sm_w - 8, 22, 0x00220000);
                 draw_string_px(12, oy + 3, items[n].label, GUI_CLOSE, 0x00220000);
+            } else if (n == 8) { // Restart item
+                draw_rect(4, oy, sm_w - 8, 22, 0x00221100);
+                draw_string_px(12, oy + 3, items[n].label, GUI_YELLOW, 0x00221100);
             } else {
                 draw_string_px(12, oy + 3, items[n].label, GUI_TEXT, item_bg);
             }
@@ -317,24 +391,34 @@ void taskbar_handle_click(int mx, int my) {
     if (my < ty) return;
 
     // Start button hit test
-    if (mx >= 4 && mx <= 74) {
+    if (mx >= 2 && mx <= 88) {
         start_menu_open = !start_menu_open;
         if (start_menu_open) calendar_open = 0;
         return;
     }
 
+    // Power button hit test
+    int tray_x = (int)fb_width - 6;
+    int pwr_r = 7;
+    int pwr_x = tray_x - pwr_r - 2;
+    if (mx >= pwr_x - pwr_r && mx <= pwr_x + pwr_r) {
+        extern void shutdown(void);
+        shutdown();
+        return;
+    }
+
     // Clock hit test (right side)
-    int tray_x = (int)fb_width - 8;
     int clk_w = 84;
-    int clk_x = tray_x - clk_w - 2;
-    if (mx >= clk_x && mx <= clk_x + clk_w) {
+    int clk_x = tray_x - 220; // approximate, enough to catch calendar
+    if (mx >= clk_x && mx <= pwr_x - pwr_r - 10) {
         calendar_open = !calendar_open;
         if (calendar_open) start_menu_open = 0;
         return;
     }
 
     // Window buttons hit test
-    int wx = 4 + 70 + 8;
+    int sep_x = 4 + 86 + 6;
+    int wx = sep_x + 8;
     int btn_w = 34;
     for (int i = 0; i < MAX_WINDOWS && wx + btn_w + 2 < clk_x; i++) {
         if (!wm_wins[i].visible) continue;

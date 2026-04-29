@@ -37,6 +37,31 @@ int hist_pos = -1;
 
 static int hist_next_slot = 0; // next slot to overwrite (oldest)
 
+// --- Prompt with timestamp (ToaruOS style) ---
+void shell_print_timestamp() {
+    rtc_time_t tm = rtc_read_time();
+    char ts[20];
+    int i = 0;
+    ts[i++] = '[';
+    ts[i++] = '0' + tm.month / 10; ts[i++] = '0' + tm.month % 10;
+    ts[i++] = '/';
+    ts[i++] = '0' + tm.day / 10; ts[i++] = '0' + tm.day % 10;
+    ts[i++] = ' ';
+    ts[i++] = '0' + tm.hour / 10; ts[i++] = '0' + tm.hour % 10;
+    ts[i++] = ':';
+    ts[i++] = '0' + tm.minute / 10; ts[i++] = '0' + tm.minute % 10;
+    ts[i++] = ':';
+    ts[i++] = '0' + tm.second / 10; ts[i++] = '0' + tm.second % 10;
+    ts[i++] = ']';
+    ts[i] = '\0';
+    print(ts, 0x0C);
+}
+
+void shell_print_prompt() {
+    print("root@mectov", 0x0A);
+    print(" ~$ ", 0x0F);
+}
+
 static void history_add(const char* cmd) {
     if (!cmd || cmd[0] == '\0') return;
     // Don't add duplicate of last entry
@@ -148,15 +173,21 @@ static void shell_redisplay() {
         // Clear line by printing spaces, then reprint
         term_print("\r", 0x00);
         for (int i = 0; i < 79; i++) term_putchar(' ', 0x00);
-        term_print("\rroot@mectov:~# ", 0x0A);
+        term_print("\r", 0x00);
+        // ToaruOS-style prompt in terminal
+        extern void term_print(const char*, unsigned char);
+        term_print("root@mectov", 0x0A);
+        term_print(" ~$ ", 0x0F);
         term_print(cmd_b, 0x0F);
     } else {
-        print("\rroot@mectov:~# ", 0x0A);
+        print("\r", 0x00);
+        shell_print_prompt();
         print(cmd_b, 0x0F);
         // Clear rest of line
-        int row_len = b_idx + 14;
+        int row_len = b_idx + 16;
         for (int i = row_len; i < 80; i++) print(" ", 0x00);
-        print("\rroot@mectov:~# ", 0x0A);
+        print("\r", 0x00);
+        shell_print_prompt();
         print(cmd_b, 0x0F);
     }
 }
@@ -228,7 +259,7 @@ void ex_cmd() {
     
     // --- HELP ---
     if (strcmp(cmd_b, "help") == 0) {
-        print("--- MECTOV OS v15.0 HELP MENU ---\n", 0x0B);
+        print("--- MECTOV OS v18.0 HELP MENU ---\n", 0x0B);
         print("SISTEM: mfetch, waktu, warna, clear, mem, kmemstats, kunci\n", 0x0E);
         print("FILES : ls, cd, pwd, mkdir, touch, cat, tree, rm\n", 0x0E);
         print("        buat, tulis, baca, edit, hapus (legacy)\n", 0x0E);
@@ -243,13 +274,53 @@ void ex_cmd() {
         if (get_use_term_buf()) term_clear();
         else c_work(); 
     }
-    // --- MFETCH ---
+    // --- MFETCH (ToaruOS sysinfo style) ---
     else if (strcmp(cmd_b, "mfetch") == 0) {
-        print("    .---.      ", 0x0A); print("root@mectov-os\n", 0x0B);
-        print("   /     \\     ", 0x0A); print("--------------\n", 0x0F);
-        print("  | () () |    ", 0x0B); print("OS  : Mectov OS v15.0\n", 0x0F);
-        print("   \\  ^  /     ", 0x0B); print("MODE: VBE High-Res 32-bit\n", 0x0F);
-        print("    |||||      ", 0x0B); print("MEM : ", 0x0F); p_int(get_used_memory()/1024, 0x0F); print(" KB used\n", 0x0F);
+        // Row 1: color blocks + username
+        print("  ", 0x00);
+        // 8 colored blocks using block char
+        print("## ## ## ## ", 0x09); print("## ## ## ## ", 0x0B);
+        print("  root@mectov\n", 0x0A);
+        // Row 2: color blocks + separator
+        print("  ", 0x00);
+        print("## ## ## ## ", 0x01); print("## ## ## ## ", 0x03);
+        print("  --------------\n", 0x0F);
+        // Row 3: color blocks + OS
+        print("  ", 0x00);
+        print("## ## ## ## ", 0x0D); print("## ## ## ## ", 0x05);
+        print("  OS: ", 0x0B); print("Mectov OS v18.0\n", 0x0F);
+        // Row 4: color blocks + Kernel
+        print("  ", 0x00);
+        print("## ## ## ## ", 0x0E); print("## ## ## ## ", 0x06);
+        print("  Kernel: ", 0x0B); print("Mectov 18.0.0\n", 0x0F);
+        // Row 5: color blocks + Uptime
+        print("  ", 0x00);
+        print("## ## ## ## ", 0x0C); print("## ## ## ## ", 0x04);
+        print("  Uptime: ", 0x0B); print("up ", 0x0F);
+        extern uint32_t get_uptime_seconds(void);
+        uint32_t up = get_uptime_seconds();
+        p_int(up / 60, 0x0F); print(" min ", 0x0F);
+        p_int(up % 60, 0x0F); print(" sec\n", 0x0F);
+        // Row 6: Shell
+        print("  ", 0x00);
+        print("## ## ## ## ", 0x0A); print("## ## ## ## ", 0x02);
+        print("  Shell: ", 0x0B); print("msh 2.0\n", 0x0F);
+        // Row 7: Resolution
+        print("  ", 0x00);
+        print("## ## ## ## ", 0x09); print("## ## ## ## ", 0x01);
+        print("  Resolution: ", 0x0B); p_int(fb_width, 0x0F); print("x", 0x0F); p_int(fb_height, 0x0F); print("\n", 0x0F);
+        // Row 8: WM
+        print("                        ", 0x00);
+        print("  WM: ", 0x0B); print("MectovWM\n", 0x0F);
+        // Row 9: CPU
+        print("                        ", 0x00);
+        extern char cpu_brand[49];
+        print("  CPU: ", 0x0B); print(cpu_brand, 0x0F); print("\n", 0x0F);
+        // Row 10: RAM
+        print("                        ", 0x00);
+        print("  RAM: ", 0x0B);
+        p_int(get_used_memory()/1024, 0x0F); print(" KB / ", 0x0F);
+        p_int(get_total_memory()/1024, 0x0F); print(" KB\n", 0x0F);
     }
     // --- MEM / KMEMSTATS ---
     else if (strcmp(cmd_b, "mem") == 0) {
@@ -259,6 +330,16 @@ void ex_cmd() {
     }
     else if (strcmp(cmd_b, "kmemstats") == 0) {
         kmalloc_stats(print);
+    }
+    // --- VFS INFO ---
+    else if (strcmp(cmd_b, "vfsinfo") == 0) {
+        int count = 0;
+        for (int i = 0; i < MAX_NODES; i++) if (fs_nodes[i].in_use) count++;
+        print("VFS STATUS:\n", 0x0B);
+        print("  MAX NODES : ", 0x0F); p_int(MAX_NODES, 0x0A); print("\n", 0x0F);
+        print("  IN USE    : ", 0x0F); p_int(count, 0x0A); print("\n", 0x0F);
+        print("  FREE      : ", 0x0F); p_int(MAX_NODES - count, 0x0A); print("\n", 0x0F);
+        print("  ROOT INUSE: ", 0x0F); p_int(fs_nodes[0].in_use, 0x0A); print("\n", 0x0F);
     }
     // --- CD ---
     else if (strncmp(cmd_b, "cd ", 3) == 0 || strcmp(cmd_b, "cd") == 0) {
@@ -580,7 +661,7 @@ void ex_cmd() {
     
     extern int term_app_running;
     if (!term_app_running) {
-        print("root@mectov:~# ", 0x0A); 
+        shell_print_prompt(); 
     }
 }
 

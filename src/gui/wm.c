@@ -117,9 +117,13 @@ static void draw_one(int idx) {
     // ========== Titlebar (rounded top corners + gradient) ==========
     if (focused) {
         draw_gradient_v(x, y, ww, TITLEBAR_H, GUI_TITLE_A, GUI_TITLE_B);
+        // Subtle top highlight
+        draw_rect(x + radius, y, ww - 2 * radius, 1, 0x55FFFFFF);
     } else {
         draw_rounded_rect(x, y, ww, TITLEBAR_H, radius, GUI_TITLE_I);
     }
+    // Bottom separator
+    draw_rect(x, y + TITLEBAR_H - 1, ww, 1, 0x0011111B);
 
     // Round the top-left corner of body so it merges with titlebar
     // (titlebar covers upper portion; body gets the bottom corners only)
@@ -133,35 +137,41 @@ static void draw_one(int idx) {
         draw_rounded_rect_border(x, y, ww, wh, radius, GUI_BORDER2);
     }
 
-    // ========== Title text ==========
+    // ========== Title text (Centered) ==========
     int tlen = strlen(w->title);
-    int btn_spacing = 14; // space reserved for 3 small circle buttons + padding
-    int tx = x + 8;
+    int tx = x + (ww - tlen * 8) / 2;
     int tty = y + (TITLEBAR_H - 16) / 2;
-    draw_string_px(tx, tty, w->title, GUI_TEXT, focused ? GUI_TITLE_A : GUI_TITLE_I);
+    draw_string_px(tx, tty, w->title, GUI_TEXT, 0xFFFFFFFF);
 
-    // ========== Titlebar buttons (right side): small circles ==========
-    int btn_r = 5;           // circle radius
+    // ========== Titlebar buttons (left side): macOS style traffic lights ==========
+    int btn_r = 6;           // circle radius
     int btn_y = y + TITLEBAR_H / 2;
+    int btn_start_x = x + 12;
 
-    // Close button (rightmost)
-    int c_cx = x + ww - (btn_r + 8);
-    fill_circle(c_cx, btn_y, btn_r, focused ? GUI_CLOSE : GUI_DIM);
-    // X mark
-    draw_string_px(c_cx - 3, btn_y - 4, "x", GUI_WHITE, focused ? GUI_CLOSE : GUI_DIM);
-    w->close_cx = c_cx; w->close_cy = btn_y; w->close_r = btn_r;
+    // Close button (Red)
+    fill_circle(btn_start_x, btn_y, btn_r, focused ? GUI_CLOSE : GUI_DIM);
+    if (focused) {
+        draw_line(btn_start_x - 2, btn_y - 2, btn_start_x + 2, btn_y + 2, 0x00500000);
+        draw_line(btn_start_x - 2, btn_y + 2, btn_start_x + 2, btn_y - 2, 0x00500000);
+    }
+    w->close_cx = btn_start_x; w->close_cy = btn_y; w->close_r = btn_r;
 
-    // Maximize button
-    int m_cx = c_cx - (btn_r * 2 + 6);
-    fill_circle(m_cx, btn_y, btn_r, focused ? GUI_GREEN : GUI_DIM);
-    draw_string_px(m_cx - 3, btn_y - 4, "O", GUI_WHITE, focused ? GUI_GREEN : GUI_DIM);
-    w->max_cx = m_cx; w->max_cy = btn_y; w->max_r = btn_r;
-
-    // Minimize button
-    int min_cx = m_cx - (btn_r * 2 + 6);
+    // Minimize button (Yellow)
+    int min_cx = btn_start_x + 18;
     fill_circle(min_cx, btn_y, btn_r, focused ? GUI_YELLOW : GUI_DIM);
-    draw_string_px(min_cx - 3, btn_y - 4, "_", GUI_WHITE, focused ? GUI_YELLOW : GUI_DIM);
+    if (focused) {
+        draw_rect(min_cx - 2, btn_y, 5, 1, 0x00593B00);
+    }
     w->min_cx = min_cx; w->min_cy = btn_y; w->min_r = btn_r;
+
+    // Maximize button (Green)
+    int m_cx = min_cx + 18;
+    fill_circle(m_cx, btn_y, btn_r, focused ? GUI_GREEN : GUI_DIM);
+    if (focused) {
+        draw_rect(m_cx - 2, btn_y, 5, 1, 0x00004000);
+        draw_rect(m_cx, btn_y - 2, 1, 5, 0x00004000);
+    }
+    w->max_cx = m_cx; w->max_cy = btn_y; w->max_r = btn_r;
 
     // ========== Content area ==========
     // Subtle inner border

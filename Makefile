@@ -44,7 +44,7 @@ $(OBJ_DIR)/wallpaper.o: $(OBJ_DIR)/wallpaper.bin
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
 $(OBJ_DIR)/wallpaper.bin:
-	python3 scratch/build_wallpaper.py /home/mectov/.gemini/antigravity/brain/1701ced2-e485-4124-afac-9fa8400a902f/media__1777224290409.png $@
+	python3 scratch/build_wallpaper.py /home/mectov/.gemini/antigravity/brain/1701ced2-e485-4124-afac-9fa8400a902f/media__1777482843135.png $@
 
 $(OBJ_DIR)/%.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

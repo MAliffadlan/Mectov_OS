@@ -117,7 +117,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     extern void init_serial();
     init_serial();
     init_uptime();
-    vfs_load();
+    vfs_init();
 
     init_double_buffer();
     init_tasking();
@@ -176,7 +176,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         }
 
         uint8_t sc = k_get_scancode();
-        if (sc != 0 && sc < 0x80) {
+        if (sc != 0 && (sc < 0x80 || sc == 0xE0)) {
             char c = scancode_to_char(sc);
             wm_handle_key(c, sc);
             needs_redraw = 1;
@@ -194,10 +194,8 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             needs_redraw = 1;
         }
 
-        // (1) Pastiin timer 60 Hz doang yang jadi trigger render
-        if (now - last_frame_tick >= 16) {
-            needs_redraw = 1;
-        }
+        // Disabled forced 60Hz redraw to fix FPS drops
+        // Redraw will only happen on events (mouse/kb/timer)
 
         if (needs_redraw) {
             needs_redraw = 0;

@@ -211,9 +211,9 @@ void draw_rounded_rect(int x, int y, int w, int h, int r, uint32_t color) {
     draw_rect(x, y + r, r, h - 2*r, color);
     draw_rect(x + w - r, y + r, r, h - 2*r, color);
     
-    // Corners: for each scanline dy from 0..r, fill dx pixels from corner edges
-    for (int dy = 0; dy <= r; dy++) {
-        int dx = corner_dx(dy, r);
+    // Corners: for each scanline dy from 0..r-1, fill dx pixels from corner edges
+    for (int dy = 0; dy < r; dy++) {
+        int dx = corner_dx(r - dy, r);
         // Top-left & top-right
         draw_rect(x + r - dx, y + dy, dx, 1, color);
         draw_rect(x + w - r, y + dy, dx, 1, color);
@@ -236,8 +236,8 @@ void draw_rounded_rect_border(int x, int y, int w, int h, int r, uint32_t col) {
     draw_rect(x + w - 1, y + r, 1, h - 2*r, col);    // right
     
     // Corner arcs (single pixel each angle)
-    for (int dy = 0; dy <= r; dy++) {
-        int dx = corner_dx(dy, r);
+    for (int dy = 0; dy < r; dy++) {
+        int dx = corner_dx(r - dy, r);
         // Top-left: left edge of corner
         put_pixel(x + r - dx, y + dy, col);
         // Top-right: right edge
@@ -266,18 +266,9 @@ void draw_gradient_v(int x, int y, int w, int h, uint32_t color_top, uint32_t co
     }
 }
 
-// Soft drop shadow using multiple alpha-blended layers
+// Soft drop shadow - disabled for clean look
 void draw_soft_shadow(int x, int y, int w, int h, int radius, uint32_t intensity) {
-    if (radius <= 0 || radius > 12) return;
-    // Draw expanding rectangles centered on shadow area, blended with alpha
-    // Innermost layer = darkest. Outermost = faintest.
-    for (int layer = 0; layer < radius; layer++) {
-        int passes = (intensity * (radius - layer)) / (radius * 32);
-        if (passes < 1) passes = 1;
-        if (passes > 3) passes = 3;
-        for (int p = 0; p < passes; p++)
-            draw_rect_alpha(x + layer + 4, y + layer + 4, w - 2*(layer + 4), h - 2*(layer + 4), 0x00000000);
-    }
+    (void)x; (void)y; (void)w; (void)h; (void)radius; (void)intensity;
 }
 
 // ============================================================
