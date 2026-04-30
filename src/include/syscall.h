@@ -24,6 +24,27 @@
 #define SYS_GET_EVENT   16   // EBX=win_id, ECX=event_ptr
 #define SYS_UPDATE_WINDOW 17 // EBX=win_id
 
+// === NEW SYSCALLS for Modern Architecture ===
+// Thread & Process Management
+#define SYS_THREAD_CREATE  18  // EBX=entry, ECX=priority, EDX=page_dir → return TID
+#define SYS_SLEEP          19  // EBX=ticks
+#define SYS_GET_PID        20  // → return current TID
+#define SYS_SET_PRIORITY   21  // EBX=tid, ECX=priority
+#define SYS_GET_PRIORITY   22  // EBX=tid → return priority
+
+// IPC
+#define SYS_IPC_CREATE     23  // EBX=key → return qid
+#define SYS_IPC_SEND       24  // EBX=qid, ECX=type, EDX=data_ptr, ESI=len → return 0/-1
+#define SYS_IPC_RECV       25  // EBX=qid, ECX=type_out, EDX=data_out, ESI=len_out → return 0/-1
+#define SYS_IPC_DESTROY    26  // EBX=qid
+#define SYS_IPC_TRY_SEND   27  // EBX=qid, ECX=type, EDX=data_ptr, ESI=len → return 0/-1
+#define SYS_IPC_TRY_RECV   28  // EBX=qid, ECX=type_out, EDX=data_out, ESI=len_out → return 0/-1
+
+// Virtual Memory
+#define SYS_VMM_MAP        29  // EBX=vaddr, ECX=paddr, EDX=flags → return 0/-1
+#define SYS_VMM_ALLOC      30  // EBX=vaddr, ECX=flags → return vaddr or 0
+#define SYS_VMM_FREE       31  // EBX=vaddr → return 0/-1
+
 // Initialize syscall handler (int 0x80)
 void init_syscalls(void);
 

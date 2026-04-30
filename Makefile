@@ -31,22 +31,22 @@ $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)/src/apps
 	mkdir -p $(OBJ_DIR)/src/gui
 
-$(OBJ_DIR)/boot.o: boot.asm
+$(OBJ_DIR)/boot.o: boot.asm | $(OBJ_DIR)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(OBJ_DIR)/src/sys/interrupt_entry.o: src/sys/interrupt_entry.asm
+$(OBJ_DIR)/src/sys/interrupt_entry.o: src/sys/interrupt_entry.asm | $(OBJ_DIR)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(OBJ_DIR)/gcalc_mct.o: gcalc.mct
+$(OBJ_DIR)/gcalc_mct.o: gcalc.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
-$(OBJ_DIR)/wallpaper.o: $(OBJ_DIR)/wallpaper.bin
+$(OBJ_DIR)/wallpaper.o: $(OBJ_DIR)/wallpaper.bin | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
 $(OBJ_DIR)/wallpaper.bin:
 	python3 scratch/build_wallpaper.py /home/mectov/.gemini/antigravity/brain/1701ced2-e485-4124-afac-9fa8400a902f/media__1777482843135.png $@
 
-$(OBJ_DIR)/%.o: %.c
+$(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 myos.bin: $(OBJS)
