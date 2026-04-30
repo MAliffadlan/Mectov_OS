@@ -1,4 +1,4 @@
-# Mectov OS v21.0 — Premium UI Refinement & Real-time Performance
+# Mectov OS v22.0 — Kernel Modernization (VMM, IPC, Priority Threading)
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,7 +6,7 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v21.0 release introduces premium UI refinements: a high-resolution sleek mouse cursor with dynamic shadows, a classic 3-arc WiFi indicator in the taskbar, and a return to forced 60Hz real-time rendering for absolute smoothness.
+The v22.0 release introduces kernel modernization: a full Virtual Memory Manager (VMM) with per-process address spaces, IPC named message queues for service-oriented architecture, 4-level priority thread scheduling with sleep/wake API, and 14 new syscalls enabling these capabilities.
 
 Created by M Alif Fadlan.
 
@@ -24,13 +24,15 @@ Created by M Alif Fadlan.
 +--------------------------------------------------------------------+
 |  PIT Timer (1kHz) |  Keyboard (PS/2) |  Mouse (PS/2) |  Serial     |
 +--------------------------------------------------------------------+
-|  Memory Manager    |  Task Scheduler    |  VFS + ATA PIO           |
+|  Memory Manager   |  VMM (Virtual Mem)|  IPC Message Queues        |
 +--------------------------------------------------------------------+
-|  VGA/VESA Driver   |  Window Manager    |  PCI Scanner             |
+|  Priority Thread   |  VFS + ATA PIO   |  PCI Scanner               |
 +--------------------------------------------------------------------+
-|  RTL8139 NIC  |  Network Stack (Ethernet/ARP/IPv4/ICMP/UDP/DNS)    |
+|  VGA/VESA Driver   |  Window Manager   |  RTL8139 NIC              |
 +--------------------------------------------------------------------+
-|  MCT App Loader  |  Ring 3 User Tasks  |  Display List Renderer    |
+|  Network Stack (Ethernet/ARP/IPv4/ICMP/UDP/DNS)                    |
++--------------------------------------------------------------------+
+|  MCT App Loader   |  Ring 3 User Tasks|  Display List Renderer     |
 +--------------------------------------------------------------------+
 |  Desktop (Squircle Icons) |  Taskbar (Glossy) |  Start Menu        |
 +--------------------------------------------------------------------+
@@ -39,7 +41,7 @@ Created by M Alif Fadlan.
 ### Target Platform
 - Architecture: i386 (32-bit x86), Monolithic Kernel
 - Ring Levels: Ring 0 (Kernel) + Ring 3 (User Mode) — ACTIVE and Stable
-- Scheduler: Preemptive Round-Robin, Ring-Aware Context Switching
+- Scheduler: Preemptive Priority Round-Robin, Ring-Aware Context Switching
 - Display: VESA VBE Linear Framebuffer, 1024x768, 32-bit color
 - Storage: ATA PIO (IDE), 1MB virtual disk
 - Audio: PC Speaker via PIT Channel 2
@@ -87,22 +89,34 @@ Created by M Alif Fadlan.
 - Professional Squircle Icons: High-end rounded-rect icons with minimalist glyphs and curated color palettes.
 - Draggable Persistent Icons: Icon positions are saved to icons.cfg on the VFS and persist across system reboots.
 
-### 6. Memory Management (src/sys/mem.c)
-- Paging with CR0/CR3 control, identity-mapped up to 128MB.
-- Linked-list heap allocator with First-Fit search strategy.
-- Working kmalloc() and kfree() with 4-byte alignment and block coalescing.
+### 6. Virtual Memory Manager (src/sys/vmm.c + src/include/vmm.h)
+- **Frame Bitmap Allocator:** Tracks 128MB of physical memory (32768 pages) with a compact bitmap for O(1) allocation/free.
+- **Per-Process Address Spaces:** `vmm_create_page_dir()` creates new page directories, `vmm_clone_page_dir()` copies kernel mappings for fork-like scenarios, `vmm_free_page_dir()` tears down an address space.
+- **Page Mapping:** `vmm_map_page()` / `vmm_map_pages()` / `vmm_unmap_page()` with automatic TLB invalidation on CR3 reload.
+- **Region Allocator:** `vmm_find_free_region()` locates free virtual address ranges starting at 0x08000000.
+- Foundation for future demand paging and Copy-on-Write (COW) for Ring 3 process isolation.
 
-### 7. Preemptive Multitasking (src/sys/task.c)
-- Round-robin scheduler driven by IRQ0 (1000Hz).
-- Full context switching: registers, EFLAGS, ESP per task.
+### 7. IPC — Inter-Process Communication (src/sys/ipc.c + src/include/ipc.h)
+- **Named Message Queues:** Fixed-size 64-byte messages with a 16-deep circular buffer per queue.
+- **Create & Connect:** `ipc_create_queue(name)` for server processes, `ipc_connect_queue(name)` for clients.
+- **Blocking Receive:** `ipc_receive()` blocks the calling task until a message arrives, with tick-based timeout support.
+- **Non-blocking Send:** `ipc_send()` returns -1 immediately if the queue is full.
+- Enables service-oriented architecture and clean multitasking app ecosystem.
+
+### 8. Priority Thread Scheduler (src/sys/task.c + src/include/task.h)
+- **4-Level Priority Round-Robin:** IDLE(0) < LOW(1) < NORMAL(2) < HIGH(3). Higher priority runnable tasks always run first; round-robin scheduling within the same priority level.
+- **Thread API:** `task_create_thread()` spawns a thread within the same process (shared address space) using a pid/tid model. `task_exit_thread()` terminates the current thread.
+- **Sleep/Wake:** `task_sleep(ticks)` suspends a task for a specified duration; `task_wake()` resumes it. Used for efficient blocking I/O and timing.
+- Full context switching: general-purpose registers, EFLAGS, ESP, and per-task `page_dir` pointer for VMM integration.
 - Per-task dual stacks: 16KB kernel stack + 8KB user stack.
+- IRQ0-driven scheduler tick (1000Hz) with cooperative yield via SYS_YIELD.
 
-### 8. Network Stack (src/drivers/net.c + src/drivers/rtl8139.c)
+### 9. Network Stack (src/drivers/net.c + src/drivers/rtl8139.c)
 - RTL8139 NIC Driver: Full driver with PCI bus mastering.
 - Ethernet/ARP/IPv4/ICMP/UDP/DNS: Complete local stack.
 - Terminal commands: ping [ip] and host [domain].
 
-### 9. Persistent File System (src/sys/vfs.c)
+### 10. Persistent File System (src/sys/vfs.c)
 - Virtual File System (16 file slots) with auto-save to disk.img via ATA PIO.
 - Persistence Fix: Reliable saving for configuration files like icons.cfg.
 
@@ -124,13 +138,26 @@ All syscalls are invoked via int 0x80. Register conventions: EAX=syscall number,
 | 8 | SYS_GET_TICKS | Get PIT timer ticks |
 | 9 | SYS_YIELD | Yield CPU to scheduler |
 | 10 | SYS_EXIT | Terminate current task |
-| 11 | SYS_DRAW_RECT | Draw rectangle in window |
-| 12 | SYS_DRAW_TEXT | Draw text in window |
-| 13 | SYS_GET_KEY | Get keyboard char |
-| 14 | SYS_GET_MOUSE | Get mouse state |
-| 15 | SYS_CREATE_WINDOW | Create GUI window |
-| 16 | SYS_GET_EVENT | Get window event |
-| 17 | SYS_UPDATE_WINDOW | Commit draw commands |
+| 11 | SYS_CREATE_THREAD | Create a thread in current process |
+| 12 | SYS_THREAD_SLEEP | Sleep current thread for n ticks |
+| 13 | SYS_THREAD_EXIT | Exit current thread |
+| 14 | SYS_VMM_CREATE | Create new address space (page directory) |
+| 15 | SYS_VMM_FREE | Free an address space |
+| 16 | SYS_VMM_SWITCH | Switch to an address space (load CR3) |
+| 17 | SYS_VMM_MAP | Map page into address space |
+| 18 | SYS_VMM_UNMAP | Unmap page from address space |
+| 19 | SYS_VMM_ALLOC_REGION | Allocate virtual region in address space |
+| 20 | SYS_IPC_CREATE | Create IPC queue (server side) |
+| 21 | SYS_IPC_CONNECT | Connect to existing IPC queue (client side) |
+| 22 | SYS_IPC_SEND | Send message via IPC (non-blocking) |
+| 23 | SYS_IPC_RECEIVE | Receive message via IPC (blocking with timeout) |
+| 24 | SYS_DRAW_RECT | Draw rectangle in window |
+| 25 | SYS_DRAW_TEXT | Draw text in window |
+| 26 | SYS_GET_KEY | Get keyboard char |
+| 27 | SYS_GET_MOUSE | Get mouse state |
+| 28 | SYS_CREATE_WINDOW | Create GUI window |
+| 29 | SYS_GET_EVENT | Get window event |
+| 30 | SYS_UPDATE_WINDOW | Commit draw commands |
 
 ---
 
@@ -175,6 +202,7 @@ make clean && make
 
 | Version | Highlights |
 |---|---|
+| v22.0 | **Kernel Modernization:** Virtual Memory Manager (per-process address spaces, page mapping, region allocator), IPC named message queues (non-blocking send, blocking receive with timeout), 4-level priority thread scheduling with sleep/wake API, and 14 new syscalls (VMM/thread/IPC). |
 | v21.0 | **Premium UI Refinement:** High-res sleek mouse cursor with dynamic shadow, classic 3-arc WiFi indicator in system tray, and return to forced 60Hz real-time rendering loop. |
 | v20.0 | Modern UI Modernization: Professional squircle icons, vibrant macOS buttons with symbols (X, -, +), taskbar separator, flat design removal of shadows. |
 | v19.0 | Modern UI Redesign: Glass-morphism icons, Catppuccin theme, rounded corners, glossy taskbar. |
