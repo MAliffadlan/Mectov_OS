@@ -123,44 +123,74 @@ Created by M Alif Fadlan.
 - Virtual File System (16 file slots) with auto-save to disk.img via ATA PIO.
 - Persistence Fix: Reliable saving for configuration files like icons.cfg.
 
+### 11. File Descriptor Layer (src/sys/fd.c + src/include/fd.h)
+- **UNIX-style FD abstraction:** Per-task file descriptor table (16 FDs per task, 128 global) wrapping VFS nodes.
+- **Typed descriptors:** `FD_TYPE_FILE`, `FD_TYPE_PIPE_READ`, `FD_TYPE_PIPE_WRITE`, `FD_TYPE_DEV`.
+- **Reference counting:** Global FD entries with `ref_count` for safe sharing between threads.
+- **UNIX Pipe support:** `do_sys_pipe()` creates a unidirectional pipe pair for inter-process data streaming.
+- Full syscall integration: `sys_open`, `sys_read`, `sys_write`, `sys_close`, `sys_pipe` all route through the FD layer.
+
 ---
 
 ## Syscall API Reference
 
-All syscalls are invoked via int 0x80. Register conventions: EAX=syscall number, EBX/ECX/EDX/ESI/EDI=arguments.
+All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall number, `EBX`/`ECX`/`EDX`/`ESI`/`EDI`=arguments.
 
+### Core Syscalls (1–10)
 | # | Name | Description |
 |---|------|-------------|
-| 1 | SYS_PRINT | Print string to screen |
-| 2 | SYS_OPEN | Open/create VFS file |
-| 3 | SYS_READ | Read from file |
-| 4 | SYS_WRITE | Write to file |
-| 5 | SYS_CLOSE | Close file descriptor |
-| 6 | SYS_MALLOC | Allocate kernel heap memory |
-| 7 | SYS_FREE | Free allocated memory |
-| 8 | SYS_GET_TICKS | Get PIT timer ticks |
-| 9 | SYS_YIELD | Yield CPU to scheduler |
+| 1 | SYS_PRINT | Print string. EBX=str_ptr, ECX=color |
+| 2 | SYS_OPEN | Open/create VFS file. EBX=filename → return fd |
+| 3 | SYS_READ | Read file. EBX=fd, ECX=buf, EDX=size → bytes read |
+| 4 | SYS_WRITE | Write file. EBX=fd, ECX=buf, EDX=size → bytes written |
+| 5 | SYS_CLOSE | Close file descriptor. EBX=fd |
+| 6 | SYS_MALLOC | Allocate memory. EBX=size → return pointer |
+| 7 | SYS_FREE | Free memory. EBX=pointer |
+| 8 | SYS_GET_TICKS | Get PIT timer tick count |
+| 9 | SYS_YIELD | Yield CPU (sti;hlt;cli for true CPU surrender) |
 | 10 | SYS_EXIT | Terminate current task |
-| 11 | SYS_CREATE_THREAD | Create a thread in current process |
-| 12 | SYS_THREAD_SLEEP | Sleep current thread for n ticks |
-| 13 | SYS_THREAD_EXIT | Exit current thread |
-| 14 | SYS_VMM_CREATE | Create new address space (page directory) |
-| 15 | SYS_VMM_FREE | Free an address space |
-| 16 | SYS_VMM_SWITCH | Switch to an address space (load CR3) |
-| 17 | SYS_VMM_MAP | Map page into address space |
-| 18 | SYS_VMM_UNMAP | Unmap page from address space |
-| 19 | SYS_VMM_ALLOC_REGION | Allocate virtual region in address space |
-| 20 | SYS_IPC_CREATE | Create IPC queue (server side) |
-| 21 | SYS_IPC_CONNECT | Connect to existing IPC queue (client side) |
-| 22 | SYS_IPC_SEND | Send message via IPC (non-blocking) |
-| 23 | SYS_IPC_RECEIVE | Receive message via IPC (blocking with timeout) |
-| 24 | SYS_DRAW_RECT | Draw rectangle in window |
-| 25 | SYS_DRAW_TEXT | Draw text in window |
-| 26 | SYS_GET_KEY | Get keyboard char |
-| 27 | SYS_GET_MOUSE | Get mouse state |
-| 28 | SYS_CREATE_WINDOW | Create GUI window |
-| 29 | SYS_GET_EVENT | Get window event |
-| 30 | SYS_UPDATE_WINDOW | Commit draw commands |
+
+### GUI Syscalls (11–17)
+| # | Name | Description |
+|---|------|-------------|
+| 11 | SYS_DRAW_RECT | Draw rectangle. EBX=win_id, ECX=x, EDX=y, ESI=(w<<16)\|h, EDI=color |
+| 12 | SYS_DRAW_TEXT | Draw text. EBX=win_id, ECX=x, EDX=y, ESI=str_ptr, EDI=color |
+| 13 | SYS_GET_KEY | Get keyboard char (non-blocking) → char or 0 |
+| 14 | SYS_GET_MOUSE | Get mouse state → EAX=x, EBX=y, ECX=buttons |
+| 15 | SYS_CREATE_WINDOW | Create window. EBX=x, ECX=y, EDX=w, ESI=h, EDI=title → win_id |
+| 16 | SYS_GET_EVENT | Get window event. EBX=win_id, ECX=event_ptr (auto-kills zombie tasks) |
+| 17 | SYS_UPDATE_WINDOW | Commit draw commands. EBX=win_id |
+
+### Thread & Process Management (18–22)
+| # | Name | Description |
+|---|------|-------------|
+| 18 | SYS_THREAD_CREATE | Create thread. EBX=entry, ECX=priority, EDX=page_dir → TID |
+| 19 | SYS_SLEEP | Sleep current task. EBX=ticks |
+| 20 | SYS_GET_PID | Get current task ID |
+| 21 | SYS_SET_PRIORITY | Set task priority. EBX=tid, ECX=priority |
+| 22 | SYS_GET_PRIORITY | Get task priority. EBX=tid → priority |
+
+### IPC — Inter-Process Communication (23–28)
+| # | Name | Description |
+|---|------|-------------|
+| 23 | SYS_IPC_CREATE | Create message queue. EBX=key → queue ID |
+| 24 | SYS_IPC_SEND | Send message (blocking). EBX=qid, ECX=type, EDX=data, ESI=len |
+| 25 | SYS_IPC_RECV | Receive message (blocking). EBX=qid, ECX=type_out, EDX=data_out, ESI=len_out |
+| 26 | SYS_IPC_DESTROY | Destroy queue. EBX=qid |
+| 27 | SYS_IPC_TRY_SEND | Non-blocking send. Returns 0/-1 |
+| 28 | SYS_IPC_TRY_RECV | Non-blocking receive. Returns 0/-1 |
+
+### Virtual Memory (29–31)
+| # | Name | Description |
+|---|------|-------------|
+| 29 | SYS_VMM_MAP | Map page. EBX=vaddr, ECX=paddr, EDX=flags |
+| 30 | SYS_VMM_ALLOC | Allocate virtual page. EBX=vaddr, ECX=flags → vaddr or 0 |
+| 31 | SYS_VMM_FREE | Free virtual page. EBX=vaddr |
+
+### UNIX Compatibility (32)
+| # | Name | Description |
+|---|------|-------------|
+| 32 | SYS_PIPE | Create pipe pair. EBX=pipefd[2] → return 0/-1 |
 
 ---
 
