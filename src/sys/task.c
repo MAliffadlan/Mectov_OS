@@ -23,6 +23,7 @@ typedef struct {
     int      priority;     // 0=background, 1=interactive, 2=realtime
     int      sleep_ticks;  // remaining ticks until wake (0 = not sleeping)
     uint32_t page_dir;     // per-process page directory (0 = global identity)
+    int      fd_table[16]; // local file descriptors mapped to global FDs
 } task_t;
 
 static task_t tasks[MAX_TASKS];
@@ -36,12 +37,18 @@ void init_tasking() {
         tasks[i].priority = PRIORITY_INTERACTIVE;
         tasks[i].sleep_ticks = 0;
         tasks[i].page_dir = 0;
+        for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
     }
-    // Task 0 = kernel main loop (already running on boot stack)
     tasks[0].state = TASK_STATE_RUNNING;
     tasks[0].ring = 0;
     tasks[0].priority = PRIORITY_INTERACTIVE;
     tasks[0].esp = 0; // Will be filled by scheduler on first preemption
+    
+    // Save boot CR3 to task 0
+    uint32_t boot_cr3;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(boot_cr3));
+    tasks[0].page_dir = boot_cr3;
+    
     current_task = 0;
     num_tasks = 1;
 }
@@ -55,6 +62,7 @@ int create_task(void (*entry)()) {
             __asm__ volatile("cli");
             
             tasks[i].ring = 0;
+            for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
             
@@ -92,6 +100,7 @@ int create_user_task(void (*entry)()) {
             __asm__ volatile("cli");
             
             tasks[i].ring = 3;
+            for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
             uint32_t user_esp = (uint32_t)&tasks[i].user_stack[USER_STACK_SIZE];
@@ -155,6 +164,15 @@ uint32_t schedule(uint32_t esp) {
     // For Ring 0 tasks this is harmless (TSS.esp0 is unused for same-ring interrupts).
     tss_set_kernel_stack((uint32_t)&tasks[next].kernel_stack[KERNEL_STACK_SIZE]);
     
+    // Switch page directory if different
+    extern void vmm_switch_page_dir(uint32_t);
+    if (tasks[next].page_dir != 0) {
+        vmm_switch_page_dir(tasks[next].page_dir);
+    } else {
+        // Fallback to task 0's page_dir (boot cr3)
+        vmm_switch_page_dir(tasks[0].page_dir);
+    }
+    
     return tasks[next].esp;
 }
 
@@ -191,6 +209,7 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             tasks[i].priority = priority;
             tasks[i].page_dir = page_dir;
             tasks[i].sleep_ticks = 0;
+            for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
             uint32_t user_esp = (uint32_t)&tasks[i].user_stack[USER_STACK_SIZE];
@@ -274,4 +293,32 @@ void task_set_page_dir(int tid, uint32_t page_dir) {
 int task_is_alive(int tid) {
     if (tid < 0 || tid >= MAX_TASKS) return 0;
     return (tasks[tid].state != TASK_STATE_FREE);
+}
+
+int task_get_fd(int tid, int local_fd) {
+    if (tid < 0 || tid >= MAX_TASKS) return -1;
+    if (local_fd < 0 || local_fd >= 16) return -1;
+    return tasks[tid].fd_table[local_fd];
+}
+
+void task_set_fd(int tid, int local_fd, int global_fd) {
+    if (tid < 0 || tid >= MAX_TASKS) return;
+    if (local_fd < 0 || local_fd >= 16) return;
+    tasks[tid].fd_table[local_fd] = global_fd;
+}
+
+// Kill a specific task by ID (called from kernel, e.g. Ctrl+C)
+int task_kill(int tid) {
+    if (tid <= 0 || tid >= MAX_TASKS) return -1; // Never kill task 0
+    if (tasks[tid].state == TASK_STATE_FREE) return -1; // Already dead
+    
+    __asm__ volatile("cli");
+    tasks[tid].state = TASK_STATE_FREE;
+    num_tasks--;
+    __asm__ volatile("sti");
+    
+    write_serial_string("[TASK] task_kill: killed task ");
+    write_serial('0' + tid);
+    write_serial('\n');
+    return 0;
 }

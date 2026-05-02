@@ -19,6 +19,7 @@ void open_explorer_app();
 
 // Power App
 void open_power_app();
+void open_power_dialog();
 
 // PCI Device Manager
 void open_pci_app();

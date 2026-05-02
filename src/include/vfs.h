@@ -7,7 +7,7 @@
 #define MAX_PATH      256
 #define MAX_FILENAME  32
 
-typedef enum { FS_FILE, FS_DIR } fs_type_t;
+typedef enum { FS_FILE, FS_DIR, FS_DEV } fs_type_t;
 
 typedef struct {
     char name[MAX_FILENAME];

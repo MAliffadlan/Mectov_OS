@@ -1,19 +1,40 @@
-.........WM_OPEN id=0x00000001 &visible=0x005F7ED4 &id=0x005F7E80
-........WM_OPEN id=0x00000002 &visible=0x005F7F7C &id=0x005F7F28
-......WM_CLOSE via MOUSE!
-WM_CLOSE called from: 0x00111EF6 for id=0x00000002
-.WM_OPEN id=0x00000003 &visible=0x005F7F7C &id=0x005F7F28
-......WM_CLOSE called from: 0x0010C33F for id=0x00000003
-........WM_OPEN id=0x00000004 &visible=0x005F7F7C &id=0x005F7F28
-...........WM_OPEN id=0x00000005 &visible=0x005F8024 &id=0x005F7FD0
-....WM_OPEN id=0x00000006 &visible=0x005F80CC &id=0x005F8078
-..WM_OPEN id=0x00000007 &visible=0x005F8174 &id=0x005F8120
-.............WM_CLOSE via MOUSE!
-WM_CLOSE called from: 0x00111EF6 for id=0x00000006
-...WM_CLOSE via MOUSE!
-WM_CLOSE called from: 0x00111EF6 for id=0x00000007
-.WM_CLOSE via MOUSE!
-WM_CLOSE called from: 0x00111EF6 for id=0x00000005
-........WM_CLOSE via MOUSE!
-WM_CLOSE called from: 0x00111EF6 for id=0x00000004
-............................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+........[LOADER] start
+[VMM] Initialized. Reserved 0x02000000 bytes for kernel.
+[VMM] Created address space at 0x02000000
+OK
+PWM_OPEN id=0x00000001 &visible=0x00610514 &id=0x006104C0
+SYS_CREATE_WINDOW returned 01
+UPD_WIN 3
+..WM_CLOSE via MOUSE!
+WM_CLOSE called from: 0x00115410 for id=0x00000001
+get_win_index failed. &visible=0x00610514 &id=0x006104C0
+SYS_GET_EVENT: Invalid WID. Killing task.
+[TASK] task_exit called for task 1
+..WM_OPEN id=0x00000002 &visible=0x00610514 &id=0x006104C0
+.................WM_OPEN id=0x00000003 &visible=0x006105D8 &id=0x00610584
+.WM_CLOSE called from: 0x0010F17F for id=0x00000003
+............[LOADER] start
+[VMM] Initialized. Reserved 0x02000000 bytes for kernel.
+[VMM] Created address space at 0x02000000
+OK
+PWM_OPEN id=0x00000001 &visible=0x00610514 &id=0x006104C0
+SYS_CREATE_WINDOW returned 01
+UPD_WIN 3
+..WM_OPEN id=0x00000002 &visible=0x006105D8 &id=0x00610584
+.........WM_CLOSE via MOUSE!
+WM_CLOSE called from: 0x00115410 for id=0x00000001
+get_win_index failed. &visible=0x00610514 &id=0x006104C0
+SYS_GET_EVENT: Invalid WID. Killing task.
+[TASK] task_exit called for task 1
+.....................................................WM_OPEN id=0x00000003 &visible=0x00610514 &id=0x006104C0
+...................WM_CLOSE via MOUSE!
+WM_CLOSE called from: 0x00115410 for id=0x00000003
+...[LOADER] start
+.[VMM] Created address space at 0x02011000
+OK
+
+[EXCEPTION] int_no=4 CS=3
+[CRASH] Ring 3 crash, killing task
+PF addr: 0xFFFFFFFC
+[TASK] task_exit called for task 1
+.......................................................................................

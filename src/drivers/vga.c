@@ -24,6 +24,23 @@ volatile char* video_m = (volatile char*) 0xb8000;
 int cx = 0, cy = 0;
 unsigned char cur_col = 0x0F;
 
+// ---- Clipping Rectangle ----
+int clip_x1 = 0, clip_y1 = 0, clip_x2 = 0x7FFFFFFF, clip_y2 = 0x7FFFFFFF;
+
+void vga_set_clip(int x, int y, int w, int h) {
+    clip_x1 = x;
+    clip_y1 = y;
+    clip_x2 = x + w;
+    clip_y2 = y + h;
+}
+
+void vga_reset_clip(void) {
+    clip_x1 = 0;
+    clip_y1 = 0;
+    clip_x2 = 0x7FFFFFFF;
+    clip_y2 = 0x7FFFFFFF;
+}
+
 // ============================================================
 // VGA palette conversion
 // ============================================================
@@ -266,10 +283,73 @@ void draw_gradient_v(int x, int y, int w, int h, uint32_t color_top, uint32_t co
     }
 }
 
-// Soft drop shadow - disabled for clean look
+// Soft drop shadow with proper alpha blending
 void draw_soft_shadow(int x, int y, int w, int h, int radius, uint32_t intensity) {
-    (void)x; (void)y; (void)w; (void)h; (void)radius; (void)intensity;
+    if (!back_buffer || radius <= 0) return;
+    
+    // Shadow offset
+    int shadow_offset = 2 + (radius / 4);
+    int shadow_x = x + shadow_offset;
+    int shadow_y = y + shadow_offset;
+    
+    // Clip shadow to screen
+    int sx0 = shadow_x - radius < 0 ? 0 : shadow_x - radius;
+    int sy0 = shadow_y - radius < 0 ? 0 : shadow_y - radius;
+    int sx1 = shadow_x + w + radius > (int)fb_width  ? (int)fb_width  : shadow_x + w + radius;
+    int sy1 = shadow_y + h + radius > (int)fb_height ? (int)fb_height : shadow_y + h + radius;
+    
+    if (sx0 >= sx1 || sy0 >= sy1) return;
+    
+    uint32_t stride = bb_pitch / 4;
+    
+    // Pre-compute intensity blend factor
+    // intensity: 0-255, higher = darker shadow
+    uint8_t alpha = (uint8_t)(intensity);
+    
+    // Apply rounded shadow with distance-based falloff
+    for (int row = sy0; row < sy1; row++) {
+        uint32_t* dst = back_buffer + row * stride + sx0;
+        for (int col = sx0; col < sx1; col++) {
+            // Compute distance from shadow rect border
+            // dx/dy measure how far inside (+)/outside (-) the shadow rect
+            int dx = 0, dy = 0;
+            if (col < shadow_x)             dx = col - shadow_x;
+            else if (col >= shadow_x + w)   dx = col - (shadow_x + w) + 1;
+            if (row < shadow_y)             dy = row - shadow_y;
+            else if (row >= shadow_y + h)   dy = row - (shadow_y + h) + 1;
+            
+            // Distance from the shadow rect edge
+            int dist;
+            if (dx < 0 && dy < 0) {
+                // Outside corner — Euclidean distance
+                dist = -dx > -dy ? -dx : -dy; // Chebyshev for performance
+                // dist = isqrt(dx*dx + dy*dy); // Would be too slow
+            } else if (dx < 0) {
+                dist = -dx;
+            } else if (dy < 0) {
+                dist = -dy;
+            } else {
+                // Inside shadow rect — full opacity
+                dist = 0;
+            }
+            
+            // Feather: alpha falls off from radius down to 0
+            int falloff = radius - dist;
+            if (falloff > 0) {
+                uint8_t a = (uint8_t)((uint32_t)alpha * (uint32_t)falloff / radius);
+                // Simple darken blend
+                uint32_t bg = dst[col - sx0];
+                uint32_t r = ((bg >> 16) & 0xFF) * (255 - a) / 255;
+                uint32_t g = ((bg >> 8) & 0xFF) * (255 - a) / 255;
+                uint32_t b = (bg & 0xFF) * (255 - a) / 255;
+                dst[col - sx0] = (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+    mark_dirty(sx0, sy0, sx1 - sx0, sy1 - sy0);
 }
+
+uint32_t* front_buffer_copy = NULL;
 
 // ============================================================
 // Init VBE + allocate double buffer
@@ -284,6 +364,7 @@ void init_vbe(uint32_t addr, uint32_t width, uint32_t height, uint32_t pitch, ui
     is_vbe    = 1;
     // Back buffer will be allocated after kmalloc is ready (from kernel_main)
     back_buffer = NULL;
+    front_buffer_copy = NULL;
 }
 
 // Called from kernel_main AFTER init_mem + paging_init
@@ -291,8 +372,10 @@ void init_double_buffer(void) {
     if (!is_vbe || fb_width == 0 || fb_height == 0) return;
     uint32_t buf_size = fb_width * fb_height * 4;
     back_buffer = (uint32_t*)kmalloc(buf_size);
-    if (back_buffer) {
+    front_buffer_copy = (uint32_t*)kmalloc(buf_size); // Shadow buffer
+    if (back_buffer && front_buffer_copy) {
         memset(back_buffer, 0, buf_size);
+        memset(front_buffer_copy, 0, buf_size);
         bb_pitch = fb_width * 4;
     }
 }
@@ -329,25 +412,31 @@ void swap_buffers(void) {
     if (fb_bpp == 32) {
         for (int y = d_min_y; y < d_max_y; y++) {
             uint32_t* src = back_buffer + y * fb_width + d_min_x;
+            uint32_t* shadow = front_buffer_copy + y * fb_width + d_min_x;
             uint32_t* dst = (uint32_t*)((uint8_t*)fb_addr + y * fb_pitch) + d_min_x;
             
-            uint32_t dwords = w;
-            __asm__ __volatile__(
-                "rep movsd"
-                : "+D"(dst), "+S"(src), "+c"(dwords)
-                :
-                : "memory"
-            );
+            // Compare and write ONLY changed pixels to avoid expensive MMIO VM-Exits
+            for (int x = 0; x < w; x++) {
+                if (src[x] != shadow[x]) {
+                    dst[x] = src[x];
+                    shadow[x] = src[x];
+                }
+            }
         }
     } else if (fb_bpp == 24) {
         for (int y = d_min_y; y < d_max_y; y++) {
             uint32_t* src = back_buffer + y * fb_width + d_min_x;
+            uint32_t* shadow = front_buffer_copy + y * fb_width + d_min_x;
             uint8_t*  dst = (uint8_t*)fb_addr + y * fb_pitch + d_min_x * 3;
+            
             for (int x = 0; x < w; x++) {
-                uint32_t c = src[x];
-                dst[x * 3 + 0] = c & 0xFF;
-                dst[x * 3 + 1] = (c >> 8) & 0xFF;
-                dst[x * 3 + 2] = (c >> 16) & 0xFF;
+                if (src[x] != shadow[x]) {
+                    uint32_t c = src[x];
+                    dst[x * 3 + 0] = c & 0xFF;
+                    dst[x * 3 + 1] = (c >> 8) & 0xFF;
+                    dst[x * 3 + 2] = (c >> 16) & 0xFF;
+                    shadow[x] = c;
+                }
             }
         }
     }
@@ -360,10 +449,10 @@ void swap_buffers(void) {
 // VSync — wait for vertical retrace via VGA status port
 // ============================================================
 void wait_for_vsync(void) {
-    // Wait until not in retrace
-    while (inb(0x3DA) & 0x08);
-    // Wait until retrace begins
-    while (!(inb(0x3DA) & 0x08));
+    // Disabled: polling 0x3DA in QEMU/KVM causes thousands of VM-Exits 
+    // per frame, dropping FPS to ~10 FPS.
+    // while (inb(0x3DA) & 0x08);
+    // while (!(inb(0x3DA) & 0x08));
 }
 
 // ============================================================
@@ -551,54 +640,54 @@ void restore_bg(int x, int y, int w, int h, uint32_t* buf) {
 // Modern High-Res Mouse Cursor (16x24)
 // ============================================================
 static const uint16_t cursor_mask[24] = {
-    0b1100000000000000,
-    0b1110000000000000,
-    0b1111000000000000,
-    0b1111100000000000,
-    0b1111110000000000,
-    0b1111111000000000,
-    0b1111111100000000,
-    0b1111111110000000,
-    0b1111111111000000,
-    0b1111111111100000,
-    0b1111111111110000,
-    0b1111111111111000,
-    0b1111111111111100,
-    0b1111111111111110,
-    0b1111111111000000,
-    0b1111111011100000,
-    0b1111100001110000,
-    0b1110000000111000,
-    0b1100000000011100,
-    0b0000000000001110,
-    0b0000000000000110,
+    0b1000000000000000, // 0
+    0b1100000000000000, // 1
+    0b1110000000000000, // 2
+    0b1111000000000000, // 3
+    0b1111100000000000, // 4
+    0b1111110000000000, // 5
+    0b1111111000000000, // 6
+    0b1111111100000000, // 7
+    0b1111111110000000, // 8
+    0b1111111111000000, // 9
+    0b1111111111100000, // 10
+    0b1111111111110000, // 11
+    0b1111111111111000, // 12
+    0b1111111111000000, // 13 - Slanted Base
+    0b1111111110000000, // 14 - Tail Join (connected!)
+    0b1110001111000000, // 15 - Tail slanted
+    0b1100001111000000, // 16
+    0b1000001111000000, // 17
+    0b0000000111100000, // 18
+    0b0000000111100000, // 19
+    0b0000000011100000, // 20
     0b0000000000000000,
     0b0000000000000000,
     0b0000000000000000
 };
 
 static const uint16_t cursor_inner[24] = {
-    0b0000000000000000,
-    0b0100000000000000,
-    0b0110000000000000,
-    0b0111000000000000,
-    0b0111100000000000,
-    0b0111110000000000,
-    0b0111111000000000,
-    0b0111111100000000,
-    0b0111111110000000,
-    0b0111111111000000,
-    0b0111111111100000,
-    0b0111111111110000,
-    0b0111111111111000,
-    0b0111111111111100,
-    0b0111111110000000,
-    0b0111110011000000,
-    0b0111000001100000,
-    0b0100000000110000,
-    0b0000000000011000,
-    0b0000000000001000,
-    0b0000000000000000,
+    0b0000000000000000, // 0
+    0b0100000000000000, // 1
+    0b0110000000000000, // 2
+    0b0111000000000000, // 3
+    0b0111100000000000, // 4
+    0b0111110000000000, // 5
+    0b0111111000000000, // 6
+    0b0111111100000000, // 7
+    0b0111111110000000, // 8
+    0b0111111111000000, // 9
+    0b0111111111100000, // 10
+    0b0111111111110000, // 11
+    0b0111111111111000, // 12
+    0b0111111111000000, // 13
+    0b0111111110000000, // 14 - Connected fill
+    0b0110001110000000, // 15 - Tail fill
+    0b0100001110000000, // 16
+    0b0000001110000000, // 17
+    0b0000000111000000, // 18
+    0b0000000111000000, // 19
+    0b0000000011000000, // 20
     0b0000000000000000,
     0b0000000000000000,
     0b0000000000000000
@@ -621,13 +710,13 @@ void draw_mouse_cursor(int x, int y) {
     save_bg(x, y, 24, 24, cursor_save_buf);
     cursor_saved_x = x; cursor_saved_y = y;
     
-    // Draw fast 50% alpha drop shadow
+    // Draw fast 50% alpha drop shadow (refined offset)
     for (int j = 0; j < 24; j++) {
         uint16_t mask = cursor_mask[j];
         for (int i = 0; i < 16; i++) {
             if (mask & (0x8000 >> i)) {
-                int sx = x + i + 2;
-                int sy = y + j + 3;
+                int sx = x + i + 1;
+                int sy = y + j + 1;
                 if (sx < (int)fb_width && sy < (int)fb_height) {
                     uint32_t* p = back_buffer + sy * (bb_pitch/4) + sx;
                     *p = ((*p & 0xFEFEFE) >> 1); // 50% darken
@@ -636,13 +725,13 @@ void draw_mouse_cursor(int x, int y) {
         }
     }
     
-    // Draw modern black-filled, white-outlined cursor
+    // Draw Pro White macOS-style cursor (White fill, Black outline)
     for (int j = 0; j < 24; j++) {
         uint16_t mask = cursor_mask[j];
         uint16_t inner = cursor_inner[j];
         for (int i = 0; i < 16; i++) {
             if (mask & (0x8000 >> i)) {
-                uint32_t col = (inner & (0x8000 >> i)) ? 0x00111111 : 0x00FFFFFF;
+                uint32_t col = (inner & (0x8000 >> i)) ? 0x00FFFFFF : 0x00111111;
                 put_pixel(x + i, y + j, col);
             }
         }

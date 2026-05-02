@@ -1,4 +1,4 @@
-# Mectov OS v22.0 — Kernel Modernization (VMM, IPC, Priority Threading)
+# Mectov OS v23.0 — Performance & Stability (Shadow Framebuffer, Process Lifecycle, Terminal UX)
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,7 +6,7 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v22.0 release introduces kernel modernization: a full Virtual Memory Manager (VMM) with per-process address spaces, IPC named message queues for service-oriented architecture, 4-level priority thread scheduling with sleep/wake API, and 14 new syscalls enabling these capabilities.
+The v23.0 release delivers a massive performance and stability overhaul: Shadow Framebuffer rendering (delta-only MMIO writes), proper process lifecycle management with zombie detection and Ctrl+C signal support, a fully rewritten Snake game as a non-blocking WM app, smarter tab-completion, terminal input protection, and power menu bugfixes.
 
 Created by M Alif Fadlan.
 
@@ -79,9 +79,10 @@ Created by M Alif Fadlan.
   - HDD activity LED (red flash on disk I/O)
   - Digital clock with day of week, adjusted for UTC+7 (WIB) timezone.
 
-### 4. Real-time Rendering (kernel.c)
-- Forced 60Hz Loop: Reverted to a constant 16ms redraw cycle to ensure the FPS stays high (~60 FPS) and the interface feels ultra-responsive at all times.
-- Optimized Performance: By stripping away unneeded shadow logic, the system maintains high performance even under heavy window loads.
+### 4. Real-time Rendering (kernel.c + src/drivers/vga.c)
+- **Shadow Framebuffer:** Triple-buffer architecture (back_buffer → front_buffer_copy → VGA MMIO). Only pixels that actually changed are written to hardware, eliminating thousands of expensive KVM VM-Exits per frame.
+- **VSync Disabled:** Removed VGA port 0x3DA polling which caused massive latency spikes under KVM virtualization.
+- Forced 60Hz Loop: Constant 16ms redraw cycle with ultra-low render times (~4ms) thanks to delta-only copying.
 - Microsecond Timing: Real-time FPS and render time measurement using PIT hardware counters.
 
 ### 5. Desktop Environment (src/gui/desktop.c)
@@ -107,6 +108,8 @@ Created by M Alif Fadlan.
 - **4-Level Priority Round-Robin:** IDLE(0) < LOW(1) < NORMAL(2) < HIGH(3). Higher priority runnable tasks always run first; round-robin scheduling within the same priority level.
 - **Thread API:** `task_create_thread()` spawns a thread within the same process (shared address space) using a pid/tid model. `task_exit_thread()` terminates the current thread.
 - **Sleep/Wake:** `task_sleep(ticks)` suspends a task for a specified duration; `task_wake()` resumes it. Used for efficient blocking I/O and timing.
+- **Process Lifecycle:** `task_kill(tid)` for external termination (used by Ctrl+C). Zombie process detection in SYS_GET_EVENT auto-kills orphaned tasks.
+- **True CPU Yielding:** SYS_YIELD now executes `sti;hlt;cli` to properly surrender the CPU until the next scheduler tick.
 - Full context switching: general-purpose registers, EFLAGS, ESP, and per-task `page_dir` pointer for VMM integration.
 - Per-task dual stacks: 16KB kernel stack + 8KB user stack.
 - IRQ0-driven scheduler tick (1000Hz) with cooperative yield via SYS_YIELD.
@@ -165,15 +168,16 @@ All syscalls are invoked via int 0x80. Register conventions: EAX=syscall number,
 
 | Application | Type | Description |
 |---|---|---|
-| Terminal | Ring 0 | Full terminal emulator with command history |
+| Terminal | Ring 0 | Full terminal emulator with command history, smart tab-completion, Ctrl+C, prompt protection |
 | Nano Editor | Ring 0 | Windowed text editor for VFS files |
 | File Explorer | Ring 0 | Browse and open stored files |
 | System Info | Ring 0 | Live RAM, CPU, resolution, uptime, and MAC address |
 | PCI Manager | Ring 0 | Scrollable table of detected PCI hardware |
 | Clock | Ring 0 | Digital clock with WIB timezone |
-| Snake | Ring 0 | Classic snake game with arrow key controls |
-| Power Options | Ring 0 | Shut Down, Restart, and Lock Screen dialog |
+| Snake | Ring 0 | Modern grid-based snake game in WM window with gradient body, eyes, score, speed scaling |
+| Power Options | Ring 0 | Shut Down, Restart, and Log Out dialog with accurate button hit-zones |
 | Mini Browser | Ring 0 | Text-mode web browser via serial modem proxy |
+| Hello Ring 3 | Ring 3 (.mct) | Demo user-space app with isolated memory and GUI window |
 | GUI Calculator | Ring 3 (.mct) | Standalone external GUI calculator |
 
 ---
@@ -202,6 +206,7 @@ make clean && make
 
 | Version | Highlights |
 |---|---|
+| v23.0 | **Performance & Stability:** Shadow Framebuffer (delta-only MMIO), VSync removal, zombie process detection + auto-kill, `task_kill()` API, Ctrl+C signal, Ctrl key tracking, Snake rewritten as WM app, terminal prompt protection, smart tab-completion with trailing space/slash, carriage return support, history display fix, power menu restart fix, `-no-reboot` removal. |
 | v22.0 | **Kernel Modernization:** Virtual Memory Manager (per-process address spaces, page mapping, region allocator), IPC named message queues (non-blocking send, blocking receive with timeout), 4-level priority thread scheduling with sleep/wake API, and 14 new syscalls (VMM/thread/IPC). |
 | v21.0 | **Premium UI Refinement:** High-res sleek mouse cursor with dynamic shadow, classic 3-arc WiFi indicator in system tray, and return to forced 60Hz real-time rendering loop. |
 | v20.0 | Modern UI Modernization: Professional squircle icons, vibrant macOS buttons with symbols (X, -, +), taskbar separator, flat design removal of shadows. |
@@ -215,4 +220,6 @@ make clean && make
 
 MIT License
 
-Created by M Alif Fadlan.
+Created by M Alif Fadlan. 
+
+# Mectov OS - Sistem Operasi 32-bit Pertama di Indonesia

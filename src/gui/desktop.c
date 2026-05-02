@@ -79,9 +79,6 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
     int bg_y = cy - bg_size / 2;
     int radius = 10;
 
-    // Draw subtle drop shadow for depth
-    draw_soft_shadow(bg_x, bg_y, bg_size, bg_size, radius, 140);
-
     // Base colors for different apps
     uint32_t bg_col = 0x00FFFFFF;
     if (strcmp(label, "Terminal") == 0) bg_col = 0x002D3748; // Dark slate
@@ -161,12 +158,21 @@ static void draw_icon(int i) {
     Icon* ic = &icons[i];
     draw_pro_icon(ic->x, ic->y, ic->label);
 
-    // Label below icon: white text with black drop shadow
+    // Label below icon: modern pill-shaped background
     int llen = strlen(ic->label);
-    int lx = ic->x + (ICON_W - llen * 8) / 2;
-    // 0xFFFFFFFF bg makes the background transparent in draw_char_px
-    draw_string_px(lx + 1, ic->y + ICON_W - 6, ic->label, 0x00000000, 0xFFFFFFFF); // Shadow
-    draw_string_px(lx, ic->y + ICON_W - 7, ic->label, 0x00FFFFFF, 0xFFFFFFFF); // White text
+    int lw = llen * 8 + 10;   // padding 5px each side
+    int lx = ic->x + (ICON_W - lw) / 2;
+    int ly = ic->y + ICON_W - 4;
+    int lh = 14;               // label height
+
+    // White text centered under icon
+    int tx = lx + (lw - llen * 8) / 2;
+    int ty = ly + (lh - 8) / 2;
+    
+    // Draw text shadow for readability
+    draw_string_px(tx + 1, ty + 1, ic->label, 0x00000000, 0xFFFFFFFF);
+    // Draw white text (0xFFFFFFFF background is transparent in vga.c)
+    draw_string_px(tx, ty, ic->label, 0x00FFFFFF, 0xFFFFFFFF);
 }
 
 extern uint32_t _binary_obj_wallpaper_bin_start[];
@@ -215,13 +221,13 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
 
     if (start_menu_open) {
         if (!btn && pbtn) {
-            int sm_h = 304;
-            int sm_w = 170;
+            int sm_h = 320;
+            int sm_w = 200;
             int sm_y = ty - sm_h;
             if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
-                if (my >= sm_y + 30) {
-                    int rel_y = my - (sm_y + 30);
-                    int item = rel_y / 24;
+                if (my >= sm_y + 36) {
+                    int rel_y = my - (sm_y + 36);
+                    int item = rel_y / 28;
                     if (item == 0) open_terminal_app();
                     else if (item == 1) st_ed("baru.txt");
                     else if (item == 2) open_explorer_app();
@@ -230,8 +236,8 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
                     else if (item == 5) open_clock_app();
                     else if (item == 6) open_pci_app();
                     else if (item == 7) start_ular();
-                    else if (item == 8) { extern void reboot(void); reboot(); }
-                    else if (item == 9) shutdown();
+                    else if (item == 8) { extern volatile int pending_logout; pending_logout = 1; }
+                    else if (item == 9) open_power_dialog();
                 }
             }
             start_menu_open = 0;

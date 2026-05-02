@@ -25,7 +25,13 @@ typedef struct {
     int drag_wx, drag_wy;  // window pos at drag start
     int minimized;         // 1 = hidden in taskbar
     int maximized;         // 1 = fullscreen
-    int saved_x, saved_y, saved_w, saved_h; // pre-maximize geometry
+    int snap_state;                          // 0=none, 1=left, 2=right, 3=top (maximized)
+    int saved_x, saved_y, saved_w, saved_h; // pre-snap/pre-maximize geometry
+    // Resizing state
+    int resizing;
+    int resize_mx, resize_my;
+    int resize_ww, resize_wh;
+    int resize_edge; // 1:top, 2:bottom, 4:left, 8:right, and combinations
     // Titlebar button hit-test positions (set by draw_one)
     int close_cx, close_cy, close_r;
     int max_cx,   max_cy,   max_r;

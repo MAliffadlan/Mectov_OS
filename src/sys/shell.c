@@ -24,10 +24,13 @@ char hist_b[256];
 int is_script = 0;
 
 const char* cmd_list[] = {
-    "mfetch","waktu","warna","clear","beep","matikan","mulaiulang","ular",
-    "ls","buat","tulis","edit","baca","hapus","echo","tunggu","nada",
-    "jalankan","kunci","man","mem","help","cd","pwd","mkdir","rm","tree",
-    "kmemstats","touch","cat","reboot","shutdown", NULL
+    "help","clear","mfetch","mem","kmemstats","vfsinfo",
+    "ls","cd","pwd","mkdir","touch","cat","tree","rm",
+    "buat","tulis","edit","baca","hapus",
+    "echo","beep","nada","tunggu","waktu","warna","kunci",
+    "jalankan","ular","lspci","man",
+    "ping","host",
+    "matikan","mulaiulang","shutdown","reboot", NULL
 };
 
 // --- History circular buffer ---
@@ -170,12 +173,14 @@ void shell_reset_history_nav() { hist_pos = -1; }
 static void shell_redisplay() {
     cmd_b[b_idx] = '\0';
     if (get_use_term_buf()) {
-        // Clear line by printing spaces, then reprint
-        term_print("\r", 0x00);
-        for (int i = 0; i < 79; i++) term_putchar(' ', 0x00);
-        term_print("\r", 0x00);
-        // ToaruOS-style prompt in terminal
         extern void term_print(const char*, unsigned char);
+        extern void term_putchar(char, unsigned char);
+        // Access term state directly to clear current line
+        extern int term_get_cx(void);
+        extern int term_get_cy(void);
+        extern void term_clear_line(void);
+        
+        term_clear_line(); // Clear current line buffer
         term_print("root@mectov", 0x0A);
         term_print(" ~$ ", 0x0F);
         term_print(cmd_b, 0x0F);
@@ -200,12 +205,11 @@ void shell_apply_tab() {
     
     if (n == 1) {
         // Single match — complete immediately
-        // Find prefix length
-        int old_len = b_idx;
         // Find start of last word
         int last = b_idx - 1;
         while (last >= 0 && cmd_b[last] != ' ') last--;
         int word_start = last + 1;
+        int is_first_word = (word_start == 0); // completing a command name
         
         // Replace from word_start with the match
         int j = word_start;
@@ -215,7 +219,12 @@ void shell_apply_tab() {
         }
         // If directory, add trailing /
         int node = vfs_get_node(tab_matches[0]);
-        if (node >= 0 && vfs_is_dir(node)) cmd_b[j++] = '/';
+        if (node >= 0 && vfs_is_dir(node)) {
+            cmd_b[j++] = '/';
+        } else if (is_first_word) {
+            // Add trailing space after command name for convenience
+            cmd_b[j++] = ' ';
+        }
         cmd_b[j] = '\0';
         b_idx = j;
     } else {

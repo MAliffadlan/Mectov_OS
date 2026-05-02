@@ -4,6 +4,7 @@
 #include "../include/vga.h"
 
 int shift_p = 0, caps_a = 0;
+int keyboard_ctrl_held = 0;
 
 // Scancode Buffer (Gudang Antrean)
 #define KBD_BUFFER_SIZE 256
@@ -15,10 +16,12 @@ static void keyboard_handler(registers_t* regs) {
     (void)regs;
     uint8_t scancode = inb(0x60);
     
-    // Update shift/caps state
+    // Update modifier state
     if (scancode == 0x2A || scancode == 0x36) shift_p = 1; 
     else if (scancode == 0xAA || scancode == 0xB6) shift_p = 0; 
     else if (scancode == 0x3A) caps_a = !caps_a;
+    else if (scancode == 0x1D) keyboard_ctrl_held = 1;  // Left Ctrl press
+    else if (scancode == 0x9D) keyboard_ctrl_held = 0;  // Left Ctrl release
 
     // Push to buffer
     uint32_t next = (kbd_head + 1) % KBD_BUFFER_SIZE;

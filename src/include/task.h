@@ -37,4 +37,11 @@ void task_wake(int tid);
 // Check if a task is alive
 int task_is_alive(int tid);
 
+// Kill a specific task by ID (from kernel, e.g. Ctrl+C)
+int task_kill(int tid);
+
+// File Descriptor accessors
+int task_get_fd(int tid, int local_fd);
+void task_set_fd(int tid, int local_fd, int global_fd);
+
 #endif

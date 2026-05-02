@@ -45,6 +45,9 @@
 #define SYS_VMM_ALLOC      30  // EBX=vaddr, ECX=flags → return vaddr or 0
 #define SYS_VMM_FREE       31  // EBX=vaddr → return 0/-1
 
+// UNIX
+#define SYS_PIPE           32  // EBX=pipefd_ptr[2] → return 0/-1
+
 // Initialize syscall handler (int 0x80)
 void init_syscalls(void);
 
@@ -100,6 +103,10 @@ static inline void sys_close(int fd) {
     syscall(SYS_CLOSE, fd, 0, 0);
 }
 
+static inline int sys_pipe(int pipefd[2]) {
+    return syscall(SYS_PIPE, (int)pipefd, 0, 0);
+}
+
 static inline void* sys_malloc(int size) {
     return (void*)syscall(SYS_MALLOC, size, 0, 0);
 }
@@ -121,16 +128,29 @@ static inline void sys_exit(void) {
     for(;;); // Never returns
 }
 
-static inline void sys_draw_rect(int x, int y, int w, int h, uint32_t color) {
-    syscall5(SYS_DRAW_RECT, x, y, w, h, (int)color);
+static inline void sys_draw_rect(int wid, int x, int y, int w, int h, uint32_t color) {
+    int wh = ((w & 0xFFFF) << 16) | (h & 0xFFFF);
+    syscall5(SYS_DRAW_RECT, wid, x, y, wh, (int)color);
 }
 
-static inline void sys_draw_text(int x, int y, const char* text, uint32_t fg, uint32_t bg) {
-    syscall5(SYS_DRAW_TEXT, x, y, (int)text, (int)fg, (int)bg);
+static inline void sys_draw_text(int wid, int x, int y, const char* text, uint32_t color) {
+    syscall5(SYS_DRAW_TEXT, wid, x, y, (int)text, (int)color);
 }
 
 static inline int sys_get_key(void) {
     return syscall(SYS_GET_KEY, 0, 0, 0);
+}
+
+static inline int sys_create_window(int x, int y, int w, int h, const char* title) {
+    return syscall5(SYS_CREATE_WINDOW, x, y, w, h, (int)title);
+}
+
+static inline int sys_get_event(int wid, void* event_ptr) {
+    return syscall(SYS_GET_EVENT, wid, (int)event_ptr, 0);
+}
+
+static inline void sys_update_window(int wid) {
+    syscall(SYS_UPDATE_WINDOW, wid, 0, 0);
 }
 
 // Mouse state return struct (packed into registers)

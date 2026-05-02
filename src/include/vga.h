@@ -37,6 +37,9 @@ void swap_buffers(void);        // Copy back_buffer → front buffer
 void wait_for_vsync(void);      // Wait for vertical retrace
 void mark_dirty(int x, int y, int w, int h); // Mark dirty rect
 
+void vga_set_clip(int x, int y, int w, int h);
+void vga_reset_clip(void);
+
 // ---- Drawing primitives (all write to back_buffer) ----
 void put_pixel(int x, int y, uint32_t color);
 void draw_rect(int x, int y, int w, int h, uint32_t color);

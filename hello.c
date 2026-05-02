@@ -1,19 +1,47 @@
 #include "src/include/syscall.h"
 
-void main() {
-    sys_print("[App] External App running from VFS at 32MB mark!\n", 0x0A);
+// Define gui_event_t locally for the app
+typedef struct {
+    int type; // 1 = paint, 2 = key, 3 = mouse
+    int x, y;
+    int key;
+} gui_event_t;
+
+void _start() {
+    sys_print("[App] Hello App starting in Ring 3...\n", 0x0A);
     
+    int wid = sys_create_window(100, 100, 300, 200, "Hello Ring 3");
+    if (wid < 0) sys_exit();
+    
+    gui_event_t ev;
     int tick = 0;
+    
     while (1) {
-        uint32_t color = (tick & 1) ? 0xFF0000 : 0x0000FF;
-        
-        // Gambar di tengah layar (400, 300) biar kelihatan
-        sys_draw_rect(400, 300, 100, 50, color);
-        sys_draw_text(410, 315, "EXTERNAL!", 0xFFFFFF, 0x000000);
+        // Process all pending events
+        while (sys_get_event(wid, &ev)) {
+            if (ev.type == 1) { // Paint event
+                uint32_t bg = (tick & 1) ? 0x222222 : 0x333333;
+                sys_draw_rect(wid, 0, 0, 300, 200, bg);
+                sys_draw_text(wid, 50, 80, "Hello from User Space!", 0x00FF00);
+                sys_draw_text(wid, 50, 100, "Memory is isolated.", 0xFFFFFF);
+                sys_update_window(wid);
+            } else if (ev.type == 2) { // Key event
+                if (ev.key == 0x01) { // ESC key (scancode 1)
+                    sys_exit();
+                }
+            }
+        }
         
         tick++;
-        // Ngasih tau CPU kalau aplikasi lagi standby, biar FPS sistem nggak turun
+        if (tick % 100000 == 0) {
+            // Force repaint every now and then
+            uint32_t bg = ((tick/100000) & 1) ? 0x222222 : 0x333333;
+            sys_draw_rect(wid, 0, 0, 300, 200, bg);
+            sys_draw_text(wid, 50, 80, "Hello from User Space!", 0x00FF00);
+            sys_draw_text(wid, 50, 100, "Memory is isolated.", 0xFFFFFF);
+            sys_update_window(wid);
+        }
+        
         sys_yield();
-        for (volatile int i = 0; i < 500000; i++);
     }
 }

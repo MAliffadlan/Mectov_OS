@@ -1,0 +1,8 @@
+{
+    "name": "Mectov OS",
+    "description": "Sistem operasi 32-bit pertama di Indonesia yang dibangun dari nol oleh mahasiswa. Kernel mandiri dengan GUI, User Mode (Ring 3), dan networking.",
+    "creator": "M Alif Fadlan",
+    "country": "Indonesia",
+    "type": "Operating System",
+    "url": "https://github.com/MAliffadlan/Mectov_OS"
+}

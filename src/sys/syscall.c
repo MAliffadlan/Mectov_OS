@@ -21,6 +21,7 @@
 #include "../include/ipc.h"
 #include "../include/vmm.h"
 #include "../include/task.h"
+#include "../include/fd.h"
 
 // GUI Event structures for Ring 3
 #define MAX_EVENTS 64
@@ -105,63 +106,7 @@ static void win_key_cb(int id, char c, uint8_t sc) {
 static void win_mouse_cb(int id, int cx, int cy, int btn) {
     push_event(id, 3, cx, cy, btn);
 }
-// ============================================================
-// File Descriptor Table (per-system, simple implementation)
-// ============================================================
-#define MAX_FDS 16
-#define FD_FREE   0
-#define FD_OPEN   1
-
-typedef struct {
-    int state;       // FD_FREE or FD_OPEN
-    char path[MAX_PATH]; // File path
-    int offset;      // Current read/write position
-    char* data;      // In-memory buffer (kmalloc'd)
-    int size;        // Current data size
-    int capacity;    // Allocated capacity
-} fd_entry_t;
-
-static fd_entry_t fd_table[MAX_FDS];
-
-static void fd_init(void) {
-    for (int i = 0; i < MAX_FDS; i++) {
-        fd_table[i].state = FD_FREE;
-        fd_table[i].path[0] = '\0';
-        fd_table[i].offset = 0;
-        fd_table[i].data = 0;
-        fd_table[i].size = 0;
-        fd_table[i].capacity = 0;
-    }
-}
-
-static int fd_alloc(const char* path) {
-    for (int i = 0; i < MAX_FDS; i++) {
-        if (fd_table[i].state == FD_FREE) {
-            fd_table[i].state = FD_OPEN;
-            strcpy(fd_table[i].path, path);
-            fd_table[i].offset = 0;
-            fd_table[i].data = 0;
-            fd_table[i].size = 0;
-            fd_table[i].capacity = 0;
-            return i;
-        }
-    }
-    return -1;
-}
-
-static void fd_free(int fd) {
-    if (fd >= 0 && fd < MAX_FDS) {
-        fd_table[fd].state = FD_FREE;
-        fd_table[fd].path[0] = '\0';
-        fd_table[fd].offset = 0;
-        if (fd_table[fd].data) {
-            kfree(fd_table[fd].data);
-            fd_table[fd].data = 0;
-        }
-        fd_table[fd].size = 0;
-        fd_table[fd].capacity = 0;
-    }
-}
+// (Legacy simple FD table removed, moved to fd.c)
 
 // ============================================================
 // Pointer Validation
@@ -214,124 +159,49 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
-        // ----- SYS_OPEN (2): Open a VFS file -----
+        // ----- SYS_OPEN (2): Open a VFS file/device -----
         case SYS_OPEN: {
             const char* filename = (const char*)regs->ebx;
             if (safe_strlen(filename, MAX_FILENAME) < 0) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
-            if (safe_strlen(filename, MAX_PATH) < 0) { regs->eax = (uint32_t)-1; break; }
-            int fd = fd_alloc(filename);
-            if (fd < 0) { regs->eax = (uint32_t)-1; break; }
-            
-            // Pre-load file contents into FD buffer if file exists
-            int node = vfs_get_node(filename);
-            if (node >= 0 && vfs_is_file(node)) {
-                // Allocate a reasonable buffer
-                fd_table[fd].data = (char*)kmalloc(MAX_FILE_SIZE);
-                if (fd_table[fd].data) {
-                    fd_table[fd].capacity = MAX_FILE_SIZE;
-                    int sz = vfs_read_file(filename, fd_table[fd].data, MAX_FILE_SIZE - 1);
-                    if (sz > 0) {
-                        fd_table[fd].data[sz] = '\0';
-                        fd_table[fd].size = sz;
-                    } else {
-                        fd_table[fd].data[0] = '\0';
-                        fd_table[fd].size = 0;
-                    }
-                }
-            } else {
-                // Create file first
-                int res = vfs_create_file(filename);
-                (void)res;
-                // Also allocate buffer
-                fd_table[fd].data = (char*)kmalloc(MAX_FILE_SIZE);
-                if (fd_table[fd].data) {
-                    fd_table[fd].capacity = MAX_FILE_SIZE;
-                    fd_table[fd].data[0] = '\0';
-                    fd_table[fd].size = 0;
-                }
-            }
-            regs->eax = (uint32_t)fd;
+            regs->eax = (uint32_t)do_sys_open(filename, 0);
             break;
         }
 
-        // ----- SYS_READ (3): Read from an open file -----
+        // ----- SYS_READ (3): Read from an open file/device -----
         case SYS_READ: {
             int fd = (int)regs->ebx;
             char* buf = (char*)regs->ecx;
             int size = (int)regs->edx;
 
-            if (fd < 0 || fd >= MAX_FDS || fd_table[fd].state != FD_OPEN) {
-                regs->eax = (uint32_t)-1; break;
-            }
             if (size <= 0 || !validate_user_ptr(buf, size)) {
                 regs->eax = (uint32_t)-1; break;
             }
 
-            if (!fd_table[fd].data) {
-                regs->eax = 0; break;
-            }
-            int off = fd_table[fd].offset;
-            int avail = fd_table[fd].size - off;
-            if (avail <= 0) { regs->eax = 0; break; }
-            int to_read = (size < avail) ? size : avail;
-            memcpy(buf, fd_table[fd].data + off, to_read);
-            fd_table[fd].offset += to_read;
-            regs->eax = (uint32_t)to_read;
+            regs->eax = (uint32_t)do_sys_read(fd, buf, size);
             break;
         }
 
-        // ----- SYS_WRITE (4): Write to an open file -----
+        // ----- SYS_WRITE (4): Write to an open file/device -----
         case SYS_WRITE: {
             int fd = (int)regs->ebx;
             const char* buf = (const char*)regs->ecx;
             int size = (int)regs->edx;
 
-            if (fd < 0 || fd >= MAX_FDS || fd_table[fd].state != FD_OPEN) {
-                regs->eax = (uint32_t)-1; break;
-            }
             if (size <= 0 || !validate_user_ptr(buf, size)) {
                 regs->eax = (uint32_t)-1; break;
             }
 
-            if (!fd_table[fd].data) {
-                fd_table[fd].data = (char*)kmalloc(MAX_FILE_SIZE);
-                if (!fd_table[fd].data) { regs->eax = 0; break; }
-                fd_table[fd].capacity = MAX_FILE_SIZE;
-                fd_table[fd].data[0] = '\0';
-                fd_table[fd].size = 0;
-            }
-            int off = fd_table[fd].offset;
-            int space = fd_table[fd].capacity - off;
-            if (space <= 0) { regs->eax = 0; break; }
-            int to_write = (size < space) ? size : space;
-            memcpy(fd_table[fd].data + off, buf, to_write);
-            fd_table[fd].offset += to_write;
-            if (fd_table[fd].offset > fd_table[fd].size) {
-                fd_table[fd].size = fd_table[fd].offset;
-            }
-            fd_table[fd].data[fd_table[fd].size] = '\0';
-            
-            // Persist to VFS
-            vfs_write_file(fd_table[fd].path, fd_table[fd].data, fd_table[fd].size);
-            regs->eax = (uint32_t)to_write;
+            regs->eax = (uint32_t)do_sys_write(fd, buf, size);
             break;
         }
 
-        // ----- SYS_CLOSE (5): Close an open file -----
+        // ----- SYS_CLOSE (5): Close an open file/device -----
         case SYS_CLOSE: {
             int fd = (int)regs->ebx;
-            if (fd < 0 || fd >= MAX_FDS || fd_table[fd].state != FD_OPEN) {
-                regs->eax = (uint32_t)-1; break;
-            }
-            // If there's data, flush to VFS on close
-            if (fd_table[fd].data && fd_table[fd].size > 0) {
-                vfs_write_file(fd_table[fd].path, fd_table[fd].data, fd_table[fd].size);
-            }
-            fd_free(fd);
-            regs->eax = 0;
+            regs->eax = (uint32_t)do_sys_close(fd);
             break;
         }
 
@@ -364,7 +234,9 @@ static void syscall_handler(registers_t* regs) {
 
         // ----- SYS_YIELD (9): Yield CPU -----
         case SYS_YIELD: {
-            // Timer IRQ handles scheduling; just return
+            // Halt the CPU with interrupts enabled so the timer IRQ 
+            // will immediately fire and switch tasks.
+            __asm__ __volatile__("sti\n\thlt\n\tcli");
             regs->eax = 0;
             break;
         }
@@ -520,7 +392,24 @@ static void syscall_handler(registers_t* regs) {
                     regs->eax = 0; // No events
                 }
             } else {
-                regs->eax = (uint32_t)-1;
+                // Window is closed/invalid. Kill the task so it doesn't become a zombie
+                // spinning in a while(sys_get_event) loop.
+                write_serial_string("SYS_GET_EVENT: Invalid WID. Killing task.\n");
+                
+                // Clean up terminal state if this was a terminal-launched app
+                extern int term_app_running;
+                extern int term_app_task_id;
+                extern int get_current_task(void);
+                if (term_app_running && get_current_task() == term_app_task_id) {
+                    term_app_running = 0;
+                    term_app_task_id = -1;
+                    print("\n", 0x0F);
+                    print("root@mectov", 0x0A);
+                    print(" ~$ ", 0x0F);
+                }
+                
+                task_exit();
+                for(;;) __asm__("hlt");
             }
             break;
         }
@@ -700,6 +589,17 @@ static void syscall_handler(registers_t* regs) {
             uint32_t vaddr = (uint32_t)regs->ebx;
             uint32_t pd = task_get_page_dir(get_current_task());
             regs->eax = (uint32_t)vmm_unmap_page(pd, vaddr);
+            break;
+        }
+
+        // ----- SYS_PIPE (32) -----
+        case SYS_PIPE: {
+            int* pipefd = (int*)regs->ebx;
+            if (!validate_user_ptr(pipefd, sizeof(int)*2)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            regs->eax = (uint32_t)do_sys_pipe(pipefd);
             break;
         }
 

@@ -17,6 +17,11 @@ extern uint8_t _binary_gcalc_mct_start[];
 extern uint8_t _binary_gcalc_mct_end[];
 static uint32_t gcalc_mct_size() { return (uint32_t)(_binary_gcalc_mct_end - _binary_gcalc_mct_start); }
 
+// Embedded binary for hello.mct
+extern uint8_t _binary_hello_mct_start[];
+extern uint8_t _binary_hello_mct_end[];
+static uint32_t hello_mct_size() { return (uint32_t)(_binary_hello_mct_end - _binary_hello_mct_start); }
+
 fs_node_t fs_nodes[MAX_NODES];
 int current_dir = 0;  // Root directory
 
@@ -65,7 +70,28 @@ static int split_path(const char* path, char components[MAX_PATH/2][MAX_FILENAME
 
 void vfs_init() {
     // Coba load dari disk
-    if (vfs_load()) return;
+    if (vfs_load()) {
+        if (vfs_get_node("/dev") < 0) {
+            int dev_node = vfs_create_node("dev", FS_DIR, 0);
+            if (dev_node >= 0) {
+                vfs_create_node("null", FS_DEV, dev_node);
+                vfs_create_node("zero", FS_DEV, dev_node);
+                vfs_create_node("random", FS_DEV, dev_node);
+                vfs_save();
+            }
+        }
+        
+        // Ensure apps directory and hello.mct exist
+        int apps_node = vfs_get_node("apps");
+        if (apps_node < 0) apps_node = vfs_create_node("apps", FS_DIR, 0);
+        
+        if (vfs_get_node("apps/hello.mct") < 0) {
+            vfs_create_file("apps/hello.mct");
+            vfs_write_file("apps/hello.mct", (const char*)_binary_hello_mct_start, hello_mct_size());
+            vfs_save();
+        }
+        return;
+    }
     
     // Tidak ada filesystem — buat root directory
     memset(fs_nodes, 0, sizeof(fs_nodes));
@@ -93,6 +119,18 @@ void vfs_init() {
     // Inject gcalc.mct dari embedded binary ke VFS
     vfs_create_file("apps/gcalc.mct");
     vfs_write_file("apps/gcalc.mct", (const char*)_binary_gcalc_mct_start, gcalc_mct_size());
+
+    // Inject hello.mct
+    vfs_create_file("apps/hello.mct");
+    vfs_write_file("apps/hello.mct", (const char*)_binary_hello_mct_start, hello_mct_size());
+
+    // Phase 1: UNIX-like /dev filesystem
+    int dev_node = vfs_create_node("dev", FS_DIR, 0);
+    if (dev_node >= 0) {
+        vfs_create_node("null", FS_DEV, dev_node);
+        vfs_create_node("zero", FS_DEV, dev_node);
+        vfs_create_node("random", FS_DEV, dev_node);
+    }
     
     vfs_save();
 }
@@ -470,6 +508,25 @@ int vfs_delete_node(const char* path) {
 int vfs_read_file(const char* path, char* buf, int max_size) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
+    
+    if (fs_nodes[node].type == FS_DEV) {
+        if (strcmp(fs_nodes[node].name, "zero") == 0) {
+            memset(buf, 0, max_size);
+            return max_size;
+        } else if (strcmp(fs_nodes[node].name, "null") == 0) {
+            return 0; // EOF immediately
+        } else if (strcmp(fs_nodes[node].name, "random") == 0) {
+            // Very simple PRNG for /dev/random (since we don't have a real entropy pool)
+            static uint32_t seed = 0x12345678;
+            for (int i = 0; i < max_size; i++) {
+                seed = (1103515245 * seed + 12345);
+                buf[i] = (char)(seed & 0xFF);
+            }
+            return max_size;
+        }
+        return -2; // Unknown device
+    }
+    
     if (fs_nodes[node].type != FS_FILE) return -2;
     
     int size = fs_nodes[node].size;
@@ -499,6 +556,16 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
 int vfs_write_file(const char* path, const char* data, int size) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
+
+    if (fs_nodes[node].type == FS_DEV) {
+        if (strcmp(fs_nodes[node].name, "null") == 0 || strcmp(fs_nodes[node].name, "zero") == 0) {
+            return size; // Discard data successfully
+        } else if (strcmp(fs_nodes[node].name, "random") == 0) {
+            return size; // Writes to /dev/random are ignored (or could add entropy)
+        }
+        return -2;
+    }
+
     if (fs_nodes[node].type != FS_FILE) return -2;
     
     // Calculate how many sectors needed

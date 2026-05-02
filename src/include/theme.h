@@ -14,12 +14,12 @@
 #define C_DARK_GRAY  0x00404040
 #define C_YELLOW     0x00FFFF00
 
-// ---- Modern Dark Theme (Catppuccin Mocha inspired) ----
+// ---- Modern Dark Theme (Catppuccin Mocha refined) ----
 // Backgrounds
 #define GUI_BG       0x001E1E2E  // Window body background (mantle)
 #define GUI_DESKTOP  0x0011111B  // Desktop background (crust)
 #define GUI_TASKBAR  0x00181825  // Taskbar background (surface0)
-#define GUI_TASKBAR_A 0x88181825 // Taskbar semi-transparent
+#define GUI_TASKBAR_A 0xCC181825 // Taskbar semi-transparent (was 0x88)
 
 // Borders
 #define GUI_BORDER   0x00585870  // Active window border (overlay0)
@@ -42,6 +42,7 @@
 #define GUI_MAGENTA  0x00CBA6F7  // Soft purple
 #define GUI_TEAL     0x0094E2D5  // Soft teal
 #define GUI_RED      0x00FF5F56  // Alias for close
+#define GUI_ORANGE   0x00FAB387  // Peach accent
 
 // Icon backgrounds
 #define GUI_ICON_BG  0x00222233
@@ -53,11 +54,16 @@
 #define GUI_WHITE    0x00FFFFFF
 
 // ---- Layout constants ----
-#define TITLEBAR_H   24
-#define TASKBAR_H_PX 28
-#define WIN_RADIUS   8       // Window corner radius
-#define BTN_RADIUS   6       // Titlebar button radius (small circles)
-#define SHADOW_LAYERS 4      // Number of drop shadow layers
+#define TITLEBAR_H   20          // Was 24 — more compact like toaruOS
+#define TASKBAR_H_PX 32          // Was 28 — more room for taskbar buttons
+#define WIN_RADIUS   8           // Window corner radius
+#define BTN_RADIUS   5           // Titlebar button radius (small circles)
+#define SHADOW_LAYERS 4          // Number of drop shadow layers
 #define ICON_COUNT   8
+
+// ---- Modern feature flags ----
+#define WINDOW_SNAP_THRESHOLD  20  // Pixels from edge to trigger snap
+#define TASKBAR_BTN_MAX_W     160  // Max width for taskbar window buttons
+#define TASKBAR_BTN_MIN_W      80  // Min width for taskbar window buttons
 
 #endif

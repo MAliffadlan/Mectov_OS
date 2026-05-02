@@ -24,8 +24,8 @@
 static uint8_t frame_bitmap[FRAME_BITMAP_SIZE];
 static int vmm_initialized = 0;
 
-// Mark kernel region (first 16MB) as reserved
-#define KERNEL_RESERVED_PAGES (16 * 256)  // 16MB
+// Mark kernel + heap region (first 32MB) as reserved
+#define KERNEL_RESERVED_PAGES (32 * 256)  // 32MB
 
 static void bitmap_set(int idx) {
     frame_bitmap[idx / 8] |= (1 << (idx % 8));
@@ -123,10 +123,12 @@ uint32_t vmm_create_address_space(void) {
     __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3_val));
     uint32_t* cur_pd = (uint32_t*)(uintptr_t)(cr3_val & 0xFFFFF000);
     
-    // Identity map kernel region (first 32 page table entries = 32*4MB = 128MB)
-    // copy from current page directory
-    uint32_t num_tables = 32;
-    for (uint32_t i = 0; i < num_tables; i++) {
+    // Clone page tables: kernel (0-32MB) and any other high memory (like Framebuffer)
+    for (uint32_t i = 0; i < 1024; i++) {
+        // Skip user space (32MB to 128MB -> indices 8 to 31)
+        // User apps will allocate their own frames here.
+        if (i >= 8 && i < 32) continue;
+        
         if (cur_pd[i] & PAGE_PRESENT) {
             // Allocate a new page table, clone entries
             uint32_t pt_paddr = frame_alloc();

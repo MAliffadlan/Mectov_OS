@@ -1,7 +1,7 @@
 #ifndef TASKBAR_H
 #define TASKBAR_H
 
-#define TASKBAR_H_PX 28     // taskbar pixel height
+#define TASKBAR_H_PX 32     // taskbar pixel height (modern)
 
 void taskbar_draw();
 void taskbar_handle_click(int mx, int my);

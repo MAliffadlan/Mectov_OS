@@ -24,7 +24,9 @@
 
 // Forward declaration
 extern void init_double_buffer(void);
+extern volatile int power_overlay_active;
 
+volatile int pending_logout = 0;
 static int fps_val = 0;
 static int fps_frames = 0;
 static uint32_t fps_last_tick = 0;
@@ -140,6 +142,9 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     // Kalkulator akan dibuka jika user mengklik ikonnya di desktop
     // extern int load_mct_app(const char*);
     // load_mct_app("gcalc.mct");
+    
+    // Auto test hello.mct to capture crash
+    load_mct_app("apps/hello.mct");
 
     // ---- Main GUI Event Loop ----
     int prev_btn  = 0;
@@ -210,6 +215,21 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                 fps_frames = 0;
                 fps_last_tick = now;
             }
+            full_redraw();
+        }
+
+        // Logout: kembali ke login screen
+        if (pending_logout) {
+            pending_logout = 0;
+            // Close all windows
+            for (int i = 0; i < MAX_WINDOWS; i++) {
+                wm_wins[i].visible = 0;
+            }
+            wm_focused = -1;
+            wm_zcount = 0;
+            start_menu_open = 0;
+            calendar_open = 0;
+            gui_login();
             full_redraw();
         }
 
