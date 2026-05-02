@@ -1,4 +1,19 @@
-# Build output
+# Build output and binaries
 *.o
 *.bin
+*.elf
+*.mct
 myos.bin
+mectov.iso
+disk.img
+
+# ISO directory
+iso/
+
+# Logs
+*.log
+
+# Dependencies and external binaries
+xbin/
+*.deb
+xorriso_bin/
