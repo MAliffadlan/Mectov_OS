@@ -36,6 +36,8 @@ Created by M Alif Fadlan.
 +--------------------------------------------------------------------+
 |  Desktop (Squircle Icons) |  Taskbar (Glossy) |  Start Menu        |
 +--------------------------------------------------------------------+
+|  File Descriptors    |  UNIX Pipe           |  Login Screen         |
++--------------------------------------------------------------------+
 ```
 
 ### Target Platform
@@ -67,6 +69,9 @@ Created by M Alif Fadlan.
   - Close (vibrant red circle with 'X' symbol)
   - Minimize (vibrant yellow circle with '-' symbol)
   - Maximize (vibrant green circle with '+' symbol)
+- **Aero Snap:** Drag windows to screen edges for automatic half-screen (left/right) or full-screen (top) snapping with saved geometry restore.
+- **Window Resizing:** Drag any window edge or corner to resize. 8-directional edge detection with minimum size constraints (220×150).
+- **Window Close Callback:** `wm_close` now notifies the terminal to kill child processes and reset state.
 - Clean Flat Aesthetic: Removed heavy shadows around windows to focus on a crisp, modern UI.
 
 ### 3. Taskbar & System Tray (src/gui/taskbar.c)
@@ -90,21 +95,27 @@ Created by M Alif Fadlan.
 - Professional Squircle Icons: High-end rounded-rect icons with minimalist glyphs and curated color palettes.
 - Draggable Persistent Icons: Icon positions are saved to icons.cfg on the VFS and persist across system reboots.
 
-### 6. Virtual Memory Manager (src/sys/vmm.c + src/include/vmm.h)
+### 6. Login Screen (src/gui/login.c)
+- Graphical login with wallpaper backdrop and semi-transparent overlay.
+- Password input field with masked characters (●) and shake animation on wrong password.
+- CAPS LOCK indicator warning.
+- Sound feedback (beep) on login events.
+
+### 7. Virtual Memory Manager (src/sys/vmm.c + src/include/vmm.h)
 - **Frame Bitmap Allocator:** Tracks 128MB of physical memory (32768 pages) with a compact bitmap for O(1) allocation/free.
 - **Per-Process Address Spaces:** `vmm_create_page_dir()` creates new page directories, `vmm_clone_page_dir()` copies kernel mappings for fork-like scenarios, `vmm_free_page_dir()` tears down an address space.
 - **Page Mapping:** `vmm_map_page()` / `vmm_map_pages()` / `vmm_unmap_page()` with automatic TLB invalidation on CR3 reload.
 - **Region Allocator:** `vmm_find_free_region()` locates free virtual address ranges starting at 0x08000000.
 - Foundation for future demand paging and Copy-on-Write (COW) for Ring 3 process isolation.
 
-### 7. IPC — Inter-Process Communication (src/sys/ipc.c + src/include/ipc.h)
+### 8. IPC — Inter-Process Communication (src/sys/ipc.c + src/include/ipc.h)
 - **Named Message Queues:** Fixed-size 64-byte messages with a 16-deep circular buffer per queue.
 - **Create & Connect:** `ipc_create_queue(name)` for server processes, `ipc_connect_queue(name)` for clients.
 - **Blocking Receive:** `ipc_receive()` blocks the calling task until a message arrives, with tick-based timeout support.
 - **Non-blocking Send:** `ipc_send()` returns -1 immediately if the queue is full.
 - Enables service-oriented architecture and clean multitasking app ecosystem.
 
-### 8. Priority Thread Scheduler (src/sys/task.c + src/include/task.h)
+### 9. Priority Thread Scheduler (src/sys/task.c + src/include/task.h)
 - **4-Level Priority Round-Robin:** IDLE(0) < LOW(1) < NORMAL(2) < HIGH(3). Higher priority runnable tasks always run first; round-robin scheduling within the same priority level.
 - **Thread API:** `task_create_thread()` spawns a thread within the same process (shared address space) using a pid/tid model. `task_exit_thread()` terminates the current thread.
 - **Sleep/Wake:** `task_sleep(ticks)` suspends a task for a specified duration; `task_wake()` resumes it. Used for efficient blocking I/O and timing.
@@ -114,21 +125,39 @@ Created by M Alif Fadlan.
 - Per-task dual stacks: 16KB kernel stack + 8KB user stack.
 - IRQ0-driven scheduler tick (1000Hz) with cooperative yield via SYS_YIELD.
 
-### 9. Network Stack (src/drivers/net.c + src/drivers/rtl8139.c)
+### 10. Network Stack (src/drivers/net.c + src/drivers/rtl8139.c)
 - RTL8139 NIC Driver: Full driver with PCI bus mastering.
 - Ethernet/ARP/IPv4/ICMP/UDP/DNS: Complete local stack.
 - Terminal commands: ping [ip] and host [domain].
 
-### 10. Persistent File System (src/sys/vfs.c)
+### 11. Persistent File System (src/sys/vfs.c)
 - Virtual File System (16 file slots) with auto-save to disk.img via ATA PIO.
 - Persistence Fix: Reliable saving for configuration files like icons.cfg.
 
-### 11. File Descriptor Layer (src/sys/fd.c + src/include/fd.h)
+### 12. File Descriptor Layer (src/sys/fd.c + src/include/fd.h)
 - **UNIX-style FD abstraction:** Per-task file descriptor table (16 FDs per task, 128 global) wrapping VFS nodes.
 - **Typed descriptors:** `FD_TYPE_FILE`, `FD_TYPE_PIPE_READ`, `FD_TYPE_PIPE_WRITE`, `FD_TYPE_DEV`.
 - **Reference counting:** Global FD entries with `ref_count` for safe sharing between threads.
 - **UNIX Pipe support:** `do_sys_pipe()` creates a unidirectional pipe pair for inter-process data streaming.
 - Full syscall integration: `sys_open`, `sys_read`, `sys_write`, `sys_close`, `sys_pipe` all route through the FD layer.
+
+### 13. MCT Application Runtime (.mct)
+- **Custom Binary Format:** 16-byte header with magic number verification and entry point specification.
+- **Fixed-Base Mapping:** Applications are mapped at virtual address `0x02000000` within their own isolated page directory.
+- **Privilege Isolation:** Clean transition from Ring 0 to Ring 3 via `iret`, ensuring user apps cannot execute privileged instructions.
+- **Independent Stacks:** Each Ring 3 task maintains separate 16KB kernel and 8KB user stacks.
+
+### 14. User-Mode GUI API
+- **Direct Window Management:** Ring 3 applications can now create, raise, and close their own GUI windows via syscalls.
+- **Graphics Primitive Syscalls:** Accelerated `SYS_DRAW_RECT` and `SYS_DRAW_TEXT` for rendering directly into the application's window buffer.
+- **Event Polling:** `SYS_GET_EVENT` allows user apps to respond to window-specific mouse and keyboard input.
+- **Flicker-Free Updates:** `SYS_UPDATE_WINDOW` ensures changes are committed to the display list and rendered during the next 60Hz frame sync.
+
+### 15. Security & Pointer Validation (src/sys/syscall.c)
+- **Safe Syscall Entry:** Every pointer passed from Ring 3 is validated via `validate_user_ptr` to prevent kernel memory corruption or unauthorized data access.
+- **Address Boundary Checks:** Enforces strict memory boundaries (`USER_MEM_LIMIT`) for all syscall parameters.
+- **Zombie Cleanup:** The kernel automatically detects and terminates Ring 3 processes whose GUI windows have been closed, preventing orphaned tasks and resource leaks.
+- **Privilege Separation:** Use of Global Descriptor Table (GDT) and Task State Segment (TSS) to strictly enforce CPU privilege levels (Ring 0 vs Ring 3).
 
 ---
 
@@ -144,8 +173,8 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 | 3 | SYS_READ | Read file. EBX=fd, ECX=buf, EDX=size → bytes read |
 | 4 | SYS_WRITE | Write file. EBX=fd, ECX=buf, EDX=size → bytes written |
 | 5 | SYS_CLOSE | Close file descriptor. EBX=fd |
-| 6 | SYS_MALLOC | Allocate memory. EBX=size → return pointer |
-| 7 | SYS_FREE | Free memory. EBX=pointer |
+| 6 | SYS_MALLOC | Allocate memory (Identity-mapped heap) |
+| 7 | SYS_FREE | Free allocated memory |
 | 8 | SYS_GET_TICKS | Get PIT timer tick count |
 | 9 | SYS_YIELD | Yield CPU (sti;hlt;cli for true CPU surrender) |
 | 10 | SYS_EXIT | Terminate current task |
@@ -229,6 +258,15 @@ make clean && make
 # Run in QEMU
 ./run.sh
 ```
+
+### Building User Applications (.mct)
+User mode applications are written in C, compiled with `gcc -m32`, and processed into the `.mct` format:
+1. **Compile**: `gcc -m32 -march=i386 -fno-pie -ffreestanding -c app.c -o app.o`
+2. **Link**: `ld -m elf_i386 -T apps/app.ld app.o -o app.elf`
+3. **Format**: `python3 build_mct.py app.elf app.mct`
+4. **Deploy**: The `Makefile` automatically handles this and uses `inject_vfs.py` to bake the `.mct` binaries into `disk.img`.
+
+---
 
 ---
 
