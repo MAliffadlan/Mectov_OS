@@ -290,4 +290,4 @@ MIT License
 
 Created by M Alif Fadlan. 
 
-# Mectov OS - Sistem Operasi 32-bit Pertama di Indonesia
+Salah satu proyek OS hobi buatan Indonesia yang paling lengkap dan terdokumentasi dengan baik di GitHub saat ini
