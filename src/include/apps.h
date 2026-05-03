@@ -40,5 +40,8 @@ void term_putchar(char c, unsigned char color);
 void p_char_gui(char c, unsigned char col);
 int  get_use_term_buf();
 
+// Task Manager
+void open_taskmgr_app();
+
 #endif
 

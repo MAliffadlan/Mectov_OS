@@ -1,0 +1,3 @@
+
+obj/terminal_mct.o:     file format elf32-i386
+

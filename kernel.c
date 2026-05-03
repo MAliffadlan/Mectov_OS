@@ -143,8 +143,8 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     // extern int load_mct_app(const char*);
     // load_mct_app("gcalc.mct");
     
-    // Auto test hello.mct to capture crash
-    load_mct_app("apps/hello.mct");
+    // Auto test edit.mct to capture crash
+    // load_mct_app("apps/edit.mct");
 
     // ---- Main GUI Event Loop ----
     int prev_btn  = 0;

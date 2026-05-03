@@ -13,8 +13,8 @@
 // If no message is available, receive blocks until a sender arrives.
 
 #define IPC_MAX_QUEUES   16
-#define IPC_MSG_SIZE     32    // bytes of payload
-#define IPC_QUEUE_DEPTH  8     // max pending messages
+#define IPC_MSG_SIZE     128   // bytes of payload (increased for stdout lines)
+#define IPC_QUEUE_DEPTH  256   // max pending messages (increased for terminal output)
 
 typedef struct {
     uint32_t sender_tid;               // who sent this

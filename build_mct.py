@@ -22,7 +22,7 @@ def build_app(c_file, output_mct):
 OUTPUT_FORMAT("elf32-i386")
 ENTRY(_start)
 SECTIONS {
-    . = 0x02000000;
+    . = 0x08000000;
     .text : { *(.text*) }
     .rodata : { *(.rodata*) }
     .data : { *(.data*) }
@@ -69,7 +69,7 @@ SECTIONS {
             parts = line.split()
             if len(parts) >= 3 and parts[2] == "_start":
                 addr = int(parts[0], 16)
-                entry_point = addr - 0x02000000
+                entry_point = addr - 0x08000000
                 break
     except Exception as e:
         print(f"[*] Warning: Could not find _start, using offset 0. {e}")

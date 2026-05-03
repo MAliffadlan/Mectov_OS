@@ -2,6 +2,41 @@
 #define SYSCALL_H
 
 #include "types.h"
+#include "rtc.h"
+#include "pci.h"
+
+typedef struct {
+    uint32_t uptime_ms;
+    uint32_t total_ram_kb;
+    uint32_t used_ram_kb;
+    uint32_t fb_width;
+    uint32_t fb_height;
+    uint32_t fb_bpp;
+    char cpu_brand[48];
+    uint8_t mac_addr[6];
+} sysinfo_t;
+
+typedef struct {
+    char name[32];
+    int type;     // 0=file, 1=dir, 2=dev
+    int size;
+    int node_idx;
+} dir_entry_t;
+
+typedef struct {
+    int id;
+    int ring;
+    int state;
+    int priority;
+} sys_task_info_t;
+
+typedef struct {
+    int id;
+    char title[32];
+    int owner_ring;
+    int visible;
+    int minimized;
+} sys_win_info_t;
 
 // ============================================================
 // Syscall Numbers — Mectov OS User Mode API
@@ -39,6 +74,29 @@
 #define SYS_IPC_DESTROY    26  // EBX=qid
 #define SYS_IPC_TRY_SEND   27  // EBX=qid, ECX=type, EDX=data_ptr, ESI=len → return 0/-1
 #define SYS_IPC_TRY_RECV   28  // EBX=qid, ECX=type_out, EDX=data_out, ESI=len_out → return 0/-1
+
+#define SYS_GET_TIME       33  // EBX=rtc_time_t* ptr
+#define SYS_PLAY_SOUND     34  // EBX=freq, ECX=duration_ms
+#define SYS_GET_SYSINFO    35  // EBX=sysinfo_t* ptr
+#define SYS_GET_PCI_INFO   36  // EBX=pci_device_t* ptr, ECX=max_count -> returns count
+#define SYS_LIST_DIR       37  // EBX=dir_entry_t* array, ECX=max_count, EDX=parent_node -> returns count
+#define SYS_STAT_FILE      38  // EBX=path_ptr -> returns node_idx or -1
+
+// Network (Browser Ring 3)
+#define SYS_DNS_RESOLVE    39  // EBX=domain_ptr -> returns 0 (async)
+#define SYS_TCP_CONNECT    40  // EBX=ip_ptr(4 bytes), ECX=port -> returns 0
+#define SYS_TCP_SEND       41  // EBX=data_ptr, ECX=len -> returns 0/-1
+#define SYS_TCP_RECV       42  // EBX=buf_ptr, ECX=max_len -> returns bytes_read or state (<0)
+#define SYS_NET_STATUS     43  // -> returns packed status: dns_resolved|tcp_state|dns_ip
+
+// Terminal (Ring 3 stdout IPC)
+#define SYS_SET_STDOUT_IPC 44  // EBX=ipc_qid (0 to disable)
+#define SYS_EXEC_CMD       45  // EBX=cmd_string_ptr -> returns 0
+#define SYS_GET_TASKS      46  // EBX=sys_task_info_t* array, ECX=max_count -> returns count
+#define SYS_GET_WINDOWS    47  // EBX=sys_win_info_t* array, ECX=max_count -> returns count
+#define SYS_KILL_TASK      48  // EBX=tid -> returns 0/-1
+#define SYS_GET_LAUNCH_ARG 49  // EBX=buf_ptr, ECX=max_len -> returns length
+#define SYS_CREATE_FILE    50  // EBX=path_ptr -> returns 0/-1
 
 // Virtual Memory
 #define SYS_VMM_MAP        29  // EBX=vaddr, ECX=paddr, EDX=flags → return 0/-1
@@ -171,6 +229,113 @@ static inline mouse_state_t sys_get_mouse(void) {
     m.y = ry;
     m.buttons = rb;
     return m;
+}
+
+// New Phase 1 syscalls
+static inline void sys_get_time(rtc_time_t* out_time) {
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_GET_TIME), "b"(out_time));
+}
+static inline void sys_play_sound(int freq, int duration_ms) {
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_PLAY_SOUND), "b"(freq), "c"(duration_ms));
+}
+
+static inline void sys_get_sysinfo(sysinfo_t* out_info) {
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_GET_SYSINFO), "b"(out_info));
+}
+static inline int sys_get_pci_info(pci_device_t* out_array, int max_count) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_PCI_INFO), "b"(out_array), "c"(max_count));
+    return ret;
+}
+static inline int sys_list_dir(dir_entry_t* out_array, int max_count, int parent_node) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_LIST_DIR), "b"(out_array), "c"(max_count), "d"(parent_node));
+    return ret;
+}
+static inline int sys_stat_file(const char* path) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_STAT_FILE), "b"(path));
+    return ret;
+}
+
+// Network syscalls
+static inline void sys_dns_resolve(const char* domain) {
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_DNS_RESOLVE), "b"(domain));
+}
+static inline void sys_tcp_connect(uint8_t* ip, int port) {
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_TCP_CONNECT), "b"(ip), "c"(port));
+}
+static inline int sys_tcp_send(const void* data, int len) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_SEND), "b"(data), "c"(len));
+    return ret;
+}
+static inline int sys_tcp_recv(void* buf, int max_len) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_RECV), "b"(buf), "c"(max_len));
+    return ret;
+}
+
+typedef struct {
+    int dns_resolved;
+    uint8_t dns_ip[4];
+    int tcp_state;
+} net_status_t;
+
+static inline void sys_net_status(net_status_t* out) {
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_NET_STATUS), "b"(out));
+}
+
+// Terminal IPC syscalls
+static inline void sys_set_stdout_ipc(int qid) {
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_SET_STDOUT_IPC), "b"(qid));
+}
+static inline int sys_exec_cmd(const char* cmd) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_EXEC_CMD), "b"(cmd));
+    return ret;
+}
+
+static inline int sys_get_tasks(sys_task_info_t* array, int max_count) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_TASKS), "b"(array), "c"(max_count));
+    return ret;
+}
+
+static inline int sys_get_windows(sys_win_info_t* array, int max_count) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_WINDOWS), "b"(array), "c"(max_count));
+    return ret;
+}
+
+static inline int sys_kill_task(int tid) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_KILL_TASK), "b"(tid));
+    return ret;
+}
+
+static inline int sys_get_launch_arg(char* buf, int max_len) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_LAUNCH_ARG), "b"(buf), "c"(max_len));
+    return ret;
+}
+
+static inline int sys_create_file(const char* path) {
+    return syscall(SYS_CREATE_FILE, (int)path, 0, 0);
+}
+
+// IPC syscalls (stubs for Ring 3)
+static inline int sys_ipc_create(int key) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_IPC_CREATE), "b"(key));
+    return ret;
+}
+static inline int sys_ipc_try_recv(int qid, void* data, int max_len) {
+    int ret;
+    uint32_t len_out = (uint32_t)max_len;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_IPC_TRY_RECV), "b"(qid), "c"(0), "d"(data), "S"(&len_out) : "memory");
+    if (ret == 0) return (int)len_out;
+    return ret;
 }
 
 #endif

@@ -59,7 +59,6 @@
 #define WIN_RADIUS   8           // Window corner radius
 #define BTN_RADIUS   5           // Titlebar button radius (small circles)
 #define SHADOW_LAYERS 4          // Number of drop shadow layers
-#define ICON_COUNT   8
 
 // ---- Modern feature flags ----
 #define WINDOW_SNAP_THRESHOLD  20  // Pixels from edge to trigger snap

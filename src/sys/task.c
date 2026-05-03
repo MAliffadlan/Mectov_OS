@@ -24,6 +24,7 @@ typedef struct {
     int      sleep_ticks;  // remaining ticks until wake (0 = not sleeping)
     uint32_t page_dir;     // per-process page directory (0 = global identity)
     int      fd_table[16]; // local file descriptors mapped to global FDs
+    char     launch_arg[128]; // command-line argument passed at launch
 } task_t;
 
 static task_t tasks[MAX_TASKS];
@@ -37,6 +38,7 @@ void init_tasking() {
         tasks[i].priority = PRIORITY_INTERACTIVE;
         tasks[i].sleep_ticks = 0;
         tasks[i].page_dir = 0;
+        tasks[i].launch_arg[0] = '\0';
         for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
     }
     tasks[0].state = TASK_STATE_RUNNING;
@@ -51,6 +53,10 @@ void init_tasking() {
     
     current_task = 0;
     num_tasks = 1;
+}
+
+uint32_t tasks_get_boot_cr3(void) {
+    return tasks[0].page_dir;
 }
 
 // Create a Ring 0 (kernel) task
@@ -230,7 +236,8 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             num_tasks++;
             tasks[i].state = TASK_STATE_READY;
             
-            __asm__ volatile("sti");
+            // NOTE: Interrupts stay DISABLED. Caller must call sti after
+            // finishing any post-create setup (e.g. setting launch_arg).
             return i;
         }
     }
@@ -321,4 +328,30 @@ int task_kill(int tid) {
     write_serial('0' + tid);
     write_serial('\n');
     return 0;
+}
+
+int get_task_info(int tid, task_info_t* info) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    if (tasks[tid].state == TASK_STATE_FREE) return 0;
+    
+    info->id = tid;
+    info->state = tasks[tid].state;
+    info->ring = tasks[tid].ring;
+    info->priority = tasks[tid].priority;
+    info->sleep_ticks = tasks[tid].sleep_ticks;
+    return 1;
+}
+
+void task_set_launch_arg(int tid, const char* arg) {
+    if (tid < 0 || tid >= MAX_TASKS) return;
+    int i = 0;
+    if (arg) {
+        for (; i < 127 && arg[i]; i++) tasks[tid].launch_arg[i] = arg[i];
+    }
+    tasks[tid].launch_arg[i] = '\0';
+}
+
+const char* task_get_launch_arg(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return "";
+    return tasks[tid].launch_arg;
 }

@@ -38,7 +38,7 @@ void taskbar_track_mouse(int mx, int my, int px, int py) {
                 if (my >= sm_y + 36) {
                     int rel_y = my - (sm_y + 36);
                     int item = rel_y / 28;
-                    if (item < 10) {
+                    if (item < 11) {
                         hover_menu_idx = item;
                         return;
                     }
@@ -337,7 +337,7 @@ void taskbar_draw() {
 
     // ========== Draw Start Menu (toaruOS style) ==========
     if (start_menu_open) {
-        int sm_h = 320;
+        int sm_h = 348;
         int sm_w = 200;
         int sm_y = ty - sm_h;
         
@@ -364,12 +364,13 @@ void taskbar_draw() {
             {"Clock", 5, 0x00FFFFFF},
             {"PCI Manager", 11, 0x00DD6B20},
             {"Snake Game", 10, 0x0038A169},
+            {"Manajer Tugas", 13, 0x00805AD5},
             {"Logout", 6, 0x00000000},
             {"Power Off", 9, 0x00000000},
         };
         
         int oy = sm_y + 40; // after header
-        for (int n = 0; n < 10; n++) {
+        for (int n = 0; n < 11; n++) {
             int item_y = oy;
             int item_h = 28;
             uint32_t item_bg = GUI_BG;
@@ -384,7 +385,7 @@ void taskbar_draw() {
                 draw_rounded_rect(4, item_y, sm_w - 8, item_h - 2, 4, item_bg);
             }
             
-            if (n == 9) {
+            if (n == 10) {
                 // Power off: red accent
                 if (hover_menu_idx == n) {
                     draw_rounded_rect(4, item_y, sm_w - 8, item_h - 2, 4, 0x00330000);
@@ -397,7 +398,7 @@ void taskbar_draw() {
                 draw_rect(ic_x + 6, ic_y + 2, 4, 7, GUI_CLOSE);
                 text_col = GUI_CLOSE;
                 draw_string_px(ic_x + 18, item_y + 6, items[n].label, text_col, hover_menu_idx == n ? 0x00330000 : GUI_BG);
-            } else if (n == 8) {
+            } else if (n == 9) {
                 // Restart: yellow accent
                 if (hover_menu_idx == n) {
                     draw_rounded_rect(4, item_y, sm_w - 8, item_h - 2, 4, 0x00332200);
@@ -476,7 +477,6 @@ void taskbar_draw() {
     }
 }
 
-// Handle start menu item click
 static void handle_start_menu_click(int item) {
     start_menu_open = 0;
     switch (item) {
@@ -488,7 +488,8 @@ static void handle_start_menu_click(int item) {
         case 5: open_clock_app(); break;
         case 6: open_pci_app(); break;
         case 7: start_ular(); break;
-        case 8: // Logout
+        case 8: open_taskmgr_app(); break;
+        case 9: // Logout
             {
                 extern volatile int pending_logout;
                 // Close all windows first
@@ -501,7 +502,7 @@ static void handle_start_menu_click(int item) {
                 pending_logout = 1;
             }
             break;
-        case 9: open_power_app(); break;
+        case 10: open_power_app(); break;
     }
 }
 
@@ -516,7 +517,7 @@ void taskbar_handle_click(int mx, int my) {
             if (my >= sm_y + 36) {
                 int rel_y = my - (sm_y + 36);
                 int item = rel_y / 28;
-                if (item >= 0 && item < 10) {
+                if (item >= 0 && item < 11) {
                     handle_start_menu_click(item);
                     return;
                 }

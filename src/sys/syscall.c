@@ -22,6 +22,13 @@
 #include "../include/vmm.h"
 #include "../include/task.h"
 #include "../include/fd.h"
+#include "../include/speaker.h"
+#include "../include/rtc.h"
+#include "../include/net.h"
+#include "../include/shell.h"
+
+// Global IPC queue ID for stdout redirection (Terminal Ring 3)
+int stdout_ipc_qid = 0;
 
 // GUI Event structures for Ring 3
 #define MAX_EVENTS 64
@@ -116,7 +123,7 @@ static void win_mouse_cb(int id, int cx, int cy, int btn) {
 // kernel from following wild pointers into unmapped memory.
 // In the future, per-task page tables would allow finer checks.
 // ============================================================
-#define USER_MEM_LIMIT 0x08000000  // 128MB
+#define USER_MEM_LIMIT 0x10000000  // 256MB (covers 128MB identity map + user space at 0x08000000)
 
 static int validate_user_ptr(const void* ptr, uint32_t size) {
     uint32_t addr = (uint32_t)ptr;
@@ -253,10 +260,6 @@ static void syscall_handler(registers_t* regs) {
             if (term_app_running && get_current_task() == term_app_task_id) {
                 term_app_running = 0;
                 term_app_task_id = -1;
-                print("root@mectov", 0x0A);
-                print(" ~$ ", 0x0F);
-            } else {
-                print("[syscall] Task exited.\n", 0x0E);
             }
             task_exit();
             // task_exit never returns, but just in case:
@@ -364,6 +367,7 @@ static void syscall_handler(registers_t* regs) {
 
             int idx = get_win_index(wid);
             if (idx >= 0) {
+                wm_wins[idx].owner_ring = 3; // From syscall -> Ring 3
                 win_queues[idx].head = 0;
                 win_queues[idx].tail = 0;
                 win_canvases[idx].count = 0;
@@ -392,24 +396,38 @@ static void syscall_handler(registers_t* regs) {
                     regs->eax = 0; // No events
                 }
             } else {
-                // Window is closed/invalid. Kill the task so it doesn't become a zombie
-                // spinning in a while(sys_get_event) loop.
-                write_serial_string("SYS_GET_EVENT: Invalid WID. Killing task.\n");
-                
-                // Clean up terminal state if this was a terminal-launched app
-                extern int term_app_running;
-                extern int term_app_task_id;
-                extern int get_current_task(void);
-                if (term_app_running && get_current_task() == term_app_task_id) {
-                    term_app_running = 0;
-                    term_app_task_id = -1;
-                    print("\n", 0x0F);
-                    print("root@mectov", 0x0A);
-                    print(" ~$ ", 0x0F);
+                // Window is closed/invalid.
+                // Track per-task: first time → return -1 (let app save).
+                // Second time → force kill (prevent zombie spinning).
+                static int close_notified_task[64]; // indexed by task id
+                static int close_init = 0;
+                if (!close_init) {
+                    for (int ci = 0; ci < 64; ci++) close_notified_task[ci] = 0;
+                    close_init = 1;
                 }
                 
-                task_exit();
-                for(;;) __asm__("hlt");
+                int cur_tid = get_current_task();
+                
+                // Clean up terminal state (do this on first notification)
+                extern int term_app_running;
+                extern int term_app_task_id;
+                if (term_app_running && cur_tid == term_app_task_id) {
+                    term_app_running = 0;
+                    term_app_task_id = -1;
+                }
+                
+                if (cur_tid >= 0 && cur_tid < 64 && close_notified_task[cur_tid]) {
+                    // Already notified once — app didn't exit. Force kill.
+                    write_serial_string("SYS_GET_EVENT: Force killing zombie task.\n");
+                    close_notified_task[cur_tid] = 0; // reset for reuse
+                    task_exit();
+                    for(;;) __asm__("hlt");
+                } else {
+                    // First notification — return -1 to give app a chance to save
+                    write_serial_string("SYS_GET_EVENT: Window closed, returning -1.\n");
+                    if (cur_tid >= 0 && cur_tid < 64) close_notified_task[cur_tid] = 1;
+                    regs->eax = (uint32_t)-1;
+                }
             }
             break;
         }
@@ -443,6 +461,7 @@ static void syscall_handler(registers_t* regs) {
             int priority = (int)regs->ecx;
             uint32_t page_dir = (uint32_t)regs->edx;
             int tid = thread_create(entry, priority, page_dir);
+            __asm__ volatile("sti"); // thread_create leaves interrupts disabled
             regs->eax = (uint32_t)tid;
             write_serial_string("[SYS] thread_create -> TID=");
             write_serial('0' + tid);
@@ -476,6 +495,291 @@ static void syscall_handler(registers_t* regs) {
         case SYS_GET_PRIORITY: {
             int tid = (int)regs->ebx;
             regs->eax = (uint32_t)task_get_priority(tid);
+            break;
+        }
+
+        // ----- SYS_GET_TIME (33) -----
+        case SYS_GET_TIME: {
+            rtc_time_t* out_time = (rtc_time_t*)regs->ebx;
+            if (out_time) {
+                *out_time = rtc_read_time();
+            }
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_PLAY_SOUND (34) -----
+        case SYS_PLAY_SOUND: {
+            int freq = (int)regs->ebx;
+            int duration_ms = (int)regs->ecx;
+            nada(freq, duration_ms);
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_GET_SYSINFO (35) -----
+        case SYS_GET_SYSINFO: {
+            sysinfo_t* info = (sysinfo_t*)regs->ebx;
+            if (validate_user_ptr(info, sizeof(sysinfo_t))) {
+                extern volatile uint32_t timer_ticks;
+                info->uptime_ms = timer_ticks;
+                info->total_ram_kb = get_total_memory() / 1024;
+                info->used_ram_kb = get_used_memory() / 1024;
+                info->fb_width = fb_width;
+                info->fb_height = fb_height;
+                info->fb_bpp = fb_bpp;
+                extern char cpu_brand[49];
+                for(int i=0; i<48; i++) info->cpu_brand[i] = cpu_brand[i];
+                extern uint8_t rtl_mac[6];
+                for(int i=0; i<6; i++) info->mac_addr[i] = rtl_mac[i];
+                regs->eax = 0;
+            } else {
+                regs->eax = -1;
+            }
+            break;
+        }
+
+        // ----- SYS_GET_PCI_INFO (36) -----
+        case SYS_GET_PCI_INFO: {
+            pci_device_t* array = (pci_device_t*)regs->ebx;
+            int max_count = (int)regs->ecx;
+            if (validate_user_ptr(array, sizeof(pci_device_t) * max_count)) {
+                int count = (pci_device_count < max_count) ? pci_device_count : max_count;
+                for (int i = 0; i < count; i++) {
+                    array[i] = pci_devices[i];
+                }
+                regs->eax = count;
+            } else {
+                regs->eax = -1;
+            }
+            break;
+        }
+
+        // ----- SYS_LIST_DIR (37) -----
+        case SYS_LIST_DIR: {
+            dir_entry_t* array = (dir_entry_t*)regs->ebx;
+            int max_count = (int)regs->ecx;
+            int parent_node = (int)regs->edx;
+            if (!validate_user_ptr(array, sizeof(dir_entry_t) * max_count)) {
+                regs->eax = (uint32_t)-1; break;
+            }
+            int count = 0;
+            for (int i = 0; i < MAX_NODES && count < max_count; i++) {
+                if (fs_nodes[i].in_use && fs_nodes[i].parent == parent_node) {
+                    dir_entry_t* e = &array[count];
+                    for (int j = 0; j < 31 && fs_nodes[i].name[j]; j++)
+                        e->name[j] = fs_nodes[i].name[j];
+                    e->name[31] = '\0';
+                    // Find null terminator
+                    int nlen = 0;
+                    while (nlen < 31 && fs_nodes[i].name[nlen]) nlen++;
+                    e->name[nlen] = '\0';
+                    e->type = (int)fs_nodes[i].type;
+                    e->size = fs_nodes[i].size;
+                    e->node_idx = i;
+                    count++;
+                }
+            }
+            regs->eax = count;
+            break;
+        }
+
+        // ----- SYS_STAT_FILE (38) -----
+        case SYS_STAT_FILE: {
+            const char* path = (const char*)regs->ebx;
+            if (safe_strlen(path, MAX_PATH) < 0) {
+                regs->eax = (uint32_t)-1; break;
+            }
+            int node = vfs_get_node(path);
+            regs->eax = (uint32_t)node;
+            break;
+        }
+        // ----- SYS_DNS_RESOLVE (39) -----
+        case SYS_DNS_RESOLVE: {
+            const char* domain = (const char*)regs->ebx;
+            if (safe_strlen(domain, 128) < 0) { regs->eax = (uint32_t)-1; break; }
+            dns_resolved = 0;
+            net_send_dns_query(domain);
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_TCP_CONNECT (40) -----
+        case SYS_TCP_CONNECT: {
+            uint8_t* ip = (uint8_t*)regs->ebx;
+            uint16_t port = (uint16_t)regs->ecx;
+            if (!validate_user_ptr(ip, 4)) { regs->eax = (uint32_t)-1; break; }
+            tcp_rx_len = 0;
+            net_tcp_connect(ip, port);
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_TCP_SEND (41) -----
+        case SYS_TCP_SEND: {
+            uint8_t* data = (uint8_t*)regs->ebx;
+            int len = (int)regs->ecx;
+            if (!validate_user_ptr(data, len)) { regs->eax = (uint32_t)-1; break; }
+            net_tcp_send(data, len);
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_TCP_RECV (42) -----
+        case SYS_TCP_RECV: {
+            uint8_t* buf = (uint8_t*)regs->ebx;
+            int max_len = (int)regs->ecx;
+            if (!validate_user_ptr(buf, max_len)) { regs->eax = (uint32_t)-1; break; }
+            int copy = tcp_rx_len;
+            if (copy > max_len) copy = max_len;
+            if (copy > 0) {
+                memcpy(buf, tcp_rx_buf, copy);
+                tcp_rx_len = 0; // consumed
+            }
+            regs->eax = copy;
+            break;
+        }
+
+        // ----- SYS_NET_STATUS (43) -----
+        case SYS_NET_STATUS: {
+            net_status_t* out = (net_status_t*)regs->ebx;
+            if (validate_user_ptr(out, sizeof(net_status_t))) {
+                out->dns_resolved = dns_resolved;
+                for (int i = 0; i < 4; i++) out->dns_ip[i] = dns_resolved_ip[i];
+                out->tcp_state = tcp_state;
+            }
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_SET_STDOUT_IPC (44) -----
+        case SYS_SET_STDOUT_IPC: {
+            extern int stdout_ipc_qid;
+            stdout_ipc_qid = (int)regs->ebx;
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_EXEC_CMD (45) -----
+        case SYS_EXEC_CMD: {
+            const char* cmd_str = (const char*)regs->ebx;
+            if (safe_strlen(cmd_str, CMD_BUF_SIZE) < 0) { regs->eax = (uint32_t)-1; break; }
+            // Copy to shell cmd buffer and exec
+            extern char cmd_b[CMD_BUF_SIZE];
+            extern int b_idx;
+            int len2 = 0;
+            while (cmd_str[len2] && len2 < CMD_BUF_SIZE - 1) {
+                cmd_b[len2] = cmd_str[len2];
+                len2++;
+            }
+            cmd_b[len2] = '\0';
+            b_idx = len2;
+            // Enable IPC stdout redirect during execution
+            extern int stdout_ipc_qid;
+            int saved_qid = stdout_ipc_qid;
+            // exec using the IPC queue that was set
+            extern int use_term_buf;
+            extern int term_app_running;
+            use_term_buf = 0; // Don't use old term buf
+            ex_cmd();
+            extern void vga_flush_ipc();
+            vga_flush_ipc();
+            stdout_ipc_qid = saved_qid;
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_GET_TASKS (46) -----
+        case SYS_GET_TASKS: {
+            sys_task_info_t* array = (sys_task_info_t*)regs->ebx;
+            int max_count = (int)regs->ecx;
+            if (!validate_user_ptr(array, sizeof(sys_task_info_t) * max_count)) { regs->eax = (uint32_t)-1; break; }
+            int count = 0;
+            for (int i = 0; i < 64 && count < max_count; i++) { // MAX_TASKS is 64 in task.h
+                task_info_t info;
+                if (get_task_info(i, &info)) {
+                    array[count].id = info.id;
+                    array[count].ring = info.ring;
+                    array[count].state = info.state;
+                    array[count].priority = info.priority;
+                    count++;
+                }
+            }
+            regs->eax = count;
+            break;
+        }
+
+        // ----- SYS_GET_WINDOWS (47) -----
+        case SYS_GET_WINDOWS: {
+            sys_win_info_t* array = (sys_win_info_t*)regs->ebx;
+            int max_count = (int)regs->ecx;
+            if (!validate_user_ptr(array, sizeof(sys_win_info_t) * max_count)) { regs->eax = (uint32_t)-1; break; }
+            int count = 0;
+            for (int i = 0; i < MAX_WINDOWS && count < max_count; i++) {
+                if (wm_wins[i].id >= 0 && wm_wins[i].visible) {
+                    array[count].id = wm_wins[i].id;
+                    array[count].owner_ring = wm_wins[i].owner_ring;
+                    array[count].visible = wm_wins[i].visible;
+                    array[count].minimized = wm_wins[i].minimized;
+                    int j = 0;
+                    while (wm_wins[i].title[j] && j < 31) {
+                        array[count].title[j] = wm_wins[i].title[j];
+                        j++;
+                    }
+                    array[count].title[j] = '\0';
+                    count++;
+                }
+            }
+            regs->eax = count;
+            break;
+        }
+
+        // ----- SYS_KILL_TASK (48) -----
+        case SYS_KILL_TASK: {
+            int tid = (int)regs->ebx;
+            // Prevent killing kernel idle task (0) or the current task via this syscall?
+            // Actually sys_exit handles current task.
+            if (tid <= 0) { regs->eax = (uint32_t)-1; break; }
+            regs->eax = (uint32_t)task_kill(tid);
+            break;
+        }
+
+        // ----- SYS_GET_LAUNCH_ARG (49) -----
+        case SYS_GET_LAUNCH_ARG: {
+            char* user_buf = (char*)regs->ebx;
+            int max_len = (int)regs->ecx;
+            if (max_len <= 0 || !validate_user_ptr(user_buf, max_len)) {
+                write_serial_string("[LAUNCH_ARG] bad ptr\n");
+                regs->eax = (uint32_t)-1; break;
+            }
+            extern const char* task_get_launch_arg(int tid);
+            const char* arg = task_get_launch_arg(get_current_task());
+            write_serial_string("[LAUNCH_ARG] tid=");
+            write_serial_hex(get_current_task());
+            write_serial_string(" arg='");
+            write_serial_string(arg);
+            write_serial_string("'\n");
+            int i = 0;
+            for (; i < max_len - 1 && arg[i]; i++) {
+                user_buf[i] = arg[i];
+            }
+            user_buf[i] = '\0';
+            regs->eax = (uint32_t)i;
+            break;
+        }
+
+        // ----- SYS_CREATE_FILE (50) -----
+        case SYS_CREATE_FILE: {
+            const char* path = (const char*)regs->ebx;
+            if (safe_strlen(path, MAX_FILENAME) < 0) {
+                regs->eax = (uint32_t)-1; break;
+            }
+            write_serial_string("[CREATE_FILE] ");
+            write_serial_string(path);
+            write_serial('\n');
+            extern int vfs_create_file(const char* name);
+            int res = vfs_create_file(path);
+            regs->eax = (uint32_t)res;
             break;
         }
 

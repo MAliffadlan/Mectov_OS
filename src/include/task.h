@@ -44,4 +44,15 @@ int task_kill(int tid);
 int task_get_fd(int tid, int local_fd);
 void task_set_fd(int tid, int local_fd, int global_fd);
 
+// === NEW: Task Info for GUI ===
+typedef struct {
+    int id;
+    int state;
+    int ring;
+    int priority;
+    int sleep_ticks;
+} task_info_t;
+
+int get_task_info(int tid, task_info_t* info);
+
 #endif

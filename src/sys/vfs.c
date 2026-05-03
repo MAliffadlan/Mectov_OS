@@ -17,6 +17,17 @@ extern uint8_t _binary_gcalc_mct_start[];
 extern uint8_t _binary_gcalc_mct_end[];
 static uint32_t gcalc_mct_size() { return (uint32_t)(_binary_gcalc_mct_end - _binary_gcalc_mct_start); }
 
+// Embedded binary for terminal.mct
+extern uint8_t _binary_terminal_mct_start[];
+extern uint8_t _binary_terminal_mct_end[];
+static uint32_t terminal_mct_size() { return (uint32_t)(_binary_terminal_mct_end - _binary_terminal_mct_start); }
+
+extern uint8_t _binary_taskmgr_mct_start[];
+extern uint8_t _binary_taskmgr_mct_end[];
+
+extern uint8_t _binary_edit_mct_start[];
+extern uint8_t _binary_edit_mct_end[];
+
 // Embedded binary for hello.mct
 extern uint8_t _binary_hello_mct_start[];
 extern uint8_t _binary_hello_mct_end[];
@@ -123,6 +134,54 @@ void vfs_init() {
     // Inject hello.mct
     vfs_create_file("apps/hello.mct");
     vfs_write_file("apps/hello.mct", (const char*)_binary_hello_mct_start, hello_mct_size());
+
+    // Inject clock.mct
+    extern uint8_t _binary_clock_mct_start[];
+    extern uint8_t _binary_clock_mct_end[];
+    vfs_create_file("apps/clock.mct");
+    vfs_write_file("apps/clock.mct", (const char*)_binary_clock_mct_start, _binary_clock_mct_end - _binary_clock_mct_start);
+
+    // Inject snake.mct
+    extern uint8_t _binary_snake_mct_start[];
+    extern uint8_t _binary_snake_mct_end[];
+    vfs_create_file("apps/snake.mct");
+    vfs_write_file("apps/snake.mct", (const char*)_binary_snake_mct_start, _binary_snake_mct_end - _binary_snake_mct_start);
+
+    // Inject sysinfo.mct
+    extern uint8_t _binary_sysinfo_mct_start[];
+    extern uint8_t _binary_sysinfo_mct_end[];
+    vfs_create_file("apps/sysinfo.mct");
+    vfs_write_file("apps/sysinfo.mct", (const char*)_binary_sysinfo_mct_start, _binary_sysinfo_mct_end - _binary_sysinfo_mct_start);
+
+    // Inject pci.mct
+    extern uint8_t _binary_pci_mct_start[];
+    extern uint8_t _binary_pci_mct_end[];
+    vfs_create_file("apps/pci.mct");
+    vfs_write_file("apps/pci.mct", (const char*)_binary_pci_mct_start, _binary_pci_mct_end - _binary_pci_mct_start);
+
+    // Inject explorer.mct
+    extern uint8_t _binary_explorer_mct_start[];
+    extern uint8_t _binary_explorer_mct_end[];
+    vfs_create_file("apps/explorer.mct");
+    vfs_write_file("apps/explorer.mct", (const char*)_binary_explorer_mct_start, _binary_explorer_mct_end - _binary_explorer_mct_start);
+
+    // Inject browser.mct
+    extern uint8_t _binary_browser_mct_start[];
+    extern uint8_t _binary_browser_mct_end[];
+    vfs_create_file("apps/browser.mct");
+    vfs_write_file("apps/browser.mct", (const char*)_binary_browser_mct_start, _binary_browser_mct_end - _binary_browser_mct_start);
+
+    // Inject terminal.mct
+    vfs_create_file("apps/terminal.mct");
+    vfs_write_file("apps/terminal.mct", (const char*)_binary_terminal_mct_start, _binary_terminal_mct_end - _binary_terminal_mct_start);
+    
+    // Task Manager & Editor (New Ring 3 apps)
+    vfs_create_file("apps/taskmgr.mct");
+    vfs_write_file("apps/taskmgr.mct", (const char*)_binary_taskmgr_mct_start, _binary_taskmgr_mct_end - _binary_taskmgr_mct_start);
+    vfs_create_file("apps/edit.mct");
+    vfs_write_file("apps/edit.mct", (const char*)_binary_edit_mct_start, _binary_edit_mct_end - _binary_edit_mct_start);
+    
+    vfs_save();
 
     // Phase 1: UNIX-like /dev filesystem
     int dev_node = vfs_create_node("dev", FS_DIR, 0);

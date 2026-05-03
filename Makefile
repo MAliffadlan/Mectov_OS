@@ -21,7 +21,16 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/boot.o \
        $(OBJ_DIR)/wallpaper.o \
        $(OBJ_DIR)/gcalc_mct.o \
-       $(OBJ_DIR)/hello_mct.o
+       $(OBJ_DIR)/hello_mct.o \
+       $(OBJ_DIR)/clock_mct.o \
+       $(OBJ_DIR)/snake_mct.o \
+       $(OBJ_DIR)/sysinfo_mct.o \
+       $(OBJ_DIR)/pci_mct.o \
+       $(OBJ_DIR)/explorer_mct.o \
+       $(OBJ_DIR)/browser_mct.o \
+       $(OBJ_DIR)/terminal_mct.o \
+       $(OBJ_DIR)/taskmgr_mct.o \
+       $(OBJ_DIR)/edit_mct.o
 
 all: $(OBJ_DIR) myos.bin
 
@@ -42,6 +51,60 @@ $(OBJ_DIR)/gcalc_mct.o: gcalc.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
 $(OBJ_DIR)/hello_mct.o: hello.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+clock.mct: clock.c
+	python3 build_mct.py clock.c clock.mct
+
+snake.mct: snake_ring3.c
+	python3 build_mct.py snake_ring3.c snake.mct
+
+sysinfo.mct: sysinfo.c
+	python3 build_mct.py sysinfo.c sysinfo.mct
+
+explorer.mct: explorer.c
+	python3 build_mct.py explorer.c explorer.mct
+
+pci.mct: pci.c
+	python3 build_mct.py pci.c pci.mct
+
+browser.mct: browser.c
+	python3 build_mct.py browser.c browser.mct
+
+terminal.mct: terminal.c
+	python3 build_mct.py terminal.c terminal.mct
+
+taskmgr.mct: taskmgr.c
+	python3 build_mct.py taskmgr.c taskmgr.mct
+
+edit.mct: edit.c
+	python3 build_mct.py edit.c edit.mct
+
+$(OBJ_DIR)/clock_mct.o: clock.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+$(OBJ_DIR)/snake_mct.o: snake.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+$(OBJ_DIR)/sysinfo_mct.o: sysinfo.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+$(OBJ_DIR)/pci_mct.o: pci.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+$(OBJ_DIR)/explorer_mct.o: explorer.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+$(OBJ_DIR)/browser_mct.o: browser.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+$(OBJ_DIR)/terminal_mct.o: terminal.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+$(OBJ_DIR)/taskmgr_mct.o: taskmgr.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+$(OBJ_DIR)/edit_mct.o: edit.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
 $(OBJ_DIR)/wallpaper.o: $(OBJ_DIR)/wallpaper.bin | $(OBJ_DIR)

@@ -41,6 +41,8 @@ static void save_desktop_icons() {
     vfs_save();
 }
 
+static void open_taskmgr_wrapper() { load_mct_app("apps/taskmgr.mct"); }
+
 static void init_icons() {
     // Grid layout: auto-arrange in a grid
     int grid_cols = (fb_width - 40) / (ICON_W + ICON_PAD);
@@ -59,11 +61,16 @@ static void init_icons() {
     icons[6] = (Icon){ start_x + 2 * grid_gap_x, start_y + 1 * grid_gap_y, "Snake",     open_snake_wrapper };
     icons[7] = (Icon){ start_x + 3 * grid_gap_x, start_y + 1 * grid_gap_y, "Calc",      open_calc_wrapper  };
 
+    // Task Manager kini Ring 3
+    icons[8] = (Icon){ start_x + 0 * grid_gap_x, start_y + 2 * grid_gap_y, "Task Mgr",  open_taskmgr_wrapper };
+
     // Load saved positions
     int read_buf[ICON_COUNT * 2];
     int sz = vfs_read_file("icons.cfg", (char*)read_buf, sizeof(read_buf));
-    if (sz >= (int)(ICON_COUNT * 2 * sizeof(int))) {
-        for (int i = 0; i < ICON_COUNT; i++) {
+    if (sz >= 8) { // Minimal 1 icon (2 * sizeof(int) = 8 bytes)
+        int saved_count = sz / (2 * sizeof(int));
+        if (saved_count > ICON_COUNT) saved_count = ICON_COUNT;
+        for (int i = 0; i < saved_count; i++) {
             icons[i].x = read_buf[i*2];
             icons[i].y = read_buf[i*2+1];
         }
@@ -89,6 +96,7 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
     else if (strcmp(label, "Browser") == 0) bg_col = 0x00319795; // Teal
     else if (strcmp(label, "Snake") == 0) bg_col = 0x0038A169; // Green
     else if (strcmp(label, "Calc") == 0) bg_col = 0x00718096; // Slate gray
+    else if (strcmp(label, "Task Mgr") == 0) bg_col = 0x00805AD5; // Purple
 
     // Draw base rounded squircle
     draw_rounded_rect(bg_x, bg_y, bg_size, bg_size, radius, bg_col);
@@ -145,6 +153,13 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
                 draw_rect(cx - 8 + c*6, cy - 3 + r*6, 4, 4, 0x00A0AEC0); // Buttons
             }
         }
+    } else if (strcmp(label, "Task Mgr") == 0) {
+        // Simple list/graph icon
+        draw_rect(cx - 10, cy - 8, 20, 16, 0x00FFFFFF);
+        draw_rect(cx - 8, cy - 6, 16, 3, 0x00CBD5E0);
+        draw_rect(cx - 8, cy - 1, 16, 3, 0x00CBD5E0);
+        draw_rect(cx - 8, cy + 4, 16, 3, 0x00CBD5E0);
+        draw_rect(cx - 8, cy - 6, 4, 3, 0x00E53E3E); // red dot
     } else {
         // Generic App glyph
         draw_rect(cx - 8, cy - 10, 16, 20, 0x002D3748);

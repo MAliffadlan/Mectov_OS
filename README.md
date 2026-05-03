@@ -145,18 +145,19 @@ Created by M Alif Fadlan.
 - **Custom Binary Format:** 16-byte header with magic number verification and entry point specification.
 - **Fixed-Base Mapping:** Applications are mapped at virtual address `0x02000000` within their own isolated page directory.
 - **Privilege Isolation:** Clean transition from Ring 0 to Ring 3 via `iret`, ensuring user apps cannot execute privileged instructions.
+- **Launch Arguments:** The kernel can pass arguments (like filenames) to newly launched Ring 3 tasks, retrievable via `SYS_GET_LAUNCH_ARG`.
 - **Independent Stacks:** Each Ring 3 task maintains separate 16KB kernel and 8KB user stacks.
 
 ### 14. User-Mode GUI API
 - **Direct Window Management:** Ring 3 applications can now create, raise, and close their own GUI windows via syscalls.
 - **Graphics Primitive Syscalls:** Accelerated `SYS_DRAW_RECT` and `SYS_DRAW_TEXT` for rendering directly into the application's window buffer.
-- **Event Polling:** `SYS_GET_EVENT` allows user apps to respond to window-specific mouse and keyboard input.
+- **Event Polling & Persistence:** `SYS_GET_EVENT` allows user apps to respond to window-specific mouse and keyboard input. It implements a two-phase close signal, giving apps a chance to safely save data to the VFS before terminating.
 - **Flicker-Free Updates:** `SYS_UPDATE_WINDOW` ensures changes are committed to the display list and rendered during the next 60Hz frame sync.
 
 ### 15. Security & Pointer Validation (src/sys/syscall.c)
 - **Safe Syscall Entry:** Every pointer passed from Ring 3 is validated via `validate_user_ptr` to prevent kernel memory corruption or unauthorized data access.
 - **Address Boundary Checks:** Enforces strict memory boundaries (`USER_MEM_LIMIT`) for all syscall parameters.
-- **Zombie Cleanup:** The kernel automatically detects and terminates Ring 3 processes whose GUI windows have been closed, preventing orphaned tasks and resource leaks.
+- **Zombie Cleanup:** The kernel automatically detects and terminates Ring 3 processes whose GUI windows have been closed (if they refuse to exit voluntarily), preventing orphaned tasks and resource leaks.
 - **Privilege Separation:** Use of Global Descriptor Table (GDT) and Task State Segment (TSS) to strictly enforce CPU privilege levels (Ring 0 vs Ring 3).
 
 ---
@@ -221,23 +222,33 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 |---|------|-------------|
 | 32 | SYS_PIPE | Create pipe pair. EBX=pipefd[2] → return 0/-1 |
 
+### Extended System & Hardware (46–50)
+| # | Name | Description |
+|---|------|-------------|
+| 46 | SYS_GET_TASKS | Get list of running tasks |
+| 47 | SYS_GET_WINDOWS | Get list of open windows |
+| 48 | SYS_KILL_TASK | Force kill a task. EBX=tid |
+| 49 | SYS_GET_LAUNCH_ARG| Get launch argument string. EBX=buf, ECX=max_len |
+| 50 | SYS_CREATE_FILE | Directly create an empty file in VFS. EBX=filename |
+
 ---
 
 ## Applications
 
 | Application | Type | Description |
 |---|---|---|
-| Terminal | Ring 0 | Full terminal emulator with command history, smart tab-completion, Ctrl+C, prompt protection |
-| Nano Editor | Ring 0 | Windowed text editor for VFS files |
-| File Explorer | Ring 0 | Browse and open stored files |
-| System Info | Ring 0 | Live RAM, CPU, resolution, uptime, and MAC address |
-| PCI Manager | Ring 0 | Scrollable table of detected PCI hardware |
-| Clock | Ring 0 | Digital clock with WIB timezone |
-| Snake | Ring 0 | Modern grid-based snake game in WM window with gradient body, eyes, score, speed scaling |
-| Power Options | Ring 0 | Shut Down, Restart, and Log Out dialog with accurate button hit-zones |
-| Mini Browser | Ring 0 | Text-mode web browser via serial modem proxy |
+| Terminal | Ring 3 (.mct) | Full terminal emulator with command execution and IPC stdout redirection |
+| Nano Editor | Ring 3 (.mct) | Windowed text editor for VFS files with stable auto-save |
+| File Explorer | Ring 3 (.mct) | Browse and open stored files |
+| System Info | Ring 3 (.mct) | Live RAM, CPU, resolution, uptime, and MAC address |
+| Task Manager | Ring 3 (.mct) | Monitor CPU, RAM, and kill active user processes |
+| PCI Manager | Ring 3 (.mct) | Scrollable table of detected PCI hardware |
+| Clock | Ring 3 (.mct) | Digital clock with WIB timezone |
+| Snake | Ring 3 (.mct) | Modern grid-based snake game in WM window with gradient body, score, speed scaling |
+| Mini Browser | Ring 3 (.mct) | Text-mode web browser via serial modem proxy |
 | Hello Ring 3 | Ring 3 (.mct) | Demo user-space app with isolated memory and GUI window |
 | GUI Calculator | Ring 3 (.mct) | Standalone external GUI calculator |
+| Power Options | Ring 0 | Shut Down, Restart, and Log Out dialog with accurate button hit-zones |
 
 ---
 

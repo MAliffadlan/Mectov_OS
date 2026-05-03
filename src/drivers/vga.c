@@ -523,10 +523,34 @@ void s_work() {
     cy--;
 }
 
+static char ipc_buf[128];
+static int ipc_buf_len = 0;
+
+void vga_flush_ipc() {
+    extern int stdout_ipc_qid;
+    if (stdout_ipc_qid > 0 && ipc_buf_len > 0) {
+        extern int ipc_try_send(int qid, uint32_t type, const void* data, uint32_t len);
+        ipc_try_send(stdout_ipc_qid, 1, ipc_buf, ipc_buf_len);
+        ipc_buf_len = 0;
+    }
+}
+
 void p_char(char c, unsigned char col) {
     extern int get_use_term_buf();
     extern void p_char_gui(char c2, unsigned char col2);
     if (get_use_term_buf()) { p_char_gui(c, col); return; }
+    
+    // IPC stdout redirect for Ring 3 Terminal
+    extern int stdout_ipc_qid;
+    if (stdout_ipc_qid > 0) {
+        ipc_buf[ipc_buf_len++] = c;
+        ipc_buf[ipc_buf_len++] = col;
+        if (ipc_buf_len >= 126 || c == '\n') {
+            vga_flush_ipc();
+        }
+        return;
+    }
+    
     if (c == '\n') { cx = 0; cy++; }
     else {
         d_char(WIN_X + 1 + cx, WIN_Y + 1 + cy, c, col);

@@ -28,7 +28,7 @@ const char* cmd_list[] = {
     "ls","cd","pwd","mkdir","touch","cat","tree","rm",
     "buat","tulis","edit","baca","hapus",
     "echo","beep","nada","tunggu","waktu","warna","kunci",
-    "jalankan","ular","lspci","man",
+    "jalankan","ular","taskmgr","lspci","man",
     "ping","host",
     "matikan","mulaiulang","shutdown","reboot", NULL
 };
@@ -457,6 +457,8 @@ void ex_cmd() {
     }
     // --- ULAR ---
     else if (strcmp(cmd_b, "ular") == 0) start_ular();
+    // --- TASKMGR ---
+    else if (strcmp(cmd_b, "taskmgr") == 0) load_mct_app("apps/taskmgr.mct");
     // --- KUNCI ---
     else if (strcmp(cmd_b, "kunci") == 0) lock_screen();
     // --- WAKTU ---
@@ -497,7 +499,7 @@ void ex_cmd() {
                 term_app_task_id = res;
                 return; // DO NOT PRINT PROMPT
             } else {
-                print("[-] Gagal menjalankan! Error: ", 0x0C); p_int(res, 0x0C); print("\n", 0x0C);
+                print("[-] Gagal mengeksekusi MCT.\n", 0x0C);
             }
         }
     }
@@ -510,18 +512,20 @@ void ex_cmd() {
         else if (res == -2) print("File sudah ada.\n", 0x0C);
         else print("Disk penuh!\n", 0x0C);
     }
-    // --- Legacy: BACA ---
+    // --- BACA ---
     else if (strncmp(cmd_b, "baca ", 5) == 0) {
         char* fname = cmd_b + 5;
-        char buf[2048];
-        int sz = vfs_read_file(fname, buf, 2047);
+        char buf[512];
+        int sz = vfs_read_file(fname, buf, 511);
         if (sz < 0) print("File tidak ditemukan.\n", 0x0C);
         else { buf[sz] = '\0'; print(buf, 0x0F); print("\n", 0x0F); }
     }
     // --- Legacy: EDIT / TULIS ---
     else if (strncmp(cmd_b, "edit ", 5) == 0 || strncmp(cmd_b, "tulis ", 6) == 0) {
-        char* fname = (cmd_b[0] == 'e') ? (cmd_b + 5) : (cmd_b + 6);
-        st_ed(fname);
+        char* fname = (strncmp(cmd_b, "edit ", 5) == 0) ? cmd_b + 5 : cmd_b + 6;
+        print("Membuka Editor...\n", 0x0E);
+        extern int load_mct_app_with_arg(const char*, const char*);
+        load_mct_app_with_arg("apps/edit.mct", fname);
     }
     // --- Legacy: HAPUS ---
     else if (strncmp(cmd_b, "hapus ", 6) == 0) {
@@ -667,11 +671,6 @@ void ex_cmd() {
     }
     
     b_idx = 0;
-    
-    extern int term_app_running;
-    if (!term_app_running) {
-        shell_print_prompt(); 
-    }
 }
 
 void run_script(const char* f) {

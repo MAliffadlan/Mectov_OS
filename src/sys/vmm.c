@@ -118,41 +118,26 @@ uint32_t vmm_create_address_space(void) {
     
     uint32_t* pd = (uint32_t*)(uintptr_t)pd_paddr;
     
-    // Get current page directory from CR3
-    uint32_t cr3_val;
-    __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3_val));
-    uint32_t* cur_pd = (uint32_t*)(uintptr_t)(cr3_val & 0xFFFFF000);
+    // IMPORTANT: Always copy from the KERNEL's boot page directory (task 0),
+    // NOT from whatever CR3 is currently active!
+    // If the scheduler has switched to a user task, the current CR3 would be
+    // that task's PD which includes user-space entries (pd_idx=32+).
+    // Copying those would corrupt the new address space.
+    extern uint32_t tasks_get_boot_cr3(void);
+    uint32_t kernel_cr3 = tasks_get_boot_cr3();
+    uint32_t* kernel_pd = (uint32_t*)(uintptr_t)(kernel_cr3 & 0xFFFFF000);
     
-    // Clone page tables: kernel (0-32MB) and any other high memory (like Framebuffer)
+    // SHARE kernel page tables directly — don't clone them!
+    // Only copy kernel-space entries (identity-map 0-128MB + framebuffer).
+    // pd_idx 0-31 = identity map (128MB), higher indices may be framebuffer.
+    // We do NOT copy user-space entries (pd_idx=32 in this case).
     for (uint32_t i = 0; i < 1024; i++) {
-        // Skip user space (32MB to 128MB -> indices 8 to 31)
-        // User apps will allocate their own frames here.
-        if (i >= 8 && i < 32) continue;
-        
-        if (cur_pd[i] & PAGE_PRESENT) {
-            // Allocate a new page table, clone entries
-            uint32_t pt_paddr = frame_alloc();
-            if (pt_paddr == 0) {
-                vmm_free_address_space(pd_paddr);
-                return 0;
-            }
-            zero_phys_page(pt_paddr);
-            
-            uint32_t* new_pt = (uint32_t*)(uintptr_t)pt_paddr;
-            uint32_t* old_pt = (uint32_t*)(uintptr_t)(cur_pd[i] & 0xFFFFF000);
-            
-            for (int j = 0; j < 1024; j++) {
-                new_pt[j] = old_pt[j];
-            }
-            
-            pd[i] = pt_paddr | (cur_pd[i] & 0xFFF);
+        if (kernel_pd[i] & PAGE_PRESENT) {
+            pd[i] = kernel_pd[i];
         }
     }
     
-    write_serial_string("[VMM] Created address space at ");
-    write_serial_hex(pd_paddr);
-    write_serial('\n');
-    
+    write_serial_string("[VMM] Created address space OK\n");
     return pd_paddr;
 }
 
@@ -161,23 +146,35 @@ void vmm_free_address_space(uint32_t page_dir) {
     
     uint32_t* pd = (uint32_t*)(uintptr_t)page_dir;
     
-    // Free page tables
+    // Get kernel page directory so we know which entries are shared
+    extern uint32_t tasks_get_boot_cr3(void);
+    uint32_t* kernel_pd = (uint32_t*)(uintptr_t)(tasks_get_boot_cr3() & 0xFFFFF000);
+    
+    // Free only privately-allocated page tables (not shared kernel ones)
     for (int i = 0; i < TABLE_PER_DIR; i++) {
-        if (pd[i] & PAGE_PRESENT) {
-            uint32_t pt_paddr = pd[i] & 0xFFFFF000;
-            // Free each page in the page table
-            uint32_t* pt = (uint32_t*)(uintptr_t)pt_paddr;
-            for (int j = 0; j < 1024; j++) {
-                if (pt[j] & PAGE_PRESENT) {
-                    uint32_t page_paddr = pt[j] & 0xFFFFF000;
-                    // Don't free kernel region pages
-                    if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
-                        frame_free(page_paddr);
-                    }
+        if (!(pd[i] & PAGE_PRESENT)) continue;
+        
+        uint32_t pt_paddr = pd[i] & 0xFFFFF000;
+        
+        // If this PDE points to the SAME page table as the kernel,
+        // it's a shared kernel page table — DO NOT free it!
+        if (i < 1024 && (kernel_pd[i] & PAGE_PRESENT) &&
+            (kernel_pd[i] & 0xFFFFF000) == pt_paddr) {
+            continue;  // Shared kernel page table, skip
+        }
+        
+        // This is a privately-allocated page table (user space)
+        uint32_t* pt = (uint32_t*)(uintptr_t)pt_paddr;
+        for (int j = 0; j < 1024; j++) {
+            if (pt[j] & PAGE_PRESENT) {
+                uint32_t page_paddr = pt[j] & 0xFFFFF000;
+                // Only free frames outside kernel region
+                if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
+                    frame_free(page_paddr);
                 }
             }
-            frame_free(pt_paddr);
         }
+        frame_free(pt_paddr);
     }
     
     // Free page directory itself
@@ -204,6 +201,11 @@ int vmm_map_page(uint32_t page_dir, uint32_t vaddr, uint32_t paddr, uint32_t fla
         if (pt_paddr == 0) return -1;
         zero_phys_page(pt_paddr);
         pd[pd_idx] = pt_paddr | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+        write_serial_string("[VMM] new PT at ");
+        write_serial_hex(pt_paddr);
+        write_serial_string(" for pd_idx=");
+        write_serial_hex(pd_idx);
+        write_serial('\n');
     }
     
     uint32_t pt_paddr = pd[pd_idx] & 0xFFFFF000;
@@ -245,10 +247,16 @@ int vmm_unmap_page(uint32_t page_dir, uint32_t vaddr) {
 
 uint32_t vmm_alloc_page_at(uint32_t page_dir, uint32_t vaddr, uint32_t flags) {
     uint32_t paddr = frame_alloc();
-    if (paddr == 0) return 0;
+    if (paddr == 0) {
+        write_serial_string("[VMM] alloc_page_at: NO FRAME for vaddr=");
+        write_serial_hex(vaddr);
+        write_serial('\n');
+        return 0;
+    }
     
     if (vmm_map_page(page_dir, vaddr, paddr, flags) != 0) {
         frame_free(paddr);
+        write_serial_string("[VMM] alloc_page_at: MAP FAILED\n");
         return 0;
     }
     return vaddr;

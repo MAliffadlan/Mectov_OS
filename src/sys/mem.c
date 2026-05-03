@@ -17,7 +17,7 @@ void init_mem(uint32_t mem_size) {
     if (mem_bitmap) {
         memset(mem_bitmap, 0, (total_pages / 8) + 1);
     }
-    uint32_t reserved_pages = 0x1000000 / PAGE_SIZE; // 16MB reserved for kernel/stack
+    uint32_t reserved_pages = 0x2000000 / PAGE_SIZE; // 32MB reserved for kernel/stack/heap
     if (reserved_pages > total_pages) reserved_pages = total_pages;
     for (uint32_t i = 0; i < reserved_pages; i++) {
         if (mem_bitmap) mem_bitmap[i / 8] |= (1 << (i % 8));

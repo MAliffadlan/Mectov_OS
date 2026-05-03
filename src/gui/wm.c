@@ -62,6 +62,7 @@ int wm_open(int x, int y, int w, int h, const char* title,
             wm_wins[i].key_fn    = key_fn;
             wm_wins[i].tick_fn   = tick_fn;
             wm_wins[i].mouse_fn  = mouse_fn;
+            wm_wins[i].owner_ring = 0; // Default to kernel
             wm_wins[i].visible   = 1;
             wm_wins[i].dragging  = 0;
             wm_wins[i].resizing  = 0;

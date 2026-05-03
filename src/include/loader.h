@@ -14,5 +14,6 @@ typedef struct {
 } mct_header_t;
 
 int load_mct_app(const char* filename);
+int load_mct_app_with_arg(const char* filename, const char* arg);
 
 #endif

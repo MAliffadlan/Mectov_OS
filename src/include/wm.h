@@ -36,6 +36,7 @@ typedef struct {
     int close_cx, close_cy, close_r;
     int max_cx,   max_cy,   max_r;
     int min_cx,   min_cy,   min_r;
+    int owner_ring; // 0 for kernel, 3 for user mode apps
 } WmWin;
 
 extern WmWin wm_wins[MAX_WINDOWS];

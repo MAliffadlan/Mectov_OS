@@ -110,9 +110,9 @@ void isr_handler(registers_t *r) {
     } else {
         // Unhandled exception
         write_serial_string("\n[EXCEPTION] int_no=");
-        write_serial('0' + (r->int_no % 10));
+        write_serial_hex(r->int_no);
         write_serial_string(" CS=");
-        write_serial('0' + (r->cs & 3));
+        write_serial_hex(r->cs);
         write_serial('\n');
         
         uint32_t cs = r->cs;
@@ -153,6 +153,12 @@ void isr_handler(registers_t *r) {
                 p_int(cr2, 0x0C);
                 print(")", 0x0C);
             }
+            write_serial_string("EIP: ");
+            write_serial_hex(r->eip);
+            write_serial_string(" CS: ");
+            write_serial_hex(r->cs);
+            write_serial_string("\n");
+
             print("\n  EIP=", 0x0C); p_int(r->eip, 0x0C);
             print("  CS=",  0x0C); p_int(r->cs, 0x0C);
             print("\n", 0x0C);
