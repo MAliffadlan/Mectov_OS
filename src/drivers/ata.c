@@ -1,8 +1,8 @@
 #include "../include/ata.h"
 #include "../include/io.h"
 
-void ata_wait_bsy() { int t=100000; while((inb(0x1F7)&0x80)&&t--); }
-void ata_wait_drq() { int t=100000; while(!(inb(0x1F7)&0x08)&&t--); }
+void ata_wait_bsy() { while(inb(0x1F7) & 0x80); }
+void ata_wait_drq() { while(!(inb(0x1F7) & 0x08)); }
 
 volatile int hdd_activity = 0;
 

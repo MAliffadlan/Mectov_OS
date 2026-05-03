@@ -636,15 +636,16 @@ int vfs_write_file(const char* path, const char* data, int size) {
     // For now, allocate from end of node table
     static int next_data_sector = 0;
     if (next_data_sector == 0) {
-        // Find highest used data sector
         int max_sector = VFS_DATA_START;
         for (int i = 0; i < MAX_NODES; i++) {
-            if (fs_nodes[i].in_use && fs_nodes[i].data_sector > max_sector)
-                max_sector = fs_nodes[i].data_sector;
+            if (fs_nodes[i].in_use && fs_nodes[i].data_sector > 0) {
+                int node_end = fs_nodes[i].data_sector + ((fs_nodes[i].size + 511) / 512);
+                if (node_end > max_sector) {
+                    max_sector = node_end;
+                }
+            }
         }
-        // Also check for freed sectors by scanning
-        // For simplicity, start from after highest known sector
-        next_data_sector = max_sector + 1;
+        next_data_sector = max_sector;
         if (next_data_sector < VFS_DATA_START) next_data_sector = VFS_DATA_START;
     }
     
