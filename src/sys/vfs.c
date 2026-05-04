@@ -28,6 +28,9 @@ extern uint8_t _binary_taskmgr_mct_end[];
 extern uint8_t _binary_edit_mct_start[];
 extern uint8_t _binary_edit_mct_end[];
 
+extern uint8_t _binary_flappy_mct_start[];
+extern uint8_t _binary_flappy_mct_end[];
+
 // Embedded binary for hello.mct
 extern uint8_t _binary_hello_mct_start[];
 extern uint8_t _binary_hello_mct_end[];
@@ -180,6 +183,10 @@ void vfs_init() {
     vfs_write_file("apps/taskmgr.mct", (const char*)_binary_taskmgr_mct_start, _binary_taskmgr_mct_end - _binary_taskmgr_mct_start);
     vfs_create_file("apps/edit.mct");
     vfs_write_file("apps/edit.mct", (const char*)_binary_edit_mct_start, _binary_edit_mct_end - _binary_edit_mct_start);
+    
+    // Flappy Bird Game
+    vfs_create_file("apps/flappy.mct");
+    vfs_write_file("apps/flappy.mct", (const char*)_binary_flappy_mct_start, _binary_flappy_mct_end - _binary_flappy_mct_start);
     
     vfs_save();
 

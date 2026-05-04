@@ -1,4 +1,4 @@
-# Mectov OS v23.0 — Performance & Stability (Shadow Framebuffer, Process Lifecycle, Terminal UX)
+# Mectov OS v24.0 — The DOOM Engine Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -249,6 +249,7 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 | Hello Ring 3 | Ring 3 (.mct) | Demo user-space app with isolated memory and GUI window |
 | GUI Calculator | Ring 3 (.mct) | Standalone external GUI calculator |
 | Power Options | Ring 0 | Shut Down, Restart, and Log Out dialog with accurate button hit-zones |
+| DOOM Engine | Ring 0 (Port) | Full integration of the legendary 1993 DOOM engine with graceful exit to desktop |
 
 ---
 
@@ -285,6 +286,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v24.0 | **DOOM Engine Port:** Fully playable port of the classic 1993 DOOM engine integrated directly into the kernel. Features keyboard polling, double buffer to MMIO front buffer translation, graceful OS exiting (`vga_force_sync`), and proper process teardown. |
 | v23.0 | **Performance & Stability:** Shadow Framebuffer (delta-only MMIO), VSync removal, zombie process detection + auto-kill, `task_kill()` API, Ctrl+C signal, Ctrl key tracking, Snake rewritten as WM app, terminal prompt protection, smart tab-completion with trailing space/slash, carriage return support, history display fix, power menu restart fix, `-no-reboot` removal. |
 | v22.0 | **Kernel Modernization:** Virtual Memory Manager (per-process address spaces, page mapping, region allocator), IPC named message queues (non-blocking send, blocking receive with timeout), 4-level priority thread scheduling with sleep/wake API, and 14 new syscalls (VMM/thread/IPC). |
 | v21.0 | **Premium UI Refinement:** High-res sleek mouse cursor with dynamic shadow, classic 3-arc WiFi indicator in system tray, and return to forced 60Hz real-time rendering loop. |

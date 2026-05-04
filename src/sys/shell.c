@@ -457,6 +457,14 @@ void ex_cmd() {
     }
     // --- ULAR ---
     else if (strcmp(cmd_b, "ular") == 0) start_ular();
+    // --- FLAPPY ---
+    else if (strcmp(cmd_b, "flappy") == 0) load_mct_app("apps/flappy.mct");
+    // --- DOOM ---
+    else if (strcmp(cmd_b, "doom") == 0) {
+        print("Starting DOOM...\n", 0x0C);
+        extern void doom_start(void);
+        doom_start();
+    }
     // --- TASKMGR ---
     else if (strcmp(cmd_b, "taskmgr") == 0) load_mct_app("apps/taskmgr.mct");
     // --- KUNCI ---

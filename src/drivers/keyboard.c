@@ -7,27 +7,33 @@ int shift_p = 0, caps_a = 0;
 int keyboard_ctrl_held = 0;
 
 // Scancode Buffer (Gudang Antrean)
-#define KBD_BUFFER_SIZE 256
+#define KBD_BUFFER_SIZE 2048
 static uint8_t kbd_buffer[KBD_BUFFER_SIZE];
-static uint32_t kbd_head = 0;
-static uint32_t kbd_tail = 0;
+static volatile uint32_t kbd_head = 0;
+static volatile uint32_t kbd_tail = 0;
 
 static void keyboard_handler(registers_t* regs) {
     (void)regs;
-    uint8_t scancode = inb(0x60);
     
-    // Update modifier state
-    if (scancode == 0x2A || scancode == 0x36) shift_p = 1; 
-    else if (scancode == 0xAA || scancode == 0xB6) shift_p = 0; 
-    else if (scancode == 0x3A) caps_a = !caps_a;
-    else if (scancode == 0x1D) keyboard_ctrl_held = 1;  // Left Ctrl press
-    else if (scancode == 0x9D) keyboard_ctrl_held = 0;  // Left Ctrl release
+    // Drain the PS/2 controller output buffer completely.
+    // If we only read one byte and there are more waiting, the IRQ edge
+    // is lost and the keyboard hangs or drops critical release scancodes!
+    while (inb(0x64) & 1) {
+        uint8_t scancode = inb(0x60);
+        
+        // Update modifier state
+        if (scancode == 0x2A || scancode == 0x36) shift_p = 1; 
+        else if (scancode == 0xAA || scancode == 0xB6) shift_p = 0; 
+        else if (scancode == 0x3A) caps_a = !caps_a;
+        else if (scancode == 0x1D) keyboard_ctrl_held = 1;  // Left Ctrl press
+        else if (scancode == 0x9D) keyboard_ctrl_held = 0;  // Left Ctrl release
 
-    // Push to buffer
-    uint32_t next = (kbd_head + 1) % KBD_BUFFER_SIZE;
-    if (next != kbd_tail) {
-        kbd_buffer[kbd_head] = scancode;
-        kbd_head = next;
+        // Push to buffer
+        uint32_t next = (kbd_head + 1) % KBD_BUFFER_SIZE;
+        if (next != kbd_tail) {
+            kbd_buffer[kbd_head] = scancode;
+            kbd_head = next;
+        }
     }
 }
 

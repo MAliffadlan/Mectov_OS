@@ -397,6 +397,8 @@ void mark_dirty(int x, int y, int w, int h) {
 // ============================================================
 void swap_buffers(void) {
     if (!back_buffer || !fb_addr) return;
+    extern volatile int doom_fullscreen;
+    if (doom_fullscreen) return;  // DOOM writes directly to fb_addr
 
     if (d_min_x > d_max_x || d_min_y > d_max_y) return; // Nothing to draw
 
@@ -443,6 +445,24 @@ void swap_buffers(void) {
 
     // Reset dirty rect
     d_min_x = 9999; d_min_y = 9999; d_max_x = -1; d_max_y = -1;
+}
+
+// ============================================================
+// vga_force_sync - Clears screen and shadow buffer to force full repaint
+// ============================================================
+void vga_force_sync(void) {
+    if (!fb_addr || !front_buffer_copy) return;
+    int size = fb_height * fb_pitch;
+    
+    // Wipe the front buffer (MMIO) to black
+    for (int i = 0; i < size; i++) {
+        ((volatile uint8_t*)fb_addr)[i] = 0;
+    }
+    
+    // Wipe the shadow buffer to black
+    for (int i = 0; i < size; i++) {
+        ((uint8_t*)front_buffer_copy)[i] = 0;
+    }
 }
 
 // ============================================================
@@ -730,6 +750,8 @@ void restore_cursor_bg() {
 
 void draw_mouse_cursor(int x, int y) {
     if (!is_vbe) return;
+    extern volatile int doom_fullscreen;
+    if (doom_fullscreen) return;  // Don't draw cursor during DOOM
     
     save_bg(x, y, 24, 24, cursor_save_buf);
     cursor_saved_x = x; cursor_saved_y = y;

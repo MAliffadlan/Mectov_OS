@@ -20,8 +20,14 @@ static uint32_t last_click_tick = 0;
 static int      last_click_icon = -1;
 
 extern int load_mct_app(const char*);
-static void open_snake_wrapper() { start_ular(); }
 static void open_calc_wrapper() { load_mct_app("apps/gcalc.mct"); }
+static void open_snake_wrapper() { load_mct_app("apps/snake.mct"); }
+static void open_sysinfo_wrapper() { load_mct_app("apps/sysinfo.mct"); }
+static void open_pci_wrapper() { load_mct_app("apps/pci.mct"); }
+static void open_explorer_wrapper() { load_mct_app("apps/explorer.mct"); }
+static void open_browser_wrapper() { load_mct_app("apps/browser.mct"); }
+static void open_taskmgr_wrapper() { load_mct_app("apps/taskmgr.mct"); }
+static void open_flappy_wrapper() { load_mct_app("apps/flappy.mct"); }
 
 #define ICON_W  72
 #define ICON_H  80
@@ -41,8 +47,6 @@ static void save_desktop_icons() {
     vfs_save();
 }
 
-static void open_taskmgr_wrapper() { load_mct_app("apps/taskmgr.mct"); }
-
 static void init_icons() {
     // Grid layout: auto-arrange in a grid
     int grid_cols = (fb_width - 40) / (ICON_W + ICON_PAD);
@@ -53,16 +57,19 @@ static void init_icons() {
     int start_y = 24;
 
     icons[0] = (Icon){ start_x + 0 * grid_gap_x, start_y, "Terminal",  open_terminal_app  };
-    icons[1] = (Icon){ start_x + 1 * grid_gap_x, start_y, "Browser",   open_browser_app   };
-    icons[2] = (Icon){ start_x + 2 * grid_gap_x, start_y, "Explorer",  open_explorer_app  };
-    icons[3] = (Icon){ start_x + 3 * grid_gap_x, start_y, "SysInfo",   open_sysinfo_app   };
+    icons[1] = (Icon){ start_x + 1 * grid_gap_x, start_y, "Browser",   open_browser_wrapper   };
+    icons[2] = (Icon){ start_x + 2 * grid_gap_x, start_y, "Explorer",  open_explorer_wrapper  };
+    icons[3] = (Icon){ start_x + 3 * grid_gap_x, start_y, "SysInfo",   open_sysinfo_wrapper   };
     icons[4] = (Icon){ start_x + 0 * grid_gap_x, start_y + 1 * grid_gap_y, "Clock",     open_clock_app     };
-    icons[5] = (Icon){ start_x + 1 * grid_gap_x, start_y + 1 * grid_gap_y, "PCI",       open_pci_app       };
+    icons[5] = (Icon){ start_x + 1 * grid_gap_x, start_y + 1 * grid_gap_y, "PCI",       open_pci_wrapper       };
     icons[6] = (Icon){ start_x + 2 * grid_gap_x, start_y + 1 * grid_gap_y, "Snake",     open_snake_wrapper };
     icons[7] = (Icon){ start_x + 3 * grid_gap_x, start_y + 1 * grid_gap_y, "Calc",      open_calc_wrapper  };
 
     // Task Manager kini Ring 3
     icons[8] = (Icon){ start_x + 0 * grid_gap_x, start_y + 2 * grid_gap_y, "Task Mgr",  open_taskmgr_wrapper };
+    
+    // Flappy Bird
+    icons[9] = (Icon){ start_x + 1 * grid_gap_x, start_y + 2 * grid_gap_y, "Flappy",    open_flappy_wrapper };
 
     // Load saved positions
     int read_buf[ICON_COUNT * 2];
@@ -92,11 +99,11 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
     else if (strcmp(label, "Explorer") == 0) bg_col = 0x003182CE; // Vibrant Blue
     else if (strcmp(label, "SysInfo") == 0) bg_col = 0x00E2E8F0; // Light silver
     else if (strcmp(label, "Clock") == 0) bg_col = 0x00FFFFFF; // Pure white
-    else if (strcmp(label, "PCI") == 0) bg_col = 0x00DD6B20; // Vibrant orange
-    else if (strcmp(label, "Browser") == 0) bg_col = 0x00319795; // Teal
+    else if (strcmp(label, "Browser") == 0) bg_col = 0x00D69E2E; // Gold/Yellow
+    else if (strcmp(label, "Task Mgr") == 0) bg_col = 0x004A5568; // Gray
     else if (strcmp(label, "Snake") == 0) bg_col = 0x0038A169; // Green
-    else if (strcmp(label, "Calc") == 0) bg_col = 0x00718096; // Slate gray
-    else if (strcmp(label, "Task Mgr") == 0) bg_col = 0x00805AD5; // Purple
+    else if (strcmp(label, "Flappy") == 0) bg_col = 0x00ECC94B; // Yellow
+    else bg_col = 0x00718096; // Default Gray
 
     // Draw base rounded squircle
     draw_rounded_rect(bg_x, bg_y, bg_size, bg_size, radius, bg_col);
@@ -160,6 +167,12 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
         draw_rect(cx - 8, cy - 1, 16, 3, 0x00CBD5E0);
         draw_rect(cx - 8, cy + 4, 16, 3, 0x00CBD5E0);
         draw_rect(cx - 8, cy - 6, 4, 3, 0x00E53E3E); // red dot
+    } else if (strcmp(label, "Flappy") == 0) {
+        // Bird glyph
+        draw_rect(cx - 6, cy - 6, 12, 12, 0x00FFFFFF); // Body
+        draw_rect(cx + 2, cy - 4, 2, 2, 0x00000000); // Eye
+        draw_rect(cx + 6, cy, 4, 4, 0x00E53E3E); // Beak (Reddish)
+        draw_rect(cx - 10, cy, 4, 4, 0x00FFFFFF); // Wing
     } else {
         // Generic App glyph
         draw_rect(cx - 8, cy - 10, 16, 20, 0x002D3748);

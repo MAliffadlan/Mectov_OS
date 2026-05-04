@@ -22,7 +22,7 @@ echo "[*] Serial debug output -> serial_debug.log"
 qemu-system-i386 -enable-kvm -cpu host \
     -vga std \
     -cdrom mectov.iso \
-    -m 64 \
+    -m 128 \
     -audiodev alsa,id=snd0 \
     -machine pcspk-audiodev=snd0 \
     -net nic,model=rtl8139 -net user \

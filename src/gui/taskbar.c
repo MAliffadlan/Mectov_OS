@@ -95,7 +95,9 @@ static void draw_app_icon(int ix, int iy, const char* title, int size) {
     else if (strncmp(title, "Snake", 5) == 0) bg_col = 0x0038A169;
     else if (strncmp(title, "Calc", 4) == 0) bg_col = 0x00718096;
     else if (strncmp(title, "Editor", 6) == 0) bg_col = 0x00718096;
-    else bg_col = 0x002D3748;
+    else if (strncmp(title, "Task Mgr", 8) == 0) bg_col = 0x004A5568;
+    else if (strncmp(title, "Flappy", 6) == 0) bg_col = 0x00ECC94B;
+    else bg_col = 0x00718096;
 
     draw_rounded_rect(ix, iy, size, size, size/4, bg_col);
 
@@ -117,6 +119,13 @@ static void draw_app_icon(int ix, int iy, const char* title, int size) {
         draw_circle(cx, cy, size/2 - 1, 0x00FFFFFF);
         draw_line(cx - size/2, cy, cx + size/2, cy, 0x00FFFFFF);
         draw_line(cx, cy - size/2, cx, cy + size/2, 0x00FFFFFF);
+    } else if (strncmp(title, "Task Mgr", 8) == 0) {
+        draw_rect(ix + 2, iy + 2, 10, 10, 0x00FFFFFF);
+        draw_rect(ix + 4, iy + 4, 6, 2, 0x00CBD5E0);
+        draw_rect(ix + 4, iy + 8, 6, 2, 0x00CBD5E0);
+    } else if (strncmp(title, "Flappy", 6) == 0) {
+        draw_rect(ix + 4, iy + 4, 6, 6, 0x00FFFFFF);
+        draw_rect(ix + 10, iy + 6, 2, 2, 0x00E53E3E);
     } else if (strncmp(title, "Snake", 5) == 0) {
         draw_rect(cx - size/3, cy - 2, size/2, 4, 0x00FFFFFF);
         draw_rect(cx + 2, cy - size/3, 4, size/3, 0x00FFFFFF);

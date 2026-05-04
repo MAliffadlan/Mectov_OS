@@ -32,7 +32,7 @@ static int fps_frames = 0;
 static uint32_t fps_last_tick = 0;
 static uint32_t last_render_us = 0;
 
-static void full_redraw() {
+void full_redraw() {
     uint32_t start_us = timer_get_us();
 
     desktop_draw();
@@ -66,7 +66,9 @@ static void full_redraw() {
     fps_buf[fi] = '\0';
 
     int fx = (int)fb_width - (fi * 8) - 8;
-    draw_rect(fx - 4, 22, fi * 8 + 8, 18, 0x00000000);
+    // Clear a fixed width area (e.g. 200 pixels) to prevent old characters from remaining
+    // when the string shrinks in length
+    draw_rect(fb_width - 200, 22, 200, 18, 0x00000000);
     draw_string_px(fx, 23, fps_buf, 0x0000FF00, 0x00000000);
 
     draw_mouse_cursor(mouse_x, mouse_y);
@@ -180,11 +182,14 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             prev_btn = btn; prev_mx = mx; prev_my = my;
         }
 
-        uint8_t sc = k_get_scancode();
-        if (sc != 0 && (sc < 0x80 || sc == 0xE0)) {
-            char c = scancode_to_char(sc);
-            wm_handle_key(c, sc);
-            needs_redraw = 1;
+        extern volatile int doom_fullscreen;
+        if (!doom_fullscreen) {
+            uint8_t sc = k_get_scancode();
+            if (sc != 0 && (sc < 0x80 || sc == 0xE0)) {
+                char c = scancode_to_char(sc);
+                wm_handle_key(c, sc);
+                needs_redraw = 1;
+            }
         }
 
         extern void net_poll();
