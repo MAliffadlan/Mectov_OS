@@ -1,28 +1,16 @@
 // gcalc.c — Mectov OS GUI Calculator
 // Compiled with -fno-pic -static -O0
 
-typedef unsigned char uint8_t;
-typedef unsigned int uint32_t;
+#include "lib/libc.h"
 
-// --- Syscall Wrappers ---
-static inline int syscall3(int num, int a, int b, int c) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "b"(a), "c"(b), "d"(c));
-    return ret;
-}
+// Define the global pointer to the shared library export table
+void** __mct_lib_ptr = 0;
 
-static inline int syscall5(int num, int a, int b, int c, int d, int e) {
-    int ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "b"(a), "c"(b), "d"(c), "S"(d), "D"(e));
-    return ret;
-}
+// GUI syscall constants are in syscall.h now.
 
-#define SYS_EXIT           10
-#define SYS_DRAW_RECT      11
-#define SYS_DRAW_TEXT      12
-#define SYS_CREATE_WINDOW  15
-#define SYS_GET_EVENT      16
-#define SYS_UPDATE_WINDOW  17
+// GUI Event already in libc.h
+
+
 
 typedef struct {
     int type; // 1 = paint, 2 = key, 3 = mouse
@@ -30,52 +18,9 @@ typedef struct {
     int key;
 } gui_event_t;
 
-int gui_create_window(int x, int y, int w, int h, const char* title) {
-    return syscall5(SYS_CREATE_WINDOW, x, y, w, h, (int)title);
-}
 
-void gui_draw_rect(int wid, int x, int y, int w, int h, uint32_t color) {
-    int wh = (w << 16) | (h & 0xFFFF);
-    syscall5(SYS_DRAW_RECT, wid, x, y, wh, color);
-}
-
-void gui_draw_text(int wid, int x, int y, const char* text, uint32_t color) {
-    syscall5(SYS_DRAW_TEXT, wid, x, y, (int)text, color);
-}
-
-int gui_get_event(int wid, gui_event_t* ev) {
-    return syscall3(SYS_GET_EVENT, wid, (int)ev, 0);
-}
-
-void gui_update_window(int wid) {
-    syscall3(SYS_UPDATE_WINDOW, wid, 0, 0);
-}
-
-void sys_exit() {
-    syscall3(1, (int)"[GCALC] Exiting...\n", 0, 0);
-    syscall3(SYS_EXIT, 0, 0, 0);
-    for(;;);
-}
 
 // --- App Logic ---
-int my_strlen(const char* s) {
-    int n = 0;
-    while (s[n]) n++;
-    return n;
-}
-
-void my_itoa(int n, char* buf) {
-    if (n == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
-    int i = 0, sign = 0;
-    if (n < 0) { sign = 1; n = -n; }
-    while (n > 0) { buf[i++] = (n % 10) + '0'; n /= 10; }
-    if (sign) buf[i++] = '-';
-    buf[i] = '\0';
-    for (int j = 0; j < i / 2; j++) {
-        char t = buf[j]; buf[j] = buf[i - 1 - j]; buf[i - 1 - j] = t;
-    }
-}
-
 int win_id = -1;
 char display_buf[32];
 int buf_len = 0;
@@ -94,14 +39,14 @@ char buttons[20] = {
 
 void draw_ui() {
     // Background
-    gui_draw_rect(win_id, 0, 0, 220, 300, 0x404040);
+    sys_draw_rect(win_id, 0, 0, 220, 300, 0x404040);
     
     // Display
-    gui_draw_rect(win_id, 5, 30, 210, 40, 0x202020);
+    sys_draw_rect(win_id, 5, 30, 210, 40, 0x202020);
     if (buf_len == 0) {
-        gui_draw_text(win_id, 10, 42, "0", 0xFFFFFF);
+        sys_draw_text(win_id, 10, 42, "0", 0xFFFFFF);
     } else {
-        gui_draw_text(win_id, 10, 42, display_buf, 0xFFFFFF);
+        sys_draw_text(win_id, 10, 42, display_buf, 0xFFFFFF);
     }
     
     // Grid
@@ -111,12 +56,12 @@ void draw_ui() {
         int col = i % 4;
         int bx = 5 + col * 52;
         int by = 80 + row * 42;
-        gui_draw_rect(win_id, bx, by, 48, 38, 0x606060);
+        sys_draw_rect(win_id, bx, by, 48, 38, 0x606060);
         char lbl[2] = { buttons[i], '\0' };
-        gui_draw_text(win_id, bx + 20, by + 12, lbl, 0xFFFFFF);
+        sys_draw_text(win_id, bx + 20, by + 12, lbl, 0xFFFFFF);
     }
     
-    gui_update_window(win_id);
+    sys_update_window(win_id);
 }
 
 void handle_click(int mx, int my) {
@@ -163,14 +108,20 @@ void handle_click(int mx, int my) {
 }
 
 void _start() {
-    win_id = gui_create_window(100, 100, 220, 300, "Calculator");
+    __mct_lib_ptr = (void**)mct_load_library("apps/libc.mct");
+    if (!__mct_lib_ptr) {
+        syscall5(SYS_WRITE, 1, (int)"[GCALC] Failed to load libc.mct\n", 32, 0, 0); // fallback if sys_print fails
+        sys_exit();
+    }
+
+    win_id = sys_create_window(100, 100, 220, 300, "Calculator");
     if (win_id < 0) sys_exit();
 
     draw_ui();
 
     gui_event_t ev;
     while (1) {
-        int res = gui_get_event(win_id, &ev);
+        int res = sys_get_event(win_id, &ev);
         if (res < 0) {
             sys_exit();
         } else if (res > 0) {
@@ -180,7 +131,7 @@ void _start() {
                 handle_click(ev.x, ev.y);
             }
         } else {
-            syscall3(9, 0, 0, 0); // YIELD
+            sys_yield(); // YIELD
         }
     }
 }

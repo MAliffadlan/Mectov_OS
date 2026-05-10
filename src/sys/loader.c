@@ -17,10 +17,13 @@ int load_mct_app_with_arg(const char* filename, const char* arg) {
     }
     
     // Read the whole file into a temp buffer
-    static uint8_t buf[65536]; // 64KB max for MCT, static to avoid 4KB kernel stack overflow!
-    int sz = vfs_read_file(filename, (char*)buf, sizeof(buf));
+    uint8_t* buf = (uint8_t*)kmalloc(65536);
+    if (!buf) return -10;
+
+    int sz = vfs_read_file(filename, (char*)buf, 65536);
     if (sz < (int)sizeof(mct_header_t)) {
         write_serial_string("[LOADER] too small\n");
+        kfree(buf);
         return -2;
     }
     
@@ -39,14 +42,14 @@ int load_mct_app_with_arg(const char* filename, const char* arg) {
     write_serial_hex(total_size);
     write_serial_string("\n");
 
-    if (total_size == 0 || total_size > 1024 * 1024) return -4;
+    if (total_size == 0 || total_size > 1024 * 1024) { kfree(buf); return -4; }
     // The file only contains the header and the code. data_size (BSS) is uninitialized memory.
-    if ((int)(sizeof(mct_header_t) + header->code_size) > sz) return -5;
+    if ((int)(sizeof(mct_header_t) + header->code_size) > sz) { kfree(buf); return -5; }
     
     // Create a new address space
     write_serial_string("[LOADER] vmm_create_address_space...\n");
     uint32_t page_dir = vmm_create_address_space();
-    if (page_dir == 0) return -6;
+    if (page_dir == 0) { kfree(buf); return -6; }
     
     // Explicitly map the memory in the new page directory
     uint32_t num_pages = (total_size + 4095) / 4096;
@@ -79,6 +82,8 @@ int load_mct_app_with_arg(const char* filename, const char* arg) {
     
     __asm__ volatile("sti");
     
+    kfree(buf);
+    
     void (*entry_point)() = (void (*)())((uint32_t)app_mem + header->entry);
     
     // CRITICAL: Set launch arg BEFORE creating the task to prevent race condition.
@@ -109,5 +114,50 @@ int load_mct_app_with_arg(const char* filename, const char* arg) {
 
 int load_mct_app(const char* filename) {
     return load_mct_app_with_arg(filename, "");
+}
+
+void* load_mct_library(const char* filename) {
+    write_serial_string("[LOADER] load lib: ");
+    write_serial_string(filename);
+    write_serial_string("\n");
+    
+    int node = vfs_get_node(filename);
+    if (node < 0 || vfs_is_dir(node)) return 0;
+    
+    uint8_t* lib_buf = (uint8_t*)kmalloc(65536);
+    if (!lib_buf) return 0;
+
+    int sz = vfs_read_file(filename, (char*)lib_buf, 65536);
+    if (sz < (int)sizeof(mct_header_t)) { kfree(lib_buf); return 0; }
+    
+    mct_header_t* header = (mct_header_t*)lib_buf;
+    if (header->magic != MCT_MAGIC) { kfree(lib_buf); return 0; }
+    
+    uint32_t total_size = header->code_size + header->data_size;
+    if (total_size == 0 || total_size > 1024 * 1024) { kfree(lib_buf); return 0; }
+    
+    uint32_t lib_base = 0x03000000;
+    uint32_t num_pages = (total_size + 4095) / 4096;
+    if (num_pages == 0) num_pages = 1;
+    
+    uint32_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    
+    // CRITICAL: Prevent task switching while modifying page tables
+    __asm__ volatile("cli");
+    for (uint32_t i = 0; i < num_pages; i++) {
+        uint32_t addr = lib_base + (i * 4096);
+        vmm_alloc_page_at(cr3, addr, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+    }
+    
+    void* lib_mem = (void*)lib_base;
+    memcpy(lib_mem, lib_buf + sizeof(mct_header_t), header->code_size);
+    memset((uint8_t*)lib_mem + header->code_size, 0, header->data_size);
+    __asm__ volatile("sti");
+
+    kfree(lib_buf);
+    
+    // In our library, the export table (MLIB) is placed right at the beginning of .text (offset 0)
+    return lib_mem;
 }
 

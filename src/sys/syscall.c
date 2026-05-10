@@ -783,6 +783,17 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_LOAD_LIBRARY (51) -----
+        case SYS_LOAD_LIBRARY: {
+            const char* lib_name = (const char*)regs->ebx;
+            if (safe_strlen(lib_name, MAX_FILENAME) < 0) {
+                regs->eax = 0; break;
+            }
+            extern void* load_mct_library(const char* filename);
+            regs->eax = (uint32_t)load_mct_library(lib_name);
+            break;
+        }
+
         // ===== NEW: IPC =====
 
         // ----- SYS_IPC_CREATE (23) -----

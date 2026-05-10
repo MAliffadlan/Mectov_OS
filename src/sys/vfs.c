@@ -95,15 +95,31 @@ void vfs_init() {
             }
         }
         
-        // Ensure apps directory and hello.mct exist
+        // Ensure apps directory exists
         int apps_node = vfs_get_node("apps");
         if (apps_node < 0) apps_node = vfs_create_node("apps", FS_DIR, 0);
         
+        // Always update snake.mct to latest kernel version for dev
+        extern uint8_t _binary_snake_mct_start[];
+        extern uint8_t _binary_snake_mct_end[];
+        if (vfs_get_node("apps/snake.mct") < 0) vfs_create_file("apps/snake.mct");
+        vfs_write_file("apps/snake.mct", (const char*)_binary_snake_mct_start, _binary_snake_mct_end - _binary_snake_mct_start);
+
+        extern uint8_t _binary_libc_mct_start[];
+        extern uint8_t _binary_libc_mct_end[];
+        if (vfs_get_node("apps/libc.mct") < 0) vfs_create_file("apps/libc.mct");
+        vfs_write_file("apps/libc.mct", (const char*)_binary_libc_mct_start, _binary_libc_mct_end - _binary_libc_mct_start);
+
+        extern uint8_t _binary_calc_mct_start[];
+        extern uint8_t _binary_calc_mct_end[];
+        if (vfs_get_node("apps/calc.mct") < 0) vfs_create_file("apps/calc.mct");
+        vfs_write_file("apps/calc.mct", (const char*)_binary_calc_mct_start, _binary_calc_mct_end - _binary_calc_mct_start);
+
         if (vfs_get_node("apps/hello.mct") < 0) {
             vfs_create_file("apps/hello.mct");
             vfs_write_file("apps/hello.mct", (const char*)_binary_hello_mct_start, hello_mct_size());
-            vfs_save();
         }
+        vfs_save();
         return;
     }
     
@@ -187,6 +203,18 @@ void vfs_init() {
     // Flappy Bird Game
     vfs_create_file("apps/flappy.mct");
     vfs_write_file("apps/flappy.mct", (const char*)_binary_flappy_mct_start, _binary_flappy_mct_end - _binary_flappy_mct_start);
+    
+    // Shared Library
+    extern uint8_t _binary_libc_mct_start[];
+    extern uint8_t _binary_libc_mct_end[];
+    vfs_create_file("apps/libc.mct");
+    vfs_write_file("apps/libc.mct", (const char*)_binary_libc_mct_start, _binary_libc_mct_end - _binary_libc_mct_start);
+    
+    // Calc
+    extern uint8_t _binary_calc_mct_start[];
+    extern uint8_t _binary_calc_mct_end[];
+    vfs_create_file("apps/calc.mct");
+    vfs_write_file("apps/calc.mct", (const char*)_binary_calc_mct_start, _binary_calc_mct_end - _binary_calc_mct_start);
     
     vfs_save();
 

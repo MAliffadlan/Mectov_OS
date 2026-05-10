@@ -97,6 +97,7 @@ typedef struct {
 #define SYS_KILL_TASK      48  // EBX=tid -> returns 0/-1
 #define SYS_GET_LAUNCH_ARG 49  // EBX=buf_ptr, ECX=max_len -> returns length
 #define SYS_CREATE_FILE    50  // EBX=path_ptr -> returns 0/-1
+#define SYS_LOAD_LIBRARY   51  // EBX=lib_name_ptr -> returns base_address of export table
 
 // Virtual Memory
 #define SYS_VMM_MAP        29  // EBX=vaddr, ECX=paddr, EDX=flags → return 0/-1

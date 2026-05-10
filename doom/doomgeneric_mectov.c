@@ -159,31 +159,19 @@ void DG_DrawFrame(void) {
     /* Poll keyboard every frame */
     doom_poll_keyboard();
     
-    /* DOOM renders at DOOMGENERIC_RESX x DOOMGENERIC_RESY (default 640x400)
-     * Our framebuffer might be different size, so we need to scale.
-     * For simplicity, we'll do nearest-neighbor scaling. */
-    
+    /* FULLSCREEN NATIVE 1:1 BLIT (1024x768) */
     uint32_t src_w = DOOMGENERIC_RESX;
     uint32_t src_h = DOOMGENERIC_RESY;
-    uint32_t dst_w = fb_width;
-    uint32_t dst_h = fb_height;
     
-    /* Draw directly to front buffer for maximum speed */
-    uint32_t *dst = fb_addr;
+    /* Bypass back_buffer during fullscreen to avoid being blocked by swap_buffers() */
+    uint32_t *dst = fb_addr; 
     uint32_t dst_pitch_px = fb_pitch / 4;
     
-    for (uint32_t y = 0; y < dst_h; y++) {
-        uint32_t src_y = (y * src_h) / dst_h;
-        if (src_y >= src_h) src_y = src_h - 1;
-        
-        pixel_t *src_row = DG_ScreenBuffer + src_y * src_w;
-        uint32_t *dst_row = dst + y * dst_pitch_px;
-        
-        for (uint32_t x = 0; x < dst_w; x++) {
-            uint32_t src_x = (x * src_w) / dst_w;
-            if (src_x >= src_w) src_x = src_w - 1;
-            dst_row[x] = src_row[src_x];
-        }
+    for (uint32_t y = 0; y < src_h; y++) {
+        uint32_t *src_row = (uint32_t*)DG_ScreenBuffer + (y * src_w);
+        uint32_t *dst_row = dst + (y * dst_pitch_px);
+        /* Fast blit via memcpy */
+        memcpy(dst_row, src_row, src_w * 4);
     }
 }
 

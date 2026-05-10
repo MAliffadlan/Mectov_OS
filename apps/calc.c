@@ -5,41 +5,25 @@
 // Compiled with -fno-pic, EBX is safe to use directly.
 // ============================================================
 
-// --- Syscall interface (no kernel headers, no PIC) ---
-static inline int syscall3(int num, int a, int b, int c) {
-    int ret;
-    __asm__ volatile("int $0x80"
-        : "=a"(ret)
-        : "a"(num), "b"(a), "c"(b), "d"(c)
-    );
-    return ret;
-}
+#include "lib/libc.h"
 
-#define SYS_PRINT    1
-#define SYS_GET_KEY  13
-#define SYS_YIELD    9
-#define SYS_EXIT     10
+// Define the global pointer to the shared library export table
+void** __mct_lib_ptr = 0;
 
 // --- Print string to terminal ---
 static void print(const char* s, int color) {
-    syscall3(SYS_PRINT, (int)s, color, 0);
+    sys_print(s, color);
 }
+
 
 // --- Get one key (blocking) ---
 static char getchar(void) {
     char c;
     while (1) {
-        c = (char)syscall3(SYS_GET_KEY, 0, 0, 0);
+        c = (char)sys_get_key();
         if (c != 0) return c;
-        syscall3(SYS_YIELD, 0, 0, 0);
+        sys_yield();
     }
-}
-
-// --- String helpers ---
-static int my_strlen(const char* s) {
-    int n = 0;
-    while (s[n]) n++;
-    return n;
 }
 
 // --- Read a line from keyboard into buf (max len-1 chars) ---
@@ -69,62 +53,22 @@ static int readline(char* buf, int len) {
     return i;
 }
 
-// --- Convert string to integer (supports negative) ---
-static int my_atoi(const char* s) {
-    int result = 0;
-    int sign = 1;
-    int i = 0;
-    
-    // Skip whitespace
-    while (s[i] == ' ') i++;
-    
-    // Handle sign
-    if (s[i] == '-') { sign = -1; i++; }
-    else if (s[i] == '+') { i++; }
-    
-    // Convert digits
-    while (s[i] >= '0' && s[i] <= '9') {
-        result = result * 10 + (s[i] - '0');
-        i++;
-    }
-    
-    return result * sign;
-}
-
-// --- Convert integer to string ---
-static void my_itoa(int num, char* buf) {
-    if (num == 0) {
-        buf[0] = '0'; buf[1] = '\0';
-        return;
-    }
-    
-    int negative = 0;
-    unsigned int unum;
-    
-    if (num < 0) {
-        negative = 1;
-        unum = (unsigned int)(-(num + 1)) + 1; // handle INT_MIN
-    } else {
-        unum = (unsigned int)num;
-    }
-    
-    // Build digits in reverse
-    char tmp[12];
-    int i = 0;
-    while (unum > 0) {
-        tmp[i++] = '0' + (unum % 10);
-        unum /= 10;
-    }
-    
-    int j = 0;
-    if (negative) buf[j++] = '-';
-    while (i > 0) buf[j++] = tmp[--i];
-    buf[j] = '\0';
-}
-
 // --- Entry point ---
 void _start() {
-    // Banner
+    // Load shared library
+    __mct_lib_ptr = (void**)mct_load_library("apps/libc.mct");
+    if (!__mct_lib_ptr) {
+        syscall5(SYS_WRITE, 1, (int)"[!] Fatal: Failed to load libc.mct\n", 35, 0, 0); // fallback if sys_print doesn't work
+        sys_exit();
+    }
+    
+    // We loaded the library successfully!
+    int fd = sys_open("/dev/serial");
+    if (fd < 0) {
+        // Just directly call sys_write to fd 1 if serial is 1, or use dummy
+    }
+    
+    // Print banner using print
     print("====================================\n", 0x0E);
     print("   Mectov Calculator v1.0 (Ring 3)\n", 0x0A);
     print("====================================\n", 0x0E);
@@ -204,6 +148,5 @@ void _start() {
     print("\n[*] Terima kasih! Sampai jumpa.\n", 0x0E);
     
     // Exit task
-    syscall3(SYS_EXIT, 0, 0, 0);
-    for(;;);
+    sys_exit();
 }

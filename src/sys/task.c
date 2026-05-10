@@ -68,6 +68,7 @@ int create_task(void (*entry)()) {
             __asm__ volatile("cli");
             
             tasks[i].ring = 0;
+            tasks[i].launch_arg[0] = '\0';
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
@@ -106,6 +107,7 @@ int create_user_task(void (*entry)()) {
             __asm__ volatile("cli");
             
             tasks[i].ring = 3;
+            tasks[i].launch_arg[0] = '\0';
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];

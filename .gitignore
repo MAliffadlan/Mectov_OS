@@ -17,3 +17,5 @@ iso/
 xbin/
 *.deb
 xorriso_bin/
+# Added by code-review-graph
+.code-review-graph/

@@ -1,5 +1,8 @@
 #include "src/include/syscall.h"
+#include "apps/lib/libc.h"
 
+// Define the global pointer to the shared library export table
+void** __mct_lib_ptr = 0;
 #define MAX_TASKS 64
 #define MAX_WINDOWS 8
 #define ROW_HEIGHT 20
@@ -78,17 +81,6 @@ static void refresh_list() {
     }
 }
 
-static void itoa_pad(int val, char* buf, int pad) {
-    char temp[12];
-    int len = 0;
-    if (val == 0) temp[len++] = '0';
-    while (val > 0) { temp[len++] = '0' + (val % 10); val /= 10; }
-    
-    int pos = 0;
-    while (pos < pad - len) buf[pos++] = ' ';
-    for (int i = len - 1; i >= 0; i--) buf[pos++] = temp[i];
-    buf[pos] = '\0';
-}
 
 static void tm_draw(int wid) {
     int cw = 380;
@@ -164,6 +156,12 @@ typedef struct {
 } gui_event_t;
 
 void _start() {
+    __mct_lib_ptr = (void**)mct_load_library("apps/libc.mct");
+    if (!__mct_lib_ptr) {
+        syscall5(SYS_WRITE, 1, (int)"[TASKMGR] Failed to load libc.mct\n", 34, 0, 0); // fallback
+        sys_exit();
+    }
+
     int wid = sys_create_window(100, 100, 380, 300, "Manajer Tugas");
     if (wid < 0) sys_exit();
     

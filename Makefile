@@ -10,7 +10,7 @@ ASFLAGS = -f elf32
 DOOM_CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 \
               -isystem doom/include_override -Idoom \
               -fno-builtin \
-              -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
+              -DDOOMGENERIC_RESX=1024 -DDOOMGENERIC_RESY=768 \
               -w
 
 SRC_DIR = src
@@ -43,6 +43,8 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/taskmgr_mct.o \
        $(OBJ_DIR)/edit_mct.o \
        $(OBJ_DIR)/flappy_mct.o \
+       $(OBJ_DIR)/libc_mct.o \
+       $(OBJ_DIR)/calc_mct.o \
        $(DOOM_OBJS) \
        $(OBJ_DIR)/doom1_wad.o
 
@@ -98,6 +100,12 @@ edit.mct: edit.c
 flappy.mct: flappy_ring3.c
 	python3 build_mct.py flappy_ring3.c flappy.mct
 
+libc.mct: apps/lib/libc.c
+	python3 build_lib.py apps/lib/libc.c libc.mct
+
+calc.mct: apps/calc.c
+	python3 build_mct.py apps/calc.c calc.mct
+
 $(OBJ_DIR)/clock_mct.o: clock.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
@@ -127,6 +135,12 @@ $(OBJ_DIR)/edit_mct.o: edit.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/flappy_mct.o: flappy.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 flappy.mct $(OBJ_DIR)/flappy_mct.o
+
+$(OBJ_DIR)/libc_mct.o: libc.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 libc.mct $(OBJ_DIR)/libc_mct.o
+
+$(OBJ_DIR)/calc_mct.o: calc.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 calc.mct $(OBJ_DIR)/calc_mct.o
 
 $(OBJ_DIR)/wallpaper.o: $(OBJ_DIR)/wallpaper.bin | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
