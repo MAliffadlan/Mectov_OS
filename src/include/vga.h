@@ -40,6 +40,15 @@ void mark_dirty(int x, int y, int w, int h); // Mark dirty rect
 void vga_set_clip(int x, int y, int w, int h);
 void vga_reset_clip(void);
 
+// ---- Render Target State ----
+extern uint32_t* active_rt_buf;
+extern uint32_t  active_rt_width;
+extern uint32_t  active_rt_height;
+extern uint32_t  active_rt_pitch;
+
+void vga_set_render_target(uint32_t* buf, int w, int h, int pitch);
+void vga_blit_buffer(uint32_t* src, int sw, int sh, int dx, int dy);
+
 // ---- Drawing primitives (all write to back_buffer) ----
 void put_pixel(int x, int y, uint32_t color);
 void draw_rect(int x, int y, int w, int h, uint32_t color);

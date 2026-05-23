@@ -220,7 +220,9 @@ void exit(int status) {
     buf[len] = '\0';
     write_serial_string(buf);
     write_serial_string(") called\n");
-    // Halt — returning to shell is not safe since DOOM corrupts kernel state
+    // Terminate the DOOM task gracefully instead of halting the OS
+    extern void task_exit(void);
+    task_exit();
     while(1) { __asm__ volatile("hlt"); }
 }
 
@@ -506,30 +508,91 @@ static FILE doom_stderr_obj = {NULL, 0, 0, 0, 0, 1};
 FILE *doom_stdout = &doom_stdout_obj;
 FILE *doom_stderr = &doom_stderr_obj;
 
+extern int vfs_get_node(const char* path);
+extern int vfs_create_file(const char* path);
+extern int vfs_write_file(const char* path, const char* data, int size);
+extern int vfs_read_file(const char* path, char* buf, int max_size);
+extern int vfs_get_node_count();
+
 FILE *fopen(const char *path, const char *mode) {
-    (void)mode;
     write_serial_string("[DOOM-FOPEN] ");
     write_serial_string(path);
-    write_serial_string("\n");
+    write_serial_string(" (mode: ");
+    write_serial_string(mode);
+    write_serial_string(")\n");
+    
     // Check if this is the WAD file
     if (strstr(path, "doom1.wad") || strstr(path, "DOOM1.WAD") ||
         strstr(path, "doom.wad") || strstr(path, "DOOM.WAD")) {
         FILE *f = (FILE*)malloc(sizeof(FILE));
         if (!f) return NULL;
-        f->data = _binary_doom1_wad_start;
+        f->data = (uint8_t*)_binary_doom1_wad_start;
         f->size = (uint32_t)(_binary_doom1_wad_end - _binary_doom1_wad_start);
         f->pos = 0;
+        f->capacity = 0;
         f->eof_flag = 0;
         f->error_flag = 0;
         f->mode = 0;
         return f;
     }
-    // For any other file, return NULL (not found)
-    return NULL;
+    
+    // Strip leading "./" if present
+    const char *clean_path = path;
+    if (clean_path[0] == '.' && clean_path[1] == '/') {
+        clean_path += 2;
+    }
+    // Also ignore just "." or empty
+    if (!clean_path[0] || (clean_path[0] == '.' && !clean_path[1])) return NULL;
+    
+    int is_write = (mode[0] == 'w' || mode[0] == 'a');
+    
+    FILE *f = (FILE*)malloc(sizeof(FILE));
+    if (!f) return NULL;
+    memset(f, 0, sizeof(FILE));
+    strncpy(f->path, clean_path, 127);
+    f->path[127] = '\0';
+    
+    if (is_write) {
+        f->mode = 2; // Write VFS
+        f->capacity = 128 * 1024; // 128 KB write buffer
+        f->data = (uint8_t*)malloc(f->capacity);
+        f->size = 0;
+        if (!f->data) { free(f); return NULL; }
+    } else {
+        f->mode = 1; // Read VFS
+        f->capacity = 256 * 1024; // Pre-allocate up to 256 KB read buffer
+        f->data = (uint8_t*)malloc(f->capacity);
+        if (!f->data) { free(f); return NULL; }
+        
+        int bytes = vfs_read_file(clean_path, (char*)f->data, f->capacity);
+        if (bytes < 0) {
+            // File not found or read error
+            free(f->data);
+            free(f);
+            return NULL;
+        }
+        f->size = bytes;
+    }
+    
+    return f;
 }
 
 int fclose(FILE *f) {
-    if (f && f != doom_stdout && f != doom_stderr) free(f);
+    if (!f) return 0;
+    if (f == doom_stdout || f == doom_stderr) return 0;
+    
+    if (f->mode == 2 && f->data) {
+        // Write mode: commit to VFS
+        if (vfs_get_node(f->path) < 0) {
+            vfs_create_file(f->path);
+        }
+        vfs_write_file(f->path, (const char*)f->data, f->size);
+    }
+    
+    if (f->mode != 0 && f->data) {
+        free(f->data);
+    }
+    free(f);
     return 0;
 }
 
@@ -544,12 +607,31 @@ size_t fread(void *buf, size_t elem_size, size_t nmemb, FILE *f) {
 }
 
 size_t fwrite(const void *buf, size_t elem_size, size_t nmemb, FILE *f) {
-    (void)buf;
-    // Write to serial for debugging if stdout/stderr
+    if (!f) return 0;
     if (f == doom_stdout || f == doom_stderr) {
-        // Just ignore or write to serial
+        return nmemb; // Ignore standard out writes to disk
     }
-    return elem_size * nmemb; // pretend success
+    
+    if (f->mode != 2 || !f->data) return 0; // Not write mode
+    
+    size_t total = elem_size * nmemb;
+    if (f->pos + total > f->capacity) {
+        uint32_t new_cap = f->capacity * 2;
+        if (new_cap < f->pos + total) new_cap = f->pos + total + 4096;
+        uint8_t *new_data = (uint8_t*)realloc(f->data, new_cap);
+        if (!new_data) {
+            f->error_flag = 1;
+            return 0;
+        }
+        f->data = new_data;
+        f->capacity = new_cap;
+    }
+    
+    memcpy(f->data + f->pos, buf, total);
+    f->pos += total;
+    if (f->pos > f->size) f->size = f->pos;
+    
+    return nmemb;
 }
 
 int fseek(FILE *f, long offset, int whence) {
@@ -607,8 +689,26 @@ ssize_t write(int fd, const void *buf, size_t count) { (void)fd; (void)buf; (voi
 int mkdir(const char *path, int mode) { (void)path; (void)mode; return -1; }
 int stat(const char *path, void *buf) { (void)path; (void)buf; return -1; }
 int access(const char *path, int mode) { (void)path; (void)mode; return -1; }
-int remove(const char *path) { (void)path; return -1; }
-int rename(const char *old, const char *new_name) { (void)old; (void)new_name; return -1; }
+extern int vfs_delete_node(const char* path);
+extern int vfs_rename(const char* old_path, const char* new_path);
+
+int remove(const char *path) { 
+    const char *clean_path = path;
+    if (clean_path[0] == '.' && clean_path[1] == '/') clean_path += 2;
+    int res = vfs_delete_node(clean_path);
+    return (res >= 0) ? 0 : -1;
+}
+
+int rename(const char *old, const char *new_name) { 
+    const char *clean_old = old;
+    if (clean_old[0] == '.' && clean_old[1] == '/') clean_old += 2;
+    
+    const char *clean_new = new_name;
+    if (clean_new[0] == '.' && clean_new[1] == '/') clean_new += 2;
+    
+    int res = vfs_rename(clean_old, clean_new);
+    return (res >= 0) ? 0 : -1;
+}
 FILE *tmpfile(void) { return NULL; }
 char *tmpnam(char *s) { (void)s; return NULL; }
 

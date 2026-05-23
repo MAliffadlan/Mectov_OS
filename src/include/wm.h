@@ -37,6 +37,13 @@ typedef struct {
     int max_cx,   max_cy,   max_r;
     int min_cx,   min_cy,   min_r;
     int owner_ring; // 0 for kernel, 3 for user mode apps
+    int owner_task; // task ID that created this window (-1 = kernel)
+    
+    // Composite WM state
+    uint32_t* content_buffer; // Off-screen canvas for window content
+    int       buffer_dirty;   // 1 = Needs redraw by app
+    int       last_cw;        // Track buffer width
+    int       last_ch;        // Track buffer height
 } WmWin;
 
 extern WmWin wm_wins[MAX_WINDOWS];
@@ -50,9 +57,12 @@ int  wm_open(int x, int y, int w, int h, const char* title,
              WinDrawFn draw_fn, WinKeyFn key_fn, WinTickFn tick_fn, WinMouseFn mouse_fn);
 void wm_close(int id);
 int  wm_is_open(int id);
+void wm_invalidate(int id);
 void wm_draw_all();
 int wm_handle_mouse(int mx, int my, int btn, int pbtn);
+void wm_handle_scroll(int mx, int my, int delta);
 void wm_handle_key(char c, uint8_t sc);
 void wm_tick_all();
+void wm_cleanup_task(int tid);  // Close all windows owned by task tid
 
 #endif

@@ -37,14 +37,14 @@ static int dir = 1; // 0=up 1=right 2=down 3=left
 static int score = 0;
 static int game_over = 0;
 static int move_interval = 150; 
-static uint32_t last_tick = 0;
+static uint32_t last_tick_time = 0;
 
 static void reset_game() {
     slen = 3;
     dir = 1;
     score = 0;
     game_over = 0;
-    last_tick = 0;
+    last_tick_time = sys_get_ticks();
     for (int i = 0; i < slen; i++) {
         sx[i] = GRID_W / 2 - i;
         sy[i] = GRID_H / 2;
@@ -99,7 +99,6 @@ void _start() {
     draw_game(wid);
     
     gui_event_t ev;
-    int tick_count = 0;
     
     while (1) {
         while (sys_get_event(wid, &ev)) {
@@ -120,9 +119,9 @@ void _start() {
             }
         }
         
-        tick_count++;
-        if (!game_over && (tick_count - last_tick > move_interval)) {
-            last_tick = tick_count;
+        uint32_t now = sys_get_ticks();
+        if (!game_over && (now - last_tick_time >= (uint32_t)move_interval)) {
+            last_tick_time = now;
             
             int nx = sx[0];
             int ny = sy[0];

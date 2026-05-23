@@ -131,12 +131,14 @@ char *getenv(const char *name);
 
 /* ===== stdio.h ===== */
 typedef struct {
-    const uint8_t *data;
+    uint8_t *data;
     uint32_t size;
     uint32_t pos;
+    uint32_t capacity;
     int      eof_flag;
     int      error_flag;
-    int      mode; // 0=read, 1=write (stubbed)
+    int      mode; // 0=read WAD, 1=read VFS, 2=write VFS
+    char     path[128];
 } FILE;
 
 extern FILE *doom_stdout;

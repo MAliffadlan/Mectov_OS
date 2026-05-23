@@ -80,6 +80,8 @@ void _start() {
                 }
             }
         }
+
+        
         
         tick++;
         if (tick % 5000 == 0) { // Lebih cepat update-nya biar detiknya gak lag

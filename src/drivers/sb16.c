@@ -127,6 +127,15 @@ void sb16_set_audio_buffer(uint8_t* pcm_data, uint32_t length) {
     current_pcm_pos = 0;
 }
 
+void sb16_stop_playback() {
+    if (!sb16_available) return;
+    // Halt 8-bit DMA
+    dsp_write(0xD0);
+    // Unmask DMA channel just to be safe
+    // Actually D0 just pauses it
+    write_serial_string("[SB16] Playback stopped/paused.\n");
+}
+
 void sb16_start_playback(uint16_t sample_rate) {
     if (!sb16_available) {
         write_serial_string("[SB16] Cannot play: no sound card.\n");
@@ -167,4 +176,34 @@ void sb16_start_playback(uint16_t sample_rate) {
     write_serial_string("[SB16] Playback started at ");
     write_serial_hex(sample_rate);
     write_serial_string(" Hz.\n");
+}
+
+// --- Volume Control ---
+// SB16 master volume: register 0x22, format: left[7:4] | right[3:0] (each 0-15)
+static uint8_t current_volume = 80; // Default 80%
+
+void sb16_set_volume(uint8_t vol) {
+    if (vol > 100) vol = 100;
+    current_volume = vol;
+    
+    if (!sb16_available) return;
+    
+    // Map 0-100 to 0-15 for SB16 mixer
+    uint8_t hw_vol = (vol * 15) / 100;
+    uint8_t mixer_val = (hw_vol << 4) | hw_vol; // Same for L+R
+    
+    outb(DSP_MIXER_ADDR, 0x22); // Master volume register
+    outb(DSP_MIXER_DATA, mixer_val);
+    
+    write_serial_string("[SB16] Volume set to ");
+    write_serial_hex(vol);
+    write_serial_string("%\n");
+}
+
+uint8_t sb16_get_volume(void) {
+    return current_volume;
+}
+
+int sb16_is_available(void) {
+    return sb16_available;
 }

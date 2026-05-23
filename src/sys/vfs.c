@@ -25,8 +25,8 @@ static uint32_t terminal_mct_size() { return (uint32_t)(_binary_terminal_mct_end
 extern uint8_t _binary_taskmgr_mct_start[];
 extern uint8_t _binary_taskmgr_mct_end[];
 
-extern uint8_t _binary_edit_mct_start[];
-extern uint8_t _binary_edit_mct_end[];
+extern uint8_t _binary_notepad_mct_start[];
+extern uint8_t _binary_notepad_mct_end[];
 
 extern uint8_t _binary_flappy_mct_start[];
 extern uint8_t _binary_flappy_mct_end[];
@@ -83,23 +83,46 @@ static int split_path(const char* path, char components[MAX_PATH/2][MAX_FILENAME
 // --- Inisialisasi ---
 
 void vfs_init() {
+    write_serial_string("[VFS] init start\n");
     // Coba load dari disk
     if (vfs_load()) {
-        if (vfs_get_node("/dev") < 0) {
+        write_serial_string("[VFS] loaded ok\n");
+        write_serial_string("[VFS] calling vfs_get_node(/dev)\n");
+        int dev_node_check = vfs_get_node("/dev");
+        write_serial_string("[VFS] vfs_get_node(/dev) returned: ");
+        write_serial_hex(dev_node_check);
+        write_serial_string("\n");
+        if (dev_node_check < 0) {
+            write_serial_string("[VFS] creating /dev\n");
             int dev_node = vfs_create_node("dev", FS_DIR, 0);
+            write_serial_string("[VFS] vfs_create_node dev returned: ");
+            write_serial_hex(dev_node);
+            write_serial_string("\n");
             if (dev_node >= 0) {
                 vfs_create_node("null", FS_DEV, dev_node);
                 vfs_create_node("zero", FS_DEV, dev_node);
                 vfs_create_node("random", FS_DEV, dev_node);
+                write_serial_string("[VFS] saving /dev nodes...\n");
                 vfs_save();
+                write_serial_string("[VFS] saved /dev nodes\n");
             }
         }
         
+        write_serial_string("[VFS] checking apps dir\n");
         // Ensure apps directory exists
         int apps_node = vfs_get_node("apps");
-        if (apps_node < 0) apps_node = vfs_create_node("apps", FS_DIR, 0);
+        write_serial_string("[VFS] apps dir node is: ");
+        write_serial_hex(apps_node);
+        write_serial_string("\n");
+        if (apps_node < 0) {
+            write_serial_string("[VFS] creating apps dir\n");
+            apps_node = vfs_create_node("apps", FS_DIR, 0);
+            write_serial_string("[VFS] apps dir created at: ");
+            write_serial_hex(apps_node);
+            write_serial_string("\n");
+        }
         
-        // Always update snake.mct to latest kernel version for dev
+        // Always update core apps to latest kernel version for dev
         extern uint8_t _binary_snake_mct_start[];
         extern uint8_t _binary_snake_mct_end[];
         if (vfs_get_node("apps/snake.mct") < 0) vfs_create_file("apps/snake.mct");
@@ -115,11 +138,84 @@ void vfs_init() {
         if (vfs_get_node("apps/calc.mct") < 0) vfs_create_file("apps/calc.mct");
         vfs_write_file("apps/calc.mct", (const char*)_binary_calc_mct_start, _binary_calc_mct_end - _binary_calc_mct_start);
 
-        if (vfs_get_node("apps/hello.mct") < 0) {
-            vfs_create_file("apps/hello.mct");
-            vfs_write_file("apps/hello.mct", (const char*)_binary_hello_mct_start, hello_mct_size());
-        }
+        extern uint8_t _binary_volume_mct_start[];
+        extern uint8_t _binary_volume_mct_end[];
+        if (vfs_get_node("apps/volume.mct") < 0) vfs_create_file("apps/volume.mct");
+        vfs_write_file("apps/volume.mct", (const char*)_binary_volume_mct_start, _binary_volume_mct_end - _binary_volume_mct_start);
+
+        extern uint8_t _binary_mplayer_mct_start[];
+        extern uint8_t _binary_mplayer_mct_end[];
+        if (vfs_get_node("apps/mplayer.mct") < 0) vfs_create_file("apps/mplayer.mct");
+        vfs_write_file("apps/mplayer.mct", (const char*)_binary_mplayer_mct_start, _binary_mplayer_mct_end - _binary_mplayer_mct_start);
+
+        extern uint8_t _binary_apps_music_wav_start[];
+        extern uint8_t _binary_apps_music_wav_end[];
+        if (vfs_get_node("apps/music.wav") < 0) vfs_create_file("apps/music.wav");
+        vfs_write_file("apps/music.wav", (const char*)_binary_apps_music_wav_start, _binary_apps_music_wav_end - _binary_apps_music_wav_start);
+
+        extern uint8_t _binary_hello_mct_start[];
+        extern uint8_t _binary_hello_mct_end[];
+        if (vfs_get_node("apps/hello.mct") < 0) vfs_create_file("apps/hello.mct");
+        vfs_write_file("apps/hello.mct", (const char*)_binary_hello_mct_start, _binary_hello_mct_end - _binary_hello_mct_start);
+
+        extern uint8_t _binary_sysinfo_mct_start[];
+        extern uint8_t _binary_sysinfo_mct_end[];
+        if (vfs_get_node("apps/sysinfo.mct") < 0) vfs_create_file("apps/sysinfo.mct");
+        vfs_write_file("apps/sysinfo.mct", (const char*)_binary_sysinfo_mct_start, _binary_sysinfo_mct_end - _binary_sysinfo_mct_start);
+
+        extern uint8_t _binary_pci_mct_start[];
+        extern uint8_t _binary_pci_mct_end[];
+        if (vfs_get_node("apps/pci.mct") < 0) vfs_create_file("apps/pci.mct");
+        vfs_write_file("apps/pci.mct", (const char*)_binary_pci_mct_start, _binary_pci_mct_end - _binary_pci_mct_start);
+
+        extern uint8_t _binary_explorer_mct_start[];
+        extern uint8_t _binary_explorer_mct_end[];
+        if (vfs_get_node("apps/explorer.mct") < 0) vfs_create_file("apps/explorer.mct");
+        vfs_write_file("apps/explorer.mct", (const char*)_binary_explorer_mct_start, _binary_explorer_mct_end - _binary_explorer_mct_start);
+
+        extern uint8_t _binary_browser_mct_start[];
+        extern uint8_t _binary_browser_mct_end[];
+        if (vfs_get_node("apps/browser.mct") < 0) vfs_create_file("apps/browser.mct");
+        vfs_write_file("apps/browser.mct", (const char*)_binary_browser_mct_start, _binary_browser_mct_end - _binary_browser_mct_start);
+
+        extern uint8_t _binary_terminal_mct_start[];
+        extern uint8_t _binary_terminal_mct_end[];
+        if (vfs_get_node("apps/terminal.mct") < 0) vfs_create_file("apps/terminal.mct");
+        vfs_write_file("apps/terminal.mct", (const char*)_binary_terminal_mct_start, _binary_terminal_mct_end - _binary_terminal_mct_start);
+
+        extern uint8_t _binary_taskmgr_mct_start[];
+        extern uint8_t _binary_taskmgr_mct_end[];
+        if (vfs_get_node("apps/taskmgr.mct") < 0) vfs_create_file("apps/taskmgr.mct");
+        vfs_write_file("apps/taskmgr.mct", (const char*)_binary_taskmgr_mct_start, _binary_taskmgr_mct_end - _binary_taskmgr_mct_start);
+
+        extern uint8_t _binary_notepad_mct_start[];
+        extern uint8_t _binary_notepad_mct_end[];
+        if (vfs_get_node("apps/notepad.mct") < 0) vfs_create_file("apps/notepad.mct");
+        vfs_write_file("apps/notepad.mct", (const char*)_binary_notepad_mct_start, _binary_notepad_mct_end - _binary_notepad_mct_start);
+
+        extern uint8_t _binary_flappy_mct_start[];
+        extern uint8_t _binary_flappy_mct_end[];
+        if (vfs_get_node("apps/flappy.mct") < 0) vfs_create_file("apps/flappy.mct");
+        vfs_write_file("apps/flappy.mct", (const char*)_binary_flappy_mct_start, _binary_flappy_mct_end - _binary_flappy_mct_start);
+
+        write_serial_string("[VFS] saving...\n");
         vfs_save();
+        write_serial_string("[VFS] saved ok\n");
+        
+        // Phase 2: Ext2 Filesystem on Drive 1
+        extern int ext2_init(int drive);
+        extern void ext2_populate_vfs(uint32_t inode_num, int vfs_parent_node);
+        write_serial_string("[VFS] ext2_init...\n");
+        if (ext2_init(1) == 0) {
+            write_serial_string("[VFS] ext2 ok\n");
+            int ext2_node = vfs_get_node("ext2");
+            if (ext2_node < 0) ext2_node = vfs_create_node("ext2", FS_DIR, 0);
+            if (ext2_node >= 0) {
+                ext2_populate_vfs(2, ext2_node); // Inode 2 is the root directory
+            }
+        }
+        
+        write_serial_string("[VFS] init done\n");
         return;
     }
     
@@ -197,8 +293,8 @@ void vfs_init() {
     // Task Manager & Editor (New Ring 3 apps)
     vfs_create_file("apps/taskmgr.mct");
     vfs_write_file("apps/taskmgr.mct", (const char*)_binary_taskmgr_mct_start, _binary_taskmgr_mct_end - _binary_taskmgr_mct_start);
-    vfs_create_file("apps/edit.mct");
-    vfs_write_file("apps/edit.mct", (const char*)_binary_edit_mct_start, _binary_edit_mct_end - _binary_edit_mct_start);
+    vfs_create_file("apps/notepad.mct");
+    vfs_write_file("apps/notepad.mct", (const char*)_binary_notepad_mct_start, _binary_notepad_mct_end - _binary_notepad_mct_start);
     
     // Flappy Bird Game
     vfs_create_file("apps/flappy.mct");
@@ -224,6 +320,16 @@ void vfs_init() {
         vfs_create_node("null", FS_DEV, dev_node);
         vfs_create_node("zero", FS_DEV, dev_node);
         vfs_create_node("random", FS_DEV, dev_node);
+    }
+    
+    // Phase 2: Ext2 Filesystem on Drive 1
+    extern int ext2_init(int drive);
+    extern void ext2_populate_vfs(uint32_t inode_num, int vfs_parent_node);
+    if (ext2_init(1) == 0) {
+        int ext2_node = vfs_create_node("ext2", FS_DIR, 0);
+        if (ext2_node >= 0) {
+            ext2_populate_vfs(2, ext2_node); // Inode 2 is the root directory
+        }
     }
     
     vfs_save();
@@ -322,7 +428,6 @@ void vfs_resolve_path(const char* path, char* resolved, int buf_size) {
     vfs_get_abs_path(current_dir, cur_path, MAX_PATH);
     
     int cur_len = strlen(cur_path);
-    int path_len = strlen(path);
     
     // Handle "." and ".." in relative path
     if (strcmp(path, ".") == 0) {
@@ -448,7 +553,7 @@ int vfs_get_node(const char* path) {
 // Cari di dalam satu directory
 int vfs_find_in_dir(const char* name, int dir_node) {
     if (dir_node < 0 || dir_node >= MAX_NODES) return -1;
-    if (!fs_nodes[dir_node].in_use || fs_nodes[dir_node].type != FS_DIR) return -1;
+    if (!fs_nodes[dir_node].in_use || (fs_nodes[dir_node].type != FS_DIR && fs_nodes[dir_node].type != FS_EXT2_DIR)) return -1;
     
     char lc_name[MAX_FILENAME];
     strtolower(lc_name, name);
@@ -469,7 +574,7 @@ int vfs_find_in_dir(const char* name, int dir_node) {
 int vfs_create_node(const char* name, fs_type_t type, int parent) {
     // Validate parent
     if (parent < 0 || parent >= MAX_NODES) return -1;
-    if (!fs_nodes[parent].in_use || fs_nodes[parent].type != FS_DIR) return -1;
+    if (!fs_nodes[parent].in_use || (fs_nodes[parent].type != FS_DIR && fs_nodes[parent].type != FS_EXT2_DIR)) return -1;
     
     // Check name exists in parent
     if (vfs_find_in_dir(name, parent) >= 0) return -2;
@@ -599,6 +704,46 @@ int vfs_delete_node(const char* path) {
 //   Untuk file kecil (< 512 bytes), cukup 1 sektor.
 //   Sektor terakhir berisi data file (tidak harus full 512 bytes).
 
+int vfs_rename(const char* old_path, const char* new_path) {
+    int node = vfs_get_node(old_path);
+    if (node < 0) return -1;
+    if (node == 0) return -3; // Cannot rename root
+    
+    char new_parent_path[MAX_PATH];
+    char new_filename[MAX_FILENAME];
+    
+    if (vfs_get_parent(new_path, new_parent_path, MAX_PATH) < 0) return -1;
+    
+    int len = strlen(new_path);
+    int i = len - 1;
+    while (i >= 0 && new_path[i] == '/') i--;
+    int end = i;
+    while (i >= 0 && new_path[i] != '/') i--;
+    int start = i + 1;
+    int j;
+    for (j = 0; j < end - start + 1 && j < MAX_FILENAME - 1; j++) {
+        new_filename[j] = new_path[start + j];
+    }
+    new_filename[j] = '\0';
+    
+    int new_parent = vfs_get_node(new_parent_path);
+    if (new_parent < 0) return -1;
+    
+    // Delete existing target if any
+    int existing = vfs_find_in_dir(new_filename, new_parent);
+    if (existing >= 0) {
+        vfs_delete_node(new_path);
+    }
+    
+    // Move node
+    fs_nodes[node].parent = new_parent;
+    strncpy(fs_nodes[node].name, new_filename, MAX_FILENAME - 1);
+    fs_nodes[node].name[MAX_FILENAME - 1] = '\0';
+    
+    vfs_save();
+    return 0;
+}
+
 int vfs_read_file(const char* path, char* buf, int max_size) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
@@ -619,6 +764,13 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
             return max_size;
         }
         return -2; // Unknown device
+    }
+    
+    if (fs_nodes[node].type == FS_EXT2_FILE) {
+        extern int ext2_read_file_data(uint32_t inode_num, char* buf, int max_size);
+        int bytes = ext2_read_file_data(fs_nodes[node].ext2_inode, buf, max_size);
+        if (bytes >= 0 && bytes < max_size) buf[bytes] = '\0';
+        return bytes;
     }
     
     if (fs_nodes[node].type != FS_FILE) return -2;
@@ -648,6 +800,10 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
 }
 
 int vfs_write_file(const char* path, const char* data, int size) {
+    extern void write_serial_string(const char*);
+    write_serial_string("[VFS] write: ");
+    write_serial_string(path);
+    write_serial_string("\n");
     int node = vfs_get_node(path);
     if (node < 0) return -1;
 
@@ -826,7 +982,7 @@ void vfs_list_dir(int dir_node, void (*print_fn)(const char*, unsigned char)) {
         count++;
         
         // Print file/dir icon
-        if (fs_nodes[i].type == FS_DIR) {
+        if (fs_nodes[i].type == FS_DIR || fs_nodes[i].type == FS_EXT2_DIR) {
             print_fn("[DIR]  ", 0x0B);
             print_fn(fs_nodes[i].name, 0x0B);
             print_fn("/\n", 0x0B);
@@ -875,12 +1031,12 @@ void vfs_tree(int dir_node, int depth, void (*print_fn)(const char*, unsigned ch
 
 int vfs_is_dir(int node) {
     if (node < 0 || node >= MAX_NODES) return 0;
-    return fs_nodes[node].in_use && fs_nodes[node].type == FS_DIR;
+    return fs_nodes[node].in_use && (fs_nodes[node].type == FS_DIR || fs_nodes[node].type == FS_EXT2_DIR);
 }
 
 int vfs_is_file(int node) {
     if (node < 0 || node >= MAX_NODES) return 0;
-    return fs_nodes[node].in_use && fs_nodes[node].type == FS_FILE;
+    return fs_nodes[node].in_use && (fs_nodes[node].type == FS_FILE || fs_nodes[node].type == FS_EXT2_FILE);
 }
 
 int vfs_get_node_count() {

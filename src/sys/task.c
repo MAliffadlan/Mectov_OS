@@ -5,7 +5,7 @@
 
 #define MAX_TASKS 64
 #define KERNEL_STACK_SIZE 16384
-#define USER_STACK_SIZE   8192
+#define USER_STACK_SIZE   65536
 
 // Task states
 #define TASK_STATE_FREE    0
@@ -126,6 +126,7 @@ int create_user_task(void (*entry)()) {
             *(--stack) = 0x23;       // DS (user data)
             
             tasks[i].esp = (uint32_t)stack;
+            tasks[i].page_dir = tasks[0].page_dir; // Default to kernel page dir
             num_tasks++;
             
             write_serial_string("User ESP: ");
@@ -147,21 +148,70 @@ int create_user_task(void (*entry)()) {
 
 extern void tss_set_kernel_stack(uint32_t stack);
 
+// Shared cleanup for task termination (exit or kill)
+static void task_cleanup(int tid) {
+    if (tid <= 0 || tid >= MAX_TASKS) return;
+    
+    // 1. Clean up windows owned by this task
+    extern void wm_cleanup_task(int tid);
+    wm_cleanup_task(tid);
+    
+    // 2. Free address space (if it's not the kernel's)
+    if (tasks[tid].page_dir != 0 && tasks[tid].page_dir != tasks[0].page_dir) {
+        extern void vmm_free_address_space(uint32_t);
+        vmm_free_address_space(tasks[tid].page_dir);
+        tasks[tid].page_dir = 0;
+    }
+}
+
 uint32_t schedule(uint32_t esp) {
     if (current_task < 0) return esp;
+    
+    // Auto-poll network on every schedule tick to process ARP/DNS/TCP packets in the background
+    extern void net_poll(void);
+    net_poll();
     
     // If we're the only task AND we're active, no need to switch
     if (num_tasks <= 1 && tasks[current_task].state != 0) return esp;
     
+    // 1. Update sleeping tasks
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (tasks[i].state == TASK_STATE_SLEEP) {
+            if (tasks[i].sleep_ticks > 0) {
+                tasks[i].sleep_ticks--;
+            }
+            if (tasks[i].sleep_ticks <= 0) {
+                tasks[i].state = TASK_STATE_READY;
+            }
+        }
+    }
+
     // Save current task's register frame pointer
     tasks[current_task].esp = esp;
-    if (tasks[current_task].state == 1) tasks[current_task].state = 2;
+    if (tasks[current_task].state == TASK_STATE_RUNNING) {
+        tasks[current_task].state = TASK_STATE_READY;
+    }
     
     // Find next ready task (round-robin)
     int next = current_task;
-    do {
+    int found = 0;
+    for (int i = 0; i < MAX_TASKS; i++) {
         next = (next + 1) % MAX_TASKS;
-    } while (tasks[next].state != 2);
+        if (tasks[next].state == TASK_STATE_READY) {
+            found = 1;
+            break;
+        }
+    }
+    
+    if (!found) {
+        // If no other task is ready, keep running current (if it's not free/sleeping)
+        if (tasks[current_task].state == TASK_STATE_READY || tasks[current_task].state == TASK_STATE_RUNNING) {
+            next = current_task;
+        } else {
+            // Fallback to task 0 (kernel/idle)
+            next = 0;
+        }
+    }
     
     tasks[next].state = 1;
     current_task = next;
@@ -188,17 +238,15 @@ uint32_t schedule(uint32_t esp) {
 void task_exit(void) {
     if (current_task <= 0) return; // Never kill task 0 (kernel)
     
-    write_serial_string("[TASK] task_exit called for task ");
+    write_serial_string("[TASK] task_exit tid=");
     write_serial('0' + current_task);
     write_serial('\n');
     
-    tasks[current_task].state = 0; // Mark as free
+    __asm__ volatile("cli");
+    task_cleanup(current_task);
+    tasks[current_task].state = TASK_STATE_FREE;
     num_tasks--;
     
-    // Re-enable interrupts before halting! The syscall interrupt gate (isr128)
-    // auto-clears IF on entry. Without sti, hlt would wait forever since
-    // The timer IRQ will fire, scheduler will skip this task (state=0),
-    // and switch to the next ready task.
     __asm__ volatile("sti");
     for (;;) __asm__("hlt");
 }
@@ -316,12 +364,13 @@ void task_set_fd(int tid, int local_fd, int global_fd) {
     tasks[tid].fd_table[local_fd] = global_fd;
 }
 
-// Kill a specific task by ID (called from kernel, e.g. Ctrl+C)
+// Kill a specific task by ID (called from kernel or syscall)
 int task_kill(int tid) {
-    if (tid <= 0 || tid >= MAX_TASKS) return -1; // Never kill task 0
-    if (tasks[tid].state == TASK_STATE_FREE) return -1; // Already dead
+    if (tid <= 0 || tid >= MAX_TASKS) return -1;
+    if (tasks[tid].state == TASK_STATE_FREE) return -1;
     
     __asm__ volatile("cli");
+    task_cleanup(tid);
     tasks[tid].state = TASK_STATE_FREE;
     num_tasks--;
     __asm__ volatile("sti");

@@ -103,11 +103,6 @@ static void zero_phys_page(uint32_t paddr) {
     }
 }
 
-// Clone a page directory entry (for kernel region mapping)
-static void clone_pde(uint32_t* dst_pd, uint32_t* src_pd, int idx) {
-    dst_pd[idx] = src_pd[idx];
-}
-
 uint32_t vmm_create_address_space(void) {
     if (!vmm_initialized) vmm_init();
     
@@ -120,24 +115,52 @@ uint32_t vmm_create_address_space(void) {
     
     // IMPORTANT: Always copy from the KERNEL's boot page directory (task 0),
     // NOT from whatever CR3 is currently active!
-    // If the scheduler has switched to a user task, the current CR3 would be
-    // that task's PD which includes user-space entries (pd_idx=32+).
-    // Copying those would corrupt the new address space.
     extern uint32_t tasks_get_boot_cr3(void);
     uint32_t kernel_cr3 = tasks_get_boot_cr3();
     uint32_t* kernel_pd = (uint32_t*)(uintptr_t)(kernel_cr3 & 0xFFFFF000);
     
-    // SHARE kernel page tables directly — don't clone them!
-    // Only copy kernel-space entries (identity-map 0-128MB + framebuffer).
-    // pd_idx 0-31 = identity map (128MB), higher indices may be framebuffer.
-    // We do NOT copy user-space entries (pd_idx=32 in this case).
+    // CLONE each kernel page table into a private copy.
+    // We MUST NOT share page table pointers with the kernel, because when
+    // user-space code maps pages (e.g., libc at 0x03000000 = pd_idx 12),
+    // vmm_map_page would modify the KERNEL's page table, corrupting the
+    // identity map for ALL tasks. By cloning, each address space gets its
+    // own writable copy of the page tables.
     for (uint32_t i = 0; i < 1024; i++) {
         if (kernel_pd[i] & PAGE_PRESENT) {
-            pd[i] = kernel_pd[i];
+            uint32_t kernel_pt_paddr = kernel_pd[i] & 0xFFFFF000;
+            uint32_t kernel_pt_flags = kernel_pd[i] & 0xFFF;
+            
+            // Allocate a new physical frame for this page table
+            uint32_t new_pt_paddr = frame_alloc();
+            if (new_pt_paddr == 0) {
+                write_serial_string("[VMM] CLONE PT FAIL - out of frames!\n");
+                // Free already-allocated page tables and PD
+                for (uint32_t j = 0; j < i; j++) {
+                    if (pd[j] & PAGE_PRESENT) {
+                        uint32_t cloned_pt = pd[j] & 0xFFFFF000;
+                        // Only free if it's not the kernel's original PT
+                        if (cloned_pt != (kernel_pd[j] & 0xFFFFF000)) {
+                            frame_free(cloned_pt);
+                        }
+                    }
+                }
+                frame_free(pd_paddr);
+                return 0;
+            }
+            
+            // Copy the entire page table (4096 bytes = 1024 entries × 4 bytes)
+            uint32_t* src_pt = (uint32_t*)(uintptr_t)kernel_pt_paddr;
+            uint32_t* dst_pt = (uint32_t*)(uintptr_t)new_pt_paddr;
+            for (uint32_t e = 0; e < 1024; e++) {
+                dst_pt[e] = src_pt[e];
+            }
+            
+            // Point the new PD entry to the CLONED page table
+            pd[i] = new_pt_paddr | kernel_pt_flags;
         }
     }
     
-    write_serial_string("[VMM] Created address space OK\n");
+    write_serial_string("[VMM] Created address space (cloned PTs) OK\n");
     return pd_paddr;
 }
 
@@ -146,34 +169,46 @@ void vmm_free_address_space(uint32_t page_dir) {
     
     uint32_t* pd = (uint32_t*)(uintptr_t)page_dir;
     
-    // Get kernel page directory so we know which entries are shared
+    // Get kernel page directory to distinguish user-modified entries
     extern uint32_t tasks_get_boot_cr3(void);
     uint32_t* kernel_pd = (uint32_t*)(uintptr_t)(tasks_get_boot_cr3() & 0xFFFFF000);
     
-    // Free only privately-allocated page tables (not shared kernel ones)
     for (int i = 0; i < TABLE_PER_DIR; i++) {
         if (!(pd[i] & PAGE_PRESENT)) continue;
         
         uint32_t pt_paddr = pd[i] & 0xFFFFF000;
-        
-        // If this PDE points to the SAME page table as the kernel,
-        // it's a shared kernel page table — DO NOT free it!
-        if (i < 1024 && (kernel_pd[i] & PAGE_PRESENT) &&
-            (kernel_pd[i] & 0xFFFFF000) == pt_paddr) {
-            continue;  // Shared kernel page table, skip
-        }
-        
-        // This is a privately-allocated page table (user space)
         uint32_t* pt = (uint32_t*)(uintptr_t)pt_paddr;
-        for (int j = 0; j < 1024; j++) {
-            if (pt[j] & PAGE_PRESENT) {
-                uint32_t page_paddr = pt[j] & 0xFFFFF000;
-                // Only free frames outside kernel region
-                if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
-                    frame_free(page_paddr);
+        
+        if ((kernel_pd[i] & PAGE_PRESENT)) {
+            // This PD entry corresponds to a CLONED kernel page table.
+            // We need to find PTEs that the user MODIFIED (differ from kernel)
+            // and free only those frames. Identity-mapped frames must stay.
+            uint32_t kernel_pt_paddr = kernel_pd[i] & 0xFFFFF000;
+            uint32_t* kernel_pt = (uint32_t*)(uintptr_t)kernel_pt_paddr;
+            
+            for (int j = 0; j < 1024; j++) {
+                if ((pt[j] & PAGE_PRESENT) && pt[j] != kernel_pt[j]) {
+                    // User-modified PTE — free the user's physical frame
+                    uint32_t page_paddr = pt[j] & 0xFFFFF000;
+                    if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
+                        frame_free(page_paddr);
+                    }
+                }
+            }
+        } else {
+            // This PD entry is entirely user-created (no kernel counterpart).
+            // Free ALL present page frames.
+            for (int j = 0; j < 1024; j++) {
+                if (pt[j] & PAGE_PRESENT) {
+                    uint32_t page_paddr = pt[j] & 0xFFFFF000;
+                    if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
+                        frame_free(page_paddr);
+                    }
                 }
             }
         }
+        
+        // Free the cloned/user page table frame itself
         frame_free(pt_paddr);
     }
     

@@ -1,4 +1,4 @@
-# Mectov OS v24.0 — The DOOM Engine Update
+# Mectov OS v25.0 — The IntelliMouse, SB16 Audio & Shared Library Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,7 +6,13 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v23.0 release delivers a massive performance and stability overhaul: Shadow Framebuffer rendering (delta-only MMIO writes), proper process lifecycle management with zombie detection and Ctrl+C signal support, a fully rewritten Snake game as a non-blocking WM app, smarter tab-completion, terminal input protection, and power menu bugfixes.
+The v25.0 release delivers a massive ergonomics, audio, and architectural upgrade:
+1. **Physical Mouse Scroll Support:** IntelliMouse 4-byte protocol driver with custom rate-negotiation, kernel event loop propagation, and scroll events delivered directly to Ring 3 user-space applications (Browser, Explorer, PCI Manager, Volume Control).
+2. **Dynamic Sound & Music (SB16):** Upgraded kernel audio sub-system to drive Sound Blaster 16 ISA registers, playing and rendering `.wav` audio files smoothly in the new Graphical Music Player (`mplayer.mct`).
+3. **Homegrown Shared Library System (`libc.mct`):** Homegrown dynamic linking DLL-style loader that lets Ring 3 user applications share a single runtime `libc.mct` library in the virtual file system, shrinking application sizes down to ~1KB.
+4. **Enhanced Kernel Stability & Network:** Increased user stack size to 64KB (from 8KB) to fully isolate heavy network and DNS payload buffers, and updated DNS querying to route over QEMU's virtual gateway (`10.0.2.3`).
+5. **TCP Real-time Debugging:** Replaced files-only logging with a real-time TCP serial logging bridge over port `45454`, paired with interactive python tools (`debug.py`).
+6. **Secondary ext2 Partition:** Multi-drive ATA support mounting a secondary 2MB virtual disk (`ext2.img`) automatically formatted as `ext2` filesystem partition under QEMU index 1.
 
 Created by M Alif Fadlan.
 
@@ -94,6 +100,7 @@ Created by M Alif Fadlan.
 - Custom Baked Wallpaper: Full-color 1024x768 image processed via Python build script.
 - Professional Squircle Icons: High-end rounded-rect icons with minimalist glyphs and curated color palettes.
 - Draggable Persistent Icons: Icon positions are saved to icons.cfg on the VFS and persist across system reboots.
+- **Application Double-Click Launcher:** Desktop icons are fully interactive and support double-clicking to launch their respective `.mct` executable.
 
 ### 6. Login Screen (src/gui/login.c)
 - Graphical login with wallpaper backdrop and semi-transparent overlay.
@@ -122,12 +129,14 @@ Created by M Alif Fadlan.
 - **Process Lifecycle:** `task_kill(tid)` for external termination (used by Ctrl+C). Zombie process detection in SYS_GET_EVENT auto-kills orphaned tasks.
 - **True CPU Yielding:** SYS_YIELD now executes `sti;hlt;cli` to properly surrender the CPU until the next scheduler tick.
 - Full context switching: general-purpose registers, EFLAGS, ESP, and per-task `page_dir` pointer for VMM integration.
-- Per-task dual stacks: 16KB kernel stack + 8KB user stack.
-- IRQ0-driven scheduler tick (1000Hz) with cooperative yield via SYS_YIELD.
+- **Per-task dual stacks:** 16KB kernel stack + **upgraded 64KB user stack** to fully isolate memory under intensive network socket, file parsing, and DNS payload operations.
+- IRQ0-driven scheduler tick (1000Hz) with cooperative yield.
 
 ### 10. Network Stack (src/drivers/net.c + src/drivers/rtl8139.c)
 - RTL8139 NIC Driver: Full driver with PCI bus mastering.
-- Ethernet/ARP/IPv4/ICMP/UDP/DNS: Complete local stack.
+- **Ethernet/ARP/IPv4/ICMP/UDP/DNS:** Complete local stack built directly into the kernel space.
+- **Reliable DNS Resolution:** Upgraded DNS queries to point to QEMU's virtual gateway DNS server at `10.0.2.3` (switching from hardcoded `8.8.8.8`) for robust internet routing.
+- **Background Net Poller:** Embedded packet listening into the timer-based process scheduler to handle asynchronous inbound packets gracefully.
 - Terminal commands: ping [ip] and host [domain].
 
 ### 11. Persistent File System (src/sys/vfs.c)
@@ -146,7 +155,7 @@ Created by M Alif Fadlan.
 - **Fixed-Base Mapping:** Applications are mapped at virtual address `0x02000000` within their own isolated page directory.
 - **Privilege Isolation:** Clean transition from Ring 0 to Ring 3 via `iret`, ensuring user apps cannot execute privileged instructions.
 - **Launch Arguments:** The kernel can pass arguments (like filenames) to newly launched Ring 3 tasks, retrievable via `SYS_GET_LAUNCH_ARG`.
-- **Independent Stacks:** Each Ring 3 task maintains separate 16KB kernel and 8KB user stacks.
+- **Independent Stacks:** Each Ring 3 task maintains separate 16KB kernel and **64KB user stacks** to avoid stack pointer overflows during large buffer parses.
 
 ### 14. User-Mode GUI API
 - **Direct Window Management:** Ring 3 applications can now create, raise, and close their own GUI windows via syscalls.
@@ -159,6 +168,36 @@ Created by M Alif Fadlan.
 - **Address Boundary Checks:** Enforces strict memory boundaries (`USER_MEM_LIMIT`) for all syscall parameters.
 - **Zombie Cleanup:** The kernel automatically detects and terminates Ring 3 processes whose GUI windows have been closed (if they refuse to exit voluntarily), preventing orphaned tasks and resource leaks.
 - **Privilege Separation:** Use of Global Descriptor Table (GDT) and Task State Segment (TSS) to strictly enforce CPU privilege levels (Ring 0 vs Ring 3).
+
+### 16. PS/2 IntelliMouse Scroll Wheel Support (src/drivers/mouse.c & src/gui/wm.c)
+- **Driver Upgrade:** Upgraded PS/2 mouse driver to the 4-byte IntelliMouse protocol, using a custom rate-negotiation sequence (200 -> 100 -> 80) to detect scroll-capable hardware.
+- **Kernel Event Routing:** The main kernel loop catches scroll deltas and dispatches them via `wm_handle_scroll()` to targeted windows, encoding up/down ticks as custom button events (0x10 and 0x20).
+- **Ring 3 Event Propagation:** Emits standard event type 4 (Scroll Event) containing scroll direction delta (+1 for up, -1 for down) to Ring 3 apps via the `SYS_GET_EVENT` syscall.
+- **Full Application Integration:** Native vertical scrolling integrated seamlessly across standard user-space applications:
+  - **Mini Browser:** Scrolls active web page contents effortlessly (3 lines per tick).
+  - **File Explorer:** Easy navigation through folder list structures.
+  - **PCI Manager:** Smooth scrolling through the system hardware list.
+  - **Volume Manager:** Intuitive scroll-to-adjust volume control (adjusts volume by ±5 per notch).
+
+### 17. Sound Blaster 16 (SB16) Audio System (src/drivers/sb16.c)
+- **Sound Blaster Hardware Driver:** Native ISA direct-register programming for Sound Blaster 16 compatibility.
+- **Dynamic WAV Playback:** Supports loading and decoding dynamic 8-bit/16-bit mono/stereo `.wav` files via VFS and streaming audio through the virtual DSP.
+- **Sound Synthesis:** Support for playing discrete frequencies (beeps) with programmable duration directly through Sound Blaster or PC Speaker hardware.
+- **Volume Controller Integration:** Mapped to QEMU's PA sound engine (`-device sb16,audiodev=snd0`) for clear real-time system audio feedback.
+
+### 18. Homegrown Dynamic Shared Library System (apps/lib/libc.c & libc.h)
+- **Dynamic Runtime Linking (`libc.mct`):** Built a homegrown dynamic linking and loading subsystem. The dynamic loader (`SYS_LOAD_LIBRARY` / `mct_load_library`) retrieves the memory base of the export table for a library in memory.
+- **Extremely Slim Binaries:** Ring 3 application executables (like `browser.mct`, `explorer.mct`, `notepad.mct`) no longer statically compile common functions, shrinking binary file sizes from 30KB+ to under 2KB.
+- **Standard Lib Wrappers:** Full resolution of standard library functions at runtime via export table pointer indexes (`__mct_lib_ptr`):
+  - **String Handling:** `strlen`, `strcpy`, `strcat`, `atoi`, `itoa`, `itoa_pad`
+  - **Formatting & Output:** `printf`, `sprintf`
+  - **POSIX Wrappers:** `open`, `read`, `write`, `close`, `malloc`, `free`, `exit`, `sleep`
+
+### 19. Multi-Drive & Secondary ext2 Partition Support (src/sys/vfs.c & run.sh)
+- **ATA Dual Drive Support:** Kernel ATA driver upgraded to detect and mount secondary IDE/ATA devices.
+- **Secondary ext2 Disk:** Automatically creates and mounts a secondary 2MB virtual disk (`ext2.img`) initialized via `mkfs.ext2` at index 1 in QEMU.
+- **Web Gateway Proxy Integration (`gateway.py`):** Background gateway process running on the host that translates QEMU network queries and streams live data between the guest OS and the real internet.
+- **TCP Real-time Debugging Socket:** Serial port debugging upgraded to a TCP socket server on port `45454` (replacing files-only logging), allowing real-time, zero-lag log streaming into our python interactive debugger (`debug.py`).
 
 ---
 
@@ -196,7 +235,7 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 |---|------|-------------|
 | 18 | SYS_THREAD_CREATE | Create thread. EBX=entry, ECX=priority, EDX=page_dir → TID |
 | 19 | SYS_SLEEP | Sleep current task. EBX=ticks |
-| 20 | SYS_GET_PID | Get current task ID |
+| 20 | SYS_GET_PID | Get current task ID / TID |
 | 21 | SYS_SET_PRIORITY | Set task priority. EBX=tid, ECX=priority |
 | 22 | SYS_GET_PRIORITY | Get task priority. EBX=tid → priority |
 
@@ -217,19 +256,37 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 | 30 | SYS_VMM_ALLOC | Allocate virtual page. EBX=vaddr, ECX=flags → vaddr or 0 |
 | 31 | SYS_VMM_FREE | Free virtual page. EBX=vaddr |
 
-### UNIX Compatibility (32)
+### UNIX Compatibility & Hardware Interface (32–38)
 | # | Name | Description |
 |---|------|-------------|
 | 32 | SYS_PIPE | Create pipe pair. EBX=pipefd[2] → return 0/-1 |
+| 33 | SYS_GET_TIME | Get RTC clock time. EBX=rtc_time_t* ptr |
+| 34 | SYS_PLAY_SOUND | Play PIT / Sound Blaster sound frequency. EBX=freq, ECX=duration_ms |
+| 35 | SYS_GET_SYSINFO | Get hardware and kernel statistics. EBX=sysinfo_t* ptr |
+| 36 | SYS_GET_PCI_INFO | Get list of detected PCI devices. EBX=pci_device_t* array, ECX=max |
+| 37 | SYS_LIST_DIR | List VFS directory contents. EBX=dir_entry_t* array, ECX=max, EDX=parent_node |
+| 38 | SYS_STAT_FILE | Get file attributes and node index. EBX=path_ptr |
 
-### Extended System & Hardware (46–50)
+### Network Stack (39–43)
 | # | Name | Description |
 |---|------|-------------|
-| 46 | SYS_GET_TASKS | Get list of running tasks |
-| 47 | SYS_GET_WINDOWS | Get list of open windows |
+| 39 | SYS_DNS_RESOLVE | Asynchronously resolve domain to IP. EBX=domain_ptr |
+| 40 | SYS_TCP_CONNECT | Open TCP socket connection. EBX=ip_ptr, ECX=port |
+| 41 | SYS_TCP_SEND | Send raw TCP packet payload. EBX=data_ptr, ECX=len |
+| 42 | SYS_TCP_RECV | Read TCP socket stream. EBX=buf_ptr, ECX=max_len → bytes read / state |
+| 43 | SYS_NET_STATUS | Get packed network state (DNS resolved, TCP state) |
+
+### Terminal & Extended Execution (44–51)
+| # | Name | Description |
+|---|------|-------------|
+| 44 | SYS_SET_STDOUT_IPC | Set process stdout redirection queue. EBX=qid (0 to disable) |
+| 45 | SYS_EXEC_CMD | Run shell command program. EBX=cmd_string_ptr |
+| 46 | SYS_GET_TASKS | Get list of running tasks. EBX=sys_task_info_t* array, ECX=max |
+| 47 | SYS_GET_WINDOWS | Get list of open windows. EBX=sys_win_info_t* array, ECX=max |
 | 48 | SYS_KILL_TASK | Force kill a task. EBX=tid |
 | 49 | SYS_GET_LAUNCH_ARG| Get launch argument string. EBX=buf, ECX=max_len |
 | 50 | SYS_CREATE_FILE | Directly create an empty file in VFS. EBX=filename |
+| 51 | SYS_LOAD_LIBRARY | Dynamically load a shared library base. EBX=lib_name_ptr → base address |
 
 ---
 
@@ -239,13 +296,16 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 |---|---|---|
 | Terminal | Ring 3 (.mct) | Full terminal emulator with command execution and IPC stdout redirection |
 | Nano Editor | Ring 3 (.mct) | Windowed text editor for VFS files with stable auto-save |
+| Notepad | Ring 3 (.mct) | Sleek text editor with menu bar options, Save As dialog, and dirty-state tracking |
 | File Explorer | Ring 3 (.mct) | Browse and open stored files |
 | System Info | Ring 3 (.mct) | Live RAM, CPU, resolution, uptime, and MAC address |
 | Task Manager | Ring 3 (.mct) | Monitor CPU, RAM, and kill active user processes |
-| PCI Manager | Ring 3 (.mct) | Scrollable table of detected PCI hardware |
+| PCI Manager | Ring 3 (.mct) | Scrollable table of detected PCI hardware with scroll wheel support |
+| Music Player | Ring 3 (.mct) | Graphical audio player to stream and play mono/stereo dynamic `.wav` files via SB16 |
+| Volume Control | Ring 3 (.mct) | Slider utility to adjust system sound level, now supporting wheel scrolling |
 | Clock | Ring 3 (.mct) | Digital clock with WIB timezone |
 | Snake | Ring 3 (.mct) | Modern grid-based snake game in WM window with gradient body, score, speed scaling |
-| Mini Browser | Ring 3 (.mct) | Text-mode web browser via serial modem proxy |
+| Mini Browser | Ring 3 (.mct) | Text-mode web browser navigating via host proxy gateway with scroll support |
 | Hello Ring 3 | Ring 3 (.mct) | Demo user-space app with isolated memory and GUI window |
 | GUI Calculator | Ring 3 (.mct) | Standalone external GUI calculator |
 | Power Options | Ring 0 | Shut Down, Restart, and Log Out dialog with accurate button hit-zones |
@@ -286,6 +346,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v25.0 | **IntelliMouse Scroll & Stability Update:** Integrated physical mouse scroll wheel support via 4-byte PS/2 IntelliMouse driver protocol. Implemented scroll event routing from kernel to focused GUI windows, propagating type-4 scroll events to Ring 3. Added smooth scrolling in Browser, Explorer, PCI Manager, and Volume Manager. Upgraded process stability by increasing user stack allocation to 64KB for heavy network/DNS payload handling, and fixed DNS querying over virtual gateway. |
 | v24.0 | **DOOM Engine Port:** Fully playable port of the classic 1993 DOOM engine integrated directly into the kernel. Features keyboard polling, double buffer to MMIO front buffer translation, graceful OS exiting (`vga_force_sync`), and proper process teardown. |
 | v23.0 | **Performance & Stability:** Shadow Framebuffer (delta-only MMIO), VSync removal, zombie process detection + auto-kill, `task_kill()` API, Ctrl+C signal, Ctrl key tracking, Snake rewritten as WM app, terminal prompt protection, smart tab-completion with trailing space/slash, carriage return support, history display fix, power menu restart fix, `-no-reboot` removal. |
 | v22.0 | **Kernel Modernization:** Virtual Memory Manager (per-process address spaces, page mapping, region allocator), IPC named message queues (non-blocking send, blocking receive with timeout), 4-level priority thread scheduling with sleep/wake API, and 14 new syscalls (VMM/thread/IPC). |

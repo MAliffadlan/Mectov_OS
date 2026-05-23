@@ -96,7 +96,7 @@ static block_meta *find_free_block(block_meta **last, uint32_t size) {
 }
 
 static block_meta *request_space(block_meta* last, uint32_t size) {
-    uint32_t max_heap = 16 * 1024 * 1024; // 16MB max heap
+    uint32_t max_heap = 48 * 1024 * 1024; // 48MB max heap
     
     if (heap_used + size + META_SIZE > max_heap) return NULL;
     

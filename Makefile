@@ -41,10 +41,13 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/browser_mct.o \
        $(OBJ_DIR)/terminal_mct.o \
        $(OBJ_DIR)/taskmgr_mct.o \
-       $(OBJ_DIR)/edit_mct.o \
+       $(OBJ_DIR)/notepad_mct.o \
        $(OBJ_DIR)/flappy_mct.o \
        $(OBJ_DIR)/libc_mct.o \
        $(OBJ_DIR)/calc_mct.o \
+       $(OBJ_DIR)/volume_mct.o \
+       $(OBJ_DIR)/mplayer_mct.o \
+       $(OBJ_DIR)/music_wav.o \
        $(DOOM_OBJS) \
        $(OBJ_DIR)/doom1_wad.o
 
@@ -70,41 +73,55 @@ $(OBJ_DIR)/gcalc_mct.o: gcalc.mct | $(OBJ_DIR)
 $(OBJ_DIR)/hello_mct.o: hello.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
-clock.mct: clock.c
+MCT_LIBC_H = apps/lib/libc.h
+
+gcalc.mct: apps/gcalc.c $(MCT_LIBC_H)
+	python3 build_mct.py apps/gcalc.c gcalc.mct
+
+hello.mct: hello.c $(MCT_LIBC_H)
+	python3 build_mct.py hello.c hello.mct
+
+clock.mct: clock.c $(MCT_LIBC_H)
 	python3 build_mct.py clock.c clock.mct
 
-snake.mct: snake_ring3.c
+snake.mct: snake_ring3.c $(MCT_LIBC_H)
 	python3 build_mct.py snake_ring3.c snake.mct
 
-sysinfo.mct: sysinfo.c
+sysinfo.mct: sysinfo.c $(MCT_LIBC_H)
 	python3 build_mct.py sysinfo.c sysinfo.mct
 
-explorer.mct: explorer.c
+explorer.mct: explorer.c $(MCT_LIBC_H)
 	python3 build_mct.py explorer.c explorer.mct
 
-pci.mct: pci.c
+pci.mct: pci.c $(MCT_LIBC_H)
 	python3 build_mct.py pci.c pci.mct
 
-browser.mct: browser.c
+browser.mct: browser.c $(MCT_LIBC_H)
 	python3 build_mct.py browser.c browser.mct
 
-terminal.mct: terminal.c
+terminal.mct: terminal.c $(MCT_LIBC_H)
 	python3 build_mct.py terminal.c terminal.mct
 
-taskmgr.mct: src/apps/taskmgr_app.c
-	python3 build_mct.py src/apps/taskmgr_app.c taskmgr.mct
+taskmgr.mct: taskmgr.c $(MCT_LIBC_H)
+	python3 build_mct.py taskmgr.c taskmgr.mct
 
-edit.mct: edit.c
-	python3 build_mct.py edit.c edit.mct
+notepad.mct: apps/notepad.c $(MCT_LIBC_H)
+	python3 build_mct.py apps/notepad.c notepad.mct
 
-flappy.mct: flappy_ring3.c
+flappy.mct: flappy_ring3.c $(MCT_LIBC_H)
 	python3 build_mct.py flappy_ring3.c flappy.mct
 
-libc.mct: apps/lib/libc.c
+libc.mct: apps/lib/libc.c $(MCT_LIBC_H)
 	python3 build_lib.py apps/lib/libc.c libc.mct
 
-calc.mct: apps/calc.c
+calc.mct: apps/calc.c $(MCT_LIBC_H)
 	python3 build_mct.py apps/calc.c calc.mct
+
+volume.mct: volume.c $(MCT_LIBC_H)
+	python3 build_mct.py volume.c volume.mct
+
+mplayer.mct: apps/mplayer.c $(MCT_LIBC_H)
+	python3 build_mct.py apps/mplayer.c mplayer.mct
 
 $(OBJ_DIR)/clock_mct.o: clock.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
@@ -130,8 +147,8 @@ $(OBJ_DIR)/terminal_mct.o: terminal.mct | $(OBJ_DIR)
 $(OBJ_DIR)/taskmgr_mct.o: taskmgr.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 taskmgr.mct $(OBJ_DIR)/taskmgr_mct.o
 
-$(OBJ_DIR)/edit_mct.o: edit.mct | $(OBJ_DIR)
-	objcopy -I binary -O elf32-i386 -B i386 edit.mct $(OBJ_DIR)/edit_mct.o
+$(OBJ_DIR)/notepad_mct.o: notepad.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 notepad.mct $(OBJ_DIR)/notepad_mct.o
 
 $(OBJ_DIR)/flappy_mct.o: flappy.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 flappy.mct $(OBJ_DIR)/flappy_mct.o
@@ -141,6 +158,15 @@ $(OBJ_DIR)/libc_mct.o: libc.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/calc_mct.o: calc.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 calc.mct $(OBJ_DIR)/calc_mct.o
+
+$(OBJ_DIR)/volume_mct.o: volume.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 volume.mct $(OBJ_DIR)/volume_mct.o
+
+$(OBJ_DIR)/mplayer_mct.o: mplayer.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 mplayer.mct $(OBJ_DIR)/mplayer_mct.o
+
+$(OBJ_DIR)/music_wav.o: apps/music.wav | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 apps/music.wav $(OBJ_DIR)/music_wav.o
 
 $(OBJ_DIR)/wallpaper.o: $(OBJ_DIR)/wallpaper.bin | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
@@ -166,4 +192,7 @@ myos.bin: $(OBJS)
 clean:
 	rm -rf $(OBJ_DIR) myos.bin
 
-.PHONY: all clean
+clean_all: clean
+	rm -f *.mct
+
+.PHONY: all clean clean_all

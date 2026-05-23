@@ -18,6 +18,84 @@ static int cmd_len = 0;
 
 static int ipc_qid = 0;
 
+// --- Current working directory tracking ---
+static char cwd_path[256] = "/";
+
+static int my_strlen(const char* s) {
+    int n = 0; while(s[n]) n++; return n;
+}
+static void my_strcpy(char* d, const char* s) {
+    while(*s) *d++ = *s++; *d = '\0';
+}
+static int my_strcmp(const char* a, const char* b) {
+    while (*a && *b && *a == *b) { a++; b++; }
+    return *a - *b;
+}
+static int my_strncmp(const char* a, const char* b, int n) {
+    for (int i = 0; i < n; i++) {
+        if (a[i] != b[i]) return a[i] - b[i];
+        if (a[i] == '\0') return 0;
+    }
+    return 0;
+}
+
+// --- Update cwd_path based on cd argument ---
+static void update_cwd(const char* arg) {
+    if (!arg || arg[0] == '\0') {
+        // cd with no argument → go to root
+        cwd_path[0] = '/';
+        cwd_path[1] = '\0';
+        return;
+    }
+
+    if (my_strcmp(arg, "/") == 0) {
+        cwd_path[0] = '/';
+        cwd_path[1] = '\0';
+        return;
+    }
+
+    if (my_strcmp(arg, "..") == 0) {
+        // Go up one level: trim last component
+        int plen = my_strlen(cwd_path);
+        if (plen <= 1) return; // Already at root
+        
+        // Find last '/'
+        int last_slash = 0;
+        for (int i = plen - 1; i > 0; i--) {
+            if (cwd_path[i] == '/') { last_slash = i; break; }
+        }
+        if (last_slash == 0) {
+            cwd_path[0] = '/';
+            cwd_path[1] = '\0';
+        } else {
+            cwd_path[last_slash] = '\0';
+        }
+        return;
+    }
+
+    if (arg[0] == '/') {
+        // Absolute path
+        my_strcpy(cwd_path, arg);
+    } else {
+        // Relative path: append to current
+        int plen = my_strlen(cwd_path);
+        if (plen > 1) { // Not just "/"
+            cwd_path[plen++] = '/';
+        }
+        int alen = my_strlen(arg);
+        for (int i = 0; i < alen && plen < 254; i++) {
+            cwd_path[plen++] = arg[i];
+        }
+        cwd_path[plen] = '\0';
+    }
+
+    // Strip trailing slash if present (but keep root "/")
+    int flen = my_strlen(cwd_path);
+    if (flen > 1 && cwd_path[flen - 1] == '/') {
+        cwd_path[flen - 1] = '\0';
+    }
+}
+
 static void term_scroll() {
     for (int r = 0; r < TERM_ROWS - 1; r++)
         for (int c = 0; c < TERM_COLS; c++) {
@@ -135,7 +213,9 @@ static void drain_ipc() {
 
 static void print_prompt() {
     term_print("root@mectov", 0x0A);
-    term_print(" ~$ ", 0x0F);
+    term_print(":", 0x08);
+    term_print(cwd_path, 0x0B);
+    term_print("$ ", 0x0F);
 }
 
 void _start() {
@@ -154,7 +234,7 @@ void _start() {
             buf[r][c] = 0; col[r][c] = 0;
         }
     
-    term_print("Mectov OS v18.0 Terminal [Ring 3]\n", 0x0B);
+    term_print("Mectov OS v25.0 Terminal [Ring 3]\n", 0x0B);
     term_print("Welcome Bos Alif! System ready.\n\n", 0x0D);
     print_prompt();
     cmd_len = 0;
@@ -188,6 +268,15 @@ void _start() {
                                     buf[r][c] = 0; col[r][c] = 0;
                                 }
                             cx = 0; cy = 0;
+                        } else if (my_strncmp(cmd, "cd", 2) == 0 &&
+                                   (cmd[2] == ' ' || cmd[2] == '\0')) {
+                            // Handle cd locally: update cwd_path, then forward to kernel
+                            char* arg = (cmd[2] == ' ') ? cmd + 3 : "";
+                            // Forward to kernel so it updates current_dir
+                            sys_exec_cmd(cmd);
+                            drain_ipc();
+                            // Update local cwd tracking
+                            update_cwd(arg);
                         } else {
                             // Execute command via kernel
                             sys_exec_cmd(cmd);

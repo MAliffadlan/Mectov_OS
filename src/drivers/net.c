@@ -2,6 +2,8 @@
 #include "../include/rtl8139.h"
 #include "../include/utils.h"
 #include "../include/timer.h"
+#include "../include/serial.h"
+
 
 // Our IP: 10.0.2.15 (QEMU default guest IP with -net user)
 uint8_t my_ip[4]       = {10, 0, 2, 15};
@@ -9,6 +11,9 @@ uint8_t my_ip[4]       = {10, 0, 2, 15};
 uint8_t gateway_ip[4]  = {10, 0, 2, 2};
 uint8_t gateway_mac[6] = {0, 0, 0, 0, 0, 0};
 int     net_ready       = 0;
+static char pending_dns_domain[128] = {0};
+static uint8_t pending_tcp_ip[4] = {0, 0, 0, 0};
+static uint16_t pending_tcp_port = 0;
 int     ping_replied    = 0;
 uint32_t ping_rtt       = 0;
 static uint32_t ping_sent_tick = 0;
@@ -84,6 +89,7 @@ static void net_send_eth(uint8_t* dst_mac, uint16_t ethertype, void* payload, ui
 
 // Send ARP request: "Who has target_ip? Tell my_ip"
 void net_send_arp_request(uint8_t* target_ip_addr) {
+    write_serial_string("[NET] Sending ARP request to gateway...\n");
     arp_packet_t arp;
     uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -130,10 +136,27 @@ static void net_handle_arp(arp_packet_t* arp) {
         // Got a reply — check if it's our gateway
         if (arp->sender_ip[0] == gateway_ip[0] && arp->sender_ip[1] == gateway_ip[1] &&
             arp->sender_ip[2] == gateway_ip[2] && arp->sender_ip[3] == gateway_ip[3]) {
+            write_serial_string("[NET] Received ARP reply! Gateway MAC resolved.\n");
             memcpy(gateway_mac, arp->sender_mac, 6);
             net_ready = 1;
+            
+            // Dispatch pending DNS query if queued
+            if (pending_dns_domain[0] != '\0') {
+                write_serial_string("[NET] Dispatching pending DNS query from queue...\n");
+                net_send_dns_query(pending_dns_domain);
+                pending_dns_domain[0] = '\0';
+            }
+            
+            // Dispatch pending TCP connection if queued
+            if (pending_tcp_port != 0) {
+                write_serial_string("[NET] Dispatching pending TCP connection from queue...\n");
+                net_tcp_connect(pending_tcp_ip, pending_tcp_port);
+                pending_tcp_port = 0;
+            }
         }
     }
+
+
 }
 
 // Handle incoming ICMP (inside an IP packet)
@@ -267,7 +290,12 @@ static void net_send_tcp_segment(uint8_t flags, uint8_t* payload, uint32_t paylo
 }
 
 void net_tcp_connect(uint8_t* target_ip, uint16_t port) {
-    if (!net_ready) return;
+    if (!net_ready) {
+        memcpy(pending_tcp_ip, target_ip, 4);
+        pending_tcp_port = port;
+        net_send_arp_request(gateway_ip);
+        return;
+    }
     memcpy(tcp_target_ip, target_ip, 4);
     tcp_remote_port = port;
     tcp_seq_num = get_ticks() * 12345; // random ISN
@@ -307,10 +335,20 @@ static int format_dns_name(char* qname, const char* domain) {
 // Send DNS Query
 void net_send_dns_query(const char* domain) {
     if (!net_ready) {
+        write_serial_string("[NET] net_send_dns_query: Network not ready. Queuing domain: ");
+        write_serial_string(domain);
+        write_serial_string("\n");
+        int i = 0;
+        for (; i < 127 && domain[i]; i++) pending_dns_domain[i] = domain[i];
+        pending_dns_domain[i] = '\0';
         net_send_arp_request(gateway_ip);
         return;
     }
+    write_serial_string("[NET] Sending DNS query for domain: ");
+    write_serial_string(domain);
+    write_serial_string("\n");
     dns_resolved = 0;
+
     uint8_t payload[512];
     dns_header_t* dns = (dns_header_t*)payload;
     dns->id = htons(0xABCD);
@@ -328,23 +366,48 @@ void net_send_dns_query(const char* domain) {
     // QCLASS = 1 (IN)
     payload[qpos++] = 0; payload[qpos++] = 1;
 
-    // Use Google DNS
-    uint8_t dns_server[4] = {8, 8, 8, 8};
+    // Use QEMU virtual DNS server (10.0.2.3) which proxies to host resolver
+    uint8_t dns_server[4] = {10, 0, 2, 3};
     net_send_udp(dns_server, 12345, 53, payload, qpos);
 }
 
-// Handle DNS Reply
 static void net_handle_dns(uint8_t* data, uint32_t len) {
-    if (len < sizeof(dns_header_t)) return;
+    if (len < sizeof(dns_header_t)) {
+        write_serial_string("[NET] net_handle_dns: packet too small\n");
+        return;
+    }
     dns_header_t* dns = (dns_header_t*)data;
-    if (ntohs(dns->id) != 0xABCD) return;
+    uint16_t dns_id = ntohs(dns->id);
+    uint16_t dns_flags = ntohs(dns->flags);
+    uint16_t qdcount = ntohs(dns->qdcount);
+    uint16_t ancount = ntohs(dns->ancount);
+    
+    write_serial_string("[NET] net_handle_dns: id=");
+    write_serial_hex(dns_id);
+    write_serial_string(" flags=");
+    write_serial_hex(dns_flags);
+    write_serial_string(" qdcount=");
+    write_serial_hex(qdcount);
+    write_serial_string(" ancount=");
+    write_serial_hex(ancount);
+    write_serial_string("\n");
+
+    if (dns_id != 0xABCD) {
+        write_serial_string("[NET] net_handle_dns: ID mismatch!\n");
+        return;
+    }
     
     // Check if it's a response (QR bit)
-    if (!(ntohs(dns->flags) & 0x8000)) return;
+    if (!(dns_flags & 0x8000)) {
+        write_serial_string("[NET] net_handle_dns: not a response!\n");
+        return;
+    }
 
-    int qdcount = ntohs(dns->qdcount);
-    int ancount = ntohs(dns->ancount);
-    if (ancount == 0) return; // No answers
+    if (ancount == 0) {
+        write_serial_string("[NET] net_handle_dns: ancount is 0!\n");
+        return;
+    }
+
 
     int pos = sizeof(dns_header_t);
     
@@ -358,30 +421,44 @@ static void net_handle_dns(uint8_t* data, uint32_t len) {
         pos += 4; // Skip QTYPE, QCLASS
     }
 
-    // Parse first answer
-    if (pos < (int)len) {
-        // Skip name (usually a pointer)
-        if ((data[pos] & 0xC0) == 0xC0) pos += 2;
-        else {
+    // Parse answers
+    for (int a = 0; a < ancount; a++) {
+        if (pos >= (int)len) break;
+        
+        // Skip or parse name (can be a pointer or label)
+        if ((data[pos] & 0xC0) == 0xC0) {
+            pos += 2;
+        } else {
             while (pos < (int)len && data[pos] != 0) pos += data[pos] + 1;
             pos++;
         }
-        if (pos + 10 <= (int)len) {
-            uint16_t type = (data[pos] << 8) | data[pos+1];
-            pos += 8; // type(2), class(2), ttl(4)
-            uint16_t rdlength = (data[pos] << 8) | data[pos+1];
-            pos += 2;
-            if (type == 1 && rdlength == 4 && pos + 4 <= (int)len) {
-                // A Record found!
-                dns_resolved_ip[0] = data[pos];
-                dns_resolved_ip[1] = data[pos+1];
-                dns_resolved_ip[2] = data[pos+2];
-                dns_resolved_ip[3] = data[pos+3];
-                dns_resolved = 1;
-            }
+        
+        if (pos + 10 > (int)len) break;
+        
+        uint16_t type = (data[pos] << 8) | data[pos+1];
+        pos += 8; // type(2), class(2), ttl(4)
+        
+        uint16_t rdlength = (data[pos] << 8) | data[pos+1];
+        pos += 2;
+        
+        if (pos + rdlength > (int)len) break;
+        
+        if (type == 1 && rdlength == 4) {
+            // A Record found!
+            dns_resolved_ip[0] = data[pos];
+            dns_resolved_ip[1] = data[pos+1];
+            dns_resolved_ip[2] = data[pos+2];
+            dns_resolved_ip[3] = data[pos+3];
+            dns_resolved = 1;
+            write_serial_string("[NET] DNS A-record resolved successfully!\n");
+            break;
         }
+        
+        // Go to next record
+        pos += rdlength;
     }
 }
+
 
 char tcp_rx_buf[4096];
 int tcp_rx_len = 0;
@@ -429,6 +506,13 @@ static void net_handle_udp(ip_header_t* ip, uint8_t* udp_data, uint32_t udp_len)
     udp_header_t* udp = (udp_header_t*)udp_data;
     
     uint16_t src_port = ntohs(udp->src_port);
+    uint16_t dst_port = ntohs(udp->dst_port);
+    write_serial_string("[NET] net_handle_udp: src_port=");
+    write_serial_hex(src_port);
+    write_serial_string(" dst_port=");
+    write_serial_hex(dst_port);
+    write_serial_string("\n");
+    
     uint32_t payload_len = ntohs(udp->len) - sizeof(udp_header_t);
     
     if (src_port == 53) {
@@ -436,10 +520,17 @@ static void net_handle_udp(ip_header_t* ip, uint8_t* udp_data, uint32_t udp_len)
     }
 }
 
+
 // Handle incoming IP packet
 static void net_handle_ip(uint8_t* data, uint32_t len) {
     if (len < sizeof(ip_header_t)) return;
     ip_header_t* ip = (ip_header_t*)data;
+    
+    write_serial_string("[NET] net_handle_ip: protocol=");
+    write_serial_hex(ip->protocol);
+    write_serial_string(" dst_ip=");
+    write_serial_hex((ip->dst_ip[0] << 24) | (ip->dst_ip[1] << 16) | (ip->dst_ip[2] << 8) | ip->dst_ip[3]);
+    write_serial_string("\n");
 
     uint32_t ihl = (ip->ver_ihl & 0x0F) * 4;
     uint32_t total = ntohs(ip->total_len);
@@ -448,8 +539,10 @@ static void net_handle_ip(uint8_t* data, uint32_t len) {
     // Check if it's for us
     if (ip->dst_ip[0] != my_ip[0] || ip->dst_ip[1] != my_ip[1] ||
         ip->dst_ip[2] != my_ip[2] || ip->dst_ip[3] != my_ip[3]) {
+        write_serial_string("[NET] net_handle_ip: discarded because dst_ip is not for us\n");
         return;
     }
+
 
     if (ip->protocol == IP_PROTO_ICMP) {
         net_handle_icmp(ip, data + ihl, total - ihl);
@@ -467,6 +560,11 @@ static void net_handle_frame(uint8_t* frame, uint32_t len) {
     uint16_t type = ntohs(eth->ethertype);
     uint8_t* payload = frame + sizeof(eth_header_t);
     uint32_t payload_len = len - sizeof(eth_header_t);
+    
+    write_serial_string("[NET] net_handle_frame: received packet type=");
+    write_serial_hex(type);
+    write_serial_string("\n");
+
 
     if (type == ETH_TYPE_ARP) {
         if (payload_len >= sizeof(arp_packet_t)) {
@@ -492,9 +590,13 @@ void net_poll(void) {
     for (int i = 0; i < 4; i++) {
         len = rtl8139_poll_rx(buf, sizeof(buf));
         if (len <= 0) break;
+        write_serial_string("[NET] rtl8139_poll_rx: packet received, len=");
+        write_serial_hex(len);
+        write_serial_string("\n");
         net_handle_frame(buf, (uint32_t)len);
     }
 }
+
 
 // Send ICMP Echo Request (ping)
 void net_send_ping(uint8_t* target_ip) {

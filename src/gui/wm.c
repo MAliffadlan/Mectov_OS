@@ -23,6 +23,7 @@ void wm_init() {
         wm_wins[i].visible = 0;
         wm_wins[i].id = 0;
         wm_wins[i].snap_state = SNAP_NONE;
+        wm_wins[i].owner_task = -1;
     }
     wm_zcount = 0;
     wm_focused = -1;
@@ -63,12 +64,17 @@ int wm_open(int x, int y, int w, int h, const char* title,
             wm_wins[i].tick_fn   = tick_fn;
             wm_wins[i].mouse_fn  = mouse_fn;
             wm_wins[i].owner_ring = 0; // Default to kernel
+            wm_wins[i].owner_task = -1; // Set by syscall for Ring 3 apps
             wm_wins[i].visible   = 1;
             wm_wins[i].dragging  = 0;
             wm_wins[i].resizing  = 0;
             wm_wins[i].minimized = 0;
             wm_wins[i].maximized = 0;
             wm_wins[i].snap_state = SNAP_NONE;
+            wm_wins[i].content_buffer = NULL;
+            wm_wins[i].buffer_dirty = 1;
+            wm_wins[i].last_cw = 0;
+            wm_wins[i].last_ch = 0;
             int k = 0;
             while (title[k] && k < 47) { wm_wins[i].title[k] = title[k]; k++; }
             wm_wins[i].title[k] = '\0';
@@ -97,25 +103,42 @@ int wm_is_open(int id) {
     return 0;
 }
 
+void wm_invalidate(int id) {
+    if (id < 0) return;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (wm_wins[i].visible && wm_wins[i].id == id) {
+            wm_wins[i].buffer_dirty = 1;
+            return;
+        }
+    }
+}
+
 void wm_close(int id) {
-    write_serial_string("WM_CLOSE called from: ");
-    write_serial_hex((uint32_t)__builtin_return_address(0));
-    write_serial_string(" for id=");
+    write_serial_string("WM_CLOSE called for id=");
     write_serial_hex(id);
     write_serial('\n');
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (wm_wins[i].visible && wm_wins[i].id == id) {
-            // Notify terminal if this is the terminal window
-            extern void on_terminal_close(void);
-            extern int term_open;
-            extern int get_term_win_id(void);
-            if (term_open && id == get_term_win_id()) {
-                on_terminal_close();
+            // If owned by a user task, kill the task.
+            // task_kill will automatically call wm_cleanup_task,
+            // which will hide the window and remove it from z-order.
+            if (wm_wins[i].owner_task > 0) {
+                extern int task_kill(int tid);
+                write_serial_string("Killing owner task: ");
+                write_serial_hex(wm_wins[i].owner_task);
+                write_serial('\n');
+                task_kill(wm_wins[i].owner_task);
+            } else {
+                // Kernel window fallback
+                wm_wins[i].visible = 0;
+                if (wm_wins[i].content_buffer) {
+                    extern void kfree(void*);
+                    kfree(wm_wins[i].content_buffer);
+                    wm_wins[i].content_buffer = NULL;
+                }
+                z_remove(i);
+                wm_focused = (wm_zcount > 0) ? wm_wins[wm_zorder[wm_zcount-1]].id : -1;
             }
-            
-            wm_wins[i].visible = 0;
-            z_remove(i);
-            wm_focused = (wm_zcount > 0) ? wm_wins[wm_zorder[wm_zcount-1]].id : -1;
             return;
         }
     }
@@ -252,15 +275,46 @@ static void draw_one(int idx) {
     // Subtle inner border
     draw_rect(x + 1, y + TITLEBAR_H + use_radius - 2, ww - 2, 1, 0x00252535);
 
-    // Call app draw_fn with content area coords
-    if (w->draw_fn) {
-        int cx2 = x + 1;
-        int cy2 = y + TITLEBAR_H + 1;
-        int cw2 = ww - 2;
-        int ch2 = wh - TITLEBAR_H - 2;
-        vga_set_clip(cx2, cy2, cw2, ch2);
-        w->draw_fn(w->id, cx2, cy2, cw2, ch2);
-        vga_reset_clip();
+    int cx2 = x + 1;
+    int cy2 = y + TITLEBAR_H + 1;
+    int cw2 = ww - 2;
+    int ch2 = wh - TITLEBAR_H - 2;
+
+    if (cw2 > 0 && ch2 > 0) {
+        // 1. Dynamic allocation of content buffer if size changed or not allocated
+        if (w->content_buffer == NULL || w->last_cw != cw2 || w->last_ch != ch2) {
+            extern void* kmalloc(uint32_t);
+            extern void kfree(void*);
+            if (w->content_buffer) kfree(w->content_buffer);
+            w->content_buffer = kmalloc(cw2 * ch2 * 4);
+            w->last_cw = cw2;
+            w->last_ch = ch2;
+            w->buffer_dirty = 1;
+        }
+
+        // 2. Render to off-screen buffer if dirty
+        if (w->content_buffer && w->buffer_dirty) {
+            vga_set_render_target(w->content_buffer, cw2, ch2, cw2 * 4);
+            vga_set_clip(0, 0, cw2, ch2);
+            
+            // Clear buffer to prevent uninitialized memory artifacts (skew/tearing) on resize
+            draw_rect(0, 0, cw2, ch2, 0x001E1E2E); // Default dark theme background
+            
+            // Call app draw_fn with (0,0) as origin!
+            if (w->draw_fn) {
+                w->draw_fn(w->id, 0, 0, cw2, ch2);
+            }
+            
+            vga_reset_clip();
+            vga_set_render_target(NULL, 0, 0, 0); // Restore back buffer
+            
+            w->buffer_dirty = 0; // Clear dirty flag
+        }
+
+        // 3. Composite (blit) the off-screen buffer to the global back buffer
+        if (w->content_buffer) {
+            vga_blit_buffer(w->content_buffer, cw2, ch2, cx2, cy2);
+        }
     }
 }
 
@@ -441,6 +495,26 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
     return 0;
 }
 
+// ---- Scroll wheel handling ----
+void wm_handle_scroll(int mx, int my, int delta) {
+    // Hit test front-to-back: find the window under the cursor
+    for (int z = wm_zcount - 1; z >= 0; z--) {
+        int idx = wm_zorder[z];
+        WmWin* w = &wm_wins[idx];
+        if (!w->visible) continue;
+        if (w->minimized) continue;
+        if (mx >= w->x && mx < w->x + w->w && my >= w->y && my < w->y + w->h) {
+            if (w->mouse_fn) {
+                // Encode scroll as special btn values:
+                // 0x10 = scroll up, 0x20 = scroll down
+                int scroll_btn = (delta > 0) ? 0x10 : 0x20;
+                w->mouse_fn(w->id, mx - w->x, my - (w->y + TITLEBAR_H), scroll_btn);
+            }
+            return;
+        }
+    }
+}
+
 void wm_handle_key(char c, uint8_t sc) {
     if (wm_focused < 0) return;
     for (int i = 0; i < MAX_WINDOWS; i++) {
@@ -453,4 +527,35 @@ void wm_tick_all() {
     for (int i = 0; i < MAX_WINDOWS; i++)
         if (wm_wins[i].visible && wm_wins[i].tick_fn)
             wm_wins[i].tick_fn(wm_wins[i].id);
+}
+
+// Close all windows owned by a specific task (crash recovery)
+void wm_cleanup_task(int tid) {
+    write_serial_string("[WM] cleanup_task tid=");
+    write_serial_hex(tid);
+    write_serial('\n');
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (wm_wins[i].visible && wm_wins[i].owner_task == tid) {
+            write_serial_string("[WM] closing zombie window: ");
+            write_serial_string(wm_wins[i].title);
+            write_serial('\n');
+            // Notify terminal if this is the terminal window
+            extern void on_terminal_close(void);
+            extern int term_open;
+            extern int get_term_win_id(void);
+            if (term_open && wm_wins[i].id == get_term_win_id()) {
+                on_terminal_close();
+            }
+            
+            wm_wins[i].visible = 0;
+            if (wm_wins[i].content_buffer) {
+                extern void kfree(void*);
+                kfree(wm_wins[i].content_buffer);
+                wm_wins[i].content_buffer = NULL;
+            }
+            z_remove(i);
+        }
+    }
+    // Update focus
+    wm_focused = (wm_zcount > 0) ? wm_wins[wm_zorder[wm_zcount-1]].id : -1;
 }

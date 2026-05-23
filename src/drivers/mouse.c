@@ -6,9 +6,11 @@
 volatile int mouse_x = 400, mouse_y = 300;
 volatile uint8_t mouse_btn = 0;
 volatile int mouse_updated = 0;
+volatile int8_t mouse_scroll = 0;  // scroll wheel delta (positive = up, negative = down)
 
 static uint8_t mouse_cycle = 0;
-static int8_t  mouse_bytes[3];
+static int8_t  mouse_bytes[4];     // 4 bytes for IntelliMouse
+static uint8_t mouse_has_wheel = 0; // 1 = IntelliMouse mode active
 
 // ---- PS/2 controller helpers ----
 static void mouse_wait_in()  { uint32_t t=100000; while(t-- && !(inb(0x64)&1)); }
@@ -20,10 +22,18 @@ static void mouse_write(uint8_t val) {
 }
 static uint8_t mouse_read() { mouse_wait_in(); return inb(0x60); }
 
+// Helper: set sample rate
+static void mouse_set_sample_rate(uint8_t rate) {
+    mouse_write(0xF3); mouse_read(); // ACK
+    mouse_write(rate); mouse_read(); // ACK
+}
+
 // ---- IRQ12 handler ----
 static void mouse_handler(registers_t* regs) {
     (void)regs;
     uint8_t data = inb(0x60);
+    int max_cycle = mouse_has_wheel ? 3 : 2;
+
     switch (mouse_cycle) {
         case 0:
             mouse_bytes[0] = (int8_t)data;
@@ -35,10 +45,20 @@ static void mouse_handler(registers_t* regs) {
             break;
         case 2:
             mouse_bytes[2] = (int8_t)data;
+            if (mouse_has_wheel) {
+                mouse_cycle++;
+                break; // wait for 4th byte
+            }
+            // Fall through for 3-byte mode (no wheel)
+            goto process_packet;
+        case 3:
+            mouse_bytes[3] = (int8_t)data;
+            // Fall through to process
+        process_packet:
             mouse_cycle = 0;
 
             // Update buttons
-            mouse_btn = mouse_bytes[0] & 0x03;
+            mouse_btn = mouse_bytes[0] & 0x07; // bits 0-2: left, right, middle
 
             // Update position (Y is inverted in PS/2)
             int dx = mouse_bytes[1];
@@ -54,6 +74,16 @@ static void mouse_handler(registers_t* regs) {
             if (mouse_x >= (int)fb_width) mouse_x = (int)fb_width  - 1;
             if (mouse_y < 0)              mouse_y = 0;
             if (mouse_y >= (int)fb_height)mouse_y = (int)fb_height - 1;
+
+            // Update scroll wheel (4th byte, only in IntelliMouse mode)
+            if (mouse_has_wheel) {
+                int8_t sz = mouse_bytes[3];
+                // Only the low 4 bits are the Z-axis delta (signed nibble)
+                // But in basic IntelliMouse it's a full signed byte
+                if (sz != 0) {
+                    mouse_scroll = sz; // negative = scroll down, positive = scroll up
+                }
+            }
 
             mouse_updated = 1;
             break;
@@ -71,8 +101,23 @@ void init_mouse() {
     mouse_wait_out(); outb(0x64, 0x60);
     mouse_wait_out(); outb(0x60, status);
 
-    // Set defaults + enable data reporting
+    // Set defaults
     mouse_write(0xF6); mouse_read();  // ACK
+
+    // ---- Enable IntelliMouse scroll wheel ----
+    // Magic sequence: set sample rate 200, 100, 80
+    mouse_set_sample_rate(200);
+    mouse_set_sample_rate(100);
+    mouse_set_sample_rate(80);
+
+    // Read device ID to check if IntelliMouse mode activated
+    mouse_write(0xF2); mouse_read(); // ACK
+    uint8_t dev_id = mouse_read();
+    if (dev_id == 3) {
+        mouse_has_wheel = 1;  // IntelliMouse mode! 4-byte packets
+    }
+
+    // Enable data reporting
     mouse_write(0xF4); mouse_read();  // ACK
 
     // IRQ12 = interrupt vector 44 (0x2C)

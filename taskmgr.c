@@ -105,28 +105,7 @@ static void tm_draw(int wid) {
         }
         
         char buf[64];
-        int pos = 0;
-        
         char* type = rows[i].is_window ? "WIN " : "TASK";
-        for(int j=0; j<4; j++) buf[pos++] = type[j];
-        buf[pos++] = ' '; buf[pos++] = ' ';
-        
-        char id_str[4];
-        itoa_pad(rows[i].id, id_str, 3);
-        for(int j=0; j<3; j++) buf[pos++] = id_str[j];
-        buf[pos++] = ' '; buf[pos++] = ' ';
-        
-        int name_len = 0;
-        while(rows[i].name[name_len] && name_len < 20) {
-            buf[pos++] = rows[i].name[name_len];
-            name_len++;
-        }
-        while(name_len < 22) { buf[pos++] = ' '; name_len++; }
-        
-        buf[pos++] = 'R';
-        buf[pos++] = rows[i].ring == 3 ? '3' : '0';
-        buf[pos++] = ' '; buf[pos++] = ' '; buf[pos++] = ' '; buf[pos++] = ' ';
-        
         char* state_str = "UNK";
         if (rows[i].is_window) {
             state_str = (rows[i].state == 1) ? "ACT" : "HID";
@@ -135,8 +114,9 @@ static void tm_draw(int wid) {
             else if (rows[i].state == 2) state_str = "RDY";
             else if (rows[i].state == 3) state_str = "SLP";
         }
-        for(int j=0; j<3; j++) buf[pos++] = state_str[j];
-        buf[pos] = '\0';
+        
+        sprintf(buf, "%s  %03d  %-20s  R%d    %s", 
+                type, rows[i].id, rows[i].name, rows[i].ring, state_str);
         
         sys_draw_text(wid, 10, y, buf, text_col);
         y += ROW_HEIGHT;

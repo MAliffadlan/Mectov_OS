@@ -69,11 +69,20 @@ static int get_win_index(int wid) {
     }
     
     // Debug print
-    write_serial_string("get_win_index failed. &visible=");
-    write_serial_hex((uint32_t)&wm_wins[0].visible);
-    write_serial_string(" &id=");
-    write_serial_hex((uint32_t)&wm_wins[0].id);
+    write_serial_string("get_win_index failed for wid=");
+    write_serial('0' + (wid / 10));
+    write_serial('0' + (wid % 10));
     write_serial('\n');
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        write_serial_string("Slot ");
+        write_serial('0' + i);
+        write_serial_string(": vis=");
+        write_serial('0' + wm_wins[i].visible);
+        write_serial_string(" id=");
+        write_serial('0' + (wm_wins[i].id / 10));
+        write_serial('0' + (wm_wins[i].id % 10));
+        write_serial('\n');
+    }
     return -1;
 }
 
@@ -101,7 +110,7 @@ static void win_draw_cb(int id, int cx, int cy, int cw, int ch) {
         if (cmd->type == 1) { // rect
             draw_rect(cx + cmd->x, cy + cmd->y, cmd->w, cmd->h, cmd->color);
         } else if (cmd->type == 2) { // text
-            draw_string_px(cx + cmd->x, cy + cmd->y, cmd->text, cmd->color, 0);
+            draw_string_px(cx + cmd->x, cy + cmd->y, cmd->text, cmd->color, 0xFFFFFFFF);
         }
     }
     // We don't push a Paint event every frame, we let the app decide when to update.
@@ -111,7 +120,15 @@ static void win_key_cb(int id, char c, uint8_t sc) {
     push_event(id, 2, 0, 0, c);
 }
 static void win_mouse_cb(int id, int cx, int cy, int btn) {
-    push_event(id, 3, cx, cy, btn);
+    if (btn == 0x10) {
+        // Scroll up
+        push_event(id, 4, cx, cy, 1);
+    } else if (btn == 0x20) {
+        // Scroll down
+        push_event(id, 4, cx, cy, -1);
+    } else {
+        push_event(id, 3, cx, cy, btn);
+    }
 }
 // (Legacy simple FD table removed, moved to fd.c)
 
@@ -160,7 +177,7 @@ static void syscall_handler(registers_t* regs) {
             uint8_t color = (uint8_t)regs->ecx;
             if (safe_strlen(msg, 256) < 0) { regs->eax = (uint32_t)-1; break; }
             // Serial marker: user app called SYS_PRINT
-            write_serial('P');
+            write_serial_string(msg);
             print(msg, color);
             regs->eax = 0;
             break;
@@ -201,7 +218,14 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (uint32_t)-1; break;
             }
 
-            regs->eax = (uint32_t)do_sys_write(fd, buf, size);
+            int cur_tid = get_current_task();
+            extern int task_get_fd(int, int);
+            if (task_get_fd(cur_tid, fd) == -1 && (fd == 1 || fd == 2)) {
+                for (int i = 0; i < size; i++) write_serial(buf[i]);
+                regs->eax = (uint32_t)size;
+            } else {
+                regs->eax = (uint32_t)do_sys_write(fd, buf, size);
+            }
             break;
         }
 
@@ -250,19 +274,12 @@ static void syscall_handler(registers_t* regs) {
 
         // ----- SYS_EXIT (10): Terminate current task -----
         case SYS_EXIT: {
-            write_serial('X'); // Serial marker: task exit
-            write_serial_string("SYS_EXIT\n");
-            
-            extern int term_app_running;
-            extern int term_app_task_id;
-            extern int get_current_task(void);
-            
-            if (term_app_running && get_current_task() == term_app_task_id) {
-                term_app_running = 0;
-                term_app_task_id = -1;
-            }
+            int tid = get_current_task();
+            write_serial_string("[SYSCALL] SYS_EXIT from TID=");
+            write_serial('0' + (tid / 10));
+            write_serial('0' + (tid % 10));
+            write_serial('\n');
             task_exit();
-            // task_exit never returns, but just in case:
             for(;;) __asm__("hlt");
             break;
         }
@@ -368,6 +385,7 @@ static void syscall_handler(registers_t* regs) {
             int idx = get_win_index(wid);
             if (idx >= 0) {
                 wm_wins[idx].owner_ring = 3; // From syscall -> Ring 3
+                wm_wins[idx].owner_task = get_current_task(); // Track owner for crash recovery
                 win_queues[idx].head = 0;
                 win_queues[idx].tail = 0;
                 win_canvases[idx].count = 0;
@@ -379,55 +397,25 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
-        // ----- SYS_GET_EVENT (16) -----
         case SYS_GET_EVENT: {
             int wid = (int)regs->ebx;
-            gui_event_t* ev_ptr = (gui_event_t*)regs->ecx;
-            if (!validate_user_ptr(ev_ptr, sizeof(gui_event_t))) { regs->eax = (uint32_t)-1; break; }
-            
             int idx = get_win_index(wid);
             if (idx >= 0) {
+                if (!validate_user_ptr((void*)regs->ecx, sizeof(gui_event_t))) {
+                    regs->eax = (uint32_t)-2;
+                    break;
+                }
                 int h = win_queues[idx].head;
                 if (h != win_queues[idx].tail) {
+                    gui_event_t* ev_ptr = (gui_event_t*)regs->ecx;
                     *ev_ptr = win_queues[idx].events[h];
                     win_queues[idx].head = (h + 1) % MAX_EVENTS;
-                    regs->eax = 1; // Success
+                    regs->eax = 1;
                 } else {
-                    regs->eax = 0; // No events
+                    regs->eax = 0;
                 }
             } else {
-                // Window is closed/invalid.
-                // Track per-task: first time → return -1 (let app save).
-                // Second time → force kill (prevent zombie spinning).
-                static int close_notified_task[64]; // indexed by task id
-                static int close_init = 0;
-                if (!close_init) {
-                    for (int ci = 0; ci < 64; ci++) close_notified_task[ci] = 0;
-                    close_init = 1;
-                }
-                
-                int cur_tid = get_current_task();
-                
-                // Clean up terminal state (do this on first notification)
-                extern int term_app_running;
-                extern int term_app_task_id;
-                if (term_app_running && cur_tid == term_app_task_id) {
-                    term_app_running = 0;
-                    term_app_task_id = -1;
-                }
-                
-                if (cur_tid >= 0 && cur_tid < 64 && close_notified_task[cur_tid]) {
-                    // Already notified once — app didn't exit. Force kill.
-                    write_serial_string("SYS_GET_EVENT: Force killing zombie task.\n");
-                    close_notified_task[cur_tid] = 0; // reset for reuse
-                    task_exit();
-                    for(;;) __asm__("hlt");
-                } else {
-                    // First notification — return -1 to give app a chance to save
-                    write_serial_string("SYS_GET_EVENT: Window closed, returning -1.\n");
-                    if (cur_tid >= 0 && cur_tid < 64) close_notified_task[cur_tid] = 1;
-                    regs->eax = (uint32_t)-1;
-                }
+                regs->eax = (uint32_t)-1;
             }
             break;
         }
@@ -442,10 +430,10 @@ static void syscall_handler(registers_t* regs) {
                     win_canvases[idx].cmds[i] = win_canvases[idx].pending_cmds[i];
                 }
                 win_canvases[idx].count = win_canvases[idx].pending_count;
-                write_serial_string("UPD_WIN ");
-                write_serial('0' + win_canvases[idx].count);
-                write_serial('\n');
                 win_canvases[idx].pending_count = 0; // Reset for next frame
+                
+                // Composite WM: trigger a redraw for this window's buffer
+                wm_wins[idx].buffer_dirty = 1;
             } else {
                 write_serial_string("UPD_WIN: Invalid WID\n");
             }
@@ -510,9 +498,7 @@ static void syscall_handler(registers_t* regs) {
 
         // ----- SYS_PLAY_SOUND (34) -----
         case SYS_PLAY_SOUND: {
-            int freq = (int)regs->ebx;
-            int duration_ms = (int)regs->ecx;
-            nada(freq, duration_ms);
+            // Audio disabled per user request
             regs->eax = 0;
             break;
         }
@@ -598,11 +584,15 @@ static void syscall_handler(registers_t* regs) {
         case SYS_DNS_RESOLVE: {
             const char* domain = (const char*)regs->ebx;
             if (safe_strlen(domain, 128) < 0) { regs->eax = (uint32_t)-1; break; }
+            write_serial_string("[SYSCALL] SYS_DNS_RESOLVE called for domain: ");
+            write_serial_string(domain);
+            write_serial_string("\n");
             dns_resolved = 0;
             net_send_dns_query(domain);
             regs->eax = 0;
             break;
         }
+
 
         // ----- SYS_TCP_CONNECT (40) -----
         case SYS_TCP_CONNECT: {
@@ -791,6 +781,29 @@ static void syscall_handler(registers_t* regs) {
             }
             extern void* load_mct_library(const char* filename);
             regs->eax = (uint32_t)load_mct_library(lib_name);
+            break;
+        }
+        // ===== Volume Control =====
+        case SYS_SET_VOLUME: {
+            extern void sb16_set_volume(uint8_t vol);
+            sb16_set_volume((uint8_t)regs->ebx);
+            regs->eax = 0;
+            break;
+        }
+        case SYS_GET_VOLUME: {
+            extern uint8_t sb16_get_volume(void);
+            regs->eax = (uint32_t)sb16_get_volume();
+            break;
+        }
+        case SYS_PLAY_WAV: {
+            // Audio disabled per user request
+            regs->eax = 0;
+            break;
+        }
+        case SYS_STOP_WAV: {
+            extern void sb16_stop_playback(void);
+            sb16_stop_playback();
+            regs->eax = 0;
             break;
         }
 

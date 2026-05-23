@@ -84,6 +84,10 @@ void full_redraw() {
 }
 
 void kernel_main(uint32_t magic, uint32_t addr) {
+    extern void init_serial();
+    init_serial();
+    write_serial_string("[KERNEL] boot start\n");
+    
     multiboot_info_t* mbi = (multiboot_info_t*)addr;
     uint32_t fb_p = 0, fb_s = 0;
     uint32_t mem_size = 32 * 1024 * 1024; // Default fallback 32MB
@@ -101,29 +105,42 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             init_vbe(fb_p, mbi->framebuffer_width, mbi->framebuffer_height, mbi->framebuffer_pitch, mbi->framebuffer_bpp);
         }
     }
-    
+    write_serial_string("[K] gdt\n");
     extern void init_gdt();
     init_gdt();
 
+    write_serial_string("[K] mem\n");
     init_mem(mem_size);
+    write_serial_string("[K] paging\n");
     paging_init(fb_p, fb_s);
+    write_serial_string("[K] idt\n");
     idt_init();
+    write_serial_string("[K] syscalls\n");
     extern void init_syscalls(void);
     init_syscalls();
+    write_serial_string("[K] timer\n");
     init_timer(1000); // 1000 Hz PIT for 1ms precision ticks
+    write_serial_string("[K] kbd\n");
     init_keyboard();
+    write_serial_string("[K] cpu\n");
     detect_cpu();
+    write_serial_string("[K] pci\n");
     pci_scan();
+    write_serial_string("[K] rtl\n");
     extern void init_rtl8139();
     init_rtl8139();
+    write_serial_string("[K] net\n");
     extern void net_init();
     net_init();
-    extern void init_serial();
-    init_serial();
+    // init_serial already called at top of kernel_main
+    write_serial_string("[K] uptime\n");
     init_uptime();
+    write_serial_string("[K] vfs\n");
     vfs_init();
 
+    write_serial_string("[K] dbuf\n");
     init_double_buffer();
+    write_serial_string("[K] tasking\n");
     init_tasking();
 
     __asm__ __volatile__ ("sti");
@@ -137,16 +154,21 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     wm_init();
     cursor_saved_x = -1;
     gui_login();
+    
+    write_serial_string("BOOTED KERNEL LOOP\n");
+
+    extern int load_mct_app(const char*);
 
     nada(659, 80); nada(784, 80); nada(1047, 150);
     full_redraw();
-
+    
     // Kalkulator akan dibuka jika user mengklik ikonnya di desktop
+
     // extern int load_mct_app(const char*);
     // load_mct_app("gcalc.mct");
     
-    // Auto test edit.mct to capture crash
-    // load_mct_app("apps/edit.mct");
+    // Auto test browser.mct to capture issue
+    // load_mct_app("apps/browser.mct");
 
     // ---- Main GUI Event Loop ----
     int prev_btn  = 0;
@@ -161,12 +183,20 @@ void kernel_main(uint32_t magic, uint32_t addr) {
 
         if (mx != prev_mx || my != prev_my || btn != prev_btn) {
             int in_taskbar = (my >= (int)fb_height - TASKBAR_H_PX);
+            // Check if any taskbar popup is open (volume, calendar, start menu)
+            extern int start_menu_open;
+            extern int calendar_open;
+            int popup_open = start_menu_open || calendar_open || taskbar_volume_popup_open();
+            
             int handled = wm_handle_mouse(mx, my, btn, prev_btn);
             if (!handled) {
-                if (!in_taskbar) {
-                    desktop_handle_mouse(mx, my, btn, prev_btn);
-                } else if (!btn && prev_btn) {
+                if (in_taskbar && !btn && prev_btn) {
                     taskbar_handle_click(mx, my);
+                } else if (!in_taskbar && !btn && prev_btn && popup_open) {
+                    // Route clicks above taskbar to taskbar if a popup is open
+                    taskbar_handle_click(mx, my);
+                } else if (!in_taskbar && !popup_open) {
+                    desktop_handle_mouse(mx, my, btn, prev_btn);
                 }
             }
             
@@ -180,6 +210,16 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                 swap_buffers();
             }
             prev_btn = btn; prev_mx = mx; prev_my = my;
+        }
+
+        // ---- Scroll wheel handling ----
+        {
+            int8_t scroll = mouse_scroll;
+            if (scroll != 0) {
+                mouse_scroll = 0; // consume
+                wm_handle_scroll(mx, my, (int)scroll);
+                needs_redraw = 1;
+            }
         }
 
         extern volatile int doom_fullscreen;

@@ -61,8 +61,12 @@ void shell_print_timestamp() {
 }
 
 void shell_print_prompt() {
+    char cwd[MAX_PATH];
+    vfs_get_abs_path(current_dir, cwd, MAX_PATH);
     print("root@mectov", 0x0A);
-    print(" ~$ ", 0x0F);
+    print(":", 0x07);
+    print(cwd, 0x0B);
+    print("$ ", 0x0F);
 }
 
 static void history_add(const char* cmd) {
@@ -182,7 +186,13 @@ static void shell_redisplay() {
         
         term_clear_line(); // Clear current line buffer
         term_print("root@mectov", 0x0A);
-        term_print(" ~$ ", 0x0F);
+        {
+            char cwd[MAX_PATH];
+            vfs_get_abs_path(current_dir, cwd, MAX_PATH);
+            term_print(":", 0x07);
+            term_print(cwd, 0x0B);
+        }
+        term_print("$ ", 0x0F);
         term_print(cmd_b, 0x0F);
     } else {
         print("\r", 0x00);

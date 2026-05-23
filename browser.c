@@ -15,6 +15,8 @@ static char page_text[MAX_PAGE];
 static int page_len = 0;
 static int loading = 0;
 static int browser_state = 0; // 0=Idle, 1=DNS, 2=TCP connect, 3=Connected
+static int scroll_offset = 0; // Scroll offset (number of lines to skip)
+
 
 static int my_strlen(const char* s) {
     int n = 0; while(s[n]) n++; return n;
@@ -50,41 +52,69 @@ static void draw_browser(int wid) {
     // Ring 3 badge
     sys_draw_text(wid, cw - 60, 34, "Ring 3", 0x00F9E2AF);
     
-    // Draw page text
+    // Draw vertical scrollbar track on the rightmost 12 pixels (below address bar y=30)
+    sys_draw_rect(wid, cw - 12, 30, 12, ch - 30, 0x00E0E0E0); // light gray track
+    
+    // Up arrow button
+    sys_draw_rect(wid, cw - 12, 30, 12, 12, 0x00C0C0C0); // gray button
+    sys_draw_text(wid, cw - 10, 29, "^", 0x00111111);
+    
+    // Down arrow button
+    sys_draw_rect(wid, cw - 12, ch - 12, 12, 12, 0x00C0C0C0);
+    sys_draw_text(wid, cw - 10, ch - 14, "v", 0x00111111);
+    
+    // Draw page text (shifted left to avoid scrollbar)
     int lx = 8, ly = 40;
     int line_len = 0;
     char line[128];
-    int max_ch = (cw - 16) / 8 - 1;
+    int max_ch = (cw - 28) / 8 - 1; // 28 pixels margin to clear scrollbar
+
+    int current_line = 0;
     
     for (int i = 0; i < page_len; i++) {
         char c = page_text[i];
         if (c == '\n' || line_len >= max_ch) {
             line[line_len] = '\0';
-            sys_draw_text(wid, lx, ly, line, 0x00111111);
-            ly += 16;
+            
+            // Only draw if we are past the scroll offset!
+            if (current_line >= scroll_offset) {
+                sys_draw_text(wid, lx, ly, line, 0x00111111);
+                ly += 16;
+                if (ly > ch - 16) break;
+            }
+            
+            current_line++;
             line_len = 0;
             if (c != '\n') line[line_len++] = c;
-            if (ly > ch - 16) break;
         } else {
             if (c >= 32 && c <= 126) line[line_len++] = c;
         }
     }
-    if (line_len > 0 && ly <= ch - 16) {
+    if (line_len > 0 && current_line >= scroll_offset && ly <= ch - 16) {
         line[line_len] = '\0';
         sys_draw_text(wid, lx, ly, line, 0x00111111);
     }
+
     
     sys_update_window(wid);
 }
 
 void _start() {
+    sys_print("[B] 1\n", 0x00FFFFFF);
+    url_len = my_strlen(url_buf);
+    sys_print("[B] 2\n", 0x00FFFFFF);
     int wid = sys_create_window(50, 50, 520, 380, "Browser (Ring 3)");
+    sys_print("[B] 3\n", 0x00FFFFFF);
     if (wid < 0) sys_exit();
     
+    sys_print("[B] 4\n", 0x00FFFFFF);
     my_strcpy(page_text, "Mectov Mini-Browser v2.0 [Ring 3]\nType URL and press ENTER.");
+    sys_print("[B] 5\n", 0x00FFFFFF);
     page_len = my_strlen(page_text);
+    sys_print("[B] 6\n", 0x00FFFFFF);
     
     draw_browser(wid);
+    sys_print("[B] 7\n", 0x00FFFFFF);
     
     gui_event_t ev;
     int tick = 0;
@@ -107,6 +137,7 @@ void _start() {
                         if (url_len > 0) {
                             // Start DNS resolution
                             page_len = 0;
+                            scroll_offset = 0; // Reset scroll on new request
                             my_strcpy(page_text, "Resolving DNS...\n");
                             page_len = my_strlen(page_text);
                             loading = 1;
@@ -124,15 +155,52 @@ void _start() {
                     if (ev.key == ' ') {
                         focused_url = 1;
                         draw_browser(wid);
+                    } else if ((ev.key == 'w' || ev.key == 'W') && scroll_offset > 0) {
+                        scroll_offset--;
+                        draw_browser(wid);
+                    } else if (ev.key == 's' || ev.key == 'S') {
+                        // Limit scrolling past the actual text lines
+                        scroll_offset++;
+                        draw_browser(wid);
                     }
                 }
             } else if (ev.type == 3) { // Mouse
-                if (ev.key == 1) {
-                    if (ev.y < 30) focused_url = 1;
-                    else focused_url = 0;
+                if (ev.key == 1) { // Left click
+                    if (ev.y < 30) {
+                        focused_url = 1;
+                    } else if (ev.x > 520 - 12) {
+                        focused_url = 0;
+                        if (ev.y < 30 + 12) {
+                            // Clicked Up button
+                            if (scroll_offset > 0) scroll_offset--;
+                        } else if (ev.y > 380 - 12) {
+                            // Clicked Down button
+                            scroll_offset++;
+                        } else {
+                            // Clicked track: scroll up or down based on click half
+                            if (ev.y < 190) {
+                                if (scroll_offset > 0) scroll_offset--;
+                            } else {
+                                scroll_offset++;
+                            }
+                        }
+                    } else {
+                        focused_url = 0;
+                    }
                     draw_browser(wid);
                 }
+            } else if (ev.type == 4) { // Scroll wheel
+                if (ev.key > 0) {
+                    // Scroll up (3 lines at a time)
+                    for (int s = 0; s < 3 && scroll_offset > 0; s++)
+                        scroll_offset--;
+                } else if (ev.key < 0) {
+                    // Scroll down (3 lines at a time)
+                    scroll_offset += 3;
+                }
+                draw_browser(wid);
             }
+
         }
         
         // Poll network state machine

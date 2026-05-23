@@ -10,6 +10,7 @@
 #include "../include/apps.h"
 #include "../include/desktop.h"
 #include "../include/login.h"
+#include "../include/sb16.h"
 
 // Helpers
 static void draw_num2(int px, int py, unsigned char n, uint32_t fg, uint32_t bg) {
@@ -32,13 +33,13 @@ void taskbar_track_mouse(int mx, int my, int px, int py) {
     if (my < ty) {
         // Check if mouse is over start menu
         if (start_menu_open) {
-            int sm_h = 320, sm_w = 200;
+            int sm_h = 348, sm_w = 200;
             int sm_y = ty - sm_h;
             if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
                 if (my >= sm_y + 36) {
                     int rel_y = my - (sm_y + 36);
                     int item = rel_y / 28;
-                    if (item < 11) {
+                    if (item >= 0 && item < 11) {
                         hover_menu_idx = item;
                         return;
                     }
@@ -97,6 +98,7 @@ static void draw_app_icon(int ix, int iy, const char* title, int size) {
     else if (strncmp(title, "Editor", 6) == 0) bg_col = 0x00718096;
     else if (strncmp(title, "Task Mgr", 8) == 0) bg_col = 0x004A5568;
     else if (strncmp(title, "Flappy", 6) == 0) bg_col = 0x00ECC94B;
+    else if (strncmp(title, "Media", 5) == 0) bg_col = 0x00D53F8C; // Pinkish red for media player
     else bg_col = 0x00718096;
 
     draw_rounded_rect(ix, iy, size, size, size/4, bg_col);
@@ -131,6 +133,11 @@ static void draw_app_icon(int ix, int iy, const char* title, int size) {
         draw_rect(cx + 2, cy - size/3, 4, size/3, 0x00FFFFFF);
     } else if (strncmp(title, "Calc", 4) == 0 || strncmp(title, "Editor", 6) == 0) {
         draw_rect(cx - size/3, cy - size/3, size*2/3, size*2/3, 0x00FFFFFF);
+    } else if (strncmp(title, "Media", 5) == 0) {
+        // Play button triangle
+        draw_line(cx - size/4, cy - size/4, cx - size/4, cy + size/4, 0x00FFFFFF);
+        draw_line(cx - size/4, cy - size/4, cx + size/4, cy, 0x00FFFFFF);
+        draw_line(cx - size/4, cy + size/4, cx + size/4, cy, 0x00FFFFFF);
     } else {
         draw_rect(cx - size/4, cy - size/4, size/2, size/2, 0x00FFFFFF);
     }
@@ -138,6 +145,10 @@ static void draw_app_icon(int ix, int iy, const char* title, int size) {
 
 int start_menu_open = 0;
 int calendar_open = 0;
+static int volume_popup_open = 0;
+static int vol_icon_x_s = 0;  // saved for click handler
+static int vol_icon_ty_s = 0;
+static int prev_volume = 80;  // for mute toggle
 
 static int get_dow(int d, int m, int y) {
     if (m < 3) { m += 12; y -= 1; }
@@ -343,6 +354,32 @@ void taskbar_draw() {
     int hdd_x = tray_x - 12;
     fill_circle(hdd_x + 5, ty + TASKBAR_H_PX / 2, 4, hdd_activity > 0 ? 0x00FF4444 : GUI_BORDER2);
     if (hdd_activity > 0) hdd_activity--;
+    tray_x = hdd_x - 6;
+
+    // 8. Volume icon (speaker glyph)
+    int vol_icon_x = tray_x - 18;
+    vol_icon_x_s = vol_icon_x;  // save for click handler
+    vol_icon_ty_s = ty;
+    int vol_icon_y = ty + 6;
+    int vol = sb16_get_volume();
+    // Speaker body
+    draw_rect(vol_icon_x + 2, vol_icon_y + 4, 5, 8, 0x00AAAACC);
+    draw_rect(vol_icon_x, vol_icon_y + 6, 2, 4, 0x00AAAACC);
+    // Sound waves based on volume
+    if (vol > 0) {
+        draw_rect(vol_icon_x + 9, vol_icon_y + 3, 1, 10, 0x0027C93F);
+    }
+    if (vol > 33) {
+        draw_rect(vol_icon_x + 12, vol_icon_y + 1, 1, 14, 0x001B9A2F);
+    }
+    if (vol > 66) {
+        draw_rect(vol_icon_x + 15, vol_icon_y, 1, 16, 0x00145F1E);
+    }
+    if (vol == 0) {
+        // Muted: X mark
+        draw_rect(vol_icon_x + 10, vol_icon_y + 5, 6, 2, 0x00FF5555);
+    }
+    tray_x = vol_icon_x - 6;
 
     // ========== Draw Start Menu (toaruOS style) ==========
     if (start_menu_open) {
@@ -366,7 +403,7 @@ void taskbar_draw() {
         // Menu items with icons (icon on left, label on right)
         struct { const char* label; int len; uint32_t icon_bg; } items[] = {
             {"Terminal", 8, 0x002D3748},
-            {"Editor", 6, 0x00718096},
+            {"Notepad", 7, 0x00718096},
             {"File Explorer", 13, 0x003182CE},
             {"Mini Browser", 12, 0x00319795},
             {"System Info", 11, 0x00E2E8F0},
@@ -484,13 +521,59 @@ void taskbar_draw() {
             if (col == 6) row++;
         }
     }
+
+    // ========== Volume Popup ==========
+    if (volume_popup_open) {
+        int vp_w = 160;
+        int vp_h = 70;
+        int vp_x = vol_icon_x - vp_w / 2 + 8;
+        int vp_y = ty - vp_h - 4;
+        if (vp_x + vp_w > (int)fb_width - 4) vp_x = (int)fb_width - vp_w - 4;
+        if (vp_x < 4) vp_x = 4;
+
+        draw_rounded_rect(vp_x, vp_y, vp_w, vp_h, 8, GUI_BG);
+        draw_rounded_rect_border(vp_x, vp_y, vp_w, vp_h, 8, GUI_BORDER);
+
+        // Title
+        draw_string_px(vp_x + vp_w/2 - 24, vp_y + 6, "Volume", GUI_TEXT, GUI_BG);
+
+        // Slider track
+        int sl_x = vp_x + 12;
+        int sl_y = vp_y + 28;
+        int sl_w = vp_w - 24;
+        int sl_h = 6;
+        draw_rounded_rect(sl_x, sl_y, sl_w, sl_h, 3, 0x00333344);
+        int fill_w = (vol * sl_w) / 100;
+        if (fill_w > 0) {
+            draw_rounded_rect(sl_x, sl_y, fill_w, sl_h, 3, 0x0027C93F);
+        }
+        // Knob
+        int knob_x = sl_x + fill_w;
+        fill_circle(knob_x, sl_y + sl_h/2, 5, 0x00FFFFFF);
+        fill_circle(knob_x, sl_y + sl_h/2, 3, 0x0027C93F);
+
+        // Volume % text
+        char vbuf[8];
+        int vi = 0;
+        if (vol >= 100) { vbuf[vi++] = '1'; vbuf[vi++] = '0'; vbuf[vi++] = '0'; }
+        else if (vol >= 10) { vbuf[vi++] = '0' + vol/10; vbuf[vi++] = '0' + vol%10; }
+        else { vbuf[vi++] = '0' + vol; }
+        vbuf[vi++] = '%'; vbuf[vi] = '\0';
+        draw_string_px(vp_x + vp_w/2 - vi*4, vp_y + 42, vbuf, GUI_TEXT, GUI_BG);
+
+        // Mute button
+        int mute_x = vp_x + vp_w/2 - 20;
+        int mute_y = vp_y + 54;
+        draw_rounded_rect(mute_x, mute_y, 40, 14, 4, 0x00333344);
+        draw_string_px(mute_x + 4, mute_y + 1, vol == 0 ? "Unmte" : " Mute", vol == 0 ? 0x00FF5555 : GUI_DIM, 0x00333344);
+    }
 }
 
 static void handle_start_menu_click(int item) {
     start_menu_open = 0;
     switch (item) {
         case 0: open_terminal_app(); break;
-        case 1: st_ed(""); break;
+        case 1: { extern int load_mct_app(const char*); load_mct_app("apps/notepad.mct"); } break;
         case 2: open_explorer_app(); break;
         case 3: open_browser_app(); break;
         case 4: open_sysinfo_app(); break;
@@ -520,7 +603,7 @@ void taskbar_handle_click(int mx, int my) {
     
     // ---------- Start menu items hit test ----------
     if (start_menu_open && my < ty) {
-        int sm_h = 320, sm_w = 200;
+        int sm_h = 348, sm_w = 200;
         int sm_y = ty - sm_h;
         if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
             if (my >= sm_y + 36) {
@@ -537,12 +620,50 @@ void taskbar_handle_click(int mx, int my) {
         return;
     }
     
+    // ---------- Volume popup hit test (above taskbar) ----------
+    if (volume_popup_open && my < ty) {
+        int vp_w = 160;
+        int vp_h = 70;
+        int vp_x = vol_icon_x_s - vp_w / 2 + 8;
+        int vp_y = ty - vp_h - 4;
+        if (vp_x + vp_w > (int)fb_width - 4) vp_x = (int)fb_width - vp_w - 4;
+        if (vp_x < 4) vp_x = 4;
+        
+        if (mx >= vp_x && mx <= vp_x + vp_w && my >= vp_y && my <= vp_y + vp_h) {
+            // Slider track area
+            int sl_x = vp_x + 12;
+            int sl_y = vp_y + 28;
+            int sl_w = vp_w - 24;
+            if (my >= sl_y - 8 && my <= sl_y + 14 && mx >= sl_x && mx <= sl_x + sl_w) {
+                int new_vol = ((mx - sl_x) * 100) / sl_w;
+                if (new_vol < 0) new_vol = 0;
+                if (new_vol > 100) new_vol = 100;
+                sb16_set_volume(new_vol);
+                return;
+            }
+            // Mute button
+            int mute_x = vp_x + vp_w/2 - 20;
+            int mute_y = vp_y + 54;
+            if (mx >= mute_x && mx <= mute_x + 40 && my >= mute_y && my <= mute_y + 14) {
+                int cur = sb16_get_volume();
+                if (cur > 0) { prev_volume = cur; sb16_set_volume(0); }
+                else sb16_set_volume(prev_volume);
+                return;
+            }
+            return; // clicked inside popup but not on control
+        }
+        // Clicked outside popup — close it
+        volume_popup_open = 0;
+        if (my >= ty) { /* fall through to taskbar handling */ }
+        else return;
+    }
+    
     if (my < ty) return;
 
     // Start button hit test (wider hit area)
     if (mx >= 2 && mx <= 92) {
         start_menu_open = !start_menu_open;
-        if (start_menu_open) calendar_open = 0;
+        if (start_menu_open) { calendar_open = 0; volume_popup_open = 0; }
         return;
     }
 
@@ -559,10 +680,17 @@ void taskbar_handle_click(int mx, int my) {
         return;
     }
 
+    // Volume icon hit test
+    if (mx >= vol_icon_x_s && mx <= vol_icon_x_s + 18 && my >= ty) {
+        volume_popup_open = !volume_popup_open;
+        if (volume_popup_open) { start_menu_open = 0; calendar_open = 0; }
+        return;
+    }
+
     // Clock/date area hit test (approximate the right-side tray area)
     if (mx > (int)fb_width - 220 && mx < pwr_x - pwr_r - 10) {
         calendar_open = !calendar_open;
-        if (calendar_open) start_menu_open = 0;
+        if (calendar_open) { start_menu_open = 0; volume_popup_open = 0; }
         return;
     }
 
@@ -604,3 +732,7 @@ void taskbar_handle_click(int mx, int my) {
 }
 
 void taskbar_tick() { }
+
+int taskbar_volume_popup_open(void) {
+    return volume_popup_open;
+}

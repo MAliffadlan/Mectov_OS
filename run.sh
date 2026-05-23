@@ -5,6 +5,12 @@ if [ ! -f "disk.img" ]; then
     dd if=/dev/zero of=disk.img bs=512 count=2048 2>/dev/null
 fi
 
+if [ ! -f "ext2.img" ]; then
+    echo "[!] Membuat ext2.img baru..."
+    dd if=/dev/zero of=ext2.img bs=1M count=2 2>/dev/null
+    mkfs.ext2 -F ext2.img > /dev/null 2>&1
+fi
+
 # Rebuild kernel
 make clean && make
 
@@ -17,14 +23,23 @@ export PATH=/home/mectov/my-os/xbin/usr/bin:$PATH
 export LD_LIBRARY_PATH=/home/mectov/my-os/xbin/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 grub-mkrescue -o mectov.iso iso >/dev/null 2>&1
 
+echo "[*] Menjalankan Mectov Web Gateway Proxy di background..."
+python3 gateway.py > gateway.log 2>&1 &
+GATEWAY_PID=$!
+
 echo "[*] Menjalankan Mectov OS di QEMU (VBE GRUB Mode)..."
 echo "[*] Serial debug output -> serial_debug.log"
 qemu-system-i386 -enable-kvm -cpu host \
     -vga std \
     -cdrom mectov.iso \
     -m 128 \
-    -audiodev alsa,id=snd0 \
+    -audiodev pa,id=snd0 \
+    -device sb16,audiodev=snd0 \
     -machine pcspk-audiodev=snd0 \
     -net nic,model=rtl8139 -net user \
-    -serial file:serial_debug.log \
-    -drive file=disk.img,format=raw,index=0,media=disk
+    -chardev socket,id=char0,host=127.0.0.1,port=45454,server=on,wait=off,logfile=serial_debug.log -serial chardev:char0 \
+    -drive file=disk.img,format=raw,index=0,media=disk \
+    -drive file=ext2.img,format=raw,index=1,media=disk
+
+echo "[*] Menghentikan Mectov Web Gateway Proxy..."
+kill $GATEWAY_PID 2>/dev/null

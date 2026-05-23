@@ -83,7 +83,7 @@ void _start() {
         int n1 = readline(buf1, 16);
         if (n1 == 0) continue;
         if (buf1[0] == 'q') break;
-        int a = my_atoi(buf1);
+        int a = atoi(buf1);
         
         // --- Input operator ---
         print("[>] Operator (+,-,*,/) : ", 0x0F);
@@ -100,7 +100,7 @@ void _start() {
         print("[>] Angka kedua   : ", 0x0F);
         int n3 = readline(buf2, 16);
         if (n3 == 0) continue;
-        int b = my_atoi(buf2);
+        int b = atoi(buf2);
         
         // --- Hitung ---
         int result = 0;
@@ -124,9 +124,9 @@ void _start() {
         
         // --- Tampilkan hasil ---
         char str_a[12], str_b[12], str_r[12];
-        my_itoa(a, str_a);
-        my_itoa(b, str_b);
-        my_itoa(result, str_r);
+        itoa(a, str_a);
+        itoa(b, str_b);
+        itoa(result, str_r);
         
         char op_str[4] = { ' ', op, ' ', '\0' };
         

@@ -117,21 +117,45 @@ void isr_handler(registers_t *r) {
         
         uint32_t cs = r->cs;
         if ((cs & 3) == 3) {
-            // Ring 3 crash - just kill the task
+            // Ring 3 crash - clean up windows, then kill the task
             write_serial_string("[CRASH] Ring 3 crash, killing task\n");
-            print("\n[USER MODE CRASH] Task killed. Exception: ", 0x0C);
-            p_int(r->int_no, 0x0C);
+            extern int get_current_task(void);
+            extern void wm_cleanup_task(int tid);
+            int crashed_tid = get_current_task();
+            write_serial_string("[CRASH] Task ID: ");
+            write_serial_hex(crashed_tid);
+            write_serial('\n');
             if (r->int_no == 14) {
                 uint32_t cr2;
                 __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
                 write_serial_string("PF addr: ");
                 write_serial_hex(cr2);
+                write_serial_string(" err=");
+                write_serial_hex(r->err_code);
                 write_serial_string("\n");
-                print(" (Page Fault at ", 0x0C);
-                p_int(cr2, 0x0C);
-                print(")", 0x0C);
             }
-            print("\n", 0x0C);
+            write_serial_string("EIP: ");
+            write_serial_hex(r->eip);
+            write_serial_string(" ESP: ");
+            write_serial_hex(r->useresp);
+            write_serial_string(" EBP: ");
+            write_serial_hex(r->ebp);
+            write_serial_string("\n");
+            write_serial_string("EAX: ");
+            write_serial_hex(r->eax);
+            write_serial_string(" EBX: ");
+            write_serial_hex(r->ebx);
+            write_serial_string(" ECX: ");
+            write_serial_hex(r->ecx);
+            write_serial_string(" EDX: ");
+            write_serial_hex(r->edx);
+            write_serial_string("\n");
+            uint32_t cr3_val;
+            __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3_val));
+            write_serial_string("CR3: ");
+            write_serial_hex(cr3_val);
+            write_serial_string("\n");
+            // The new task_exit() handles full cleanup (WM + VMM)
             task_exit();
         } else {
             // Kernel crash

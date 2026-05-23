@@ -199,12 +199,13 @@ static void tm_mouse(int id, int cx, int cy, int btn) {
                 // Never kill task 0 (kernel idle)
                 if (r->id > 0) {
                     task_kill(r->id);
-                    tm_selected_row = -1; // Reset selection
-                    refresh_list(); // refresh immediately
                 }
             }
         }
     }
+    
+    // Invalidate window to redraw selection changes
+    wm_invalidate(id);
 }
 
 static void tm_tick(int id) {
@@ -219,6 +220,7 @@ static void tm_tick(int id) {
     static int refresh_counter = 0;
     if (++refresh_counter > 20) {
         refresh_list();
+        wm_invalidate(id);
         refresh_counter = 0;
     }
 }

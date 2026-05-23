@@ -18,6 +18,7 @@ int strlen(const char* s);
 int strcmp(const char* s1, const char* s2);
 int strncmp(const char* s1, const char* s2, int n);
 void strcpy(char* d, const char* s);
+void strncpy(char* d, const char* s, int n);
 void memset(void* dest, uint8_t val, uint32_t len);
 void memcpy(void* dest, const void* src, uint32_t len);
 void p_int(int n, unsigned char c);

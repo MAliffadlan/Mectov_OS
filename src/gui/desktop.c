@@ -16,8 +16,6 @@ void open_sysinfo_app();
 // ---- Icon definitions ----
 typedef struct { int x, y; const char* label; void (*action)(); } Icon;
 static Icon icons[ICON_COUNT];
-static uint32_t last_click_tick = 0;
-static int      last_click_icon = -1;
 
 extern int load_mct_app(const char*);
 static void open_calc_wrapper() { load_mct_app("apps/gcalc.mct"); }
@@ -28,6 +26,7 @@ static void open_explorer_wrapper() { load_mct_app("apps/explorer.mct"); }
 static void open_browser_wrapper() { load_mct_app("apps/browser.mct"); }
 static void open_taskmgr_wrapper() { load_mct_app("apps/taskmgr.mct"); }
 static void open_flappy_wrapper() { load_mct_app("apps/flappy.mct"); }
+static void open_notepad_wrapper() { load_mct_app("apps/notepad.mct"); }
 
 #define ICON_W  72
 #define ICON_H  80
@@ -71,6 +70,9 @@ static void init_icons() {
     // Flappy Bird
     icons[9] = (Icon){ start_x + 1 * grid_gap_x, start_y + 2 * grid_gap_y, "Flappy",    open_flappy_wrapper };
 
+    // Notepad
+    icons[10] = (Icon){ start_x + 2 * grid_gap_x, start_y + 2 * grid_gap_y, "Notepad",  open_notepad_wrapper };
+
     // Load saved positions
     int read_buf[ICON_COUNT * 2];
     int sz = vfs_read_file("icons.cfg", (char*)read_buf, sizeof(read_buf));
@@ -103,6 +105,7 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
     else if (strcmp(label, "Task Mgr") == 0) bg_col = 0x004A5568; // Gray
     else if (strcmp(label, "Snake") == 0) bg_col = 0x0038A169; // Green
     else if (strcmp(label, "Flappy") == 0) bg_col = 0x00ECC94B; // Yellow
+    else if (strcmp(label, "Notepad") == 0) bg_col = 0x00E2E8F0; // Light gray
     else bg_col = 0x00718096; // Default Gray
 
     // Draw base rounded squircle
@@ -238,6 +241,9 @@ static int drag_offset_y = 0;
 static int drag_start_x = 0;
 static int drag_start_y = 0;
 
+static int last_clicked_icon = -1;
+static uint32_t last_click_tick = 0;
+
 void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
     int ty = (int)fb_height - TASKBAR_H_PX;
     if (my >= ty) return; // taskbar handles its own clicks
@@ -247,31 +253,7 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
         return;
     }
 
-    if (start_menu_open) {
-        if (!btn && pbtn) {
-            int sm_h = 320;
-            int sm_w = 200;
-            int sm_y = ty - sm_h;
-            if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
-                if (my >= sm_y + 36) {
-                    int rel_y = my - (sm_y + 36);
-                    int item = rel_y / 28;
-                    if (item == 0) open_terminal_app();
-                    else if (item == 1) st_ed("baru.txt");
-                    else if (item == 2) open_explorer_app();
-                    else if (item == 3) open_browser_app();
-                    else if (item == 4) open_sysinfo_app();
-                    else if (item == 5) open_clock_app();
-                    else if (item == 6) open_pci_app();
-                    else if (item == 7) start_ular();
-                    else if (item == 8) { extern volatile int pending_logout; pending_logout = 1; }
-                    else if (item == 9) open_power_dialog();
-                }
-            }
-            start_menu_open = 0;
-        }
-        return;
-    }
+    if (start_menu_open) return;
 
     if (!icons[0].label) return;
 
@@ -295,16 +277,32 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
         }
     } else if (!btn && pbtn) {
         if (dragged_icon != -1) {
-            uint32_t now = get_ticks();
-            if (last_click_icon == dragged_icon && (now - last_click_tick) < 500) {
-                if (icons[dragged_icon].action) icons[dragged_icon].action();
-                last_click_icon = -1;
-            } else {
-                last_click_icon = dragged_icon;
-                last_click_tick = now;
-                if (icons[dragged_icon].x != drag_start_x || icons[dragged_icon].y != drag_start_y) {
-                    save_desktop_icons();
+            int dx = icons[dragged_icon].x - drag_start_x;
+            int dy = icons[dragged_icon].y - drag_start_y;
+            int dist_sq = dx * dx + dy * dy;
+
+            // Jika pergeseran mouse sangat kecil (toleransi 5 piksel), anggap sebagai klik
+            if (dist_sq < 25) {
+                // Kembalikan ikon ke posisi awal agar tidak bergeser sedikit demi sedikit akibat jitter klik
+                icons[dragged_icon].x = drag_start_x;
+                icons[dragged_icon].y = drag_start_y;
+                
+                uint32_t now = get_ticks();
+                if (dragged_icon == last_clicked_icon && (now - last_click_tick) < 500) {
+                    // Double click detected! Buka aplikasi
+                    if (icons[dragged_icon].action) {
+                        icons[dragged_icon].action();
+                    }
+                    last_clicked_icon = -1;
+                    last_click_tick = 0;
+                } else {
+                    // Single click: catat icon dan waktu klik untuk deteksi double click berikutnya
+                    last_clicked_icon = dragged_icon;
+                    last_click_tick = now;
                 }
+            } else {
+                // Pergeseran besar, simpan posisi baru ikon desktop
+                save_desktop_icons();
             }
             dragged_icon = -1;
         }

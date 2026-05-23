@@ -136,7 +136,7 @@ void* load_mct_library(const char* filename) {
     uint32_t total_size = header->code_size + header->data_size;
     if (total_size == 0 || total_size > 1024 * 1024) { kfree(lib_buf); return 0; }
     
-    uint32_t lib_base = 0x03000000;
+    uint32_t lib_base = 0x09000000;
     uint32_t num_pages = (total_size + 4095) / 4096;
     if (num_pages == 0) num_pages = 1;
     
@@ -145,6 +145,12 @@ void* load_mct_library(const char* filename) {
     
     // CRITICAL: Prevent task switching while modifying page tables
     __asm__ volatile("cli");
+    
+    // Switch to the target page directory to allocate and map pages
+    uint32_t old_cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(old_cr3));
+    vmm_switch_page_dir(cr3);
+
     for (uint32_t i = 0; i < num_pages; i++) {
         uint32_t addr = lib_base + (i * 4096);
         vmm_alloc_page_at(cr3, addr, PAGE_PRESENT | PAGE_RW | PAGE_USER);
@@ -153,6 +159,9 @@ void* load_mct_library(const char* filename) {
     void* lib_mem = (void*)lib_base;
     memcpy(lib_mem, lib_buf + sizeof(mct_header_t), header->code_size);
     memset((uint8_t*)lib_mem + header->code_size, 0, header->data_size);
+    
+    // Restore original page directory
+    vmm_switch_page_dir(old_cr3);
     __asm__ volatile("sti");
 
     kfree(lib_buf);

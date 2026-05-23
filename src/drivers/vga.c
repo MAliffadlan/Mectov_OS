@@ -19,6 +19,51 @@ int       is_vbe    = 0;
 uint32_t* back_buffer = NULL;         // All drawing goes here
 uint32_t  bb_pitch    = 0;            // Always width*4
 
+// ---- Render Target State ----
+uint32_t* active_rt_buf    = NULL;
+uint32_t  active_rt_width  = 0;
+uint32_t  active_rt_height = 0;
+uint32_t  active_rt_pitch  = 0;
+
+void vga_set_render_target(uint32_t* buf, int w, int h, int pitch) {
+    if (buf == NULL) {
+        active_rt_buf    = back_buffer;
+        active_rt_width  = fb_width;
+        active_rt_height = fb_height;
+        active_rt_pitch  = bb_pitch;
+    } else {
+        active_rt_buf    = buf;
+        active_rt_width  = w;
+        active_rt_height = h;
+        active_rt_pitch  = pitch;
+    }
+}
+
+void vga_blit_buffer(uint32_t* src, int sw, int sh, int dx, int dy) {
+    if (!src || !back_buffer) return;
+    int x0 = dx < 0 ? 0 : dx;
+    int y0 = dy < 0 ? 0 : dy;
+    int x1 = dx + sw > (int)fb_width  ? (int)fb_width  : dx + sw;
+    int y1 = dy + sh > (int)fb_height ? (int)fb_height : dy + sh;
+    if (x0 >= x1 || y0 >= y1) return;
+    
+    mark_dirty(x0, y0, x1 - x0, y1 - y0);
+    
+    uint32_t src_stride = sw;
+    uint32_t dst_stride = bb_pitch / 4;
+    
+    for (int y = y0; y < y1; y++) {
+        uint32_t* dst = back_buffer + y * dst_stride + x0;
+        uint32_t* s   = src + (y - dy) * src_stride + (x0 - dx);
+        uint32_t count = x1 - x0;
+        __asm__ __volatile__(
+            "rep movsd"
+            : "+D"(dst), "+S"(s), "+c"(count)
+            :: "memory"
+        );
+    }
+}
+
 // ---- Text console state ----
 volatile char* video_m = (volatile char*) 0xb8000;
 int cx = 0, cy = 0;
@@ -62,10 +107,10 @@ uint32_t vga_to_rgb(unsigned char col) {
 // Core drawing — all write to back_buffer
 // ============================================================
 void put_pixel(int x, int y, uint32_t color) {
-    if (x < 0 || x >= (int)fb_width || y < 0 || y >= (int)fb_height) return;
+    if (x < 0 || x >= (int)active_rt_width || y < 0 || y >= (int)active_rt_height) return;
     mark_dirty(x, y, 1, 1);
-    if (back_buffer)
-        back_buffer[y * (bb_pitch / 4) + x] = color;
+    if (active_rt_buf)
+        active_rt_buf[y * (active_rt_pitch / 4) + x] = color;
     else {
         // Fallback: direct write (before double buffer init)
         if (fb_bpp == 32)
@@ -80,19 +125,19 @@ void put_pixel(int x, int y, uint32_t color) {
 }
 
 void draw_rect(int x, int y, int w, int h, uint32_t color) {
-    // Clip to screen
+    // Clip to screen or active render target
     int x0 = x < 0 ? 0 : x;
     int y0 = y < 0 ? 0 : y;
-    int x1 = (x + w > (int)fb_width)  ? (int)fb_width  : (x + w);
-    int y1 = (y + h > (int)fb_height) ? (int)fb_height : (y + h);
+    int x1 = (x + w > (int)active_rt_width)  ? (int)active_rt_width  : (x + w);
+    int y1 = (y + h > (int)active_rt_height) ? (int)active_rt_height : (y + h);
     if (x0 >= x1 || y0 >= y1) return;
     mark_dirty(x0, y0, x1 - x0, y1 - y0);
 
-    if (back_buffer) {
-        uint32_t stride = bb_pitch / 4;
+    if (active_rt_buf) {
+        uint32_t stride = active_rt_pitch / 4;
         int count = x1 - x0;
         for (int row = y0; row < y1; row++) {
-            uint32_t* dst = back_buffer + row * stride + x0;
+            uint32_t* dst = active_rt_buf + row * stride + x0;
             uint32_t cnt = (uint32_t)count;
             // rep stosl: fill cnt dwords at dst with color
             __asm__ __volatile__(
@@ -110,20 +155,20 @@ void draw_rect(int x, int y, int w, int h, uint32_t color) {
 }
 
 void draw_rect_alpha(int x, int y, int w, int h, uint32_t color) {
-    // Clip to screen
+    // Clip to screen or active render target
     int x0 = x < 0 ? 0 : x;
     int y0 = y < 0 ? 0 : y;
-    int x1 = (x + w > (int)fb_width)  ? (int)fb_width  : (x + w);
-    int y1 = (y + h > (int)fb_height) ? (int)fb_height : (y + h);
+    int x1 = (x + w > (int)active_rt_width)  ? (int)active_rt_width  : (x + w);
+    int y1 = (y + h > (int)active_rt_height) ? (int)active_rt_height : (y + h);
     if (x0 >= x1 || y0 >= y1) return;
     mark_dirty(x0, y0, x1 - x0, y1 - y0);
 
-    if (back_buffer) {
-        uint32_t stride = bb_pitch / 4;
+    if (active_rt_buf) {
+        uint32_t stride = active_rt_pitch / 4;
         // Pre-calculate 50% of the incoming color
         uint32_t c_half = (color & 0xFEFEFE) >> 1;
         for (int row = y0; row < y1; row++) {
-            uint32_t* dst = back_buffer + row * stride + x0;
+            uint32_t* dst = active_rt_buf + row * stride + x0;
             for (int col = 0; col < (x1 - x0); col++) {
                 uint32_t bg = dst[col];
                 // Super fast 50% blend without multiplication/division!
@@ -285,7 +330,7 @@ void draw_gradient_v(int x, int y, int w, int h, uint32_t color_top, uint32_t co
 
 // Soft drop shadow with proper alpha blending
 void draw_soft_shadow(int x, int y, int w, int h, int radius, uint32_t intensity) {
-    if (!back_buffer || radius <= 0) return;
+    if (!active_rt_buf || radius <= 0) return;
     
     // Shadow offset
     int shadow_offset = 2 + (radius / 4);
@@ -295,12 +340,12 @@ void draw_soft_shadow(int x, int y, int w, int h, int radius, uint32_t intensity
     // Clip shadow to screen
     int sx0 = shadow_x - radius < 0 ? 0 : shadow_x - radius;
     int sy0 = shadow_y - radius < 0 ? 0 : shadow_y - radius;
-    int sx1 = shadow_x + w + radius > (int)fb_width  ? (int)fb_width  : shadow_x + w + radius;
-    int sy1 = shadow_y + h + radius > (int)fb_height ? (int)fb_height : shadow_y + h + radius;
+    int sx1 = shadow_x + w + radius > (int)active_rt_width  ? (int)active_rt_width  : shadow_x + w + radius;
+    int sy1 = shadow_y + h + radius > (int)active_rt_height ? (int)active_rt_height : shadow_y + h + radius;
     
     if (sx0 >= sx1 || sy0 >= sy1) return;
     
-    uint32_t stride = bb_pitch / 4;
+    uint32_t stride = active_rt_pitch / 4;
     
     // Pre-compute intensity blend factor
     // intensity: 0-255, higher = darker shadow
@@ -308,7 +353,7 @@ void draw_soft_shadow(int x, int y, int w, int h, int radius, uint32_t intensity
     
     // Apply rounded shadow with distance-based falloff
     for (int row = sy0; row < sy1; row++) {
-        uint32_t* dst = back_buffer + row * stride + sx0;
+        uint32_t* dst = active_rt_buf + row * stride + sx0;
         for (int col = sx0; col < sx1; col++) {
             // Compute distance from shadow rect border
             // dx/dy measure how far inside (+)/outside (-) the shadow rect
@@ -377,6 +422,9 @@ void init_double_buffer(void) {
         memset(back_buffer, 0, buf_size);
         memset(front_buffer_copy, 0, buf_size);
         bb_pitch = fb_width * 4;
+        
+        // Initialize render target to back buffer
+        vga_set_render_target(NULL, 0, 0, 0);
     }
 }
 
@@ -386,6 +434,7 @@ void init_double_buffer(void) {
 int d_min_x = 9999, d_min_y = 9999, d_max_x = -1, d_max_y = -1;
 
 void mark_dirty(int x, int y, int w, int h) {
+    if (active_rt_buf != back_buffer) return; // Only dirty the screen when drawing to back buffer
     if (x < d_min_x) d_min_x = x;
     if (y < d_min_y) d_min_y = y;
     if (x + w > d_max_x) d_max_x = x + w;
@@ -527,8 +576,8 @@ void s_work() {
     if (is_vbe) {
         int sx = (WIN_X + 1) * 8, sy = (WIN_Y + 1) * 16;
         int sw = (WIN_W - 2) * 8, sh = (WIN_H - 2) * 16;
-        uint32_t* buf = back_buffer ? back_buffer : fb_addr;
-        uint32_t stride = back_buffer ? (bb_pitch / 4) : (fb_pitch / 4);
+        uint32_t* buf = active_rt_buf ? active_rt_buf : fb_addr;
+        uint32_t stride = active_rt_buf ? (active_rt_pitch / 4) : (fb_pitch / 4);
         for (int y = sy; y < sy + sh - 16; y++)
             for (int x = sx; x < sx + sw; x++)
                 buf[y * stride + x] = buf[(y + 16) * stride + x];
@@ -655,8 +704,8 @@ void update_hud() {}
 // ============================================================
 void save_bg(int x, int y, int w, int h, uint32_t* buf) {
     if (!is_vbe) return;
-    uint32_t* src = back_buffer ? back_buffer : fb_addr;
-    uint32_t stride = back_buffer ? (bb_pitch / 4) : (fb_pitch / 4);
+    uint32_t* src = active_rt_buf ? active_rt_buf : fb_addr;
+    uint32_t stride = active_rt_buf ? (active_rt_pitch / 4) : (fb_pitch / 4);
     for (int j = 0; j < h; j++)
         for (int i = 0; i < w; i++) {
             int px2 = x + i, py2 = y + j;
@@ -668,8 +717,8 @@ void save_bg(int x, int y, int w, int h, uint32_t* buf) {
 
 void restore_bg(int x, int y, int w, int h, uint32_t* buf) {
     if (!is_vbe) return;
-    uint32_t* dst = back_buffer ? back_buffer : fb_addr;
-    uint32_t stride = back_buffer ? (bb_pitch / 4) : (fb_pitch / 4);
+    uint32_t* dst = active_rt_buf ? active_rt_buf : fb_addr;
+    uint32_t stride = active_rt_buf ? (active_rt_pitch / 4) : (fb_pitch / 4);
     for (int j = 0; j < h; j++)
         for (int i = 0; i < w; i++) {
             int px2 = x + i, py2 = y + j;
@@ -763,8 +812,8 @@ void draw_mouse_cursor(int x, int y) {
             if (mask & (0x8000 >> i)) {
                 int sx = x + i + 1;
                 int sy = y + j + 1;
-                if (sx < (int)fb_width && sy < (int)fb_height) {
-                    uint32_t* p = back_buffer + sy * (bb_pitch/4) + sx;
+                if (sx < (int)active_rt_width && sy < (int)active_rt_height) {
+                    uint32_t* p = active_rt_buf + sy * (active_rt_pitch/4) + sx;
                     *p = ((*p & 0xFEFEFE) >> 1); // 50% darken
                 }
             }

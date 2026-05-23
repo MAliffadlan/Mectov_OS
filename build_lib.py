@@ -19,7 +19,7 @@ def build_lib(c_file, output_mct):
 OUTPUT_FORMAT("elf32-i386")
 ENTRY(_start)
 SECTIONS {
-    . = 0x03000000;
+    . = 0x09000000;
     .text : { 
         KEEP(*(.export_table))
         *(.text*) 
@@ -31,7 +31,7 @@ SECTIONS {
 """)
 
     try:
-        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-pie", "-fno-pic", "-static", "-O0", "-s", "-c", c_file, "-o", o_file], check=True)
+        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-pie", "-fno-pic", "-static", "-O0", "-DBUILDING_LIBC", "-s", "-c", c_file, "-o", o_file], check=True)
         subprocess.run(["ld", "-m", "elf_i386", "-T", ld_file, o_file, "-o", elf_file], check=True)
         subprocess.run(["objcopy", "-O", "binary", elf_file, bin_file], check=True)
     except subprocess.CalledProcessError:

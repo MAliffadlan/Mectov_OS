@@ -216,6 +216,16 @@ void _start() {
                         scroll_offset--; draw_pci(wid);
                     }
                 }
+            } else if (ev.type == 4) { // Scroll wheel
+                if (ev.key > 0 && scroll_offset > 0) {
+                    for (int s = 0; s < 3 && scroll_offset > 0; s++)
+                        scroll_offset--;
+                    draw_pci(wid);
+                } else if (ev.key < 0 && scroll_offset < pci_count - max_rows) {
+                    for (int s = 0; s < 3 && scroll_offset < pci_count - max_rows; s++)
+                        scroll_offset++;
+                    draw_pci(wid);
+                }
             }
         }
         sys_yield();

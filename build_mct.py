@@ -27,14 +27,16 @@ SECTIONS {
     .rodata : { *(.rodata*) }
     .data : { *(.data*) }
     .bss : { *(.bss*) *(COMMON) }
+    /DISCARD/ : { *(.eh_frame) *(.note*) *(.comment) }
 }
 """)
 
     # 2. Compile
     # -fno-stack-protector: don't require libc's stack check
+    # -fno-asynchronous-unwind-tables: prevent eh_frame generation
     # -fno-pie -fno-pic: prevent GOT/PLT generation which breaks flat binaries
     try:
-        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-pie", "-fno-pic", "-static", "-O0", "-s", "-c", c_file, "-o", o_file], check=True)
+        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic", "-static", "-O0", "-g", "-c", c_file, "-o", o_file], check=True)
     except subprocess.CalledProcessError:
         print("[!] Compilation failed!")
         return
@@ -93,7 +95,7 @@ SECTIONS {
 
     # Cleanup temporary files
     os.remove(o_file)
-    # os.remove(elf_file)
+     
     os.remove(bin_file)
     os.remove(ld_file)
 

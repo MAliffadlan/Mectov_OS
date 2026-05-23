@@ -97,8 +97,8 @@ void handle_click(int mx, int my) {
                 if (operator == '-') res = operand1 - val;
                 if (operator == '*') res = operand1 * val;
                 if (operator == '/') res = val != 0 ? operand1 / val : 0;
-                my_itoa(res, display_buf);
-                buf_len = my_strlen(display_buf);
+                itoa(res, display_buf);
+                buf_len = strlen(display_buf);
                 operator = 0;
                 new_number = 1;
             }

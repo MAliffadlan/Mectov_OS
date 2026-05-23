@@ -98,6 +98,10 @@ typedef struct {
 #define SYS_GET_LAUNCH_ARG 49  // EBX=buf_ptr, ECX=max_len -> returns length
 #define SYS_CREATE_FILE    50  // EBX=path_ptr -> returns 0/-1
 #define SYS_LOAD_LIBRARY   51  // EBX=lib_name_ptr -> returns base_address of export table
+#define SYS_SET_VOLUME     52  // EBX=volume (0-100)
+#define SYS_GET_VOLUME     53  // -> returns volume (0-100)
+#define SYS_PLAY_WAV       54  // EBX=pcm_data_ptr, ECX=length, EDX=sample_rate -> returns 0
+#define SYS_STOP_WAV       55  // -> returns 0
 
 // Virtual Memory
 #define SYS_VMM_MAP        29  // EBX=vaddr, ECX=paddr, EDX=flags → return 0/-1
@@ -238,6 +242,20 @@ static inline void sys_get_time(rtc_time_t* out_time) {
 }
 static inline void sys_play_sound(int freq, int duration_ms) {
     __asm__ __volatile__ ("int $0x80" : : "a"(SYS_PLAY_SOUND), "b"(freq), "c"(duration_ms));
+}
+static inline void sys_set_volume(int vol) {
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_SET_VOLUME), "b"(vol));
+}
+static inline int sys_get_volume(void) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_VOLUME));
+    return ret;
+}
+static inline void sys_play_wav(void* pcm_data, uint32_t length, uint16_t sample_rate) {
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_PLAY_WAV), "b"(pcm_data), "c"(length), "d"(sample_rate));
+}
+static inline void sys_stop_wav(void) {
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_STOP_WAV));
 }
 
 static inline void sys_get_sysinfo(sysinfo_t* out_info) {

@@ -1,23 +1,6 @@
-#include "src/include/syscall.h"
+#include "apps/lib/libc.h"
 
-static void itoa(int val, char* buf) {
-    if (val == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
-    char temp[12]; int len = 0;
-    while (val > 0) { temp[len++] = '0' + (val % 10); val /= 10; }
-    int pos = 0;
-    for (int i = len - 1; i >= 0; i--) buf[pos++] = temp[i];
-    buf[pos] = '\0';
-}
-
-static void itoa_pad(int val, char* buf, int pad) {
-    char temp[12]; int len = 0;
-    if (val == 0) temp[len++] = '0';
-    while (val > 0) { temp[len++] = '0' + (val % 10); val /= 10; }
-    int pos = 0;
-    while (pos < pad - len) buf[pos++] = '0';
-    for (int i = len - 1; i >= 0; i--) buf[pos++] = temp[i];
-    buf[pos] = '\0';
-}
+void** __mct_lib_ptr;
 
 static void draw_bar(int wid, int x, int y, int w, int h, uint32_t filled, uint32_t total, uint32_t on_col) {
     sys_draw_rect(wid, x, y, w, h, 0x00313244);
@@ -57,17 +40,7 @@ static void draw_sysinfo(int wid) {
     // RAM usage
     sys_draw_text(wid, lx, ly, "RAM:", 0x006C7086);
     char rbuf[64];
-    int rpos = 0;
-    
-    char tmp[16];
-    itoa(info.used_ram_kb / 1024, tmp);
-    for(int i=0; tmp[i]; i++) rbuf[rpos++] = tmp[i];
-    rbuf[rpos++] = ' '; rbuf[rpos++] = 'M'; rbuf[rpos++] = 'B'; rbuf[rpos++] = ' ';
-    rbuf[rpos++] = '/'; rbuf[rpos++] = ' ';
-    
-    itoa(info.total_ram_kb / 1024, tmp);
-    for(int i=0; tmp[i]; i++) rbuf[rpos++] = tmp[i];
-    rbuf[rpos++] = ' '; rbuf[rpos++] = 'M'; rbuf[rpos++] = 'B'; rbuf[rpos] = '\0';
+    sprintf(rbuf, "%d MB / %d MB", info.used_ram_kb / 1024, info.total_ram_kb / 1024);
     
     sys_draw_text(wid, lx + 40, ly, rbuf, 0x00CDD6F4);
     draw_bar(wid, lx + 40, ly + 14, 280, 8, info.used_ram_kb, info.total_ram_kb, 0x0089B4FA);
@@ -79,42 +52,23 @@ static void draw_sysinfo(int wid) {
     uint32_t mins = secs / 60;
     uint32_t hrs  = mins / 60;
     char ubuf[32];
-    itoa_pad(hrs, ubuf, 2);
-    ubuf[2] = ':';
-    itoa_pad(mins % 60, ubuf+3, 2);
-    ubuf[5] = ':';
-    itoa_pad(secs % 60, ubuf+6, 2);
-    ubuf[8] = '\0';
+    sprintf(ubuf, "%02d:%02d:%02d", hrs, mins % 60, secs % 60);
     sys_draw_text(wid, lx + 40, ly, ubuf, 0x00A6E3A1);
     ly += gap;
 
     // Display
     sys_draw_text(wid, lx, ly, "VGA:", 0x006C7086);
     char sbuf[32];
-    int spos = 0;
-    itoa(info.fb_width, tmp);
-    for(int i=0; tmp[i]; i++) sbuf[spos++] = tmp[i];
-    sbuf[spos++] = 'x';
-    itoa(info.fb_height, tmp);
-    for(int i=0; tmp[i]; i++) sbuf[spos++] = tmp[i];
-    sbuf[spos++] = '@';
-    itoa(info.fb_bpp, tmp);
-    for(int i=0; tmp[i]; i++) sbuf[spos++] = tmp[i];
-    sbuf[spos] = '\0';
+    sprintf(sbuf, "%dx%d@%d", info.fb_width, info.fb_height, info.fb_bpp);
     sys_draw_text(wid, lx + 40, ly, sbuf, 0x00CDD6F4);
     ly += gap;
 
     // MAC Address
     sys_draw_text(wid, lx, ly, "MAC:", 0x006C7086);
     char mbuf[32];
-    int mpos = 0;
-    const char hex[] = "0123456789ABCDEF";
-    for(int i=0; i<6; i++) {
-        mbuf[mpos++] = hex[(info.mac_addr[i] >> 4) & 0xF];
-        mbuf[mpos++] = hex[info.mac_addr[i] & 0xF];
-        if (i < 5) mbuf[mpos++] = ':';
-    }
-    mbuf[mpos] = '\0';
+    sprintf(mbuf, "%02X:%02X:%02X:%02X:%02X:%02X", 
+            info.mac_addr[0], info.mac_addr[1], info.mac_addr[2],
+            info.mac_addr[3], info.mac_addr[4], info.mac_addr[5]);
     sys_draw_text(wid, lx + 40, ly, mbuf, 0x00CDD6F4);
 
     sys_update_window(wid);
@@ -127,6 +81,8 @@ typedef struct {
 } gui_event_t;
 
 void _start() {
+    __mct_lib_ptr = mct_load_library("apps/libc.mct");
+    
     int wid = sys_create_window(200, 200, 360, 240, "SysInfo (Ring 3)");
     if (wid < 0) sys_exit();
     
