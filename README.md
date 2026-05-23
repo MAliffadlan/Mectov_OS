@@ -13,6 +13,8 @@ The v25.0 release delivers a massive ergonomics, audio, and architectural upgrad
 4. **Enhanced Kernel Stability & Network:** Increased user stack size to 64KB (from 8KB) to fully isolate heavy network and DNS payload buffers, and updated DNS querying to route over QEMU's virtual gateway (`10.0.2.3`).
 5. **TCP Real-time Debugging:** Replaced files-only logging with a real-time TCP serial logging bridge over port `45454`, paired with interactive python tools (`debug.py`).
 6. **Secondary ext2 Partition:** Multi-drive ATA support mounting a secondary 2MB virtual disk (`ext2.img`) automatically formatted as `ext2` filesystem partition under QEMU index 1.
+7. **Enhanced GUI Terminal Emulator:** Re-engineered Ring 3 Terminal (`terminal.c`) with a 16-command circular history buffer (navigated using Up/Down arrow keys) and an active, dynamic VFS-based Tab autocomplete system for shell commands and filenames.
+8. **Private Gitea Migration:** Configured personal Gitea repository hosting remote (`gitea`) pointing to the home server at `https://git.mectov.my.id/maliffadlan/Mectov-OS.git` to migrate from GitHub to a private self-hosted Git repository server.
 
 Created by M Alif Fadlan.
 
@@ -199,6 +201,14 @@ Created by M Alif Fadlan.
 - **Web Gateway Proxy Integration (`gateway.py`):** Background gateway process running on the host that translates QEMU network queries and streams live data between the guest OS and the real internet.
 - **TCP Real-time Debugging Socket:** Serial port debugging upgraded to a TCP socket server on port `45454` (replacing files-only logging), allowing real-time, zero-lag log streaming into our python interactive debugger (`debug.py`).
 
+### 20. User-Space Terminal Emulator Enhancements (terminal.c)
+- **Arrow-Key Command History:** Tracks up to 16 commands in a local circular history buffer. Intercepts non-ASCII Up Arrow (`0xE048`) and Down Arrow (`0xE050`) key events, visually clearing the input line using backspaces and replacing it with the history entry.
+- **Dynamic VFS Tab Completion:** Intercepts Tab (`\t`) key events, parses the current word prefix, and dynamically queries the VFS via `sys_stat_file` and `sys_list_dir` to autocomplete both built-in shell commands and active directory files/folders.
+
+### 21. Self-Hosted Gitea Integration (Git Hosting Migration)
+- **Home Server Remote Tracking:** Added a dedicated `gitea` Git remote tracking the repository at `https://git.mectov.my.id/maliffadlan/Mectov-OS.git`.
+- **Infrastructure Autonomy:** Seamlessly routes all future feature branch pushes, commit tracking, and code releases directly onto the self-hosted Gitea home server, operating as the primary remote alongside GitHub.
+
 ---
 
 ## Syscall API Reference
@@ -294,7 +304,7 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 
 | Application | Type | Description |
 |---|---|---|
-| Terminal | Ring 3 (.mct) | Full terminal emulator with command execution and IPC stdout redirection |
+| Terminal | Ring 3 (.mct) | Full terminal emulator with 16-command circular history (Up/Down arrows) and VFS tab autocomplete |
 | Nano Editor | Ring 3 (.mct) | Windowed text editor for VFS files with stable auto-save |
 | Notepad | Ring 3 (.mct) | Sleek text editor with menu bar options, Save As dialog, and dirty-state tracking |
 | File Explorer | Ring 3 (.mct) | Browse and open stored files |
@@ -346,7 +356,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
-| v25.0 | **IntelliMouse Scroll & Stability Update:** Integrated physical mouse scroll wheel support via 4-byte PS/2 IntelliMouse driver protocol. Implemented scroll event routing from kernel to focused GUI windows, propagating type-4 scroll events to Ring 3. Added smooth scrolling in Browser, Explorer, PCI Manager, and Volume Manager. Upgraded process stability by increasing user stack allocation to 64KB for heavy network/DNS payload handling, and fixed DNS querying over virtual gateway. |
+| v25.0 | **IntelliMouse, Audio, Shell & Git Enhancements:** Upgraded mouse driver to 4-byte IntelliMouse protocol supporting smooth scrolling in Browser, Explorer, PCI, and Volume Manager. Upgraded kernel audio to Sound Blaster 16 supporting dynamic WAV music stream playback. Built a dynamic shared library system (`libc.mct`) with a dynamic loading subsystem, reducing app binary sizes to ~1KB. Increased user stacks to 64KB and updated DNS to route over virtual gateway. **Enhanced GUI Terminal** with 16-command history buffer (Up/Down arrow navigation) and dynamic client-side VFS Tab completion. **Gitea Migration:** Added self-hosted home server remote `gitea` for private repository tracking. |
 | v24.0 | **DOOM Engine Port:** Fully playable port of the classic 1993 DOOM engine integrated directly into the kernel. Features keyboard polling, double buffer to MMIO front buffer translation, graceful OS exiting (`vga_force_sync`), and proper process teardown. |
 | v23.0 | **Performance & Stability:** Shadow Framebuffer (delta-only MMIO), VSync removal, zombie process detection + auto-kill, `task_kill()` API, Ctrl+C signal, Ctrl key tracking, Snake rewritten as WM app, terminal prompt protection, smart tab-completion with trailing space/slash, carriage return support, history display fix, power menu restart fix, `-no-reboot` removal. |
 | v22.0 | **Kernel Modernization:** Virtual Memory Manager (per-process address spaces, page mapping, region allocator), IPC named message queues (non-blocking send, blocking receive with timeout), 4-level priority thread scheduling with sleep/wake API, and 14 new syscalls (VMM/thread/IPC). |

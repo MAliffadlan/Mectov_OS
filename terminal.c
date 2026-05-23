@@ -6,6 +6,16 @@ typedef struct {
     int key;
 } gui_event_t;
 
+// --- Forward Declarations for Static Functions ---
+static int my_strlen(const char* s);
+static void my_strcpy(char* d, const char* s);
+static int my_strcmp(const char* a, const char* b);
+static int my_strncmp(const char* a, const char* b, int n);
+static void term_putchar(char c2, uint8_t color);
+static void term_print(const char* s, uint8_t color);
+static void draw_terminal(int wid);
+static void print_prompt(void);
+
 #define TERM_COLS 74
 #define TERM_ROWS 24
 
@@ -20,6 +30,35 @@ static int ipc_qid = 0;
 
 // --- Current working directory tracking ---
 static char cwd_path[256] = "/";
+
+// --- Command history circular buffer ---
+#define HIST_MAX 16
+static char history[HIST_MAX][256];
+static int hist_count = 0;
+static int hist_pos = -1;
+static int hist_next_slot = 0;
+
+static void history_add(const char* c) {
+    if (!c || c[0] == '\0') return;
+    if (hist_count > 0) {
+        int last = (hist_next_slot == 0) ? HIST_MAX - 1 : hist_next_slot - 1;
+        if (my_strcmp(history[last], c) == 0) return;
+    }
+    my_strcpy(history[hist_next_slot], c);
+    hist_next_slot = (hist_next_slot + 1) % HIST_MAX;
+    if (hist_count < HIST_MAX) hist_count++;
+    hist_pos = -1;
+}
+
+// --- Built-in commands list for tab completion ---
+static const char* builtins[] = {
+    "help", "clear", "mfetch", "mem", "kmemstats", "vfsinfo",
+    "ls", "cd", "pwd", "mkdir", "touch", "cat", "tree", "rm",
+    "buat", "tulis", "edit", "baca", "hapus",
+    "echo", "beep", "nada", "tunggu", "waktu", "warna", "kunci",
+    "jalankan", "ular", "taskmgr", "lspci", "man",
+    "ping", "host", "shutdown", "reboot", 0
+};
 
 static int my_strlen(const char* s) {
     int n = 0; while(s[n]) n++; return n;
@@ -93,6 +132,98 @@ static void update_cwd(const char* arg) {
     int flen = my_strlen(cwd_path);
     if (flen > 1 && cwd_path[flen - 1] == '/') {
         cwd_path[flen - 1] = '\0';
+    }
+}
+
+static void do_tab_completion(int wid) {
+    if (cmd_len == 0) return;
+    
+    // Find start of the word being completed
+    int last_space = cmd_len - 1;
+    while (last_space >= 0 && cmd[last_space] != ' ') {
+        last_space--;
+    }
+    int word_start = last_space + 1;
+    char prefix[64];
+    int prefix_len = 0;
+    for (int i = word_start; i < cmd_len && prefix_len < 63; i++) {
+        prefix[prefix_len++] = cmd[i];
+    }
+    prefix[prefix_len] = '\0';
+    
+    // Matches collector
+    char matches[16][64];
+    int match_count = 0;
+    
+    if (word_start == 0) {
+        // Complete built-in commands first
+        for (int i = 0; builtins[i] != 0 && match_count < 16; i++) {
+            // Check if builtins[i] starts with prefix
+            int match = 1;
+            for (int j = 0; j < prefix_len; j++) {
+                if (builtins[i][j] != prefix[j]) { match = 0; break; }
+            }
+            if (match) {
+                my_strcpy(matches[match_count++], builtins[i]);
+            }
+        }
+    }
+    
+    // Complete VFS files
+    int node_idx = sys_stat_file(cwd_path);
+    if (node_idx >= 0 && match_count < 16) {
+        dir_entry_t entries[64];
+        int count = sys_list_dir(entries, 64, node_idx);
+        for (int i = 0; i < count && match_count < 16; i++) {
+            int match = 1;
+            for (int j = 0; j < prefix_len; j++) {
+                if (entries[i].name[j] != prefix[j]) { match = 0; break; }
+            }
+            if (match) {
+                // If it's a directory, append a slash
+                char name[64];
+                my_strcpy(name, entries[i].name);
+                if (entries[i].type == 1) { // directory
+                    int nl = my_strlen(name);
+                    if (nl < 62) { name[nl] = '/'; name[nl+1] = '\0'; }
+                } else {
+                    // Append a space for files
+                    int nl = my_strlen(name);
+                    if (nl < 62) { name[nl] = ' '; name[nl+1] = '\0'; }
+                }
+                my_strcpy(matches[match_count++], name);
+            }
+        }
+    }
+    
+    if (match_count == 1) {
+        // Exactly one match! Autocomplete it.
+        // Erase prefix
+        for (int i = 0; i < prefix_len; i++) {
+            term_putchar('\b', 0x0F);
+        }
+        // Copy match into cmd
+        int match_len = my_strlen(matches[0]);
+        for (int i = 0; i < match_len && cmd_len < 254; i++) {
+            cmd[word_start + i] = matches[0][i];
+        }
+        cmd_len = word_start + match_len;
+        cmd[cmd_len] = '\0';
+        term_print(matches[0], 0x0A);
+        draw_terminal(wid);
+    } else if (match_count > 1) {
+        // Multiple matches, list them below
+        term_putchar('\n', 0x0F);
+        for (int i = 0; i < match_count; i++) {
+            term_print(matches[i], 0x0E);
+            term_print("  ", 0x0F);
+        }
+        term_putchar('\n', 0x0F);
+        print_prompt();
+        // Reprint the command typed so far
+        cmd[cmd_len] = '\0';
+        term_print(cmd, 0x0F);
+        draw_terminal(wid);
     }
 }
 
@@ -259,6 +390,9 @@ void _start() {
                     cmd[cmd_len] = '\0';
                     
                     if (cmd_len > 0) {
+                        // Add to command history
+                        history_add(cmd);
+                        
                         // Check for local commands
                         if (cmd[0] == 'c' && cmd[1] == 'l' && cmd[2] == 'e' &&
                             cmd[3] == 'a' && cmd[4] == 'r' && cmd[5] == '\0') {
@@ -293,6 +427,48 @@ void _start() {
                         cmd_len--;
                         term_putchar('\b', 0x0F);
                         draw_terminal(wid);
+                    }
+                } else if (ev.key == '\t') {
+                    do_tab_completion(wid);
+                } else if (ev.key == 0xE048) { // Up Arrow (History Back)
+                    if (hist_count > 0) {
+                        if (hist_pos == -1) hist_pos = hist_next_slot;
+                        int new_pos = (hist_pos == 0) ? HIST_MAX - 1 : hist_pos - 1;
+                        if (new_pos != hist_next_slot && history[new_pos][0] != '\0') {
+                            hist_pos = new_pos;
+                            // Erase current input line visually
+                            for (int i = 0; i < cmd_len; i++) {
+                                term_putchar('\b', 0x0F);
+                            }
+                            my_strcpy(cmd, history[hist_pos]);
+                            cmd_len = my_strlen(cmd);
+                            term_print(cmd, 0x0A);
+                            draw_terminal(wid);
+                        }
+                    }
+                } else if (ev.key == 0xE050) { // Down Arrow (History Forward)
+                    if (hist_count > 0 && hist_pos != -1) {
+                        int new_pos = (hist_pos + 1) % HIST_MAX;
+                        if (new_pos != hist_next_slot) {
+                            hist_pos = new_pos;
+                            // Erase current input line visually
+                            for (int i = 0; i < cmd_len; i++) {
+                                term_putchar('\b', 0x0F);
+                            }
+                            my_strcpy(cmd, history[hist_pos]);
+                            cmd_len = my_strlen(cmd);
+                            term_print(cmd, 0x0A);
+                            draw_terminal(wid);
+                        } else {
+                            // Reached newest, clear input line
+                            hist_pos = -1;
+                            for (int i = 0; i < cmd_len; i++) {
+                                term_putchar('\b', 0x0F);
+                            }
+                            cmd_len = 0;
+                            cmd[0] = '\0';
+                            draw_terminal(wid);
+                        }
                     }
                 } else if (ev.key >= ' ' && ev.key <= '~' && cmd_len < 255) {
                     cmd[cmd_len++] = (char)ev.key;
