@@ -99,6 +99,17 @@ void memcpy(void* dest, const void* src, uint32_t len) {
     );
 }
 
+void* memmove(void* dest, const void* src, uint32_t len) {
+    uint8_t* d = (uint8_t*)dest;
+    const uint8_t* s = (const uint8_t*)src;
+    if (d < s) {
+        for (uint32_t i = 0; i < len; i++) d[i] = s[i];
+    } else if (d > s) {
+        for (uint32_t i = len; i > 0; i--) d[i-1] = s[i-1];
+    }
+    return dest;
+}
+
 void p_int(int n, unsigned char c) { if (n < 0) { print("-", c); n = -n; } if (n == 0) { print("0", c); return; } char buf[10]; int i = 0; while (n > 0) { buf[i++] = (n % 10) + '0'; n /= 10; } for (int j = 0; j < i / 2; j++) { char t = buf[j]; buf[j] = buf[i - j - 1]; buf[i - j - 1] = t; } buf[i] = '\0'; print(buf, c); }
 
 int atoi(const char* s) { int r = 0, si = 1, i = 0; if (s[0] == '-') { si = -1; i++; } for (; s[i] != '\0'; ++i) { if (s[i] >= '0' && s[i] <= '9') r = r * 10 + s[i] - '0'; else break; } return si * r; }

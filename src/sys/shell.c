@@ -23,10 +23,145 @@ char cmd_b[CMD_BUF_SIZE]; int b_idx = 0;
 char hist_b[256];
 int is_script = 0;
 
+#define MAX_ENV_VARS 32
+#define ENV_NAME_LEN 32
+#define ENV_VAL_LEN  128
+
+typedef struct {
+    char name[ENV_NAME_LEN];
+    char value[ENV_VAL_LEN];
+} env_var_t;
+
+env_var_t env_vars[MAX_ENV_VARS];
+int env_var_count = 0;
+
+#define MAX_ALIASES 32
+#define ALIAS_NAME_LEN 32
+#define ALIAS_VAL_LEN  128
+
+typedef struct {
+    char name[ALIAS_NAME_LEN];
+    char value[ALIAS_VAL_LEN];
+} alias_t;
+
+alias_t aliases[MAX_ALIASES];
+int alias_count = 0;
+
+void init_env_vars_and_aliases() {
+    // Default environment variables
+    strcpy(env_vars[0].name, "USER");
+    strcpy(env_vars[0].value, "root");
+    
+    strcpy(env_vars[1].name, "OS");
+    strcpy(env_vars[1].value, "Mectov_OS");
+    
+    strcpy(env_vars[2].name, "HOME");
+    strcpy(env_vars[2].value, "/home");
+    
+    strcpy(env_vars[3].name, "SHELL");
+    strcpy(env_vars[3].value, "/sys/shell");
+    
+    env_var_count = 4;
+    
+    // Default aliases
+    strcpy(aliases[0].name, "ll");
+    strcpy(aliases[0].value, "ls");
+    
+    strcpy(aliases[1].name, "la");
+    strcpy(aliases[1].value, "ls");
+    
+    strcpy(aliases[2].name, "cls");
+    strcpy(aliases[2].value, "clear");
+    
+    strcpy(aliases[3].name, "neofetch");
+    strcpy(aliases[3].value, "mfetch");
+    
+    alias_count = 4;
+}
+
+void expand_env_vars(char* out, const char* in, int max_len) {
+    int i = 0, o = 0;
+    while (in[i] && o < max_len - 1) {
+        if (in[i] == '$') {
+            i++; // skip '$'
+            char var_name[ENV_NAME_LEN];
+            int vn = 0;
+            while (in[i] && vn < ENV_NAME_LEN - 1 && 
+                   ((in[i] >= 'a' && in[i] <= 'z') || 
+                    (in[i] >= 'A' && in[i] <= 'Z') || 
+                    (in[i] >= '0' && in[i] <= '9') || 
+                    in[i] == '_')) {
+                var_name[vn++] = in[i++];
+            }
+            var_name[vn] = '\0';
+            
+            if (vn == 0) {
+                out[o++] = '$';
+            } else {
+                // Look up in env_vars
+                const char* val = "";
+                for (int k = 0; k < env_var_count; k++) {
+                    if (strcmp(env_vars[k].name, var_name) == 0) {
+                        val = env_vars[k].value;
+                        break;
+                    }
+                }
+                
+                // Copy value to output
+                while (*val && o < max_len - 1) {
+                    out[o++] = *val++;
+                }
+            }
+        } else {
+            out[o++] = in[i++];
+        }
+    }
+    out[o] = '\0';
+}
+
+void expand_alias(char* out, const char* in, int max_len) {
+    // Extract the first word (command)
+    char first_word[ALIAS_NAME_LEN];
+    int i = 0, fw = 0;
+    while (in[i] && in[i] == ' ') i++; // skip leading spaces
+    
+    while (in[i] && in[i] != ' ' && fw < ALIAS_NAME_LEN - 1) {
+        first_word[fw++] = in[i++];
+    }
+    first_word[fw] = '\0';
+    
+    // Look up in aliases
+    const char* val = NULL;
+    for (int k = 0; k < alias_count; k++) {
+        if (strcmp(aliases[k].name, first_word) == 0) {
+            val = aliases[k].value;
+            break;
+        }
+    }
+    
+    if (val) {
+        // Copy the alias value first
+        int o = 0;
+        while (*val && o < max_len - 1) {
+            out[o++] = *val++;
+        }
+        // Copy the rest of the command (arguments)
+        while (in[i] && o < max_len - 1) {
+            out[o++] = in[i++];
+        }
+        out[o] = '\0';
+    } else {
+        // No alias found, just copy input as is
+        strncpy(out, in, max_len - 1);
+        out[max_len - 1] = '\0';
+    }
+}
+
 const char* cmd_list[] = {
     "help","clear","mfetch","mem","kmemstats","vfsinfo",
     "ls","cd","pwd","mkdir","touch","cat","tree","rm",
     "buat","tulis","edit","nano","baca","hapus",
+    "sh","source","export","alias","unalias","history",
     "echo","beep","nada","tunggu","waktu","warna","kunci",
     "jalankan","ular","taskmgr","lspci","man",
     "ping","host","grep",
@@ -61,6 +196,11 @@ void shell_print_timestamp() {
 }
 
 void shell_print_prompt() {
+    static int initialized = 0;
+    if (!initialized) {
+        init_env_vars_and_aliases();
+        initialized = 1;
+    }
     char cwd[MAX_PATH];
     vfs_get_abs_path(current_dir, cwd, MAX_PATH);
     print("root@mectov", 0x0A);
@@ -282,10 +422,11 @@ static int strstr_custom(const char* haystack, const char* needle) {
 static void run_cmd_internal() {
     // --- HELP ---
     if (strcmp(cmd_b, "help") == 0) {
-        print("--- MECTOV OS v26.0 HELP MENU ---\n", 0x0B);
-        print("SISTEM: mfetch, waktu, warna, clear, mem, kmemstats, kunci\n", 0x0E);
+        print("--- MECTOV OS v27.0 HELP MENU ---\n", 0x0B);
+        print("SISTEM: mfetch, waktu, warna, clear, mem, kmemstats, kunci, history\n", 0x0E);
         print("FILES : ls, cd, pwd, mkdir, touch, cat, tree, rm\n", 0x0E);
-        print("        buat, tulis, baca, edit, nano, hapus (legacy)\n", 0x0E);
+        print("        buat, tulis, baca, edit, nano, hapus, sh, source (legacy)\n", 0x0E);
+        print("SHELL : export [NAME=VAL], alias [NAME=VAL], unalias [NAME]\n", 0x0E);
         print("APPS  : ular, nada, beep, echo, tunggu, grep\n", 0x0E);
         print("POWER : matikan, mulaiulang, shutdown, reboot\n", 0x0E);
         print("HW    : lspci\n", 0x0E);
@@ -312,11 +453,11 @@ static void run_cmd_internal() {
         // Row 3: color blocks + OS
         print("  ", 0x00);
         print("## ## ## ## ", 0x0D); print("## ## ## ## ", 0x05);
-        print("  OS: ", 0x0B); print("Mectov OS v18.0\n", 0x0F);
+        print("  OS: ", 0x0B); print("Mectov OS v27.0\n", 0x0F);
         // Row 4: color blocks + Kernel
         print("  ", 0x00);
         print("## ## ## ## ", 0x0E); print("## ## ## ## ", 0x06);
-        print("  Kernel: ", 0x0B); print("Mectov 18.0.0\n", 0x0F);
+        print("  Kernel: ", 0x0B); print("Mectov 27.0.0\n", 0x0F);
         // Row 5: color blocks + Uptime
         print("  ", 0x00);
         print("## ## ## ## ", 0x0C); print("## ## ## ## ", 0x04);
@@ -552,10 +693,6 @@ static void run_cmd_internal() {
     // --- JALANKAN (run .mct app) ---
     else if (strncmp(cmd_b, "jalankan ", 9) == 0) {
         char* fname = cmd_b + 9;
-        // Use vfs_find from old API or the new vfs_get_node
-        // Backward compat: try old vfs_find
-        int fid = -1;
-        // Check if old vfs_find exists (might be in vfs.h old API)
         // Use new VFS: read file data
         int node = vfs_get_node(fname);
         if (node < 0) {
@@ -692,6 +829,172 @@ static void run_cmd_internal() {
         }
         host_done: ;
     }
+    // --- SH / SOURCE ---
+    else if (strncmp(cmd_b, "sh ", 3) == 0 || strncmp(cmd_b, "source ", 7) == 0) {
+        char* fname = (strncmp(cmd_b, "sh ", 3) == 0) ? cmd_b + 3 : cmd_b + 7;
+        while (*fname == ' ') fname++;
+        run_script(fname);
+    }
+    // --- EXPORT ---
+    else if (strncmp(cmd_b, "export ", 7) == 0 || strcmp(cmd_b, "export") == 0) {
+        if (strcmp(cmd_b, "export") == 0) {
+            for (int i = 0; i < env_var_count; i++) {
+                print("declare -x ", 0x0E);
+                print(env_vars[i].name, 0x0F);
+                print("=\"", 0x07);
+                print(env_vars[i].value, 0x0F);
+                print("\"\n", 0x07);
+            }
+        } else {
+            char* arg = cmd_b + 7;
+            while (*arg == ' ') arg++;
+            
+            char name[ENV_NAME_LEN];
+            char val[ENV_VAL_LEN];
+            int n = 0, v = 0;
+            
+            while (*arg && *arg != '=' && *arg != ' ' && n < ENV_NAME_LEN - 1) {
+                name[n++] = *arg++;
+            }
+            name[n] = '\0';
+            
+            if (*arg == '=') {
+                arg++;
+                char quote = '\0';
+                if (*arg == '"' || *arg == '\'') {
+                    quote = *arg;
+                    arg++;
+                }
+                while (*arg && v < ENV_VAL_LEN - 1) {
+                    if (quote && *arg == quote) {
+                        arg++;
+                        break;
+                    }
+                    val[v++] = *arg++;
+                }
+                val[v] = '\0';
+                
+                int found = -1;
+                for (int i = 0; i < env_var_count; i++) {
+                    if (strcmp(env_vars[i].name, name) == 0) {
+                        found = i;
+                        break;
+                    }
+                }
+                if (found >= 0) {
+                    strcpy(env_vars[found].value, val);
+                } else if (env_var_count < MAX_ENV_VARS) {
+                    strcpy(env_vars[env_var_count].name, name);
+                    strcpy(env_vars[env_var_count].value, val);
+                    env_var_count++;
+                } else {
+                    print("export: too many variables\n", 0x0C);
+                }
+            } else {
+                print("usage: export NAME=VALUE\n", 0x0C);
+            }
+        }
+    }
+    // --- ALIAS ---
+    else if (strncmp(cmd_b, "alias ", 6) == 0 || strcmp(cmd_b, "alias") == 0) {
+        if (strcmp(cmd_b, "alias") == 0) {
+            for (int i = 0; i < alias_count; i++) {
+                print("alias ", 0x0E);
+                print(aliases[i].name, 0x0F);
+                print("='", 0x07);
+                print(aliases[i].value, 0x0F);
+                print("'\n", 0x07);
+            }
+        } else {
+            char* arg = cmd_b + 6;
+            while (*arg == ' ') arg++;
+            
+            char name[ALIAS_NAME_LEN];
+            char val[ALIAS_VAL_LEN];
+            int n = 0, v = 0;
+            
+            while (*arg && *arg != '=' && *arg != ' ' && n < ALIAS_NAME_LEN - 1) {
+                name[n++] = *arg++;
+            }
+            name[n] = '\0';
+            
+            if (*arg == '=') {
+                arg++;
+                char quote = '\0';
+                if (*arg == '"' || *arg == '\'') {
+                    quote = *arg;
+                    arg++;
+                }
+                while (*arg && v < ALIAS_VAL_LEN - 1) {
+                    if (quote && *arg == quote) {
+                        arg++;
+                        break;
+                    }
+                    val[v++] = *arg++;
+                }
+                val[v] = '\0';
+                
+                int found = -1;
+                for (int i = 0; i < alias_count; i++) {
+                    if (strcmp(aliases[i].name, name) == 0) {
+                        found = i;
+                        break;
+                    }
+                }
+                if (found >= 0) {
+                    strcpy(aliases[found].value, val);
+                } else if (alias_count < MAX_ALIASES) {
+                    strcpy(aliases[alias_count].name, name);
+                    strcpy(aliases[alias_count].value, val);
+                    alias_count++;
+                } else {
+                    print("alias: too many aliases\n", 0x0C);
+                }
+            } else {
+                print("usage: alias NAME=\"VALUE\"\n", 0x0C);
+            }
+        }
+    }
+    // --- UNALIAS ---
+    else if (strncmp(cmd_b, "unalias ", 8) == 0) {
+        char* name = cmd_b + 8;
+        while (*name == ' ') name++;
+        
+        int found = -1;
+        for (int i = 0; i < alias_count; i++) {
+            if (strcmp(aliases[i].name, name) == 0) {
+                found = i;
+                break;
+            }
+        }
+        
+        if (found >= 0) {
+            for (int i = found; i < alias_count - 1; i++) {
+                aliases[i] = aliases[i + 1];
+            }
+            alias_count--;
+        } else {
+            print("unalias: alias not found: ", 0x0C);
+            print(name, 0x0C);
+            print("\n", 0x0C);
+        }
+    }
+    // --- HISTORY ---
+    else if (strcmp(cmd_b, "history") == 0) {
+        int idx = hist_next_slot;
+        int count = 0;
+        if (hist_count < HIST_MAX) {
+            idx = 0;
+        }
+        while (count < hist_count) {
+            p_int(count + 1, 0x0E);
+            print("  ", 0x07);
+            print(history[idx], 0x0F);
+            print("\n", 0x0F);
+            idx = (idx + 1) % HIST_MAX;
+            count++;
+        }
+    }
     // --- ECHO ---
     else if (strncmp(cmd_b, "echo ", 5) == 0) {
         print(cmd_b + 5, 0x0F);
@@ -750,11 +1053,14 @@ static void run_cmd_internal() {
 
 void run_script(const char* f) {
     is_script = 1;
+    
     // Find file in new VFS
     char buf[2048];
     int sz = vfs_read_file(f, buf, 2047);
     if (sz < 0) {
-        print("run_script: file not found\n", 0x0C);
+        print("sh: ", 0x0C);
+        print(f, 0x0C);
+        print(": No such file or directory\n", 0x0C);
         is_script = 0;
         return;
     }
@@ -767,10 +1073,20 @@ void run_script(const char* f) {
             if (j > 0) {
                 cmd_b[j] = '\0';
                 b_idx = j;
-                print("> ", 0x0A);
-                print(cmd_b, 0x0F);
-                ex_cmd();
-                // Don't print prompt (ex_cmd does it)
+                
+                int start = 0;
+                while (cmd_b[start] == ' ') start++;
+                
+                // Skip comments (#) and empty lines
+                if (cmd_b[start] != '#' && cmd_b[start] != '\0') {
+                    print("> ", 0x0A);
+                    print(cmd_b + start, 0x0F);
+                    if (start > 0) {
+                        memmove(cmd_b, cmd_b + start, j - start + 1);
+                        b_idx = j - start;
+                    }
+                    ex_cmd();
+                }
                 j = 0;
             }
         } else if (j < CMD_BUF_SIZE - 1) {
@@ -781,9 +1097,17 @@ void run_script(const char* f) {
     if (j > 0) {
         cmd_b[j] = '\0';
         b_idx = j;
-        print("> ", 0x0A);
-        print(cmd_b, 0x0F);
-        ex_cmd();
+        int start = 0;
+        while (cmd_b[start] == ' ') start++;
+        if (cmd_b[start] != '#' && cmd_b[start] != '\0') {
+            print("> ", 0x0A);
+            print(cmd_b + start, 0x0F);
+            if (start > 0) {
+                memmove(cmd_b, cmd_b + start, j - start + 1);
+                b_idx = j - start;
+            }
+            ex_cmd();
+        }
     }
     is_script = 0;
 }
@@ -796,6 +1120,16 @@ void ex_cmd() {
     if (b_idx > 0) {
         history_add(cmd_b);
         strcpy(hist_b, cmd_b);
+        
+        // Expand environment variables and aliases
+        char expanded1[512];
+        char expanded2[512];
+        expand_env_vars(expanded1, cmd_b, 512);
+        expand_alias(expanded2, expanded1, 512);
+        
+        strncpy(cmd_b, expanded2, CMD_BUF_SIZE - 1);
+        cmd_b[CMD_BUF_SIZE - 1] = '\0';
+        b_idx = strlen(cmd_b);
     }
     
     shell_reset_history_nav();

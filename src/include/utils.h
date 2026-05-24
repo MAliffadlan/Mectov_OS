@@ -21,6 +21,7 @@ void strcpy(char* d, const char* s);
 void strncpy(char* d, const char* s, int n);
 void memset(void* dest, uint8_t val, uint32_t len);
 void memcpy(void* dest, const void* src, uint32_t len);
+void* memmove(void* dest, const void* src, uint32_t len);
 void p_int(int n, unsigned char c);
 int atoi(const char* s);
 unsigned int rand();

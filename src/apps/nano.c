@@ -105,6 +105,9 @@ void st_ed(const char* f) {
 
 void sa_ex_ed() { 
     // Save via new VFS API
+    if (vfs_get_node(ed_fn) < 0) {
+        vfs_create_file(ed_fn);
+    }
     vfs_write_file(ed_fn, ed_b, ed_c);
     vfs_save(); 
     ed_a = 0; 

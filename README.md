@@ -1,4 +1,4 @@
-# Mectov OS v27.0 — The TCP Socket Redirection & Web Gateway Update
+# Mectov OS v28.0 — The Advanced Shell Scripting, Environment Variables & Aliasing Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,10 +6,12 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v27.0 release delivers a massive dynamic networking and modern web browsing capability upgrade:
-1. **Kernel TCP Port 80 Redirection:** Implemented a transparent socket interception layer inside the kernel TCP stack (`net_tcp_connect`). Connections targeted to HTTP port 80 are transparently redirected to `gateway_ip` (`10.0.2.2`) and port `8888` (where `gateway.py` listens on the host).
-2. **Mectov Web Gateway Proxy Integration:** Enabled secure, modern HTTPS web page downloading by routing redirected guest requests through a Python-based gateway proxy on the host. The gateway fetches real websites, strips heavy HTML/CSS structures, limits memory footprint, and returns beautifully clean text to the guest.
-3. **Real-time Web Browser App:** Enabled full dynamic internet browsing in the Ring 3 Browser (`apps/browser.mct`). Users can type any modern domain, watch DNS resolve, connect through TCP sockets, and read parsed live website text seamlessly.
+The v28.0 release delivers a massive Terminal shell scripting, variable configuration, and shortcut utility upgrade to make it as powerful as Linux:
+1. **Automated Shell Scripting (`sh` / `source`):** Direct execution of script files (`.msh`), with robust parsing that trims leading spaces, ignores completely empty lines, and supports inline comments starting with `#`.
+2. **Environment Variables (`export` & `$`):** Full support for declaring variables via `export NAME=VALUE` and expanding `$NAME` dynamically in both terminal commands and script files (e.g., `echo $USER` or `cd $HOME`).
+3. **Command Aliasing & History (`alias` / `unalias` / `history`):** Lightweight command shortcut mapping (e.g. `alias ll="ls"`) with single-level expansion to prevent recursive loops, coupled with a `history` command to list recently typed commands from the kernel circular buffer.
+4. **Seamless Nano Saving:** Upgraded `nano` editor to automatically create files if they don't already exist on save, avoiding silent save failures.
+5. **Clean 100% Warning-Free Build:** Implemented standard `memmove` inside the kernel utility libraries, resolving all compiler warnings.
 
 Created by M Alif Fadlan.
 
@@ -354,6 +356,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v28.0 | **Advanced Shell Scripting, Environment Variables & Aliasing Update:** Implemented automated script file execution (`sh`/`source` commands) with inline comment (`#`) parsing, whitespace trimming, and empty line skipping. Implemented Shell Environment Variables (`export` and `$VAR` expansion) in both terminal commands and scripts. Added command aliasing (`alias`, `unalias`, and a new `history` command) in the shell. Fixed `nano` editor to automatically create files if they don't already exist on save. Implemented kernel `memmove`, achieving a 100% warning-free build. |
 | v27.0 | **TCP Socket Redirection & Web Gateway Update:** Implemented transparent HTTP port 80 redirection inside the kernel TCP stack (`net_tcp_connect`) routing to the host gateway at `10.0.2.2:8888`. Enabled clean modern web browsing inside the Ring 3 Browser app (`apps/browser.mct`) using a Python gateway proxy (`gateway.py`) to parse real HTTPS web pages into memory-safe text. |
 | v26.0 | **Copy-on-Write (COW) Paging & Integrated Editor Update:** Added virtual page Reference Counting (`frame_ref_count`) and fully implemented Copy-on-Write (COW) address space cloning for Ring 3 process isolation. Fully integrated built-in GUI editor to `edit`, `tulis`, and new `nano` shell commands. Added sleek text editor status footer showing character count and key controls. Fixed persistent disk storage by removing the destructive `disk.img` deletion in `run.sh`. |
 | v25.0 | **IntelliMouse, Audio, Shell & Git Enhancements:** Upgraded mouse driver to 4-byte IntelliMouse protocol supporting smooth scrolling in Browser, Explorer, PCI, and Volume Manager. Upgraded kernel audio to Sound Blaster 16 supporting dynamic WAV music stream playback. Built a dynamic shared library system (`libc.mct`) with a dynamic loading subsystem, reducing app binary sizes to ~1KB. Increased user stacks to 64KB and updated DNS to route over virtual gateway. **Enhanced GUI Terminal** with 16-command history buffer (Up/Down arrow navigation) and dynamic client-side VFS Tab completion. **Gitea Migration:** Added self-hosted home server remote `gitea` for private repository tracking. |
