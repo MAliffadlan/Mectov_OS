@@ -296,8 +296,18 @@ void net_tcp_connect(uint8_t* target_ip, uint16_t port) {
         net_send_arp_request(gateway_ip);
         return;
     }
-    memcpy(tcp_target_ip, target_ip, 4);
-    tcp_remote_port = port;
+    // Dynamic local port allocation to prevent port reuse collision / TIME_WAIT hang on host
+    tcp_local_port = 49152 + (get_ticks() % 16384);
+
+    // Redirect HTTP port 80 to Mectov Web Gateway Proxy on host (10.0.2.2:8888)
+    if (port == 80) {
+        memcpy(tcp_target_ip, gateway_ip, 4);
+        tcp_remote_port = 8888;
+        write_serial_string("[TCP] Redirecting HTTP port 80 to Web Gateway Proxy at 10.0.2.2:8888\n");
+    } else {
+        memcpy(tcp_target_ip, target_ip, 4);
+        tcp_remote_port = port;
+    }
     tcp_seq_num = get_ticks() * 12345; // random ISN
     tcp_ack_num = 0;
     tcp_state = TCP_SYN_SENT;
@@ -473,6 +483,13 @@ static void net_handle_tcp(ip_header_t* ip, uint8_t* tcp_data, uint32_t tcp_len)
     uint16_t dst_port = ntohs(tcp->dst_port);
 
     if (dst_port != tcp_local_port || src_port != tcp_remote_port) return;
+
+    // Handle remote connection reset or termination (FIN / RST)
+    if (tcp->flags & (TCP_FIN | TCP_RST)) {
+        tcp_state = TCP_CLOSED;
+        write_serial_string("[TCP] Connection closed by remote host (FIN/RST received)\n");
+        return;
+    }
 
     if (tcp_state == TCP_SYN_SENT) {
         if ((tcp->flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {

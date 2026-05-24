@@ -26,6 +26,10 @@ export PATH=/home/mectov/my-os/xbin/usr/bin:$PATH
 export LD_LIBRARY_PATH=/home/mectov/my-os/xbin/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 grub-mkrescue -o mectov.iso iso >/dev/null 2>&1
 
+echo "[*] Menghentikan instansi lama Web Gateway Proxy (jika ada)..."
+pkill -f gateway.py 2>/dev/null
+sleep 0.5
+
 echo "[*] Menjalankan Mectov Web Gateway Proxy di background..."
 python3 gateway.py > gateway.log 2>&1 &
 GATEWAY_PID=$!

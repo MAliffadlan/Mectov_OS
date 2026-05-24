@@ -1,4 +1,4 @@
-# Mectov OS v26.0 — The Copy-on-Write Paging & Integrated GUI Text Editor Update
+# Mectov OS v27.0 — The TCP Socket Redirection & Web Gateway Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,11 +6,10 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v26.0 release delivers a massive protected memory, user productivity, and persistent storage upgrade:
-1. **Copy-on-Write (COW) Paging:** Added a lightweight physical page reference counting system (`frame_ref_count`) to track shared page tables. When processes clone via `vmm_clone_address_space`, memory tables are mapped read-only and flagged as COW. A dynamic Page Fault (INT 14) handler intercepts writes, duplicating shared pages on-demand or promoting sole-owned pages to writable instantly.
-2. **Integrated GUI Text Editor:** Fully routed shell `edit`, `tulis`, and a new Linux-style `nano` command to the built-in kernel-space GUI editor `st_ed()` (from [nano.c](file:///home/mectov/my-os/src/apps/nano.c)), replacing broken external binary loads. Registered the new commands in the autocomplete `cmd_list` and the shell `help` system.
-3. **Interactive Status Bar Footer:** Designed a beautiful dark-theme status footer in the text editor displaying helper legends (`ESC: Simpan & Keluar`) and live character counts.
-4. **Persistent Storage across Reboot:** Fixed data loss by eliminating the destructive `rm -f disk.img` from the run script ([run.sh](file:///home/mectov/my-os/run.sh)), allowing VFS files, desktop layouts, and file edits to persist permanently across QEMU sessions.
+The v27.0 release delivers a massive dynamic networking and modern web browsing capability upgrade:
+1. **Kernel TCP Port 80 Redirection:** Implemented a transparent socket interception layer inside the kernel TCP stack (`net_tcp_connect`). Connections targeted to HTTP port 80 are transparently redirected to `gateway_ip` (`10.0.2.2`) and port `8888` (where `gateway.py` listens on the host).
+2. **Mectov Web Gateway Proxy Integration:** Enabled secure, modern HTTPS web page downloading by routing redirected guest requests through a Python-based gateway proxy on the host. The gateway fetches real websites, strips heavy HTML/CSS structures, limits memory footprint, and returns beautifully clean text to the guest.
+3. **Real-time Web Browser App:** Enabled full dynamic internet browsing in the Ring 3 Browser (`apps/browser.mct`). Users can type any modern domain, watch DNS resolve, connect through TCP sockets, and read parsed live website text seamlessly.
 
 Created by M Alif Fadlan.
 
@@ -355,6 +354,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v27.0 | **TCP Socket Redirection & Web Gateway Update:** Implemented transparent HTTP port 80 redirection inside the kernel TCP stack (`net_tcp_connect`) routing to the host gateway at `10.0.2.2:8888`. Enabled clean modern web browsing inside the Ring 3 Browser app (`apps/browser.mct`) using a Python gateway proxy (`gateway.py`) to parse real HTTPS web pages into memory-safe text. |
 | v26.0 | **Copy-on-Write (COW) Paging & Integrated Editor Update:** Added virtual page Reference Counting (`frame_ref_count`) and fully implemented Copy-on-Write (COW) address space cloning for Ring 3 process isolation. Fully integrated built-in GUI editor to `edit`, `tulis`, and new `nano` shell commands. Added sleek text editor status footer showing character count and key controls. Fixed persistent disk storage by removing the destructive `disk.img` deletion in `run.sh`. |
 | v25.0 | **IntelliMouse, Audio, Shell & Git Enhancements:** Upgraded mouse driver to 4-byte IntelliMouse protocol supporting smooth scrolling in Browser, Explorer, PCI, and Volume Manager. Upgraded kernel audio to Sound Blaster 16 supporting dynamic WAV music stream playback. Built a dynamic shared library system (`libc.mct`) with a dynamic loading subsystem, reducing app binary sizes to ~1KB. Increased user stacks to 64KB and updated DNS to route over virtual gateway. **Enhanced GUI Terminal** with 16-command history buffer (Up/Down arrow navigation) and dynamic client-side VFS Tab completion. **Gitea Migration:** Added self-hosted home server remote `gitea` for private repository tracking. |
 | v24.0 | **DOOM Engine Port:** Fully playable port of the classic 1993 DOOM engine integrated directly into the kernel. Features keyboard polling, double buffer to MMIO front buffer translation, graceful OS exiting (`vga_force_sync`), and proper process teardown. |
