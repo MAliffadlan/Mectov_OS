@@ -114,26 +114,50 @@ void* kmalloc(uint32_t size) {
     if (size == 0) return NULL;
     if (size % 4 != 0) size += 4 - (size % 4); // Align 4 bytes
 
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+
+    void* result = NULL;
     if (!global_base) { // First call
         block_meta *block = request_space(NULL, size);
-        if (!block) return NULL;
-        global_base = block;
-        return (void*)(block + 1);
+        if (block) {
+            global_base = block;
+            result = (void*)(block + 1);
+        }
+    } else {
+        block_meta *last = global_base;
+        block_meta *block = find_free_block(&last, size);
+        if (!block) {
+            block = request_space(last, size);
+            if (block) {
+                result = (void*)(block + 1);
+            }
+        } else {
+            // Block splitting to save memory and reduce internal fragmentation
+            if (block->size >= size + META_SIZE + 4) {
+                block_meta *new_block = (block_meta*)((uint8_t*)block + META_SIZE + size);
+                new_block->size = block->size - size - META_SIZE;
+                new_block->free = 1;
+                new_block->next = block->next;
+                
+                block->size = size;
+                block->next = new_block;
+            }
+            block->free = 0;
+            result = (void*)(block + 1);
+        }
     }
 
-    block_meta *last = global_base;
-    block_meta *block = find_free_block(&last, size);
-    if (!block) {
-        block = request_space(last, size);
-        if (!block) return NULL;
-    } else {
-        block->free = 0;
-    }
-    return (void*)(block + 1);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+    return result;
 }
 
 void kfree(void* p) {
     if (!p) return;
+
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+
     block_meta *block = (block_meta*)p - 1;
     block->free = 1;
 
@@ -152,6 +176,8 @@ void kfree(void* p) {
             prev->next = block->next;
         }
     }
+
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
 }
 
 void* krealloc(void* ptr, uint32_t new_size) {

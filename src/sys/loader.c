@@ -16,11 +16,17 @@ int load_mct_app_with_arg(const char* filename, const char* arg) {
         return -1;
     }
     
+    int file_size = fs_nodes[node].size;
+    if (file_size <= 0 || file_size > 1024 * 1024) {
+        write_serial_string("[LOADER] invalid size\n");
+        return -2;
+    }
+    
     // Read the whole file into a temp buffer
-    uint8_t* buf = (uint8_t*)kmalloc(65536);
+    uint8_t* buf = (uint8_t*)kmalloc(file_size);
     if (!buf) return -10;
 
-    int sz = vfs_read_file(filename, (char*)buf, 65536);
+    int sz = vfs_read_file(filename, (char*)buf, file_size);
     if (sz < (int)sizeof(mct_header_t)) {
         write_serial_string("[LOADER] too small\n");
         kfree(buf);
@@ -124,10 +130,13 @@ void* load_mct_library(const char* filename) {
     int node = vfs_get_node(filename);
     if (node < 0 || vfs_is_dir(node)) return 0;
     
-    uint8_t* lib_buf = (uint8_t*)kmalloc(65536);
+    int file_size = fs_nodes[node].size;
+    if (file_size <= 0 || file_size > 1024 * 1024) return 0;
+    
+    uint8_t* lib_buf = (uint8_t*)kmalloc(file_size);
     if (!lib_buf) return 0;
 
-    int sz = vfs_read_file(filename, (char*)lib_buf, 65536);
+    int sz = vfs_read_file(filename, (char*)lib_buf, file_size);
     if (sz < (int)sizeof(mct_header_t)) { kfree(lib_buf); return 0; }
     
     mct_header_t* header = (mct_header_t*)lib_buf;

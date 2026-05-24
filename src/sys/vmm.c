@@ -22,6 +22,7 @@
 
 // One static bitmap for the whole system
 static uint8_t frame_bitmap[FRAME_BITMAP_SIZE];
+uint8_t frame_ref_count[TOTAL_PHYSICAL_PAGES];
 static int vmm_initialized = 0;
 
 // Mark kernel + heap region (first 32MB) as reserved
@@ -41,12 +42,14 @@ void vmm_init(void) {
     if (vmm_initialized) return;
     vmm_initialized = 1;
     
-    // Clear bitmap
+    // Clear bitmap & ref count
     memset(frame_bitmap, 0, FRAME_BITMAP_SIZE);
+    memset(frame_ref_count, 0, TOTAL_PHYSICAL_PAGES);
     
-    // Reserve kernel region (first 16MB)
+    // Reserve kernel region (first 32MB)
     for (int i = 0; i < KERNEL_RESERVED_PAGES; i++) {
         bitmap_set(i);
+        frame_ref_count[i] = 1;
     }
     
     write_serial_string("[VMM] Initialized. ");
@@ -56,10 +59,11 @@ void vmm_init(void) {
 }
 
 // Allocate one physical frame. Returns physical address or 0.
-static uint32_t frame_alloc(void) {
+uint32_t frame_alloc(void) {
     for (int i = KERNEL_RESERVED_PAGES; i < TOTAL_PHYSICAL_PAGES; i++) {
         if (!bitmap_test(i)) {
             bitmap_set(i);
+            frame_ref_count[i] = 1;
             return (uint32_t)i * 4096;
         }
     }
@@ -67,11 +71,16 @@ static uint32_t frame_alloc(void) {
     return 0;
 }
 
-static void frame_free(uint32_t paddr) {
+void frame_free(uint32_t paddr) {
     if (paddr == 0) return;
     int idx = paddr / 4096;
     if (idx >= KERNEL_RESERVED_PAGES && idx < TOTAL_PHYSICAL_PAGES) {
-        bitmap_clear(idx);
+        if (frame_ref_count[idx] > 0) {
+            frame_ref_count[idx]--;
+            if (frame_ref_count[idx] == 0) {
+                bitmap_clear(idx);
+            }
+        }
     }
 }
 
@@ -311,10 +320,73 @@ uint32_t vmm_find_free_region(uint32_t page_dir, uint32_t size) {
 }
 
 uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
-    (void)src_page_dir;
-    // COW implementation would go here
-    // For now, just create new address space
-    return vmm_create_address_space();
+    if (src_page_dir == 0) {
+        return vmm_create_address_space();
+    }
+    
+    // Create new independent address space with kernel mappings already cloned
+    uint32_t dst_pd_paddr = vmm_create_address_space();
+    if (dst_pd_paddr == 0) return 0;
+    
+    uint32_t* src_pd = (uint32_t*)(uintptr_t)src_page_dir;
+    uint32_t* dst_pd = (uint32_t*)(uintptr_t)dst_pd_paddr;
+    
+    extern uint32_t tasks_get_boot_cr3(void);
+    uint32_t kernel_cr3 = tasks_get_boot_cr3();
+    uint32_t* kernel_pd = (uint32_t*)(uintptr_t)(kernel_cr3 & 0xFFFFF000);
+    
+    // Scan all user-space page directory entries (index >= 8, covering 32MB+)
+    for (uint32_t i = 8; i < 1024; i++) {
+        if (!(src_pd[i] & PAGE_PRESENT)) continue;
+        
+        // If it's a kernel page table that has not been modified, it was already handled
+        if (i < 32 && (kernel_pd[i] & PAGE_PRESENT) && (src_pd[i] & 0xFFFFF000) == (kernel_pd[i] & 0xFFFFF000)) {
+            continue;
+        }
+        
+        // Allocate a new physical frame for this cloned page table
+        uint32_t dst_pt_paddr = frame_alloc();
+        if (dst_pt_paddr == 0) {
+            vmm_free_address_space(dst_pd_paddr);
+            return 0;
+        }
+        zero_phys_page(dst_pt_paddr);
+        
+        uint32_t* src_pt = (uint32_t*)(uintptr_t)(src_pd[i] & 0xFFFFF000);
+        uint32_t* dst_pt = (uint32_t*)(uintptr_t)dst_pt_paddr;
+        
+        for (uint32_t e = 0; e < 1024; e++) {
+            if (!(src_pt[e] & PAGE_PRESENT)) continue;
+            
+            // Mark user-space writable pages as COW and Read-Only
+            if ((src_pt[e] & PAGE_USER) && (src_pt[e] & PAGE_RW)) {
+                src_pt[e] &= ~PAGE_RW;  // clear RW
+                src_pt[e] |= PAGE_COW;  // set COW
+            }
+            
+            // Copy the page table entry
+            dst_pt[e] = src_pt[e];
+            
+            // Increment the reference count of the physical frame
+            uint32_t page_paddr = src_pt[e] & 0xFFFFF000;
+            if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
+                frame_ref_count[page_paddr / 4096]++;
+            }
+        }
+        
+        // Link to new directory
+        dst_pd[i] = dst_pt_paddr | (src_pd[i] & 0xFFF);
+    }
+    
+    // Flush TLB of the current active directory just in case it was src_page_dir
+    uint32_t active_cr3;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(active_cr3));
+    if (active_cr3 == src_page_dir) {
+        __asm__ __volatile__("mov %0, %%cr3" : : "r"(src_page_dir));
+    }
+    
+    write_serial_string("[VMM] Cloned COW address space successfully\n");
+    return dst_pd_paddr;
 }
 
 void vmm_switch_page_dir(uint32_t page_dir) {

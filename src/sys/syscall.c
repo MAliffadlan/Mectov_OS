@@ -49,10 +49,10 @@ typedef struct {
     int type; // 1 = rect, 2 = text
     int x, y, w, h;
     uint32_t color;
-    char text[32];
+    char text[128]; // Expanded from 32 to 128 to support full-length terminal rows
 } draw_cmd_t;
 
-#define MAX_DRAW_CMDS 128
+#define MAX_DRAW_CMDS 512 // Expanded from 128 to 512 to prevent drawing command exhaustion on heavy terminals
 typedef struct {
     draw_cmd_t cmds[MAX_DRAW_CMDS];
     int count;
@@ -324,7 +324,7 @@ static void syscall_handler(registers_t* regs) {
             int y = (int)regs->edx;
             const char* text = (const char*)regs->esi;
             uint32_t color = (uint32_t)regs->edi;
-            if (safe_strlen(text, 31) < 0) { regs->eax = (uint32_t)-1; break; }
+            if (safe_strlen(text, 127) < 0) { regs->eax = (uint32_t)-1; break; }
             
             int idx = get_win_index(wid);
             if (idx >= 0) {
@@ -332,7 +332,7 @@ static void syscall_handler(registers_t* regs) {
                     draw_cmd_t* cmd = &win_canvases[idx].pending_cmds[win_canvases[idx].pending_count++];
                     cmd->type = 2; cmd->x = x; cmd->y = y; cmd->color = color;
                     int i = 0;
-                    while (text[i] && i < 31) { cmd->text[i] = text[i]; i++; }
+                    while (text[i] && i < 127) { cmd->text[i] = text[i]; i++; }
                     cmd->text[i] = '\0';
                 }
             }

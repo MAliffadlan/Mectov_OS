@@ -11,6 +11,11 @@ void ipc_init(void) {
     ipc_initialized = 1;
     memset(queues, 0, sizeof(queues));
     write_serial_string("[IPC] Initialized\n");
+    write_serial_string("[IPC] IPC_MSG_SIZE: ");
+    write_serial_hex(IPC_MSG_SIZE);
+    write_serial_string("\n[IPC] sizeof(ipc_message_t): ");
+    write_serial_hex(sizeof(ipc_message_t));
+    write_serial_string("\n");
 }
 
 int ipc_queue_create(uint32_t key) {

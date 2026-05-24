@@ -29,5 +29,8 @@ int shell_history_up();
 int shell_history_down();
 void shell_reset_history_nav();
 void shell_apply_tab();
+extern int pipe_active;
+extern char pipe_buffer[4096];
+extern int pipe_buf_len;
 
 #endif

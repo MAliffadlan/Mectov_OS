@@ -9,6 +9,7 @@
 #define PAGE_PRESENT 0x1
 #define PAGE_RW      0x2
 #define PAGE_USER    0x4
+#define PAGE_COW     0x200
 
 void init_mem(uint32_t mem_size);
 void paging_init(uint32_t fb_addr, uint32_t fb_size);

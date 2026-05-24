@@ -14,6 +14,11 @@ uint32_t vmm_create_address_space(void);
 // Free a page directory (for task cleanup)
 void vmm_free_address_space(uint32_t page_dir);
 
+// Frame management stubs
+uint32_t frame_alloc(void);
+void frame_free(uint32_t paddr);
+extern uint8_t frame_ref_count[];
+
 // Map a virtual address to a physical frame in a specific page directory
 int vmm_map_page(uint32_t page_dir, uint32_t vaddr, uint32_t paddr, uint32_t flags);
 

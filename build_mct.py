@@ -76,7 +76,17 @@ SECTIONS {
     except Exception as e:
         print(f"[*] Warning: Could not find _start, using offset 0. {e}")
         
-    data_size = 16384 # Kasih 16KB untuk BSS (variabel global nol) dan memory runtime
+    bss_val = 0
+    try:
+        size_out = subprocess.check_output(["size", elf_file]).decode()
+        lines = size_out.splitlines()
+        if len(lines) >= 2:
+            parts = lines[1].split()
+            bss_val = int(parts[2])
+    except Exception as e:
+        print(f"[*] Warning: Could not parse BSS size from size utility. {e}")
+        
+    data_size = bss_val + 16384 # Give dynamic BSS size + 16KB padding for runtime heap/stack safety
 
     # Struct format: 4 uint32 (16 bytes header)
     # <I = little-endian uint32

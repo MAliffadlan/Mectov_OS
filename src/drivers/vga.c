@@ -604,7 +604,18 @@ void vga_flush_ipc() {
     }
 }
 
+int pipe_active = 0;
+char pipe_buffer[4096];
+int pipe_buf_len = 0;
+
 void p_char(char c, unsigned char col) {
+    if (pipe_active) {
+        if (pipe_buf_len < 4095) {
+            pipe_buffer[pipe_buf_len++] = c;
+        }
+        return;
+    }
+
     extern int get_use_term_buf();
     extern void p_char_gui(char c2, unsigned char col2);
     if (get_use_term_buf()) { p_char_gui(c, col); return; }

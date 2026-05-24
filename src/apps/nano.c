@@ -19,16 +19,44 @@ static void nano_draw(int id, int cx, int cy, int cw, int ch) {
     draw_rect(cx, cy, cw, ch, GUI_BG);
     draw_rect_border(cx, cy, cw, ch, GUI_BORDER2);
     
+    int footer_h = 22;
+    int max_text_y = ch - footer_h - 4;
+    
     int x = 4, y = 4;
     for(int i = 0; i < ed_c; i++) {
         if(ed_b[i] == '\n') { x = 4; y += 16; continue; }
         if(x + 8 > cw - 4) { x = 4; y += 16; }
-        if(y + 16 > ch - 4) break; // Out of bounds
+        if(y + 16 > max_text_y) break; // Out of bounds (above footer)
         draw_char_px(cx + x, cy + y, ed_b[i], GUI_TEXT, GUI_BG);
         x += 8;
     }
-    // Draw cursor
-    if ((get_ticks() / 500) & 1) draw_rect(cx + x, cy + y + 14, 8, 2, 0x0000FF88);
+    // Draw cursor (only if it falls above the footer)
+    if (y + 16 <= max_text_y) {
+        if ((get_ticks() / 500) & 1) draw_rect(cx + x, cy + y + 14, 8, 2, 0x0000FF88);
+    }
+
+    // Status Bar / Footer at the bottom
+    int footer_y = cy + ch - footer_h;
+    draw_rect(cx + 1, footer_y - 1, cw - 2, footer_h, 0x00151522); // Sleek dark bar
+    draw_line(cx + 1, footer_y - 1, cx + cw - 2, footer_y - 1, GUI_BORDER2); // Top divider line
+
+    // Draw shortcut info
+    draw_string_px(cx + 8, footer_y + 3, "ESC: Simpan & Keluar", GUI_TEAL, 0);
+
+    // Draw character count
+    char count_buf[32];
+    strcpy(count_buf, "Karakter: ");
+    int val = ed_c;
+    int ci = 10;
+    if (val == 0) {
+        count_buf[ci++] = '0';
+    } else {
+        char rev[8]; int rl = 0;
+        while (val > 0) { rev[rl++] = '0' + (val % 10); val /= 10; }
+        while (rl > 0) count_buf[ci++] = rev[--rl];
+    }
+    count_buf[ci] = '\0';
+    draw_string_px(cx + cw - 120, footer_y + 3, count_buf, GUI_DIM, 0);
 }
 
 static void nano_key(int id, char c, uint8_t sc) {
@@ -44,9 +72,14 @@ static void nano_key(int id, char c, uint8_t sc) {
         ed_b[ed_c++] = c;
         ed_b[ed_c] = '\0';
     }
+    wm_invalidate(id);
 }
 
-static void nano_tick(int id) { (void)id; }
+static void nano_tick(int id) {
+    if (wm_is_open(id)) {
+        wm_invalidate(id);
+    }
+}
 
 void st_ed(const char* f) { 
     if (nano_win_id >= 0 && wm_is_open(nano_win_id)) { wm_raise(nano_win_id); return; }

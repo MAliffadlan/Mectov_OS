@@ -26,10 +26,10 @@ int is_script = 0;
 const char* cmd_list[] = {
     "help","clear","mfetch","mem","kmemstats","vfsinfo",
     "ls","cd","pwd","mkdir","touch","cat","tree","rm",
-    "buat","tulis","edit","baca","hapus",
+    "buat","tulis","edit","nano","baca","hapus",
     "echo","beep","nada","tunggu","waktu","warna","kunci",
     "jalankan","ular","taskmgr","lspci","man",
-    "ping","host",
+    "ping","host","grep",
     "matikan","mulaiulang","shutdown","reboot", NULL
 };
 
@@ -260,32 +260,37 @@ void shell_apply_tab() {
     shell_redisplay();
 }
 
+static int strstr_custom(const char* haystack, const char* needle) {
+    if (!*needle) return 0;
+    for (int i = 0; haystack[i]; i++) {
+        int match = 1;
+        for (int j = 0; needle[j]; j++) {
+            if (haystack[i + j] != needle[j]) {
+                match = 0;
+                break;
+            }
+        }
+        if (match) return i;
+    }
+    return -1;
+}
+
 // ============================================================
 // Main command execution
 // ============================================================
 
-void ex_cmd() {
-    print("\n", 0x0F);
-    cmd_b[b_idx] = '\0';
-    
-    // Save to history (skip empty)
-    if (b_idx > 0) {
-        history_add(cmd_b);
-        strcpy(hist_b, cmd_b);
-    }
-    
-    shell_reset_history_nav();
-    
+static void run_cmd_internal() {
     // --- HELP ---
     if (strcmp(cmd_b, "help") == 0) {
-        print("--- MECTOV OS v18.0 HELP MENU ---\n", 0x0B);
+        print("--- MECTOV OS v26.0 HELP MENU ---\n", 0x0B);
         print("SISTEM: mfetch, waktu, warna, clear, mem, kmemstats, kunci\n", 0x0E);
         print("FILES : ls, cd, pwd, mkdir, touch, cat, tree, rm\n", 0x0E);
-        print("        buat, tulis, baca, edit, hapus (legacy)\n", 0x0E);
-        print("APPS  : ular, nada, beep, echo, tunggu\n", 0x0E);
+        print("        buat, tulis, baca, edit, nano, hapus (legacy)\n", 0x0E);
+        print("APPS  : ular, nada, beep, echo, tunggu, grep\n", 0x0E);
         print("POWER : matikan, mulaiulang, shutdown, reboot\n", 0x0E);
         print("HW    : lspci\n", 0x0E);
         print("NET   : ping [ip], host [domain]\n", 0x0E);
+        print("PIPE  : cmd1 | cmd2 (e.g. lspci | grep Ethernet)\n", 0x0E);
         print("NAV   : Tab=complete, Up/Down=history\n", 0x0E);
     }
     // --- CLEAR ---
@@ -430,16 +435,66 @@ void ex_cmd() {
         }
     }
     // --- CAT (read file) ---
-    else if (strncmp(cmd_b, "cat ", 4) == 0) {
-        char* fpath = cmd_b + 4;
-        char buf[2048];
-        int sz = vfs_read_file(fpath, buf, 2047);
-        if (sz < 0) {
-            print("cat: file not found\n", 0x0C);
+    else if (strncmp(cmd_b, "cat ", 4) == 0 || strcmp(cmd_b, "cat") == 0) {
+        if (strcmp(cmd_b, "cat") == 0) {
+            extern int pipe_buf_len;
+            extern char pipe_buffer[];
+            if (pipe_buf_len > 0) {
+                print(pipe_buffer, 0x0F);
+                print("\n", 0x0F);
+            } else {
+                print("cat: no input\n", 0x0C);
+            }
         } else {
-            buf[sz] = '\0';
-            print(buf, 0x0F);
-            print("\n", 0x0F);
+            char* fpath = cmd_b + 4;
+            char buf[2048];
+            int sz = vfs_read_file(fpath, buf, 2047);
+            if (sz < 0) {
+                print("cat: file not found\n", 0x0C);
+            } else {
+                buf[sz] = '\0';
+                print(buf, 0x0F);
+                print("\n", 0x0F);
+            }
+        }
+    }
+    // --- GREP ---
+    else if (strncmp(cmd_b, "grep ", 5) == 0) {
+        char* pattern = cmd_b + 5;
+        while (*pattern == ' ') pattern++;
+        
+        extern int pipe_buf_len;
+        extern char pipe_buffer[];
+        if (pipe_buf_len > 0) {
+            int i = 0;
+            char line[256];
+            int line_len = 0;
+            while (i < pipe_buf_len) {
+                char c = pipe_buffer[i++];
+                if (c == '\n' || c == '\r') {
+                    line[line_len] = '\0';
+                    if (line_len > 0) {
+                        if (strstr_custom(line, pattern) >= 0) {
+                            print(line, 0x0A); // Tampilkan yang cocok dengan warna hijau
+                            print("\n", 0x0F);
+                        }
+                    }
+                    line_len = 0;
+                } else {
+                    if (line_len < 255) {
+                        line[line_len++] = c;
+                    }
+                }
+            }
+            if (line_len > 0) {
+                line[line_len] = '\0';
+                if (strstr_custom(line, pattern) >= 0) {
+                    print(line, 0x0A);
+                    print("\n", 0x0F);
+                }
+            }
+        } else {
+            print("grep: no input\n", 0x0C);
         }
     }
     // --- RM (delete) ---
@@ -538,12 +593,14 @@ void ex_cmd() {
         if (sz < 0) print("File tidak ditemukan.\n", 0x0C);
         else { buf[sz] = '\0'; print(buf, 0x0F); print("\n", 0x0F); }
     }
-    // --- Legacy: EDIT / TULIS ---
-    else if (strncmp(cmd_b, "edit ", 5) == 0 || strncmp(cmd_b, "tulis ", 6) == 0) {
-        char* fname = (strncmp(cmd_b, "edit ", 5) == 0) ? cmd_b + 5 : cmd_b + 6;
+    // --- Legacy: EDIT / TULIS / NANO ---
+    else if (strncmp(cmd_b, "edit ", 5) == 0 || strncmp(cmd_b, "tulis ", 6) == 0 || strncmp(cmd_b, "nano ", 5) == 0) {
+        char* fname = NULL;
+        if (strncmp(cmd_b, "edit ", 5) == 0) fname = cmd_b + 5;
+        else if (strncmp(cmd_b, "tulis ", 6) == 0) fname = cmd_b + 6;
+        else fname = cmd_b + 5;
         print("Membuka Editor...\n", 0x0E);
-        extern int load_mct_app_with_arg(const char*, const char*);
-        load_mct_app_with_arg("apps/edit.mct", fname);
+        st_ed(fname);
     }
     // --- Legacy: HAPUS ---
     else if (strncmp(cmd_b, "hapus ", 6) == 0) {
@@ -729,4 +786,94 @@ void run_script(const char* f) {
         ex_cmd();
     }
     is_script = 0;
+}
+
+void ex_cmd() {
+    print("\n", 0x0F);
+    cmd_b[b_idx] = '\0';
+    
+    // Save to history (skip empty)
+    if (b_idx > 0) {
+        history_add(cmd_b);
+        strcpy(hist_b, cmd_b);
+    }
+    
+    shell_reset_history_nav();
+    
+    // Check for pipe '|'
+    int pipe_idx = -1;
+    for (int i = 0; cmd_b[i]; i++) {
+        if (cmd_b[i] == '|') {
+            pipe_idx = i;
+            break;
+        }
+    }
+    
+    if (pipe_idx >= 0) {
+        char cmd1[256];
+        char cmd2[256];
+        
+        // Extract cmd1
+        int len1 = pipe_idx;
+        if (len1 > 255) len1 = 255;
+        strncpy(cmd1, cmd_b, len1);
+        cmd1[len1] = '\0';
+        
+        // Trim trailing spaces for cmd1
+        int end1 = len1 - 1;
+        while (end1 >= 0 && cmd1[end1] == ' ') {
+            cmd1[end1] = '\0';
+            end1--;
+        }
+        
+        // Extract cmd2
+        int len2 = 0;
+        int k = pipe_idx + 1;
+        while (cmd_b[k] == ' ') k++; // skip leading spaces
+        while (cmd_b[k]) {
+            if (len2 < 255) {
+                cmd2[len2++] = cmd_b[k];
+            }
+            k++;
+        }
+        cmd2[len2] = '\0';
+        
+        // Trim trailing spaces for cmd2
+        int end2 = len2 - 1;
+        while (end2 >= 0 && cmd2[end2] == ' ') {
+            cmd2[end2] = '\0';
+            end2--;
+        }
+        
+        // Execute cmd1 with pipe redirection active
+        extern int pipe_active;
+        extern char pipe_buffer[];
+        extern int pipe_buf_len;
+        
+        pipe_buf_len = 0;
+        pipe_buffer[0] = '\0';
+        pipe_active = 1;
+        
+        strcpy(cmd_b, cmd1);
+        b_idx = strlen(cmd_b);
+        run_cmd_internal();
+        
+        pipe_buffer[pipe_buf_len] = '\0';
+        pipe_active = 0; // Turn off redirection so cmd2 outputs to terminal
+        
+        // Execute cmd2
+        strcpy(cmd_b, cmd2);
+        b_idx = strlen(cmd_b);
+        run_cmd_internal();
+        
+        // Reset pipe buffer
+        pipe_buf_len = 0;
+        pipe_buffer[0] = '\0';
+        b_idx = 0;
+        return;
+    }
+    
+    // Normal execution (no pipe)
+    run_cmd_internal();
+    b_idx = 0;
 }

@@ -102,8 +102,73 @@ uint32_t irq_handler(uint32_t esp) {
 // ISR handler — called from isr_common_stub and isr128 (syscalls)
 // Does NOT do context switching or EOI
 #include "../include/vga.h"
+#include "../include/vmm.h"
+#include "../include/mem.h"
 
 void isr_handler(registers_t *r) {
+    if (r->int_no == 14) {
+        uint32_t faulting_address;
+        __asm__ __volatile__("mov %%cr2, %0" : "=r"(faulting_address));
+        
+        uint32_t cr3_val;
+        __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3_val));
+        
+        uint32_t* pd = (uint32_t*)(uintptr_t)(cr3_val & 0xFFFFF000);
+        uint32_t pd_idx = faulting_address >> 22;
+        
+        if (pd[pd_idx] & PAGE_PRESENT) {
+            uint32_t* pt = (uint32_t*)(uintptr_t)(pd[pd_idx] & 0xFFFFF000);
+            uint32_t pt_idx = (faulting_address >> 12) & 0x3FF;
+            
+            if (pt[pt_idx] & PAGE_PRESENT) {
+                uint32_t entry = pt[pt_idx];
+                if (entry & PAGE_COW) {
+                    uint32_t old_paddr = entry & 0xFFFFF000;
+                    
+                    // Sole ownership optimization
+                    if (frame_ref_count[old_paddr / 4096] == 1) {
+                        uint32_t flags = entry & 0xFFF;
+                        flags |= PAGE_RW;
+                        flags &= ~PAGE_COW;
+                        pt[pt_idx] = old_paddr | flags;
+                        __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
+                        
+                        write_serial_string("[COW] Promoted sole-owned page to writable at ");
+                        write_serial_hex(faulting_address);
+                        write_serial_string("\n");
+                        return; // Resume execution
+                    }
+                    
+                    // Duplicate page
+                    uint32_t new_paddr = frame_alloc();
+                    if (new_paddr == 0) {
+                        write_serial_string("[COW] OUT OF PHYSICAL FRAMES during Page Fault!\n");
+                        // Fall through to crash
+                    } else {
+                        memcpy((void*)(uintptr_t)new_paddr, (void*)(uintptr_t)old_paddr, 4096);
+                        
+                        uint32_t flags = entry & 0xFFF;
+                        flags |= PAGE_RW;
+                        flags &= ~PAGE_COW;
+                        pt[pt_idx] = new_paddr | flags;
+                        
+                        frame_free(old_paddr);
+                        __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
+                        
+                        write_serial_string("[COW] Duplicated page at ");
+                        write_serial_hex(faulting_address);
+                        write_serial_string(" (Old: ");
+                        write_serial_hex(old_paddr);
+                        write_serial_string(" -> New: ");
+                        write_serial_hex(new_paddr);
+                        write_serial_string(")\n");
+                        return; // Resume execution
+                    }
+                }
+            }
+        }
+    }
+
     if (interrupt_handlers[r->int_no] != 0) {
         isr_t handler = interrupt_handlers[r->int_no];
         handler(r);

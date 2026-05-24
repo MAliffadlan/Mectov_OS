@@ -12,6 +12,9 @@
 #include "../include/utils.h"
 #include "../include/mem.h"
 
+extern void write_serial_string(const char*);
+extern void write_serial_hex(uint32_t);
+
 // Embedded binary for gcalc.mct
 extern uint8_t _binary_gcalc_mct_start[];
 extern uint8_t _binary_gcalc_mct_end[];
@@ -82,6 +85,21 @@ static int split_path(const char* path, char components[MAX_PATH/2][MAX_FILENAME
 
 // --- Inisialisasi ---
 
+static int vfs_update_file_if_needed(const char* path, const char* data, int size) {
+    int node = vfs_get_node(path);
+    if (node < 0) {
+        vfs_create_file(path);
+        vfs_write_file(path, data, size);
+        return 1;
+    } else {
+        if (fs_nodes[node].size != size) {
+            vfs_write_file(path, data, size);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void vfs_init() {
     write_serial_string("[VFS] init start\n");
     // Coba load dari disk
@@ -122,85 +140,73 @@ void vfs_init() {
             write_serial_string("\n");
         }
         
-        // Always update core apps to latest kernel version for dev
+        int changed = 0;
+        // Always update core apps to latest kernel version for dev if needed
         extern uint8_t _binary_snake_mct_start[];
         extern uint8_t _binary_snake_mct_end[];
-        if (vfs_get_node("apps/snake.mct") < 0) vfs_create_file("apps/snake.mct");
-        vfs_write_file("apps/snake.mct", (const char*)_binary_snake_mct_start, _binary_snake_mct_end - _binary_snake_mct_start);
+        changed += vfs_update_file_if_needed("apps/snake.mct", (const char*)_binary_snake_mct_start, _binary_snake_mct_end - _binary_snake_mct_start);
 
         extern uint8_t _binary_libc_mct_start[];
         extern uint8_t _binary_libc_mct_end[];
-        if (vfs_get_node("apps/libc.mct") < 0) vfs_create_file("apps/libc.mct");
-        vfs_write_file("apps/libc.mct", (const char*)_binary_libc_mct_start, _binary_libc_mct_end - _binary_libc_mct_start);
+        changed += vfs_update_file_if_needed("apps/libc.mct", (const char*)_binary_libc_mct_start, _binary_libc_mct_end - _binary_libc_mct_start);
 
         extern uint8_t _binary_calc_mct_start[];
         extern uint8_t _binary_calc_mct_end[];
-        if (vfs_get_node("apps/calc.mct") < 0) vfs_create_file("apps/calc.mct");
-        vfs_write_file("apps/calc.mct", (const char*)_binary_calc_mct_start, _binary_calc_mct_end - _binary_calc_mct_start);
+        changed += vfs_update_file_if_needed("apps/calc.mct", (const char*)_binary_calc_mct_start, _binary_calc_mct_end - _binary_calc_mct_start);
 
         extern uint8_t _binary_volume_mct_start[];
         extern uint8_t _binary_volume_mct_end[];
-        if (vfs_get_node("apps/volume.mct") < 0) vfs_create_file("apps/volume.mct");
-        vfs_write_file("apps/volume.mct", (const char*)_binary_volume_mct_start, _binary_volume_mct_end - _binary_volume_mct_start);
+        changed += vfs_update_file_if_needed("apps/volume.mct", (const char*)_binary_volume_mct_start, _binary_volume_mct_end - _binary_volume_mct_start);
 
         extern uint8_t _binary_mplayer_mct_start[];
         extern uint8_t _binary_mplayer_mct_end[];
-        if (vfs_get_node("apps/mplayer.mct") < 0) vfs_create_file("apps/mplayer.mct");
-        vfs_write_file("apps/mplayer.mct", (const char*)_binary_mplayer_mct_start, _binary_mplayer_mct_end - _binary_mplayer_mct_start);
+        changed += vfs_update_file_if_needed("apps/mplayer.mct", (const char*)_binary_mplayer_mct_start, _binary_mplayer_mct_end - _binary_mplayer_mct_start);
 
         extern uint8_t _binary_apps_music_wav_start[];
         extern uint8_t _binary_apps_music_wav_end[];
-        if (vfs_get_node("apps/music.wav") < 0) vfs_create_file("apps/music.wav");
-        vfs_write_file("apps/music.wav", (const char*)_binary_apps_music_wav_start, _binary_apps_music_wav_end - _binary_apps_music_wav_start);
+        changed += vfs_update_file_if_needed("apps/music.wav", (const char*)_binary_apps_music_wav_start, _binary_apps_music_wav_end - _binary_apps_music_wav_start);
 
         extern uint8_t _binary_hello_mct_start[];
         extern uint8_t _binary_hello_mct_end[];
-        if (vfs_get_node("apps/hello.mct") < 0) vfs_create_file("apps/hello.mct");
-        vfs_write_file("apps/hello.mct", (const char*)_binary_hello_mct_start, _binary_hello_mct_end - _binary_hello_mct_start);
+        changed += vfs_update_file_if_needed("apps/hello.mct", (const char*)_binary_hello_mct_start, _binary_hello_mct_end - _binary_hello_mct_start);
 
         extern uint8_t _binary_sysinfo_mct_start[];
         extern uint8_t _binary_sysinfo_mct_end[];
-        if (vfs_get_node("apps/sysinfo.mct") < 0) vfs_create_file("apps/sysinfo.mct");
-        vfs_write_file("apps/sysinfo.mct", (const char*)_binary_sysinfo_mct_start, _binary_sysinfo_mct_end - _binary_sysinfo_mct_start);
+        changed += vfs_update_file_if_needed("apps/sysinfo.mct", (const char*)_binary_sysinfo_mct_start, _binary_sysinfo_mct_end - _binary_sysinfo_mct_start);
 
         extern uint8_t _binary_pci_mct_start[];
         extern uint8_t _binary_pci_mct_end[];
-        if (vfs_get_node("apps/pci.mct") < 0) vfs_create_file("apps/pci.mct");
-        vfs_write_file("apps/pci.mct", (const char*)_binary_pci_mct_start, _binary_pci_mct_end - _binary_pci_mct_start);
+        changed += vfs_update_file_if_needed("apps/pci.mct", (const char*)_binary_pci_mct_start, _binary_pci_mct_end - _binary_pci_mct_start);
 
         extern uint8_t _binary_explorer_mct_start[];
         extern uint8_t _binary_explorer_mct_end[];
-        if (vfs_get_node("apps/explorer.mct") < 0) vfs_create_file("apps/explorer.mct");
-        vfs_write_file("apps/explorer.mct", (const char*)_binary_explorer_mct_start, _binary_explorer_mct_end - _binary_explorer_mct_start);
+        changed += vfs_update_file_if_needed("apps/explorer.mct", (const char*)_binary_explorer_mct_start, _binary_explorer_mct_end - _binary_explorer_mct_start);
 
         extern uint8_t _binary_browser_mct_start[];
         extern uint8_t _binary_browser_mct_end[];
-        if (vfs_get_node("apps/browser.mct") < 0) vfs_create_file("apps/browser.mct");
-        vfs_write_file("apps/browser.mct", (const char*)_binary_browser_mct_start, _binary_browser_mct_end - _binary_browser_mct_start);
+        changed += vfs_update_file_if_needed("apps/browser.mct", (const char*)_binary_browser_mct_start, _binary_browser_mct_end - _binary_browser_mct_start);
 
         extern uint8_t _binary_terminal_mct_start[];
         extern uint8_t _binary_terminal_mct_end[];
-        if (vfs_get_node("apps/terminal.mct") < 0) vfs_create_file("apps/terminal.mct");
-        vfs_write_file("apps/terminal.mct", (const char*)_binary_terminal_mct_start, _binary_terminal_mct_end - _binary_terminal_mct_start);
+        changed += vfs_update_file_if_needed("apps/terminal.mct", (const char*)_binary_terminal_mct_start, _binary_terminal_mct_end - _binary_terminal_mct_start);
 
         extern uint8_t _binary_taskmgr_mct_start[];
         extern uint8_t _binary_taskmgr_mct_end[];
-        if (vfs_get_node("apps/taskmgr.mct") < 0) vfs_create_file("apps/taskmgr.mct");
-        vfs_write_file("apps/taskmgr.mct", (const char*)_binary_taskmgr_mct_start, _binary_taskmgr_mct_end - _binary_taskmgr_mct_start);
+        changed += vfs_update_file_if_needed("apps/taskmgr.mct", (const char*)_binary_taskmgr_mct_start, _binary_taskmgr_mct_end - _binary_taskmgr_mct_start);
 
         extern uint8_t _binary_notepad_mct_start[];
         extern uint8_t _binary_notepad_mct_end[];
-        if (vfs_get_node("apps/notepad.mct") < 0) vfs_create_file("apps/notepad.mct");
-        vfs_write_file("apps/notepad.mct", (const char*)_binary_notepad_mct_start, _binary_notepad_mct_end - _binary_notepad_mct_start);
+        changed += vfs_update_file_if_needed("apps/notepad.mct", (const char*)_binary_notepad_mct_start, _binary_notepad_mct_end - _binary_notepad_mct_start);
 
         extern uint8_t _binary_flappy_mct_start[];
         extern uint8_t _binary_flappy_mct_end[];
-        if (vfs_get_node("apps/flappy.mct") < 0) vfs_create_file("apps/flappy.mct");
-        vfs_write_file("apps/flappy.mct", (const char*)_binary_flappy_mct_start, _binary_flappy_mct_end - _binary_flappy_mct_start);
+        changed += vfs_update_file_if_needed("apps/flappy.mct", (const char*)_binary_flappy_mct_start, _binary_flappy_mct_end - _binary_flappy_mct_start);
 
-        write_serial_string("[VFS] saving...\n");
-        vfs_save();
-        write_serial_string("[VFS] saved ok\n");
+        if (changed > 0) {
+            write_serial_string("[VFS] saving...\n");
+            vfs_save();
+            write_serial_string("[VFS] saved ok\n");
+        }
         
         // Phase 2: Ext2 Filesystem on Drive 1
         extern int ext2_init(int drive);

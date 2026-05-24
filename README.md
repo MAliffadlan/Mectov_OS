@@ -1,4 +1,4 @@
-# Mectov OS v25.0 — The IntelliMouse, SB16 Audio & Shared Library Update
+# Mectov OS v26.0 — The Copy-on-Write Paging & Integrated GUI Text Editor Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,15 +6,11 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v25.0 release delivers a massive ergonomics, audio, and architectural upgrade:
-1. **Physical Mouse Scroll Support:** IntelliMouse 4-byte protocol driver with custom rate-negotiation, kernel event loop propagation, and scroll events delivered directly to Ring 3 user-space applications (Browser, Explorer, PCI Manager, Volume Control).
-2. **Dynamic Sound & Music (SB16):** Upgraded kernel audio sub-system to drive Sound Blaster 16 ISA registers, playing and rendering `.wav` audio files smoothly in the new Graphical Music Player (`mplayer.mct`).
-3. **Homegrown Shared Library System (`libc.mct`):** Homegrown dynamic linking DLL-style loader that lets Ring 3 user applications share a single runtime `libc.mct` library in the virtual file system, shrinking application sizes down to ~1KB.
-4. **Enhanced Kernel Stability & Network:** Increased user stack size to 64KB (from 8KB) to fully isolate heavy network and DNS payload buffers, and updated DNS querying to route over QEMU's virtual gateway (`10.0.2.3`).
-5. **TCP Real-time Debugging:** Replaced files-only logging with a real-time TCP serial logging bridge over port `45454`, paired with interactive python tools (`debug.py`).
-6. **Secondary ext2 Partition:** Multi-drive ATA support mounting a secondary 2MB virtual disk (`ext2.img`) automatically formatted as `ext2` filesystem partition under QEMU index 1.
-7. **Enhanced GUI Terminal Emulator:** Re-engineered Ring 3 Terminal (`terminal.c`) with a 16-command circular history buffer (navigated using Up/Down arrow keys) and an active, dynamic VFS-based Tab autocomplete system for shell commands and filenames.
-8. **Private Gitea Migration:** Configured personal Gitea repository hosting remote (`gitea`) pointing to the home server at `https://git.mectov.my.id/maliffadlan/Mectov-OS.git` to migrate from GitHub to a private self-hosted Git repository server.
+The v26.0 release delivers a massive protected memory, user productivity, and persistent storage upgrade:
+1. **Copy-on-Write (COW) Paging:** Added a lightweight physical page reference counting system (`frame_ref_count`) to track shared page tables. When processes clone via `vmm_clone_address_space`, memory tables are mapped read-only and flagged as COW. A dynamic Page Fault (INT 14) handler intercepts writes, duplicating shared pages on-demand or promoting sole-owned pages to writable instantly.
+2. **Integrated GUI Text Editor:** Fully routed shell `edit`, `tulis`, and a new Linux-style `nano` command to the built-in kernel-space GUI editor `st_ed()` (from [nano.c](file:///home/mectov/my-os/src/apps/nano.c)), replacing broken external binary loads. Registered the new commands in the autocomplete `cmd_list` and the shell `help` system.
+3. **Interactive Status Bar Footer:** Designed a beautiful dark-theme status footer in the text editor displaying helper legends (`ESC: Simpan & Keluar`) and live character counts.
+4. **Persistent Storage across Reboot:** Fixed data loss by eliminating the destructive `rm -f disk.img` from the run script ([run.sh](file:///home/mectov/my-os/run.sh)), allowing VFS files, desktop layouts, and file edits to persist permanently across QEMU sessions.
 
 Created by M Alif Fadlan.
 
@@ -202,8 +198,11 @@ Created by M Alif Fadlan.
 - **TCP Real-time Debugging Socket:** Serial port debugging upgraded to a TCP socket server on port `45454` (replacing files-only logging), allowing real-time, zero-lag log streaming into our python interactive debugger (`debug.py`).
 
 ### 20. User-Space Terminal Emulator Enhancements (terminal.c)
-- **Arrow-Key Command History:** Tracks up to 16 commands in a local circular history buffer. Intercepts non-ASCII Up Arrow (`0xE048`) and Down Arrow (`0xE050`) key events, visually clearing the input line using backspaces and replacing it with the history entry.
-- **Dynamic VFS Tab Completion:** Intercepts Tab (`\t`) key events, parses the current word prefix, and dynamically queries the VFS via `sys_stat_file` and `sys_list_dir` to autocomplete both built-in shell commands and active directory files/folders.
+- **Interactive Shell Aliases & Shortcuts:** Allows local registration of shortcuts (e.g. `alias ll="ls -la"`, `alias ..="cd .."`) including wrapper aliases for complex MCT launches (e.g. `alias browser="jalankan apps/browser.mct"`). Type `alias` to print all active shortcuts.
+- **Modern Zsh-style Auto-suggestions:** Searches command history backwards in real-time as the user types and renders suggestions inline in dim gray (`0x08`). Pressing Right Arrow or End at the end of the line instantly accepts the auto-suggested text.
+- **Advanced Inline Editing & Cursor Navigation:** Fully supports non-ASCII key events for inline cursor movement via Left Arrow (`0xE04B`) and Right Arrow (`0xE04D`), instant jumping via Home (`0xE047`) and End (`0xE04F`), mid-string character insertion, and precise backspacing.
+- **Terminal Scrollback & Mouse Wheel:** Expanded internal buffer from 24 rows to 128 rows (`SCROLLBACK_ROWS`). Incorporates mouse scroll wheel polling (Event Type 4) and Page Up/Page Down keyboard keys to scroll the terminal view smoothly, complete with a custom visual scrollbar indicator.
+- **Arrow-Key Command History & VFS Tab Completion:** Tracks up to 16 commands in a circular buffer and dynamically queries the VFS to autocomplete both built-in shell commands and active directory files/folders.
 
 ### 21. Self-Hosted Gitea Integration (Git Hosting Migration)
 - **Home Server Remote Tracking:** Added a dedicated `gitea` Git remote tracking the repository at `https://git.mectov.my.id/maliffadlan/Mectov-OS.git`.
@@ -356,6 +355,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v26.0 | **Copy-on-Write (COW) Paging & Integrated Editor Update:** Added virtual page Reference Counting (`frame_ref_count`) and fully implemented Copy-on-Write (COW) address space cloning for Ring 3 process isolation. Fully integrated built-in GUI editor to `edit`, `tulis`, and new `nano` shell commands. Added sleek text editor status footer showing character count and key controls. Fixed persistent disk storage by removing the destructive `disk.img` deletion in `run.sh`. |
 | v25.0 | **IntelliMouse, Audio, Shell & Git Enhancements:** Upgraded mouse driver to 4-byte IntelliMouse protocol supporting smooth scrolling in Browser, Explorer, PCI, and Volume Manager. Upgraded kernel audio to Sound Blaster 16 supporting dynamic WAV music stream playback. Built a dynamic shared library system (`libc.mct`) with a dynamic loading subsystem, reducing app binary sizes to ~1KB. Increased user stacks to 64KB and updated DNS to route over virtual gateway. **Enhanced GUI Terminal** with 16-command history buffer (Up/Down arrow navigation) and dynamic client-side VFS Tab completion. **Gitea Migration:** Added self-hosted home server remote `gitea` for private repository tracking. |
 | v24.0 | **DOOM Engine Port:** Fully playable port of the classic 1993 DOOM engine integrated directly into the kernel. Features keyboard polling, double buffer to MMIO front buffer translation, graceful OS exiting (`vga_force_sync`), and proper process teardown. |
 | v23.0 | **Performance & Stability:** Shadow Framebuffer (delta-only MMIO), VSync removal, zombie process detection + auto-kill, `task_kill()` API, Ctrl+C signal, Ctrl key tracking, Snake rewritten as WM app, terminal prompt protection, smart tab-completion with trailing space/slash, carriage return support, history display fix, power menu restart fix, `-no-reboot` removal. |

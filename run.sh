@@ -1,4 +1,7 @@
 #!/bin/bash
+# Bersihkan binary lama di awal untuk menjamin rebuild bersih total
+make clean_all
+
 # Cek apakah disk.img ada
 if [ ! -f "disk.img" ]; then
     echo "[!] Membuat disk.img baru..."
@@ -11,8 +14,8 @@ if [ ! -f "ext2.img" ]; then
     mkfs.ext2 -F ext2.img > /dev/null 2>&1
 fi
 
-# Rebuild kernel
-make clean && make
+# Rebuild kernel (akan mengompilasi semua MCT dinamis secara bersih)
+make
 
 # Setup ISO directory
 mkdir -p iso/boot/grub
