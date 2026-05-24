@@ -53,6 +53,7 @@ void init_tasking() {
     
     current_task = 0;
     num_tasks = 1;
+    task_set_launch_arg(0, "idle");
 }
 
 uint32_t tasks_get_boot_cr3(void) {
@@ -68,7 +69,7 @@ int create_task(void (*entry)()) {
             __asm__ volatile("cli");
             
             tasks[i].ring = 0;
-            tasks[i].launch_arg[0] = '\0';
+            task_set_launch_arg(i, "sys_kernel");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
@@ -107,7 +108,7 @@ int create_user_task(void (*entry)()) {
             __asm__ volatile("cli");
             
             tasks[i].ring = 3;
-            tasks[i].launch_arg[0] = '\0';
+            task_set_launch_arg(i, "sys_user");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];

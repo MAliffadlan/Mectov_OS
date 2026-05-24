@@ -51,6 +51,11 @@ static void int_to_str(int n, char* out) {
     while(n>0){t[i++]='0'+(n%10);n/=10;}
     int j=0; while(i>0) out[j++]=t[--i]; out[j]=0;
 }
+static int ends_with_mct(const char* s) {
+    int len = str_len(s);
+    if (len < 4) return 0;
+    return (s[len - 4] == '.' && s[len - 3] == 'm' && s[len - 2] == 'c' && s[len - 1] == 't');
+}
 
 // ---- Save/Load using VFS syscalls ----
 static void dbg(const char* msg) {
@@ -170,15 +175,7 @@ static void draw_statusbar(void) {
     sys_draw_rect(wid, 0, sy, CW, 1, 0x00D0D0D0);
 
     if (mode == MODE_SAVEAS) {
-        // Save As prompt
-        sys_draw_text(wid, 6, sy+3, "Nama file:", 0x00003399);
-        // Draw user input with cursor
-        char disp[32];
-        int i;
-        for (i = 0; i < sa_len && i < 28; i++) disp[i] = sa_input[i];
-        disp[i] = '_'; disp[i+1] = 0;
-        sys_draw_text(wid, 94, sy+3, disp, 0x00000000);
-        sys_draw_text(wid, CW-160, sy+3, "Enter=OK ESC=Batal", 0x00888888);
+        sys_draw_text(wid, 6, sy+3, "Menunggu nama berkas...", 0x00003399);
     } else if (save_flash > 0) {
         sys_draw_text(wid, 6, sy+3, "Tersimpan!", 0x00008800);
         if (has_file)
@@ -200,6 +197,38 @@ static void draw_statusbar(void) {
         char stat[24]; str_cpy(stat, "Ln:"); str_cat(stat, cstr);
         sys_draw_text(wid, CW-70, sy+3, stat, 0x00888888);
     }
+}
+
+static void draw_saveas_dialog(void) {
+    int dw = 320;
+    int dh = 120;
+    int dx = (CW - dw) / 2;
+    int dy = (CH - dh) / 2;
+
+    // Shadow border
+    sys_draw_rect(wid, dx - 1, dy - 1, dw + 2, dh + 2, 0x001E1E2E);
+    // Background card
+    sys_draw_rect(wid, dx, dy, dw, dh, 0x00E2E8F0); // Card BG
+    // Header bar
+    sys_draw_rect(wid, dx, dy, dw, 24, 0x0089B4FA); // Blue titlebar
+    sys_draw_text(wid, dx + 10, dy + 5, "Simpan Sebagai...", 0x00111111);
+
+    // Label
+    sys_draw_text(wid, dx + 16, dy + 38, "Nama berkas (di /home):", 0x00313244);
+
+    // Input text field
+    sys_draw_rect(wid, dx + 16, dy + 58, dw - 32, 22, 0x0011111B); // Dark input box
+    sys_draw_rect(wid, dx + 16, dy + 58, dw - 32, 1, 0x0045475A);  // Border
+
+    // Input text contents
+    char disp[32];
+    int i;
+    for (i = 0; i < sa_len && i < 28; i++) disp[i] = sa_input[i];
+    disp[i] = '_'; disp[i+1] = 0;
+    sys_draw_text(wid, dx + 24, dy + 61, disp, 0x00A6E3A1); // Green input text
+
+    // Help Footer
+    sys_draw_text(wid, dx + 16, dy + 92, "ENTER = OK  |  ESC = Batal", 0x00585B70);
 }
 
 static void draw_all(void) {
@@ -242,6 +271,10 @@ static void draw_all(void) {
     // Dropdown overlay
     if (menu_open != MENU_NONE)
         draw_dropdown(menu_open);
+
+    // Centered pop-up dialog
+    if (mode == MODE_SAVEAS)
+        draw_saveas_dialog();
 
     sys_update_window(wid);
 }
@@ -302,7 +335,7 @@ void _start() {
     // Check launch argument
     char arg[64];
     int al = sys_get_launch_arg(arg, 64);
-    if (al > 0 && arg[0] != '\0') {
+    if (al > 0 && arg[0] != '\0' && !ends_with_mct(arg)) {
         str_cpy(filepath, arg);
         has_file = 1;
         do_load();
@@ -364,9 +397,16 @@ void _start() {
                     // Don't consume the key — let it pass through
                 }
 
-                if (mode == MODE_SAVEAS) {
+                // Global shortcuts (works in both EDIT and SAVEAS modes)
+                if (c == 17) { // Ctrl+Q = Quit/Exit
+                    exec_action(4);
+                } else if (c == 14) { // Ctrl+N = New
+                    mode = MODE_EDIT;
+                    exec_action(1);
+                    draw_all();
+                } else if (mode == MODE_SAVEAS) {
                     // ---- Save As input mode ----
-                    if (c == '\n') {
+                    if (c == '\n' || c == 19) { // Enter or Ctrl+S to save
                         if (sa_len > 0) {
                             // Build full path
                             str_cpy(filepath, "home/");
@@ -390,6 +430,9 @@ void _start() {
                     if (c == 27) { // ESC = save & exit
                         if (dirty && has_file) do_save();
                         sys_exit();
+                    } else if (c == 19) { // Ctrl+S = Save
+                        exec_action(2);
+                        draw_all();
                     } else if (c == '\b') {
                         if (buf_len > 0) { buf_len--; buf[buf_len]=0; dirty=1; draw_all(); }
                     } else if (c == '\n' && buf_len < BUF_SIZE-1) {

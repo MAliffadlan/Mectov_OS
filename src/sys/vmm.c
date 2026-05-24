@@ -26,7 +26,7 @@ uint8_t frame_ref_count[TOTAL_PHYSICAL_PAGES];
 static int vmm_initialized = 0;
 
 // Mark kernel + heap region (first 32MB) as reserved
-#define KERNEL_RESERVED_PAGES (32 * 256)  // 32MB
+#define KERNEL_RESERVED_PAGES (48 * 256)  // 48MB
 
 static void bitmap_set(int idx) {
     frame_bitmap[idx / 8] |= (1 << (idx % 8));
@@ -196,7 +196,7 @@ void vmm_free_address_space(uint32_t page_dir) {
             uint32_t* kernel_pt = (uint32_t*)(uintptr_t)kernel_pt_paddr;
             
             for (int j = 0; j < 1024; j++) {
-                if ((pt[j] & PAGE_PRESENT) && pt[j] != kernel_pt[j]) {
+                if ((pt[j] & PAGE_PRESENT) && (pt[j] & 0xFFFFF007) != (kernel_pt[j] & 0xFFFFF007)) {
                     // User-modified PTE — free the user's physical frame
                     uint32_t page_paddr = pt[j] & 0xFFFFF000;
                     if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {

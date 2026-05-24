@@ -116,7 +116,11 @@ static void win_draw_cb(int id, int cx, int cy, int cw, int ch) {
     // We don't push a Paint event every frame, we let the app decide when to update.
 }
 static void win_key_cb(int id, char c, uint8_t sc) {
-    if (c == 0 && sc > 0) {
+    if (keyboard_ctrl_held && c >= 'a' && c <= 'z') {
+        push_event(id, 2, 0, 0, c - 'a' + 1);
+    } else if (keyboard_ctrl_held && c >= 'A' && c <= 'Z') {
+        push_event(id, 2, 0, 0, c - 'A' + 1);
+    } else if (c == 0 && sc > 0) {
         push_event(id, 2, 0, 0, 0xE000 | sc);
     } else {
         push_event(id, 2, 0, 0, c);

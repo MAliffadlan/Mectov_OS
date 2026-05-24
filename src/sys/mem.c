@@ -17,7 +17,7 @@ void init_mem(uint32_t mem_size) {
     if (mem_bitmap) {
         memset(mem_bitmap, 0, (total_pages / 8) + 1);
     }
-    uint32_t reserved_pages = 0x2000000 / PAGE_SIZE; // 32MB reserved for kernel/stack/heap
+    uint32_t reserved_pages = 0x3000000 / PAGE_SIZE; // 48MB reserved for kernel/stack/heap
     if (reserved_pages > total_pages) reserved_pages = total_pages;
     for (uint32_t i = 0; i < reserved_pages; i++) {
         if (mem_bitmap) mem_bitmap[i / 8] |= (1 << (i % 8));
@@ -96,7 +96,7 @@ static block_meta *find_free_block(block_meta **last, uint32_t size) {
 }
 
 static block_meta *request_space(block_meta* last, uint32_t size) {
-    uint32_t max_heap = 48 * 1024 * 1024; // 48MB max heap
+    uint32_t max_heap = 32 * 1024 * 1024; // 32MB max heap (heap base=16MB, so grows to 48MB — matching KERNEL_RESERVED_PAGES)
     
     if (heap_used + size + META_SIZE > max_heap) return NULL;
     

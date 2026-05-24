@@ -109,8 +109,10 @@ int load_mct_app_with_arg(const char* filename, const char* arg) {
     // Set launch arg while interrupts are still disabled (thread_create re-enables
     // them, but we disabled again before calling it — actually thread_create has its
     // own cli/sti, so we set arg right after it returns, before any yield).
-    if (arg) {
+    if (arg && arg[0] != '\0') {
         task_set_launch_arg(task_id, arg);
+    } else {
+        task_set_launch_arg(task_id, filename);
     }
     __asm__ volatile("sti");
     

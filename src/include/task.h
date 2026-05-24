@@ -54,5 +54,7 @@ typedef struct {
 } task_info_t;
 
 int get_task_info(int tid, task_info_t* info);
+void task_set_launch_arg(int tid, const char* arg);
+const char* task_get_launch_arg(int tid);
 
 #endif

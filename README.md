@@ -1,4 +1,4 @@
-# Mectov OS v25.1 — The Advanced Shell Scripting, Environment Variables & Aliasing Update
+# Mectov OS v27.3 — The Notepad Shortcuts, Centered Modal Dialogs & VFS Path Sanitization Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,12 +6,11 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v25.1 release delivers a massive Terminal shell scripting, variable configuration, and shortcut utility upgrade to make it as powerful as Linux:
-1. **Automated Shell Scripting (`sh` / `source`):** Direct execution of script files (`.msh`), with robust parsing that trims leading spaces, ignores completely empty lines, and supports inline comments starting with `#`.
-2. **Environment Variables (`export` & `$`):** Full support for declaring variables via `export NAME=VALUE` and expanding `$NAME` dynamically in both terminal commands and script files (e.g., `echo $USER` or `cd $HOME`).
-3. **Command Aliasing & History (`alias` / `unalias` / `history`):** Lightweight command shortcut mapping (e.g. `alias ll="ls"`) with single-level expansion to prevent recursive loops, coupled with a `history` command to list recently typed commands from the kernel circular buffer.
-4. **Seamless Nano Saving:** Upgraded `nano` editor to automatically create files if they don't already exist on save, avoiding silent save failures.
-5. **Clean 100% Warning-Free Build:** Implemented standard `memmove` inside the kernel utility libraries, resolving all compiler warnings.
+The v27.3 release delivers memory stability, user-mode productivity, and GUI/VFS polish:
+1. **Notepad Shortcuts & GUI Polish (v27.2):** Added Ring 3 translation for Ctrl+S (Save), Ctrl+N (New Document), and Ctrl+Q (Exit) keyboard shortcuts, redesigned the Save As interface into a centered, modal dialog box, and resolved the .mct auto-loading binary bug.
+2. **VFS Path Sanitization (v27.3):** Implemented automatic quote-stripping and trailing-space trimming for all path arguments in shell commands (`cd`, `ls`, `cat`, `baca`, etc.), making file operations fully robust against spaces and quotes.
+3. **Critical Memory Isolation (v27.1):** Corrected a VMM and Kernel Heap overlap bug by separating memory boundaries (heap capped at 48MB, VMM starting at 48MB/64MB), resolving process crash bugs on reload.
+4. **Transparent TCP Proxy Redirection (v27.0):** Redirects Port 80 traffic to host proxy server at 10.0.2.2:8888 for real-world web fetching.
 
 Created by M Alif Fadlan.
 
@@ -356,9 +355,12 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
-| v25.1 | **Advanced Shell Scripting, Environment Variables & Aliasing Update:** Implemented automated script file execution (`sh`/`source` commands) with inline comment (`#`) parsing, whitespace trimming, and empty line skipping. Implemented Shell Environment Variables (`export` and `$VAR` expansion) in both terminal commands and scripts. Added command aliasing (`alias`, `unalias`, and a new `history` command) in the shell. Fixed `nano` editor to automatically create files if they don't already exist on save. Implemented kernel `memmove`, achieving a 100% warning-free build. |
+| v27.3 | **VFS Path Sanitization Update:** Implemented automatic quote-stripping and trailing-space trimming in all shell command path arguments, resolving file read and navigation failures for files with spaces (e.g., `"notepad tes"`). |
+| v27.2 | **Notepad GUI & Shortcut Update:** Implemented Ctrl+S, Ctrl+N, and Ctrl+Q keyboard shortcuts for Notepad GUI in user mode. Redesigned the Save As interface into a centered modal dialog box. Fixed a bug where Notepad loaded its own binary (`notepad.mct`) on startup. |
+| v27.1 | **Memory Overlap & Stability Fix:** Fixed page directory/table corruption by adjusting `KERNEL_RESERVED_PAGES` to 64MB and capping `max_heap` at 32MB, ensuring 100% physical separation between heap and VMM frame pool. |
 | v27.0 | **TCP Socket Redirection & Web Gateway Update:** Implemented transparent HTTP port 80 redirection inside the kernel TCP stack (`net_tcp_connect`) routing to the host gateway at `10.0.2.2:8888`. Enabled clean modern web browsing inside the Ring 3 Browser app (`apps/browser.mct`) using a Python gateway proxy (`gateway.py`) to parse real HTTPS web pages into memory-safe text. |
-| v26.0 | **Copy-on-Write (COW) Paging & Integrated Editor Update:** Added virtual page Reference Counting (`frame_ref_count`) and fully implemented Copy-on-Write (COW) address space cloning for Ring 3 process isolation. Fully integrated built-in GUI editor to `edit`, `tulis`, and new `nano` shell commands. Added sleek text editor status footer showing character count and key controls. Fixed persistent disk storage by removing the destructive `disk.img` deletion in `run.sh`. |
+| v26.0 | **Copy-on-Write (COW) Paging & Integrated Editor Update:** Added virtual page Reference Counting (`frame_ref_count`) and fully implemented Copy-on-Write (COW) address space cloning for Ring 3 process isolation. Fully integrated built-in GUI editor to `edit`, `tulis`, and new `nano` shell commands. Added sleek text editor status footer showing count and controls. Fixed persistent disk storage by removing the destructive `disk.img` deletion in `run.sh`. |
+| v25.1 | **Advanced Shell Scripting, Environment Variables & Aliasing Update:** Implemented automated script file execution (`sh`/`source` commands) with inline comment (`#`) parsing, whitespace trimming, and empty line skipping. Implemented Shell Environment Variables (`export` and `$VAR` expansion) in both terminal commands and scripts. Added command aliasing (`alias`, `unalias`, and a new `history` command) in the shell. Fixed `nano` editor to automatically create files if they don't already exist on save. Implemented kernel `memmove`, achieving a 100% warning-free build. |
 | v25.0 | **IntelliMouse, Audio, Shell & Git Enhancements:** Upgraded mouse driver to 4-byte IntelliMouse protocol supporting smooth scrolling in Browser, Explorer, PCI, and Volume Manager. Upgraded kernel audio to Sound Blaster 16 supporting dynamic WAV music stream playback. Built a dynamic shared library system (`libc.mct`) with a dynamic loading subsystem, reducing app binary sizes to ~1KB. Increased user stacks to 64KB and updated DNS to route over virtual gateway. **Enhanced GUI Terminal** with 16-command history buffer (Up/Down arrow navigation) and dynamic client-side VFS Tab completion. **Gitea Migration:** Added self-hosted home server remote `gitea` for private repository tracking. |
 | v24.0 | **DOOM Engine Port:** Fully playable port of the classic 1993 DOOM engine integrated directly into the kernel. Features keyboard polling, double buffer to MMIO front buffer translation, graceful OS exiting (`vga_force_sync`), and proper process teardown. |
 | v23.0 | **Performance & Stability:** Shadow Framebuffer (delta-only MMIO), VSync removal, zombie process detection + auto-kill, `task_kill()` API, Ctrl+C signal, Ctrl key tracking, Snake rewritten as WM app, terminal prompt protection, smart tab-completion with trailing space/slash, carriage return support, history display fix, power menu restart fix, `-no-reboot` removal. |

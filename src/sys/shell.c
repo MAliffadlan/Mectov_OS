@@ -17,6 +17,7 @@
 #include "../include/timer.h"
 #include "../include/loader.h"
 #include "../include/rtc.h"
+#include "../include/task.h"
 
 // --- Command buffer & state ---
 char cmd_b[CMD_BUF_SIZE]; int b_idx = 0;
@@ -161,9 +162,9 @@ const char* cmd_list[] = {
     "help","clear","mfetch","mem","kmemstats","vfsinfo",
     "ls","cd","pwd","mkdir","touch","cat","tree","rm",
     "buat","tulis","edit","nano","baca","hapus",
-    "sh","source","export","alias","unalias","history",
+    "sh","source","export","alias","unalias","history","ps","kill",
     "echo","beep","nada","tunggu","waktu","warna","kunci",
-    "jalankan","ular","taskmgr","lspci","man",
+    "jalankan","ular","taskmgr","flappy","doom","lspci","man",
     "ping","host","grep",
     "matikan","mulaiulang","shutdown","reboot", NULL
 };
@@ -415,6 +416,34 @@ static int strstr_custom(const char* haystack, const char* needle) {
     return -1;
 }
 
+static void sanitize_path(char* path) {
+    if (!path) return;
+    int start = 0;
+    while (path[start] == ' ') start++;
+    
+    int len = 0;
+    while (path[start + len] != '\0') len++;
+    
+    // Trim trailing spaces
+    while (len > 0 && path[start + len - 1] == ' ') {
+        len--;
+    }
+    
+    // Strip surrounding quotes
+    if (len >= 2 && 
+        ((path[start] == '"' && path[start + len - 1] == '"') ||
+         (path[start] == '\'' && path[start + len - 1] == '\''))) {
+        start++;
+        len -= 2;
+    }
+    
+    // Move to beginning of path buffer
+    for (int i = 0; i < len; i++) {
+        path[i] = path[start + i];
+    }
+    path[len] = '\0';
+}
+
 // ============================================================
 // Main command execution
 // ============================================================
@@ -422,17 +451,20 @@ static int strstr_custom(const char* haystack, const char* needle) {
 static void run_cmd_internal() {
     // --- HELP ---
     if (strcmp(cmd_b, "help") == 0) {
-        print("--- MECTOV OS v27.0 HELP MENU ---\n", 0x0B);
-        print("SISTEM: mfetch, waktu, warna, clear, mem, kmemstats, kunci, history\n", 0x0E);
-        print("FILES : ls, cd, pwd, mkdir, touch, cat, tree, rm\n", 0x0E);
-        print("        buat, tulis, baca, edit, nano, hapus, sh, source (legacy)\n", 0x0E);
-        print("SHELL : export [NAME=VAL], alias [NAME=VAL], unalias [NAME]\n", 0x0E);
-        print("APPS  : ular, nada, beep, echo, tunggu, grep\n", 0x0E);
-        print("POWER : matikan, mulaiulang, shutdown, reboot\n", 0x0E);
-        print("HW    : lspci\n", 0x0E);
-        print("NET   : ping [ip], host [domain]\n", 0x0E);
-        print("PIPE  : cmd1 | cmd2 (e.g. lspci | grep Ethernet)\n", 0x0E);
-        print("NAV   : Tab=complete, Up/Down=history\n", 0x0E);
+        print("======================================================================\n", 0x0B);
+        print("                ⚡ MECTOV OS v27.0 - COMMAND CENTER ⚡                \n", 0x0F);
+        print("======================================================================\n", 0x0B);
+        print(" SYSTEM  : ", 0x0B); print("mfetch, waktu, warna, clear, mem, kmemstats, kunci, ps, kill\n", 0x0F);
+        print(" FILE VFS: ", 0x0B); print("ls, cd, pwd, mkdir, touch, cat, tree, rm, buat, hapus\n", 0x0F);
+        print(" EDITOR  : ", 0x0B); print("nano, edit, tulis, baca\n", 0x0F);
+        print(" SHELL   : ", 0x0B); print("export [NAME=VAL], alias [NAME=VAL], unalias, history, sh\n", 0x0F);
+        print(" APPS GUI: ", 0x0B); print("flappy, doom, taskmgr, ular, jalankan [app.mct]\n", 0x0A);
+        print(" NET & HW: ", 0x0B); print("ping [ip], host [domain], lspci\n", 0x0F);
+        print(" UTILS   : ", 0x0B); print("echo [msg], tunggu [detik], nada [freq], beep, man [cmd]\n", 0x0F);
+        print(" POWER   : ", 0x0B); print("reboot, shutdown (mulaiulang, matikan)\n", 0x0C);
+        print("----------------------------------------------------------------------\n", 0x07);
+        print(" SHORTCUT: ", 0x0E); print("Tab=Autocomplete  |  Up/Down=History  |  Pipes: cmd1 | cmd2\n", 0x0F);
+        print("======================================================================\n", 0x0B);
     }
     // --- CLEAR ---
     else if (strcmp(cmd_b, "clear") == 0) { 
@@ -512,6 +544,7 @@ static void run_cmd_internal() {
             current_dir = 0; // Go to root
         } else {
             char* dirpath = cmd_b + 3;
+            sanitize_path(dirpath);
             int node = vfs_get_node(dirpath);
             if (node < 0 || !vfs_is_dir(node)) {
                 print("cd: directory not found: ", 0x0C);
@@ -535,6 +568,7 @@ static void run_cmd_internal() {
     }
     else if (strncmp(cmd_b, "ls ", 3) == 0) {
         char* dirpath = cmd_b + 3;
+        sanitize_path(dirpath);
         int node = vfs_get_node(dirpath);
         if (node < 0 || !vfs_is_dir(node)) {
             print("ls: directory not found: ", 0x0C);
@@ -550,6 +584,7 @@ static void run_cmd_internal() {
     }
     else if (strncmp(cmd_b, "tree ", 5) == 0) {
         char* dirpath = cmd_b + 5;
+        sanitize_path(dirpath);
         int node = vfs_get_node(dirpath);
         if (node < 0 || !vfs_is_dir(node)) {
             print("tree: directory not found\n", 0x0C);
@@ -560,6 +595,7 @@ static void run_cmd_internal() {
     // --- MKDIR ---
     else if (strncmp(cmd_b, "mkdir ", 6) == 0) {
         char* dirpath = cmd_b + 6;
+        sanitize_path(dirpath);
         int res = vfs_mkdir(dirpath);
         if (res < 0) {
             print("mkdir: failed (", 0x0C);
@@ -570,6 +606,7 @@ static void run_cmd_internal() {
     // --- TOUCH (create empty file) ---
     else if (strncmp(cmd_b, "touch ", 6) == 0) {
         char* fpath = cmd_b + 6;
+        sanitize_path(fpath);
         int res = vfs_create_file(fpath);
         if (res < 0) {
             print("touch: failed\n", 0x0C);
@@ -588,6 +625,7 @@ static void run_cmd_internal() {
             }
         } else {
             char* fpath = cmd_b + 4;
+            sanitize_path(fpath);
             char buf[2048];
             int sz = vfs_read_file(fpath, buf, 2047);
             if (sz < 0) {
@@ -641,6 +679,7 @@ static void run_cmd_internal() {
     // --- RM (delete) ---
     else if (strncmp(cmd_b, "rm ", 3) == 0) {
         char* fpath = cmd_b + 3;
+        sanitize_path(fpath);
         int res = vfs_delete_node(fpath);
         if (res < 0) {
             print("rm: failed\n", 0x0C);
@@ -693,6 +732,7 @@ static void run_cmd_internal() {
     // --- JALANKAN (run .mct app) ---
     else if (strncmp(cmd_b, "jalankan ", 9) == 0) {
         char* fname = cmd_b + 9;
+        sanitize_path(fname);
         // Use new VFS: read file data
         int node = vfs_get_node(fname);
         if (node < 0) {
@@ -716,6 +756,7 @@ static void run_cmd_internal() {
     // --- Legacy: BUAT ---
     else if (strncmp(cmd_b, "buat ", 5) == 0) {
         char* fname = cmd_b + 5;
+        sanitize_path(fname);
         // Use new VFS
         int res = vfs_create_file(fname);
         if (res >= 0) print("File berhasil dibuat.\n", 0x0A);
@@ -725,6 +766,7 @@ static void run_cmd_internal() {
     // --- BACA ---
     else if (strncmp(cmd_b, "baca ", 5) == 0) {
         char* fname = cmd_b + 5;
+        sanitize_path(fname);
         char buf[512];
         int sz = vfs_read_file(fname, buf, 511);
         if (sz < 0) print("File tidak ditemukan.\n", 0x0C);
@@ -736,12 +778,14 @@ static void run_cmd_internal() {
         if (strncmp(cmd_b, "edit ", 5) == 0) fname = cmd_b + 5;
         else if (strncmp(cmd_b, "tulis ", 6) == 0) fname = cmd_b + 6;
         else fname = cmd_b + 5;
+        sanitize_path(fname);
         print("Membuka Editor...\n", 0x0E);
         st_ed(fname);
     }
     // --- Legacy: HAPUS ---
     else if (strncmp(cmd_b, "hapus ", 6) == 0) {
         char* fname = cmd_b + 6;
+        sanitize_path(fname);
         int res = vfs_delete_node(fname);
         if (res < 0) print("File tidak ditemukan.\n", 0x0C);
         else print("File dihapus.\n", 0x0A);
@@ -832,7 +876,7 @@ static void run_cmd_internal() {
     // --- SH / SOURCE ---
     else if (strncmp(cmd_b, "sh ", 3) == 0 || strncmp(cmd_b, "source ", 7) == 0) {
         char* fname = (strncmp(cmd_b, "sh ", 3) == 0) ? cmd_b + 3 : cmd_b + 7;
-        while (*fname == ' ') fname++;
+        sanitize_path(fname);
         run_script(fname);
     }
     // --- EXPORT ---
@@ -994,6 +1038,69 @@ static void run_cmd_internal() {
             idx = (idx + 1) % HIST_MAX;
             count++;
         }
+    }
+    // --- PS (Process Status) ---
+    else if (strcmp(cmd_b, "ps") == 0) {
+        print("========================================================\n", 0x0B);
+        print("  PID  RING  PRIO  STATE  PROCESS NAME\n", 0x0E);
+        print("========================================================\n", 0x0B);
+        for (int i = 0; i < 64; i++) {
+            task_info_t info;
+            if (get_task_info(i, &info)) {
+                // Print PID
+                print("  ", 0x0F);
+                p_int(info.id, 0x0F);
+                if (info.id < 10) print("    ", 0x0F);
+                else print("   ", 0x0F);
+
+                // Print Ring
+                p_int(info.ring, 0x0F);
+                print("     ", 0x0F);
+
+                // Print Priority
+                p_int(info.priority, 0x0F);
+                print("    ", 0x0F);
+
+                // Print State (1=RUNNING, 2=READY, 3=SLEEP)
+                if (info.state == 1)      print("RUN     ", 0x0A);
+                else if (info.state == 2) print("RDY     ", 0x0B);
+                else if (info.state == 3) print("SLP     ", 0x07);
+                else                      print("UNK     ", 0x0C);
+
+                // Print Process Name (launch arg)
+                const char* name = task_get_launch_arg(info.id);
+                if (name && name[0] != '\0') {
+                    print(name, 0x0F);
+                } else {
+                    print("unknown", 0x07);
+                }
+                print("\n", 0x0F);
+            }
+        }
+        print("========================================================\n", 0x0B);
+    }
+    // --- KILL ---
+    else if (strncmp(cmd_b, "kill ", 5) == 0) {
+        int tid = atoi(cmd_b + 5);
+        if (tid == 0) {
+            print("kill: cannot terminate idle kernel process (PID 0)!\n", 0x0C);
+        } else if (tid < 0 || tid >= 64) {
+            print("kill: invalid PID!\n", 0x0C);
+        } else if (!task_is_alive(tid)) {
+            print("kill: process not found!\n", 0x0C);
+        } else {
+            int res = task_kill(tid);
+            if (res == 0) {
+                print("Process ", 0x0A);
+                p_int(tid, 0x0A);
+                print(" terminated successfully.\n", 0x0A);
+            } else {
+                print("kill: failed to terminate process!\n", 0x0C);
+            }
+        }
+    }
+    else if (strcmp(cmd_b, "kill") == 0) {
+        print("Usage: kill [PID]  — Terminate a process\n", 0x0E);
     }
     // --- ECHO ---
     else if (strncmp(cmd_b, "echo ", 5) == 0) {

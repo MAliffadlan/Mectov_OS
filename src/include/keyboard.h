@@ -4,6 +4,7 @@
 #include "types.h"
 
 extern int shift_p, caps_a;
+extern int keyboard_ctrl_held;
 
 void init_keyboard();
 uint8_t k_get_scancode();
