@@ -10,7 +10,7 @@ void start_ular();
 
 // Nano (Editor)
 extern int ed_a;
-extern char ed_b[MAX_FILE_SIZE], ed_fn[MAX_FILENAME];
+extern char ed_b[MAX_FILE_SIZE], ed_fn[MAX_PATH];
 extern int ed_c;
 void st_ed(const char* f);
 

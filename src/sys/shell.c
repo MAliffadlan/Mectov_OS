@@ -159,7 +159,7 @@ void expand_alias(char* out, const char* in, int max_len) {
 }
 
 const char* cmd_list[] = {
-    "help","clear","mfetch","mem","kmemstats","vfsinfo",
+    "help","clear","mfetch","mem","memstat","kmemstats","uptime","vfsinfo",
     "ls","cd","pwd","mkdir","touch","cat","tree","rm",
     "buat","tulis","edit","nano","baca","hapus",
     "sh","source","export","alias","unalias","history","ps","kill",
@@ -203,7 +203,7 @@ void shell_print_prompt() {
         initialized = 1;
     }
     char cwd[MAX_PATH];
-    vfs_get_abs_path(current_dir, cwd, MAX_PATH);
+    vfs_get_abs_path(get_current_dir(), cwd, MAX_PATH);
     print("root@mectov", 0x0A);
     print(":", 0x07);
     print(cwd, 0x0B);
@@ -254,9 +254,10 @@ int shell_try_complete() {
         // Scan VFS for matching files/dirs
         for (int i = 0; i < MAX_NODES && tab_match_count < TAB_MAX; i++) {
             if (!fs_nodes[i].in_use) continue;
-            int p = fs_nodes[i].parent;
             // Only match if parent is current_dir, or if path is absolute
-            if (p == current_dir || current_dir == 0) {
+            int p = fs_nodes[i].parent;
+            int cur_cd = get_current_dir();
+            if (p == cur_cd || cur_cd == 0) {
                 if (tab_match_prefix(prefix, fs_nodes[i].name)) {
                     strcpy(tab_matches[tab_match_count], fs_nodes[i].name);
                     tab_match_count++;
@@ -329,7 +330,7 @@ static void shell_redisplay() {
         term_print("root@mectov", 0x0A);
         {
             char cwd[MAX_PATH];
-            vfs_get_abs_path(current_dir, cwd, MAX_PATH);
+            vfs_get_abs_path(get_current_dir(), cwd, MAX_PATH);
             term_print(":", 0x07);
             term_print(cwd, 0x0B);
         }
@@ -454,7 +455,7 @@ static void run_cmd_internal() {
         print("======================================================================\n", 0x0B);
         print("                ⚡ MECTOV OS v27.0 - COMMAND CENTER ⚡                \n", 0x0F);
         print("======================================================================\n", 0x0B);
-        print(" SYSTEM  : ", 0x0B); print("mfetch, waktu, warna, clear, mem, kmemstats, kunci, ps, kill\n", 0x0F);
+        print(" SYSTEM  : ", 0x0B); print("mfetch, waktu, warna, clear, mem, memstat, kmemstats, uptime, kunci, ps, kill\n", 0x0F);
         print(" FILE VFS: ", 0x0B); print("ls, cd, pwd, mkdir, touch, cat, tree, rm, buat, hapus\n", 0x0F);
         print(" EDITOR  : ", 0x0B); print("nano, edit, tulis, baca\n", 0x0F);
         print(" SHELL   : ", 0x0B); print("export [NAME=VAL], alias [NAME=VAL], unalias, history, sh\n", 0x0F);
@@ -528,6 +529,41 @@ static void run_cmd_internal() {
     else if (strcmp(cmd_b, "kmemstats") == 0) {
         kmalloc_stats(print);
     }
+    // --- MEMSTAT ---
+    else if (strcmp(cmd_b, "memstat") == 0) {
+        print("==================================================\n", 0x0B);
+        print("                SYSTEM MEMORY STATS               \n", 0x0F);
+        print("==================================================\n", 0x0B);
+        print("Physical RAM:\n", 0x0E);
+        print("  Total Memory : ", 0x0F); p_int(get_total_memory()/1024, 0x0A); print(" KB\n", 0x0F);
+        print("  Used Memory  : ", 0x0F); p_int(get_used_memory()/1024, 0x0C); print(" KB\n", 0x0F);
+        print("  Free Memory  : ", 0x0F); p_int(get_free_memory()/1024, 0x0A); print(" KB\n", 0x0F);
+        print("--------------------------------------------------\n", 0x07);
+        kmalloc_stats(print);
+        print("==================================================\n", 0x0B);
+    }
+    // --- UPTIME ---
+    else if (strcmp(cmd_b, "uptime") == 0) {
+        extern uint32_t get_uptime_seconds(void);
+        uint32_t up = get_uptime_seconds();
+        uint32_t hours = up / 3600;
+        uint32_t minutes = (up % 3600) / 60;
+        uint32_t seconds = up % 60;
+        
+        print("System Uptime:\n", 0x0B);
+        print("  Running for: ", 0x0F);
+        if (hours > 0) {
+            p_int(hours, 0x0A); print(" hour(s), ", 0x0F);
+        }
+        if (hours > 0 || minutes > 0) {
+            p_int(minutes, 0x0A); print(" minute(s), ", 0x0F);
+        }
+        p_int(seconds, 0x0A); print(" second(s)\n", 0x0F);
+        
+        print("  Total ticks: ", 0x0F);
+        p_int(get_ticks(), 0x0E);
+        print("\n", 0x0F);
+    }
     // --- VFS INFO ---
     else if (strcmp(cmd_b, "vfsinfo") == 0) {
         int count = 0;
@@ -541,7 +577,7 @@ static void run_cmd_internal() {
     // --- CD ---
     else if (strncmp(cmd_b, "cd ", 3) == 0 || strcmp(cmd_b, "cd") == 0) {
         if (strcmp(cmd_b, "cd") == 0) {
-            current_dir = 0; // Go to root
+            set_current_dir(0); // Go to root
         } else {
             char* dirpath = cmd_b + 3;
             sanitize_path(dirpath);
@@ -551,20 +587,20 @@ static void run_cmd_internal() {
                 print(dirpath, 0x0C);
                 print("\n", 0x0C);
             } else {
-                current_dir = node;
+                set_current_dir(node);
             }
         }
     }
     // --- PWD ---
     else if (strcmp(cmd_b, "pwd") == 0) {
         char cwd[MAX_PATH];
-        vfs_get_abs_path(current_dir, cwd, MAX_PATH);
+        vfs_get_abs_path(get_current_dir(), cwd, MAX_PATH);
         print(cwd, 0x0F);
         print("\n", 0x0F);
     }
     // --- LS (new VFS version) ---
     else if (strcmp(cmd_b, "ls") == 0) {
-        vfs_list_dir(current_dir, print);
+        vfs_list_dir(get_current_dir(), print);
     }
     else if (strncmp(cmd_b, "ls ", 3) == 0) {
         char* dirpath = cmd_b + 3;
@@ -580,7 +616,7 @@ static void run_cmd_internal() {
     }
     // --- TREE ---
     else if (strcmp(cmd_b, "tree") == 0) {
-        vfs_tree(current_dir, 0, print);
+        vfs_tree(get_current_dir(), 0, print);
     }
     else if (strncmp(cmd_b, "tree ", 5) == 0) {
         char* dirpath = cmd_b + 5;
@@ -703,7 +739,7 @@ static void run_cmd_internal() {
     // --- ULAR ---
     else if (strcmp(cmd_b, "ular") == 0) start_ular();
     // --- FLAPPY ---
-    else if (strcmp(cmd_b, "flappy") == 0) load_mct_app("apps/flappy.mct");
+    else if (strcmp(cmd_b, "flappy") == 0) load_mct_app("/apps/flappy.mct");
     // --- DOOM ---
     else if (strcmp(cmd_b, "doom") == 0) {
         print("Starting DOOM...\n", 0x0C);
@@ -711,7 +747,7 @@ static void run_cmd_internal() {
         doom_start();
     }
     // --- TASKMGR ---
-    else if (strcmp(cmd_b, "taskmgr") == 0) load_mct_app("apps/taskmgr.mct");
+    else if (strcmp(cmd_b, "taskmgr") == 0) load_mct_app("/apps/taskmgr.mct");
     // --- KUNCI ---
     else if (strcmp(cmd_b, "kunci") == 0) lock_screen();
     // --- WAKTU ---

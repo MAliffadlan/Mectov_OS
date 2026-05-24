@@ -13,7 +13,7 @@ def build_app(c_file, output_mct):
     o_file = f"{base_name}.o"
     elf_file = f"{base_name}.elf"
     bin_file = f"{base_name}.bin"
-    ld_file = "app.ld"
+    ld_file = f"{base_name}.ld"
     
     # 1. Create Linker Script
     # Ini memastikan entry point ada di offset 0 dan sections berurutan

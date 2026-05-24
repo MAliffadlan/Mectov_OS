@@ -7,12 +7,11 @@ MCT_MAGIC = 0x4D435431
 
 def build_lib(c_file, output_mct):
     print(f"[*] Building Lib {c_file} -> {output_mct}")
-    
     base_name = os.path.splitext(c_file)[0]
     o_file = f"{base_name}.o"
     elf_file = f"{base_name}.elf"
     bin_file = f"{base_name}.bin"
-    ld_file = "lib.ld"
+    ld_file = f"{base_name}.ld"
     
     with open(ld_file, "w") as f:
         f.write("""

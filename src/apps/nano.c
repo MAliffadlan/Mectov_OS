@@ -10,7 +10,7 @@
 
 int ed_a = 0; 
 char ed_b[NANO_BUF_SIZE]; 
-char ed_fn[MAX_FILENAME]; 
+char ed_fn[MAX_PATH]; 
 int ed_c = 0;
 static int nano_win_id = -1;
 
@@ -83,10 +83,14 @@ static void nano_tick(int id) {
 
 void st_ed(const char* f) { 
     if (nano_win_id >= 0 && wm_is_open(nano_win_id)) { wm_raise(nano_win_id); return; }
-    strcpy(ed_fn, f); 
+    
+    // Resolve to absolute path immediately in caller's task context
+    char abs_path[MAX_PATH];
+    vfs_resolve_path(f, abs_path, MAX_PATH);
+    strcpy(ed_fn, abs_path); 
     
     // Try to read file via new VFS API
-    int sz = vfs_read_file(f, ed_b, NANO_BUF_SIZE - 1);
+    int sz = vfs_read_file(ed_fn, ed_b, NANO_BUF_SIZE - 1);
     if (sz > 0) {
         ed_b[sz] = '\0';
         ed_c = sz;

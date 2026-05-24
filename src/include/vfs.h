@@ -21,7 +21,9 @@ typedef struct {
 } __attribute__((packed)) fs_node_t;
 
 extern fs_node_t fs_nodes[MAX_NODES];
-extern int current_dir;  // Index node dari current directory
+
+int get_current_dir(void);
+void set_current_dir(int dir);
 
 // Inisialisasi VFS
 void vfs_init();

@@ -18,15 +18,15 @@ typedef struct { int x, y; const char* label; void (*action)(); } Icon;
 static Icon icons[ICON_COUNT];
 
 extern int load_mct_app(const char*);
-static void open_calc_wrapper() { load_mct_app("apps/gcalc.mct"); }
-static void open_snake_wrapper() { load_mct_app("apps/snake.mct"); }
-static void open_sysinfo_wrapper() { load_mct_app("apps/sysinfo.mct"); }
-static void open_pci_wrapper() { load_mct_app("apps/pci.mct"); }
-static void open_explorer_wrapper() { load_mct_app("apps/explorer.mct"); }
-static void open_browser_wrapper() { load_mct_app("apps/browser.mct"); }
-static void open_taskmgr_wrapper() { load_mct_app("apps/taskmgr.mct"); }
-static void open_flappy_wrapper() { load_mct_app("apps/flappy.mct"); }
-static void open_notepad_wrapper() { load_mct_app("apps/notepad.mct"); }
+static void open_calc_wrapper() { load_mct_app("/apps/gcalc.mct"); }
+static void open_snake_wrapper() { load_mct_app("/apps/snake.mct"); }
+static void open_sysinfo_wrapper() { load_mct_app("/apps/sysinfo.mct"); }
+static void open_pci_wrapper() { load_mct_app("/apps/pci.mct"); }
+static void open_explorer_wrapper() { load_mct_app("/apps/explorer.mct"); }
+static void open_browser_wrapper() { load_mct_app("/apps/browser.mct"); }
+static void open_taskmgr_wrapper() { load_mct_app("/apps/taskmgr.mct"); }
+static void open_flappy_wrapper() { load_mct_app("/apps/flappy.mct"); }
+static void open_notepad_wrapper() { load_mct_app("/apps/notepad.mct"); }
 
 #define ICON_W  72
 #define ICON_H  80

@@ -84,7 +84,7 @@ static void history_add(const char* c) {
 
 // --- Built-in commands list for tab completion ---
 static const char* builtins[] = {
-    "help", "clear", "mfetch", "mem", "kmemstats", "vfsinfo",
+    "help", "clear", "mfetch", "mem", "memstat", "kmemstats", "uptime", "vfsinfo",
     "ls", "cd", "pwd", "mkdir", "touch", "cat", "tree", "rm",
     "buat", "tulis", "edit", "baca", "hapus",
     "echo", "beep", "nada", "tunggu", "waktu", "warna", "kunci",
@@ -121,7 +121,7 @@ static void add_default_aliases(void) {
     my_strcpy(aliases[1].name, "..");
     my_strcpy(aliases[1].value, "cd ..");
     my_strcpy(aliases[2].name, "ular");
-    my_strcpy(aliases[2].value, "jalankan apps/snake.mct");
+    my_strcpy(aliases[2].value, "jalankan /apps/snake.mct");
     alias_count = 3;
 }
 

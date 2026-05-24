@@ -8,7 +8,23 @@ extern void** __mct_lib_ptr;
 
 // --- Dynamic Library Loader ---
 static inline void** mct_load_library(const char* lib_name) {
-    uint32_t base = (uint32_t)syscall(SYS_LOAD_LIBRARY, (int)lib_name, 0, 0);
+    char abs_path[64];
+    const char* real_path = lib_name;
+    if (lib_name && lib_name[0] != '/') {
+        int len = 0;
+        while (lib_name[len]) len++;
+        if (len < 60) {
+            abs_path[0] = '/';
+            int i = 0;
+            while (lib_name[i]) {
+                abs_path[i + 1] = lib_name[i];
+                i++;
+            }
+            abs_path[i + 1] = '\0';
+            real_path = abs_path;
+        }
+    }
+    uint32_t base = (uint32_t)syscall(SYS_LOAD_LIBRARY, (int)real_path, 0, 0);
     if (base == 0 || base == 0xFFFFFFFF) return 0;
     // The export table starts after the 8-byte header (Magic + Count)
     return (void**)(base + 8);

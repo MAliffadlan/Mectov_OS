@@ -25,6 +25,7 @@ typedef struct {
     uint32_t page_dir;     // per-process page directory (0 = global identity)
     int      fd_table[16]; // local file descriptors mapped to global FDs
     char     launch_arg[128]; // command-line argument passed at launch
+    int      current_dir;  // per-task working directory
 } task_t;
 
 static task_t tasks[MAX_TASKS];
@@ -39,6 +40,7 @@ void init_tasking() {
         tasks[i].sleep_ticks = 0;
         tasks[i].page_dir = 0;
         tasks[i].launch_arg[0] = '\0';
+        tasks[i].current_dir = 0;
         for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
     }
     tasks[0].state = TASK_STATE_RUNNING;
@@ -69,6 +71,7 @@ int create_task(void (*entry)()) {
             __asm__ volatile("cli");
             
             tasks[i].ring = 0;
+            tasks[i].current_dir = (current_task >= 0) ? tasks[current_task].current_dir : 0;
             task_set_launch_arg(i, "sys_kernel");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
@@ -108,6 +111,7 @@ int create_user_task(void (*entry)()) {
             __asm__ volatile("cli");
             
             tasks[i].ring = 3;
+            tasks[i].current_dir = (current_task >= 0) ? tasks[current_task].current_dir : 0;
             task_set_launch_arg(i, "sys_user");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
@@ -256,6 +260,23 @@ int get_current_task(void) {
     return current_task;
 }
 
+int get_current_dir(void) {
+    if (current_task >= 0 && current_task < MAX_TASKS) {
+        return tasks[current_task].current_dir;
+    }
+    static int boot_current_dir = 0;
+    return boot_current_dir;
+}
+
+void set_current_dir(int dir) {
+    if (current_task >= 0 && current_task < MAX_TASKS) {
+        tasks[current_task].current_dir = dir;
+    } else {
+        static int boot_current_dir = 0;
+        boot_current_dir = dir;
+    }
+}
+
 // === NEW: Thread creation with priority + page_dir ===
 int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
     for (int i = 0; i < MAX_TASKS; i++) {
@@ -263,6 +284,7 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             __asm__ volatile("cli");
             
             tasks[i].ring = 3;  // Threads are user tasks by default
+            tasks[i].current_dir = (current_task >= 0) ? tasks[current_task].current_dir : 0;
             tasks[i].priority = priority;
             tasks[i].page_dir = page_dir;
             tasks[i].sleep_ticks = 0;

@@ -40,7 +40,6 @@ extern uint8_t _binary_hello_mct_end[];
 static uint32_t hello_mct_size() { return (uint32_t)(_binary_hello_mct_end - _binary_hello_mct_start); }
 
 fs_node_t fs_nodes[MAX_NODES];
-int current_dir = 0;  // Root directory
 
 // --- Internal helpers ---
 
@@ -96,6 +95,19 @@ static int vfs_update_file_if_needed(const char* path, const char* data, int siz
             vfs_write_file(path, data, size);
             return 1;
         }
+        // If it is an MCT file, check if disk has the correct magic
+        if (size >= 4 && data[0] == '1' && data[1] == 'T' && data[2] == 'C' && data[3] == 'M') {
+            extern int vfs_read_file(const char* path, char* buf, int max_size);
+            char disk_magic[4];
+            int rd = vfs_read_file(path, disk_magic, 4);
+            if (rd < 4 || disk_magic[0] != '1' || disk_magic[1] != 'T' || disk_magic[2] != 'C' || disk_magic[3] != 'M') {
+                write_serial_string("[VFS] magic mismatch, rewriting: ");
+                write_serial_string(path);
+                write_serial_string("\n");
+                vfs_write_file(path, data, size);
+                return 1;
+            }
+        }
     }
     return 0;
 }
@@ -126,6 +138,12 @@ void vfs_init() {
             }
         }
         
+        // CRITICAL: Reset current_dir to root during init.
+        // vfs_load() restores current_dir from disk, but if user previously
+        // cd'd to a non-root dir (e.g., /home), all relative paths below
+        // would resolve against that dir instead of root, causing NOT FOUND.
+        set_current_dir(0);
+        
         write_serial_string("[VFS] checking apps dir\n");
         // Ensure apps directory exists
         int apps_node = vfs_get_node("apps");
@@ -153,6 +171,14 @@ void vfs_init() {
         extern uint8_t _binary_calc_mct_start[];
         extern uint8_t _binary_calc_mct_end[];
         changed += vfs_update_file_if_needed("apps/calc.mct", (const char*)_binary_calc_mct_start, _binary_calc_mct_end - _binary_calc_mct_start);
+
+        extern uint8_t _binary_gcalc_mct_start[];
+        extern uint8_t _binary_gcalc_mct_end[];
+        changed += vfs_update_file_if_needed("apps/gcalc.mct", (const char*)_binary_gcalc_mct_start, _binary_gcalc_mct_end - _binary_gcalc_mct_start);
+
+        extern uint8_t _binary_clock_mct_start[];
+        extern uint8_t _binary_clock_mct_end[];
+        changed += vfs_update_file_if_needed("apps/clock.mct", (const char*)_binary_clock_mct_start, _binary_clock_mct_end - _binary_clock_mct_start);
 
         extern uint8_t _binary_volume_mct_start[];
         extern uint8_t _binary_volume_mct_end[];
@@ -221,6 +247,9 @@ void vfs_init() {
             }
         }
         
+        // We always start at root (dir 0) when booting
+        set_current_dir(0);
+        
         write_serial_string("[VFS] init done\n");
         return;
     }
@@ -232,7 +261,7 @@ void vfs_init() {
     fs_nodes[0].type = FS_DIR;
     strcpy(fs_nodes[0].name, "/");
     fs_nodes[0].size = 0;
-    current_dir = 0;
+    set_current_dir(0);
     
     // Buat home directory default
     vfs_create_node("home", FS_DIR, 0);
@@ -360,8 +389,9 @@ void vfs_save() {
     meta[9] = 0x00;  // Version minor
     
     // Current dir index
-    meta[16] = (unsigned char)(current_dir & 0xFF);
-    meta[17] = (unsigned char)((current_dir >> 8) & 0xFF);
+    int cur_dir = get_current_dir();
+    meta[16] = (unsigned char)(cur_dir & 0xFF);
+    meta[17] = (unsigned char)((cur_dir >> 8) & 0xFF);
     
     // Node count (for quick validation)
     int count = 0;
@@ -396,9 +426,10 @@ int vfs_load() {
     }
     
     // Restore current_dir
-    current_dir = meta[16] | (meta[17] << 8);
-    if (current_dir < 0 || current_dir >= MAX_NODES || !fs_nodes[current_dir].in_use)
-        current_dir = 0;
+    int loaded_cd = meta[16] | (meta[17] << 8);
+    if (loaded_cd < 0 || loaded_cd >= MAX_NODES || !fs_nodes[loaded_cd].in_use)
+        loaded_cd = 0;
+    set_current_dir(loaded_cd);
 
     // Check Root node
     if (!fs_nodes[0].in_use) {
@@ -414,7 +445,7 @@ int vfs_load() {
 void vfs_resolve_path(const char* path, char* resolved, int buf_size) {
     if (!path || path[0] == '\0') {
         // Default: current directory
-        vfs_get_abs_path(current_dir, resolved, buf_size);
+        vfs_get_abs_path(get_current_dir(), resolved, buf_size);
         return;
     }
     
@@ -431,7 +462,7 @@ void vfs_resolve_path(const char* path, char* resolved, int buf_size) {
     
     // Relative path — resolve against current_dir
     char cur_path[MAX_PATH];
-    vfs_get_abs_path(current_dir, cur_path, MAX_PATH);
+    vfs_get_abs_path(get_current_dir(), cur_path, MAX_PATH);
     
     int cur_len = strlen(cur_path);
     
@@ -443,11 +474,12 @@ void vfs_resolve_path(const char* path, char* resolved, int buf_size) {
     
     if (strcmp(path, "..") == 0) {
         // Go up from current directory
-        if (current_dir == 0) {
+        int cur_cd = get_current_dir();
+        if (cur_cd == 0) {
             strcpy(resolved, "/");
             return;
         }
-        vfs_get_abs_path(fs_nodes[current_dir].parent, resolved, buf_size);
+        vfs_get_abs_path(fs_nodes[cur_cd].parent, resolved, buf_size);
         return;
     }
     
@@ -516,7 +548,7 @@ int vfs_get_abs_path(int node_idx, char* buf, int buf_size) {
 
 // Cari node berdasarkan path. Return node index atau -1.
 int vfs_get_node(const char* path) {
-    if (!path || path[0] == '\0') return current_dir;
+    if (!path || path[0] == '\0') return get_current_dir();
     
     char resolved[MAX_PATH];
     vfs_resolve_path(path, resolved, MAX_PATH);
@@ -846,8 +878,13 @@ int vfs_write_file(const char* path, const char* data, int size) {
         if (next_data_sector < VFS_DATA_START) next_data_sector = VFS_DATA_START;
     }
     
-    // If node already has data sectors, reuse or expand
+    // If node already has data sectors, reuse or expand.
+    // If it needs more sectors than before, allocate at the end to prevent overwriting adjacent files.
     int start_sector = fs_nodes[node].data_sector;
+    int old_sectors = (fs_nodes[node].size + 511) / 512;
+    if (start_sector > 0 && sectors_needed > old_sectors) {
+        start_sector = 0;
+    }
     if (start_sector == 0) {
         start_sector = next_data_sector;
         next_data_sector += sectors_needed;
@@ -961,7 +998,7 @@ int vfs_get_parent(const char* path, char* parent_path, int buf_size) {
         // Just a filename relative to current dir
         // Actually this means there's no parent in the path string
         // Return current dir path as parent
-        return vfs_get_abs_path(current_dir, parent_path, buf_size);
+        return vfs_get_abs_path(get_current_dir(), parent_path, buf_size);
     }
     
     if (last_slash == 0) {

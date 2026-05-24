@@ -1,4 +1,4 @@
-# Mectov OS v27.3 — The Notepad Shortcuts, Centered Modal Dialogs & VFS Path Sanitization Update
+# Mectov OS v27.8 — The Per-Task Working Directory & Path Resolution Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,11 +6,15 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v27.3 release delivers memory stability, user-mode productivity, and GUI/VFS polish:
-1. **Notepad Shortcuts & GUI Polish (v27.2):** Added Ring 3 translation for Ctrl+S (Save), Ctrl+N (New Document), and Ctrl+Q (Exit) keyboard shortcuts, redesigned the Save As interface into a centered, modal dialog box, and resolved the .mct auto-loading binary bug.
-2. **VFS Path Sanitization (v27.3):** Implemented automatic quote-stripping and trailing-space trimming for all path arguments in shell commands (`cd`, `ls`, `cat`, `baca`, etc.), making file operations fully robust against spaces and quotes.
-3. **Critical Memory Isolation (v27.1):** Corrected a VMM and Kernel Heap overlap bug by separating memory boundaries (heap capped at 48MB, VMM starting at 48MB/64MB), resolving process crash bugs on reload.
-4. **Transparent TCP Proxy Redirection (v27.0):** Redirects Port 80 traffic to host proxy server at 10.0.2.2:8888 for real-world web fetching.
+The v27.8 release delivers per-task VFS working directories, robust path resolution for kernel editor tools, absolute path launchers, system diagnostics, memory stability, user-mode productivity, and GUI/VFS polish:
+1. **Per-Task Working Directory (v27.7):** Converted the VFS `current_dir` from a global system variable to a thread-local task property (`task_t.current_dir`), ensuring that navigation (`cd`) in one terminal does not conflict with other terminals or desktop apps. Set default boot directory to root (`/`) to eliminate startup shell mismatches.
+2. **Nano Path Resolution Fix (v27.8):** Fixed a bug in the kernel editor where relative files (e.g. `nano test.txt` in `/home`) were saved to the root directory `/` due to callback execution context. Path arguments are now resolved to absolute paths immediately on startup within the caller's context.
+3. **Absolute Path Launchers (v27.5):** Refactored the Desktop icon wrappers and shell command stubs to launch apps via absolute paths (e.g. `/apps/gcalc.mct` instead of `apps/gcalc.mct`), ensuring apps load correctly even when the global active directory (`current_dir`) changes.
+4. **System Diagnostics (v27.4):** Added native `uptime` and `memstat` commands to the shell and terminal builtins, enabling easy tracking of system running duration, timer ticks, physical RAM allocation, and internal heap statistics.
+5. **Notepad Shortcuts & GUI Polish (v27.2):** Added Ring 3 translation for Ctrl+S (Save), Ctrl+N (New Document), and Ctrl+Q (Exit) keyboard shortcuts, redesigned the Save As interface into a centered, modal dialog box, and resolved the .mct auto-loading binary bug.
+6. **VFS Path Sanitization (v27.3):** Implemented automatic quote-stripping and trailing-space trimming for all path arguments in shell commands (`cd`, `ls`, `cat`, `baca`, etc.), making file operations fully robust against spaces and quotes.
+7. **Critical Memory Isolation (v27.1):** Corrected a VMM and Kernel Heap overlap bug by separating memory boundaries (heap capped at 48MB, VMM starting at 48MB/64MB), resolving process crash bugs on reload.
+8. **Transparent TCP Proxy Redirection (v27.0):** Redirects Port 80 traffic to host proxy server at 10.0.2.2:8888 for real-world web fetching.
 
 Created by M Alif Fadlan.
 
@@ -355,6 +359,8 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v27.5 | **Absolute Path Launcher Update:** Fixed a bug where changing the active directory in the Terminal (e.g. `cd home`) caused Desktop application icons and aliases to fail to open by rewriting all launchers and stubs to load apps using absolute paths (e.g., `/apps/gcalc.mct` instead of relative paths). |
+| v27.4 | **System Diagnostics Update:** Implemented native `uptime` and `memstat` commands in both the kernel shell and user-space Terminal. `uptime` displays human-readable runtime duration and total timer ticks, while `memstat` renders a complete breakdown of physical RAM allocation alongside heap allocator (`kmalloc`) metrics. |
 | v27.3 | **VFS Path Sanitization Update:** Implemented automatic quote-stripping and trailing-space trimming in all shell command path arguments, resolving file read and navigation failures for files with spaces (e.g., `"notepad tes"`). |
 | v27.2 | **Notepad GUI & Shortcut Update:** Implemented Ctrl+S, Ctrl+N, and Ctrl+Q keyboard shortcuts for Notepad GUI in user mode. Redesigned the Save As interface into a centered modal dialog box. Fixed a bug where Notepad loaded its own binary (`notepad.mct`) on startup. |
 | v27.1 | **Memory Overlap & Stability Fix:** Fixed page directory/table corruption by adjusting `KERNEL_RESERVED_PAGES` to 64MB and capping `max_heap` at 32MB, ensuring 100% physical separation between heap and VMM frame pool. |
