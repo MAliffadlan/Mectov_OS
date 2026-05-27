@@ -212,6 +212,30 @@ Created by M Alif Fadlan.
 - **Home Server Remote Tracking:** Added a dedicated `gitea` Git remote tracking the repository at `https://git.mectov.my.id/maliffadlan/Mectov-OS.git`.
 - **Infrastructure Autonomy:** Seamlessly routes all future feature branch pushes, commit tracking, and code releases directly onto the self-hosted Gitea home server, operating as the primary remote alongside GitHub.
 
+### 22. Copy-on-Write (COW) Virtual Paging (src/sys/vmm.c & src/sys/idt.c)
+- **Reference Counting Allocator:** Added physical frame reference counting (`frame_ref_count`) to track shared pages across page directories.
+- **Fork-Style COW Address Spaces:** Modified `vmm_clone_address_space()` to clone user space mappings without eager memory copy. Pages are marked read-only and flagged with `PAGE_COW` (bit 9).
+- **On-Demand Page Duplication:** Page fault handler (Interrupt 14) intercepts writes to `PAGE_COW` pages, copying data dynamically when `ref_count > 1`, or directly promoting the page to writable if it's the sole remaining owner.
+
+### 23. Environment Variables & Advanced Command Interpreter (src/sys/shell.c)
+- **Active Shell Context:** Supports variable exports (e.g. `export USER=bos_alif`) and dynamic `$VAR` string interpolation for all script and terminal inputs.
+- **Interactive Aliasing:** Built-in shell commands (`alias`, `unalias`, `history`) to manage custom command shortcuts, circular command history, and inline expansions.
+- **Robust Path Sanitization:** Built-in `sanitize_path` to strip quotes, clean whitespace, and ensure resilient navigation (`cd`) and text display (`cat`, `baca`) even with spaces in pathnames (e.g. `"notepad tes"`).
+
+### 24. Process Control & Task Diagnostics (src/sys/task.c & src/sys/shell.c)
+- **Task Identification:** Scheduler tracks process names dynamically via `task_set_launch_arg()` and `task_get_launch_arg()`, naming system services and desktop binaries accordingly.
+- **CLI Process Managers:** `ps` command prints a beautiful colored table of PID, Ring, priority, status, and name; `kill [PID]` safely terminates user processes with PID range guard validation.
+- **Real-time Diagnostics:** Added `uptime` command (reads PIT ticks and renders human-readable hours/minutes/seconds) and `memstat` command (queries physical RAM allocations and outputs dynamic heap allocator `kmalloc_stats` fragmentation data).
+
+### 25. Per-Task Working Directories (src/sys/task.c & src/sys/vfs.c)
+- **Thread-Local Directories:** Replaced the global `current_dir` VFS variable with a task-specific property (`task_t.current_dir`). Task directories are fully isolated; changing directories in one terminal does not disrupt other processes or desktop widgets.
+- **Boot Alignment:** Suppressed VFS startup active directory restoration. The kernel always boots at `/` to align perfectly with the GUI Terminal initialization.
+- **Nano Absolute Path Resolution:** Solved relative-path saving context bugs by immediately resolving files (e.g. `nano note.txt` in `/home`) to absolute paths in `st_ed()` before Window Manager callbacks process saving events.
+
+### 26. VFS Integrity & Parallel Build System
+- **VFS Sector Growth Guard:** Rebuilt the ATA VFS sector allocator to prevent contiguous file overwrite bugs. Files that grow past their original sector limits are dynamically moved to the end of the disk (`next_data_sector`), ensuring robust data safety.
+- **Build Isolation:** Links independent `.ld` script targets named after target binaries to eliminate parallel linker race conditions during concurrent builds (`make -j`).
+
 ---
 
 ## Syscall API Reference
@@ -359,6 +383,8 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v27.8 | **Nano Path Resolution Update:** Fixed relative path saving context bugs inside the kernel Nano editor (`src/apps/nano.c`) by resolving files to absolute paths via `vfs_resolve_path()` on startup. Upgraded the `ed_fn` buffer size from `MAX_FILENAME` (32) to `MAX_PATH` (256) in `nano.c` and `apps.h` to fully support deep path strings. |
+| v27.7 | **Per-Task Working Directory Update:** Refactored the VFS `current_dir` from a global system variable to a task-specific thread-local attribute (`task_t.current_dir`). This isolates working directories between terminals and GUI applications. Disabled active directory persistent restoration on boot to prevent prompt synchronization desync on startup. |
 | v27.5 | **Absolute Path Launcher Update:** Fixed a bug where changing the active directory in the Terminal (e.g. `cd home`) caused Desktop application icons and aliases to fail to open by rewriting all launchers and stubs to load apps using absolute paths (e.g., `/apps/gcalc.mct` instead of relative paths). |
 | v27.4 | **System Diagnostics Update:** Implemented native `uptime` and `memstat` commands in both the kernel shell and user-space Terminal. `uptime` displays human-readable runtime duration and total timer ticks, while `memstat` renders a complete breakdown of physical RAM allocation alongside heap allocator (`kmalloc`) metrics. |
 | v27.3 | **VFS Path Sanitization Update:** Implemented automatic quote-stripping and trailing-space trimming in all shell command path arguments, resolving file read and navigation failures for files with spaces (e.g., `"notepad tes"`). |

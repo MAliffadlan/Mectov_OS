@@ -6,12 +6,32 @@
 myos.bin
 mectov.iso
 disk.img
+core.img
+ext2.img
+memdisk.tar
+
+# Temporary/Scratch Binaries
+offset
+run
+test_task
+test_task_layout
+
+# Temporary/Scratch Source & Config Files
+test.c
+test.s
+terminal.s
+test.ld
+test_sprintf.c
+test_task.c
+test_task_layout.c
 
 # ISO directory
 iso/
 
-# Logs
+# Logs & Dumps
 *.log
+*.txt
+serial_debug.txt
 
 # Dependencies and external binaries
 xbin/
