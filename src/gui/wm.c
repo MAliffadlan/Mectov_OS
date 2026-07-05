@@ -531,6 +531,9 @@ void wm_tick_all() {
 
 // Close all windows owned by a specific task (crash recovery)
 void wm_cleanup_task(int tid) {
+    extern volatile int doom_fullscreen;
+    doom_fullscreen = 0; // Restore normal rendering if DOOM task exits
+
     write_serial_string("[WM] cleanup_task tid=");
     write_serial_hex(tid);
     write_serial('\n');

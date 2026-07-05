@@ -96,11 +96,11 @@ static block_meta *find_free_block(block_meta **last, uint32_t size) {
 }
 
 static block_meta *request_space(block_meta* last, uint32_t size) {
-    uint32_t max_heap = 32 * 1024 * 1024; // 32MB max heap (heap base=16MB, so grows to 48MB — matching KERNEL_RESERVED_PAGES)
+    uint32_t max_heap = 24 * 1024 * 1024; // 24MB max heap (heap base=24MB, so grows to 48MB — matching KERNEL_RESERVED_PAGES)
     
     if (heap_used + size + META_SIZE > max_heap) return NULL;
     
-    block_meta *block = (block_meta*)((uint8_t*)0x1000000 + heap_used);
+    block_meta *block = (block_meta*)((uint8_t*)0x1800000 + heap_used);
     heap_used += size + META_SIZE;
     
     if (last) last->next = block;
@@ -222,7 +222,7 @@ void kmalloc_stats(void (*print_fn)(const char*, unsigned char)) {
 
     // Convert numbers to string and print
     print_fn("Heap Allocator Stats:\n", 0x0B);
-    print_fn("  Heap Base      : 0x1000000\n", 0x0F);
+    print_fn("  Heap Base      : 0x1800000\n", 0x0F);
     print_fn("  Heap Used      : ", 0x0F);
     // Simple int to string
     int n = heap_used;
@@ -269,5 +269,5 @@ void kmalloc_stats(void (*print_fn)(const char*, unsigned char)) {
 }
 
 unsigned int get_total_memory() { return total_pages * 4096; }
-unsigned int get_used_memory() { return (16 * 1024 * 1024) + heap_used; }
+unsigned int get_used_memory() { return (24 * 1024 * 1024) + heap_used; }
 unsigned int get_free_memory() { return get_total_memory() - get_used_memory(); }

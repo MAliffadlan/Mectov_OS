@@ -378,11 +378,16 @@ static int doom_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
             unsigned int uval;
             if (val < 0) { neg = 1; uval = (unsigned int)(-val); } else uval = (unsigned int)val;
             if (uval == 0) numbuf[nlen++] = '0';
-            else while (uval) { numbuf[nlen++] = '0' + uval % 10; uval /= 10; }
+            else while (uval) { numbuf[nlen++] = '0' + (uval % 10); uval /= 10; }
+            if (precision >= 0) {
+                while (nlen < precision && nlen < (int)sizeof(numbuf) - 2) {
+                    numbuf[nlen++] = '0';
+                }
+            }
             if (neg) numbuf[nlen++] = '-';
             // Pad
-            char padc = zero_pad ? '0' : ' ';
-            if (neg && zero_pad && pos < size) { buf[pos++] = '-'; nlen--; } // remove '-' from numbuf
+            char padc = (zero_pad && precision < 0) ? '0' : ' ';
+            if (neg && (zero_pad && precision < 0) && pos < size) { buf[pos++] = '-'; nlen--; }
             for (int i = nlen; i < width && pos < size; i++) buf[pos++] = padc;
             for (int i = nlen - 1; i >= 0 && pos < size; i--) buf[pos++] = numbuf[i];
             break;
@@ -391,7 +396,13 @@ static int doom_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
             unsigned int val = va_arg(ap, unsigned int);
             if (val == 0) numbuf[nlen++] = '0';
             else while (val) { numbuf[nlen++] = '0' + val % 10; val /= 10; }
-            for (int i = nlen; i < width && pos < size; i++) buf[pos++] = (zero_pad ? '0' : ' ');
+            if (precision >= 0) {
+                while (nlen < precision && nlen < (int)sizeof(numbuf) - 1) {
+                    numbuf[nlen++] = '0';
+                }
+            }
+            char padc = (zero_pad && precision < 0) ? '0' : ' ';
+            for (int i = nlen; i < width && pos < size; i++) buf[pos++] = padc;
             for (int i = nlen - 1; i >= 0 && pos < size; i--) buf[pos++] = numbuf[i];
             break;
         }
@@ -400,7 +411,13 @@ static int doom_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
             const char *hex = (*fmt == 'x') ? "0123456789abcdef" : "0123456789ABCDEF";
             if (val == 0) numbuf[nlen++] = '0';
             else while (val) { numbuf[nlen++] = hex[val & 0xF]; val >>= 4; }
-            for (int i = nlen; i < width && pos < size; i++) buf[pos++] = (zero_pad ? '0' : ' ');
+            if (precision >= 0) {
+                while (nlen < precision && nlen < (int)sizeof(numbuf) - 1) {
+                    numbuf[nlen++] = '0';
+                }
+            }
+            char padc = (zero_pad && precision < 0) ? '0' : ' ';
+            for (int i = nlen; i < width && pos < size; i++) buf[pos++] = padc;
             for (int i = nlen - 1; i >= 0 && pos < size; i--) buf[pos++] = numbuf[i];
             break;
         }
