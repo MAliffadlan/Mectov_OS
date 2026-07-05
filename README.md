@@ -1,4 +1,4 @@
-# Mectov OS v27.8 — The Per-Task Working Directory & Path Resolution Update
+# Mectov OS v28.0 — The DOOM Memory Protection & HUD Font Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,15 +6,12 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v27.8 release delivers per-task VFS working directories, robust path resolution for kernel editor tools, absolute path launchers, system diagnostics, memory stability, user-mode productivity, and GUI/VFS polish:
-1. **Per-Task Working Directory (v27.7):** Converted the VFS `current_dir` from a global system variable to a thread-local task property (`task_t.current_dir`), ensuring that navigation (`cd`) in one terminal does not conflict with other terminals or desktop apps. Set default boot directory to root (`/`) to eliminate startup shell mismatches.
-2. **Nano Path Resolution Fix (v27.8):** Fixed a bug in the kernel editor where relative files (e.g. `nano test.txt` in `/home`) were saved to the root directory `/` due to callback execution context. Path arguments are now resolved to absolute paths immediately on startup within the caller's context.
-3. **Absolute Path Launchers (v27.5):** Refactored the Desktop icon wrappers and shell command stubs to launch apps via absolute paths (e.g. `/apps/gcalc.mct` instead of `apps/gcalc.mct`), ensuring apps load correctly even when the global active directory (`current_dir`) changes.
-4. **System Diagnostics (v27.4):** Added native `uptime` and `memstat` commands to the shell and terminal builtins, enabling easy tracking of system running duration, timer ticks, physical RAM allocation, and internal heap statistics.
-5. **Notepad Shortcuts & GUI Polish (v27.2):** Added Ring 3 translation for Ctrl+S (Save), Ctrl+N (New Document), and Ctrl+Q (Exit) keyboard shortcuts, redesigned the Save As interface into a centered, modal dialog box, and resolved the .mct auto-loading binary bug.
-6. **VFS Path Sanitization (v27.3):** Implemented automatic quote-stripping and trailing-space trimming for all path arguments in shell commands (`cd`, `ls`, `cat`, `baca`, etc.), making file operations fully robust against spaces and quotes.
-7. **Critical Memory Isolation (v27.1):** Corrected a VMM and Kernel Heap overlap bug by separating memory boundaries (heap capped at 48MB, VMM starting at 48MB/64MB), resolving process crash bugs on reload.
-8. **Transparent TCP Proxy Redirection (v27.0):** Redirects Port 80 traffic to host proxy server at 10.0.2.2:8888 for real-world web fetching.
+The v28.0 release delivers fully integrated DOOM game execution, kernel memory isolation, HUD font rendering via vsnprintf precision formatting, and desktop window recovery fixes:
+1. **DOOM Memory Protection:** Relocated the kernel heap basis (`kmalloc`) from 16MB to 24MB (`src/sys/mem.c`) and capped `max_heap` at 24MB, completely resolving overlapping memory collisions with DOOM's 16.95 MB BSS section and preventing Page Faults on game initialization.
+2. **HUD Font Precision Formatting:** Implemented standard integer precision padding (`%.3d`) in `doom_vsnprintf` (`doom/doom_libc.c`), allowing the game to successfully format and load `STCFN033`-`STCFN127` HUD font lumps from the WAD file.
+3. **Graceful Fullscreen Reset & Recovery:** Added automatic fullscreen flag reset (`doom_fullscreen = 0`) in the task cleanup function (`src/gui/wm.c`) to ensure the Desktop GUI is fully restored and remains responsive when the DOOM task is closed or terminated.
+4. **Desktop Icon Count Alignment:** Adjusted desktop `ICON_COUNT` to 11 (`src/include/desktop.h`) to properly hide the corrupt trash bin icon at coordinate `(0,0)`.
+5. **Per-Task Working Directory (v27.7):** Converted the VFS `current_dir` from a global system variable to a thread-local task property (`task_t.current_dir`), ensuring that navigation (`cd`) in one terminal does not conflict with other terminals or desktop apps.
 
 Created by M Alif Fadlan.
 
