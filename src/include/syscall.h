@@ -102,6 +102,11 @@ typedef struct {
 #define SYS_GET_VOLUME     53  // -> returns volume (0-100)
 #define SYS_PLAY_WAV       54  // EBX=pcm_data_ptr, ECX=length, EDX=sample_rate -> returns 0
 #define SYS_STOP_WAV       55  // -> returns 0
+#define SYS_CLIPBOARD_COPY 56  // EBX=str_ptr, ECX=len -> returns len
+#define SYS_CLIPBOARD_PASTE 57 // EBX=buf_ptr, ECX=max_len -> returns len
+#define SYS_DELETE_FILE    58  // EBX=path_ptr -> returns 0/-1
+#define SYS_MKDIR          59  // EBX=path_ptr -> returns 0/-1
+#define SYS_RENAME_FILE    60  // EBX=old_path_ptr, ECX=new_path_ptr -> returns 0/-1
 
 // Virtual Memory
 #define SYS_VMM_MAP        29  // EBX=vaddr, ECX=paddr, EDX=flags → return 0/-1
@@ -341,6 +346,26 @@ static inline int sys_get_launch_arg(char* buf, int max_len) {
 
 static inline int sys_create_file(const char* path) {
     return syscall(SYS_CREATE_FILE, (int)path, 0, 0);
+}
+
+static inline int sys_clipboard_copy(const char* data, int len) {
+    return syscall(SYS_CLIPBOARD_COPY, (int)data, len, 0);
+}
+
+static inline int sys_clipboard_paste(char* buf, int max_len) {
+    return syscall(SYS_CLIPBOARD_PASTE, (int)buf, max_len, 0);
+}
+
+static inline int sys_delete_file(const char* path) {
+    return syscall(SYS_DELETE_FILE, (int)path, 0, 0);
+}
+
+static inline int sys_mkdir(const char* path) {
+    return syscall(SYS_MKDIR, (int)path, 0, 0);
+}
+
+static inline int sys_rename_file(const char* old_path, const char* new_path) {
+    return syscall(SYS_RENAME_FILE, (int)old_path, (int)new_path, 0);
 }
 
 // IPC syscalls (stubs for Ring 3)

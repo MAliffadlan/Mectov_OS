@@ -1,4 +1,4 @@
-# Mectov OS v29.0 — The File Association & Explorer Double-Click Update
+# Mectov OS v30.0 — The Clipboard, Explorer CRUD & Context Menu Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,14 +6,13 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v29.0 release delivers fully integrated file associations, double-click launch capability in File Explorer, shell argument parsing, DOOM game execution, kernel memory isolation, and GUI desktop recovery fixes:
-1. **File Association & Explorer Double-Click:** Upgraded File Explorer (`explorer.c`) to launch executable `.mct` binaries, play `.wav` audio files in Media Player (`mplayer.mct`), and open text/source files in Notepad (`notepad.mct`) automatically upon double-clicking (second-clicking a selected file).
-2. **Shell Argument Parser:** Enhanced the kernel shell command parser (`src/sys/shell.c`) to parse program path and trailing argument strings for the `jalankan` command, launching applications with arguments via `load_mct_app_with_arg()`.
-3. **DOOM Memory Protection (v28.0):** Relocated the kernel heap basis (`kmalloc`) from 16MB to 24MB (`src/sys/mem.c`) and capped `max_heap` at 24MB, completely resolving overlapping memory collisions with DOOM's 16.95 MB BSS section.
-4. **HUD Font Precision Formatting (v28.0):** Implemented standard integer precision padding (`%.3d`) in `doom_vsnprintf` (`doom/doom_libc.c`), allowing the game to successfully format and load `STCFN033`-`STCFN127` HUD font lumps from the WAD file.
-5. **Graceful Fullscreen Reset & Recovery (v28.0):** Added automatic fullscreen flag reset (`doom_fullscreen = 0`) in the task cleanup function (`src/gui/wm.c`) to ensure the Desktop GUI is fully restored when the DOOM task is closed.
-6. **Desktop Icon Count Alignment (v28.0):** Adjusted desktop `ICON_COUNT` to 11 (`src/include/desktop.h`) to properly hide the corrupt trash bin icon at coordinate `(0,0)`.
-7. **Per-Task Working Directory (v27.7):** Converted the VFS `current_dir` from a global system variable to a thread-local task property (`task_t.current_dir`), ensuring that navigation (`cd`) in one terminal does not conflict with other terminals or desktop apps.
+The v30.0 release delivers fully integrated kernel clipboard support, complete VFS CRUD controls in File Explorer, right-click desktop/explorer context menus, double-click launch capability, and shell argument parsing:
+1. **Kernel Clipboard Subsystem:** Created a global kernel-level clipboard manager (`src/sys/clipboard.c` / `src/include/clipboard.h`) supporting copy-paste operations between separate applications via `SYS_CLIPBOARD_COPY` (56) and `SYS_CLIPBOARD_PASTE` (57).
+2. **Notepad & Terminal Integration:** Integrated Ctrl+C and Ctrl+V keyboard shortcuts in Notepad (`apps/notepad.c`) and Terminal (`terminal.c`), as well as "Copy All" and "Paste" items in Notepad's GUI Edit dropdown menu.
+3. **Explorer CRUD Controls:** Added a top toolbar to File Explorer (`explorer.c`) with "+File", "+Folder", and "Hapus" buttons. Added modal input overlays to name files/folders and delete/rename VFS items.
+4. **VFS Syscall Upgrades:** Added new kernel system calls `SYS_DELETE_FILE` (58), `SYS_MKDIR` (59), and `SYS_RENAME_FILE` (60) to support file/folder creation, deletion, and renaming from Ring 3.
+5. **Right-Click Context Menus:** Implemented right-click mouse detection (`btn & 2`) in both Desktop (`src/gui/desktop.c`) and File Explorer to open custom Catppuccin-styled context menus with options to launch apps, delete, and rename items.
+6. **File Association & Double-Click (v29.0):** Upgraded File Explorer to launch executable `.mct` binaries, play `.wav` audio files in Media Player, and open text files in Notepad automatically on double-click.
 
 Created by M Alif Fadlan.
 
@@ -382,6 +381,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v30.0 | **Clipboard, Explorer CRUD & Context Menu Update:** Implemented global kernel clipboard manager (`src/sys/clipboard.c`) and user stubs for app copy-paste capability. Added "+File", "+Folder", and "Hapus" toolbar buttons with name input modals in File Explorer. Added kernel syscalls `SYS_DELETE_FILE` (58), `SYS_MKDIR` (59), and `SYS_RENAME_FILE` (60) to support Ring 3 CRUD actions. Implemented custom Catppuccin right-click context menus on Desktop and File Explorer for direct app launches, deletion, and renaming. |
 | v29.0 | **File Association & Explorer Double-Click Update:** Upgraded File Explorer (`explorer.c`) to support double-click (second-click on selected item) file associations. Double-clicking `.mct` runs the binary, `.wav` plays in Media Player (`/apps/mplayer.mct`), and other text files edit in Notepad (`/apps/notepad.mct`). Upgraded kernel command executor (`src/sys/shell.c`) to parse arguments for the `jalankan` command, splitting program path from arguments and launching via `load_mct_app_with_arg()`. |
 | v28.0 | **DOOM Memory Protection, HUD Font & Crash Recovery Update:** Relocated kernel heap base from 16MB to 24MB (`src/sys/mem.c`) to completely resolve memory overlap/collision with the expanded kernel BSS section caused by DOOM's embedded static variables. Implemented integer precision formatting (`%.3d`) in `doom_vsnprintf` (`doom/doom_libc.c`) to fix HUD and quit-confirm pop-up font loading. Implemented automatic fullscreen flag reset (`doom_fullscreen = 0`) on task exit inside `wm_cleanup_task` (`src/gui/wm.c`) to prevent system-wide freezes on game exit/crash. Fixed overlapping desktop icons by aligning `ICON_COUNT` to 11 (`src/include/desktop.h`). |
 | v27.8 | **Nano Path Resolution Update:** Fixed relative path saving context bugs inside the kernel Nano editor (`src/apps/nano.c`) by resolving files to absolute paths via `vfs_resolve_path()` on startup. Upgraded the `ed_fn` buffer size from `MAX_FILENAME` (32) to `MAX_PATH` (256) in `nano.c` and `apps.h` to fully support deep path strings. |

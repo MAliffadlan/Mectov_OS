@@ -7,6 +7,7 @@
 #include "../include/mem.h"
 #include "../include/taskbar.h"
 #include "../include/vfs.h"
+#include "../include/mouse.h"
 
 // Forward declarations for GUI apps
 void open_terminal_app();
@@ -208,6 +209,10 @@ static void draw_icon(int i) {
 
 extern uint32_t _binary_obj_wallpaper_bin_start[];
 
+static int ctx_menu_open = 0;
+static int ctx_menu_x = 0;
+static int ctx_menu_y = 0;
+
 void desktop_draw() {
     if (!is_vbe) return;
 
@@ -233,6 +238,41 @@ void desktop_draw() {
     // Draw desktop icons (grid, modern style)
     if (!icons[0].label) init_icons();
     for (int i = 0; i < ICON_COUNT; i++) draw_icon(i);
+
+    // Draw Right-Click Context Menu
+    if (ctx_menu_open) {
+        int dx = ctx_menu_x;
+        int dy = ctx_menu_y;
+        int dw = 130;
+        int dh = 78;
+        
+        // Background card
+        draw_rect(dx, dy, dw, dh, 0x00181825);
+        
+        // Border lines
+        draw_rect(dx, dy, dw, 1, 0x00313244);
+        draw_rect(dx, dy + dh - 1, dw, 1, 0x00313244);
+        draw_rect(dx, dy, 1, dh, 0x00313244);
+        draw_rect(dx + dw - 1, dy, 1, dh, 0x00313244);
+        
+        const char* menu_items[] = {
+            "Buka Terminal",
+            "Buka Explorer",
+            "Info Sistem",
+            "Muat Ulang"
+        };
+        
+        for (int i = 0; i < 4; i++) {
+            int iy = dy + 3 + i * 18;
+            // Check hover based on global mouse_x / mouse_y
+            if (mouse_x >= dx && mouse_x < dx + dw && mouse_y >= iy && mouse_y < iy + 18) {
+                draw_rect(dx + 2, iy, dw - 4, 16, 0x0089B4FA); // blue hover
+                draw_string_px(dx + 8, iy + 4, menu_items[i], 0x0011111B, 0xFFFFFFFF);
+            } else {
+                draw_string_px(dx + 8, iy + 4, menu_items[i], 0x00CDD6F4, 0xFFFFFFFF);
+            }
+        }
+    }
 }
 
 static int dragged_icon = -1;
@@ -247,6 +287,51 @@ static uint32_t last_click_tick = 0;
 void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
     int ty = (int)fb_height - TASKBAR_H_PX;
     if (my >= ty) return; // taskbar handles its own clicks
+
+    // --- Right-click Context Menu logic ---
+    if (ctx_menu_open) {
+        if ((btn & 1) && !(pbtn & 1)) {
+            // Left click: check context menu bounds
+            int dx = ctx_menu_x;
+            int dy = ctx_menu_y;
+            int dw = 130;
+            int dh = 78;
+            if (mx >= dx && mx < dx + dw && my >= dy && my < dy + dh) {
+                int item = (my - dy - 3) / 18;
+                if (item == 0) {
+                    open_terminal_app();
+                } else if (item == 1) {
+                    open_explorer_wrapper();
+                } else if (item == 2) {
+                    open_sysinfo_wrapper();
+                } else if (item == 3) {
+                    vfs_load();
+                    init_icons();
+                }
+            }
+            ctx_menu_open = 0;
+            return;
+        } else if ((btn & 2) && !(pbtn & 2)) {
+            // Right click while menu open: reposition it
+            ctx_menu_open = 1;
+            ctx_menu_x = mx;
+            ctx_menu_y = my;
+            if (ctx_menu_x + 130 > (int)fb_width) ctx_menu_x = fb_width - 130;
+            if (ctx_menu_y + 78 > ty) ctx_menu_y = ty - 78;
+            return;
+        }
+        return;
+    }
+
+    if ((btn & 2) && !(pbtn & 2)) {
+        // Right click: open context menu
+        ctx_menu_open = 1;
+        ctx_menu_x = mx;
+        ctx_menu_y = my;
+        if (ctx_menu_x + 130 > (int)fb_width) ctx_menu_x = fb_width - 130;
+        if (ctx_menu_y + 78 > ty) ctx_menu_y = ty - 78;
+        return;
+    }
 
     if (calendar_open) {
         if (!btn && pbtn) calendar_open = 0;

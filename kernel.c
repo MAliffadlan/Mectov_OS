@@ -138,6 +138,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] vfs\n");
     vfs_init();
 
+    write_serial_string("[K] clipboard\n");
+    extern void clipboard_init(void);
+    clipboard_init();
+
     write_serial_string("[K] dbuf\n");
     init_double_buffer();
     write_serial_string("[K] tasking\n");

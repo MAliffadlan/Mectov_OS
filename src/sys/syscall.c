@@ -938,6 +938,70 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_CLIPBOARD_COPY (56) -----
+        case SYS_CLIPBOARD_COPY: {
+            const char* user_data = (const char*)regs->ebx;
+            int len = (int)regs->ecx;
+            if (len <= 0 || len >= 4096 || !validate_user_ptr(user_data, len)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int clipboard_copy(const char* data, int len);
+            regs->eax = (uint32_t)clipboard_copy(user_data, len);
+            break;
+        }
+
+        // ----- SYS_CLIPBOARD_PASTE (57) -----
+        case SYS_CLIPBOARD_PASTE: {
+            char* user_buf = (char*)regs->ebx;
+            int max_len = (int)regs->ecx;
+            if (max_len <= 0 || !validate_user_ptr(user_buf, max_len)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int clipboard_paste(char* buf, int max_len);
+            regs->eax = (uint32_t)clipboard_paste(user_buf, max_len);
+            break;
+        }
+
+        // ----- SYS_DELETE_FILE (58) -----
+        case SYS_DELETE_FILE: {
+            const char* path = (const char*)regs->ebx;
+            if (!validate_user_ptr(path, 1) || safe_strlen(path, 256) < 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int vfs_delete_node(const char* path);
+            regs->eax = (uint32_t)vfs_delete_node(path);
+            break;
+        }
+
+        // ----- SYS_MKDIR (59) -----
+        case SYS_MKDIR: {
+            const char* path = (const char*)regs->ebx;
+            if (!validate_user_ptr(path, 1) || safe_strlen(path, 256) < 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int vfs_mkdir(const char* path);
+            regs->eax = (uint32_t)vfs_mkdir(path);
+            break;
+        }
+
+        // ----- SYS_RENAME_FILE (60) -----
+        case SYS_RENAME_FILE: {
+            const char* old_path = (const char*)regs->ebx;
+            const char* new_path = (const char*)regs->ecx;
+            if (!validate_user_ptr(old_path, 1) || safe_strlen(old_path, 256) < 0 ||
+                !validate_user_ptr(new_path, 1) || safe_strlen(new_path, 256) < 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int vfs_rename(const char* old_path, const char* new_path);
+            regs->eax = (uint32_t)vfs_rename(old_path, new_path);
+            break;
+        }
+
         default:
             regs->eax = (uint32_t)-1; // Unknown syscall
             break;

@@ -783,6 +783,29 @@ void _start(void) {
                 } else if (ev.key == 0xE051) { // Page Down
                     scroll_offset -= 6;
                     if (scroll_offset < 0) scroll_offset = 0;
+                } else if (ev.key == 3) { // Ctrl+C = Copy current command
+                    if (cmd_len > 0) {
+                        sys_clipboard_copy(cmd, cmd_len);
+                    }
+                } else if (ev.key == 22) { // Ctrl+V = Paste from clipboard
+                    char paste_buf[256];
+                    int pasted = sys_clipboard_paste(paste_buf, 256);
+                    if (pasted > 0) {
+                        scroll_offset = 0; // Snap to bottom
+                        for (int i = 0; i < pasted && cmd_len < 255; i++) {
+                            if (paste_buf[i] >= ' ' && paste_buf[i] <= '~') {
+                                // Shift right to insert
+                                for (int j = cmd_len; j > edit_cursor; j--) {
+                                    cmd[j] = cmd[j-1];
+                                }
+                                cmd[edit_cursor] = paste_buf[i];
+                                cmd_len++;
+                                edit_cursor++;
+                            }
+                        }
+                        cmd[cmd_len] = '\0';
+                        redraw_input_line();
+                    }
                 } else if (ev.key >= ' ' && ev.key <= '~' && cmd_len < 255) {
                     scroll_offset = 0; // Snap to bottom
                     // Shift right to insert

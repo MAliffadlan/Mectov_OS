@@ -124,15 +124,17 @@ static MItem file_menu[] = {
 static MItem edit_menu[] = {
     {"Undo",       10},
     {"Clear All",  11},
+    {"Copy All",   12},
+    {"Paste",      13},
 };
-#define EDIT_MENU_N 2
+#define EDIT_MENU_N 4
 
 static MItem help_menu[] = {
     {"About",      20},
 };
 #define HELP_MENU_N 1
 
-#define DROP_W 100
+#define DROP_W 110
 #define DROP_ITEM_H 18
 
 static void draw_menubar(void) {
@@ -306,6 +308,18 @@ static void exec_action(int a) {
         if (buf_len > 0) { buf_len--; buf[buf_len]=0; dirty=1; }
     } else if (a == 11) { // Clear All
         buf_len = 0; buf[0] = 0; dirty = 1;
+    } else if (a == 12) { // Copy All
+        sys_clipboard_copy(buf, buf_len);
+    } else if (a == 13) { // Paste
+        char paste_buf[BUF_SIZE];
+        int pasted = sys_clipboard_paste(paste_buf, BUF_SIZE);
+        if (pasted > 0) {
+            for (int i = 0; i < pasted && buf_len < BUF_SIZE - 1; i++) {
+                buf[buf_len++] = paste_buf[i];
+            }
+            buf[buf_len] = '\0';
+            dirty = 1;
+        }
     }
 }
 
@@ -432,6 +446,11 @@ void _start() {
                         sys_exit();
                     } else if (c == 19) { // Ctrl+S = Save
                         exec_action(2);
+                        draw_all();
+                    } else if (c == 3) { // Ctrl+C = Copy All
+                        exec_action(12);
+                    } else if (c == 22) { // Ctrl+V = Paste
+                        exec_action(13);
                         draw_all();
                     } else if (c == '\b') {
                         if (buf_len > 0) { buf_len--; buf[buf_len]=0; dirty=1; draw_all(); }
