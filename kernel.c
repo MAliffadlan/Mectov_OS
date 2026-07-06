@@ -195,12 +195,11 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             int handled = 0;
             extern int alt_tab_active;
             if (alt_tab_active) {
-                if (btn && !prev_btn) {
-                    extern void wm_alt_tab_end(void);
-                    wm_alt_tab_end();
-                    needs_redraw = 1;
+                if (btn != prev_btn) {
+                    handled = 1;
+                } else {
+                    handled = 0;
                 }
-                handled = 1;
             } else {
                 handled = wm_handle_mouse(mx, my, btn, prev_btn);
                 if (!handled) {
