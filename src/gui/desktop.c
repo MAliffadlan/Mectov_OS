@@ -383,12 +383,7 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
         return;
     }
 
-    if (calendar_open) {
-        if (!btn && pbtn) calendar_open = 0;
-        return;
-    }
-
-    if (start_menu_open) return;
+    // Popup dismissal is now handled in kernel.c before this function is called
 
     if (!icons[0].label) return;
 

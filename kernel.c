@@ -202,6 +202,24 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             
             int handled = 0;
             extern int alt_tab_active;
+
+            // Dismiss popups on ANY click outside their area (press, not just release)
+            // This must run BEFORE wm_handle_mouse to prevent the WM from eating the event
+            if (popup_open && (btn & 1) && !(prev_btn & 1) && !in_taskbar) {
+                // Mouse press on desktop area while popup open → close all popups
+                int sm_ty = (int)fb_height - TASKBAR_H_PX;
+                int sm_h = 348;
+                int sm_y = sm_ty - sm_h;
+                int in_start_menu = (start_menu_open && mx >= 2 && mx <= 202 && my >= sm_y && my <= sm_ty);
+                if (!in_start_menu) {
+                    // Click is outside all popups - close them
+                    if (start_menu_open) { start_menu_open = 0; needs_redraw = 1; }
+                    if (calendar_open) { calendar_open = 0; needs_redraw = 1; }
+                    extern int taskbar_volume_popup_open(void);
+                    // Note: volume_popup_open is static, handled by taskbar_handle_click
+                }
+            }
+
             if (alt_tab_active) {
                 if (btn != prev_btn) {
                     handled = 1;
@@ -214,9 +232,9 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                     if (in_taskbar && !btn && prev_btn) {
                         taskbar_handle_click(mx, my);
                     } else if (!in_taskbar && !btn && prev_btn && popup_open) {
-                        // Route clicks above taskbar to taskbar if a popup is open
+                        // Route release above taskbar to taskbar if a popup was open
                         taskbar_handle_click(mx, my);
-                    } else if (!in_taskbar && !popup_open) {
+                    } else if (!in_taskbar) {
                         desktop_handle_mouse(mx, my, btn, prev_btn);
                     }
                 }
