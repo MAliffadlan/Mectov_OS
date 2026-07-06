@@ -162,6 +162,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     extern int load_mct_app(const char*);
 
     nada(659, 80); nada(784, 80); nada(1047, 150);
+    mark_dirty(0, 0, fb_width, fb_height);
     full_redraw();
     
     // Kalkulator akan dibuka jika user mengklik ikonnya di desktop
@@ -313,6 +314,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             start_menu_open = 0;
             calendar_open = 0;
             gui_login();
+            mark_dirty(0, 0, fb_width, fb_height);
             full_redraw();
         }
 

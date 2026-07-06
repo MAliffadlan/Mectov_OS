@@ -384,10 +384,12 @@ static void draw_one(int idx) {
     if (!w->visible || w->minimized) return;
     
     extern int d_min_x, d_min_y, d_max_x, d_max_y;
-    // Check if the window overlaps the active dirty rectangle.
+    // Check if the window overlaps the active dirty rectangle OR if it has a dirty buffer.
     // If not, we don't need to redraw it because it is already correct in the back buffer!
-    if (w->x + w->w <= d_min_x || w->x >= d_max_x || w->y + w->h <= d_min_y || w->y >= d_max_y) {
-        return;
+    if (!w->buffer_dirty) {
+        if (w->x + w->w <= d_min_x || w->x >= d_max_x || w->y + w->h <= d_min_y || w->y >= d_max_y) {
+            return;
+        }
     }
 
     int x = w->x, y = w->y, ww = w->w, wh = w->h;
