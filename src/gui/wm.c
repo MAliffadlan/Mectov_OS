@@ -78,6 +78,8 @@ void wm_alt_tab_start(void) {
     if (wm_zcount <= 1) return;
     alt_tab_active = 1;
     alt_tab_selected_idx = 1; // Highlight the second window by default
+    extern void mark_dirty(int, int, int, int);
+    mark_dirty(0, 0, fb_width, fb_height); // Show HUD card cleanly
 }
 
 void wm_alt_tab_next(void) {
@@ -89,7 +91,18 @@ void wm_alt_tab_end(void) {
     if (!alt_tab_active) return;
     alt_tab_active = 0;
     
+    extern void mark_dirty(int, int, int, int);
+    mark_dirty(0, 0, fb_width, fb_height); // Erase HUD card cleanly
+
     if (wm_zcount <= 1) return;
+    
+    // Clamp selection index if z-count changed (e.g. windows closed)
+    if (alt_tab_selected_idx >= wm_zcount) {
+        alt_tab_selected_idx = wm_zcount - 1;
+    }
+    if (alt_tab_selected_idx < 0) {
+        alt_tab_selected_idx = 0;
+    }
     
     // Select the highlighted window: HUD lists windows from top to bottom
     int target_idx = wm_zorder[wm_zcount - 1 - alt_tab_selected_idx];
@@ -169,6 +182,14 @@ static void draw_hud_icon(int ix, int iy, const char* title) {
 
 static void wm_draw_alt_tab_hud(void) {
     if (!alt_tab_active || wm_zcount <= 1) return;
+
+    // Clamp selection index if z-count changed (e.g. windows closed)
+    if (alt_tab_selected_idx >= wm_zcount) {
+        alt_tab_selected_idx = wm_zcount - 1;
+    }
+    if (alt_tab_selected_idx < 0) {
+        alt_tab_selected_idx = 0;
+    }
 
     int item_w = 56;
     int gap = 14;

@@ -256,6 +256,8 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                         needs_redraw = 1;
                     } else if (sc == 0x01) { // Escape press: cancel without focus change
                         alt_tab_active = 0;
+                        extern void mark_dirty(int, int, int, int);
+                        mark_dirty(0, 0, fb_width, fb_height); // Erase HUD card cleanly
                         needs_redraw = 1;
                     } else if (sc == 0x1C) { // Enter press: select
                         wm_alt_tab_end();
