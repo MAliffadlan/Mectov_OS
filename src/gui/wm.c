@@ -48,6 +48,8 @@ void wm_raise(int id) {
             wm_focused = id;
             extern void mark_dirty(int, int, int, int);
             mark_dirty(0, 0, fb_width, fb_height); // Mark fullscreen dirty on focus change
+            extern volatile int needs_redraw;
+            needs_redraw = 1;
             return;
         }
     }
@@ -69,6 +71,8 @@ void wm_focus_next(void) {
     wm_wins[new_top_idx].minimized = 0; // Restore if minimized
     extern void mark_dirty(int, int, int, int);
     mark_dirty(0, 0, fb_width, fb_height); // Mark fullscreen dirty on z-order shift
+    extern volatile int needs_redraw;
+    needs_redraw = 1;
 }
 
 int alt_tab_active = 0;
@@ -285,6 +289,8 @@ int wm_open(int x, int y, int w, int h, const char* title,
             write_serial_hex((uint32_t)&wm_wins[i].id);
             write_serial('\n');
 
+            extern volatile int needs_redraw;
+            needs_redraw = 1;
             return wm_wins[i].id;
         }
     }
@@ -337,6 +343,8 @@ void wm_close(int id) {
                 z_remove(i);
                 wm_focused = (wm_zcount > 0) ? wm_wins[wm_zorder[wm_zcount-1]].id : -1;
             }
+            extern volatile int needs_redraw;
+            needs_redraw = 1;
             return;
         }
     }
@@ -587,6 +595,8 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                     wm_wins[i].h = new_h;
                     
                     mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // New bounds dirty
+                    extern volatile int needs_redraw;
+                    needs_redraw = 1;
                     return 1;
                 }
                 // Drag
@@ -609,6 +619,8 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                     }
                     
                     mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // New bounds dirty
+                    extern volatile int needs_redraw;
+                    needs_redraw = 1;
                     return 1;
                 }
             }
@@ -637,6 +649,8 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                 wm_wins[i].resize_edge = 0;
             }
         }
+        extern volatile int needs_redraw;
+        needs_redraw = 1;
         if (handled_release) return 1;
     }
 
@@ -686,6 +700,8 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                         w->maximized = 1;
                     }
                     mark_dirty(0, 0, fb_width, fb_height);
+                    extern volatile int needs_redraw;
+                    needs_redraw = 1;
                     return 1;
                 }
 
@@ -703,6 +719,8 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                             break;
                         }
                     }
+                    extern volatile int needs_redraw;
+                    needs_redraw = 1;
                     return 1;
                 }
 
@@ -710,6 +728,8 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                 w->dragging = 1;
                 w->drag_mx = mx; w->drag_my = my;
                 w->drag_wx = w->x; w->drag_wy = w->y;
+                extern volatile int needs_redraw;
+                needs_redraw = 1;
                 return 1;
             }
 
@@ -727,6 +747,8 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                 w->resize_mx = mx; w->resize_my = my;
                 w->drag_wx = w->x; w->drag_wy = w->y;
                 w->resize_ww = w->w; w->resize_wh = w->h;
+                extern volatile int needs_redraw;
+                needs_redraw = 1;
                 return 1;
             }
 
@@ -734,6 +756,8 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
             if (w->mouse_fn) {
                 w->mouse_fn(w->id, mx - w->x, my - (w->y + TITLEBAR_H), btn);
             }
+            extern volatile int needs_redraw;
+            needs_redraw = 1;
             return 1;
         }
     }
@@ -808,4 +832,6 @@ void wm_cleanup_task(int tid) {
     }
     // Update focus
     wm_focused = (wm_zcount > 0) ? wm_wins[wm_zorder[wm_zcount-1]].id : -1;
+    extern volatile int needs_redraw;
+    needs_redraw = 1;
 }
