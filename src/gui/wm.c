@@ -379,10 +379,17 @@ static void check_snap(int idx) {
     }
 }
 
-// ---- Draw a single window ----
 static void draw_one(int idx) {
     WmWin* w = &wm_wins[idx];
     if (!w->visible || w->minimized) return;
+    
+    extern int d_min_x, d_min_y, d_max_x, d_max_y;
+    // Check if the window overlaps the active dirty rectangle.
+    // If not, we don't need to redraw it because it is already correct in the back buffer!
+    if (w->x + w->w <= d_min_x || w->x >= d_max_x || w->y + w->h <= d_min_y || w->y >= d_max_y) {
+        return;
+    }
+
     int x = w->x, y = w->y, ww = w->w, wh = w->h;
     int focused = (wm_focused == w->id);
     int use_radius = (w->snap_state != SNAP_NONE || w->maximized) ? 4 : WIN_RADIUS;

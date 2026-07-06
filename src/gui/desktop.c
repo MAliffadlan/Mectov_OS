@@ -188,6 +188,11 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
 
 static void draw_icon(int i) {
     Icon* ic = &icons[i];
+    extern int d_min_x, d_min_y, d_max_x, d_max_y;
+    // Check overlap with dirty rect (icon box is roughly ic->x to ic->x + 80, ic->y to ic->y + 90)
+    if (ic->x + 80 <= d_min_x || ic->x >= d_max_x || ic->y + 90 <= d_min_y || ic->y >= d_max_y) {
+        return;
+    }
     draw_pro_icon(ic->x, ic->y, ic->label);
 
     // Label below icon: modern pill-shaped background
@@ -218,20 +223,30 @@ void desktop_draw() {
 
     uint32_t area_h = fb_height - TASKBAR_H_PX;
 
-    // Blit wallpaper
+    // Blit wallpaper clipped to dirty rect
     uint32_t* wp_ptr = _binary_obj_wallpaper_bin_start;
     uint32_t wp_w = 1024, wp_h = 768;
     uint32_t copy_w = (fb_width < wp_w) ? fb_width : wp_w;
     uint32_t copy_h = (area_h < wp_h) ? area_h : wp_h;
-    for (uint32_t y = 0; y < copy_h; y++) {
-        memcpy(&back_buffer[y * fb_width], &wp_ptr[y * wp_w], copy_w * 4);
+    
+    extern int d_min_x, d_min_y, d_max_x, d_max_y;
+    int start_y = d_min_y < 0 ? 0 : d_min_y;
+    int end_y = d_max_y > (int)copy_h ? (int)copy_h : d_max_y;
+    int start_x = d_min_x < 0 ? 0 : d_min_x;
+    int end_x = d_max_x > (int)copy_w ? (int)copy_w : d_max_x;
+
+    if (start_y < end_y && start_x < end_x) {
+        uint32_t copy_bytes = (end_x - start_x) * 4;
+        for (int y = start_y; y < end_y; y++) {
+            memcpy(&back_buffer[y * fb_width + start_x], &wp_ptr[y * wp_w + start_x], copy_bytes);
+        }
     }
 
-    // Fill remaining edges if screen is larger than wallpaper
-    if (fb_width > wp_w) {
+    // Fill remaining edges if screen is larger than wallpaper (only if dirty rect overlaps them)
+    if (fb_width > wp_w && d_max_x > (int)wp_w) {
         draw_rect(wp_w, 0, fb_width - wp_w, area_h, 0x00111122);
     }
-    if (area_h > wp_h) {
+    if (area_h > wp_h && d_max_y > (int)wp_h) {
         draw_rect(0, wp_h, fb_width, area_h - wp_h, 0x00111122);
     }
 

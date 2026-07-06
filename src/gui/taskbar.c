@@ -170,6 +170,14 @@ static int days_in_month(int m, int y) {
 void taskbar_draw() {
     if (!is_vbe) return;
     int ty = (int)fb_height - TASKBAR_H_PX;
+    
+    extern int d_max_y;
+    // Check if the taskbar overlaps the active dirty rectangle.
+    // If not, we don't need to redraw it because it is already correct in the back buffer!
+    if (d_max_y < ty) {
+        return;
+    }
+
     int tray_right = (int)fb_width; // right edge
 
     // ---------- Taskbar background (clean dark, slightly transparent feel) ----------
