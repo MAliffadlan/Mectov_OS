@@ -617,6 +617,19 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
 
     // ---- Release: finalize snap / restore / resizing ----
     if (release) {
+        int handled_release = 0;
+        for (int i = 0; i < MAX_WINDOWS; i++) {
+            if (wm_wins[i].visible && wm_wins[i].id == wm_focused && !wm_wins[i].minimized) {
+                WmWin* w = &wm_wins[i];
+                if (mx >= w->x && mx < w->x + w->w && my >= w->y && my < w->y + w->h) {
+                    if (w->mouse_fn && my >= w->y + TITLEBAR_H) {
+                        w->mouse_fn(w->id, mx - w->x, my - (w->y + TITLEBAR_H), 0);
+                        handled_release = 1;
+                    }
+                }
+                break;
+            }
+        }
         for (int i = 0; i < MAX_WINDOWS; i++) {
             if (wm_wins[i].visible) {
                 wm_wins[i].dragging = 0;
@@ -624,6 +637,7 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                 wm_wins[i].resize_edge = 0;
             }
         }
+        if (handled_release) return 1;
     }
 
     if (!click) return 0;

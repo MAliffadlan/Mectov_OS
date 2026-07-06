@@ -391,6 +391,20 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
                 drag_offset_y = my - ic->y;
                 drag_start_x = ic->x;
                 drag_start_y = ic->y;
+
+                // Double click detection directly on mouse down to bypass drag coordinate jumps
+                uint32_t now = get_ticks();
+                if (i == last_clicked_icon && (now - last_click_tick) < 800) {
+                    if (ic->action) {
+                        ic->action();
+                    }
+                    last_clicked_icon = -1;
+                    last_click_tick = 0;
+                    dragged_icon = -1; // Cancel drag on double-click
+                } else {
+                    last_clicked_icon = i;
+                    last_click_tick = now;
+                }
                 return;
             }
         }
@@ -424,33 +438,19 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
             int dy = icons[dragged_icon].y - drag_start_y;
             int dist_sq = dx * dx + dy * dy;
 
-            // Jika pergeseran mouse sangat kecil (toleransi 20 piksel), anggap sebagai klik
-            if (dist_sq < 400) {
+            // Save new position only if dragged significantly (>= 10 pixels)
+            if (dist_sq >= 100) {
+                save_desktop_icons();
+            } else {
+                // Snap back to start position to prevent accidental shifts on single click
                 extern void mark_dirty(int, int, int, int);
                 mark_dirty(icons[dragged_icon].x - 4, icons[dragged_icon].y - 4, 88, 104);
-
-                // Kembalikan ikon ke posisi awal agar tidak bergeser sedikit demi sedikit akibat jitter klik
                 icons[dragged_icon].x = drag_start_x;
                 icons[dragged_icon].y = drag_start_y;
-                
                 mark_dirty(icons[dragged_icon].x - 4, icons[dragged_icon].y - 4, 88, 104);
                 
-                uint32_t now = get_ticks();
-                if (dragged_icon == last_clicked_icon && (now - last_click_tick) < 500) {
-                    // Double click detected! Buka aplikasi
-                    if (icons[dragged_icon].action) {
-                        icons[dragged_icon].action();
-                    }
-                    last_clicked_icon = -1;
-                    last_click_tick = 0;
-                } else {
-                    // Single click: catat icon dan waktu klik untuk deteksi double click berikutnya
-                    last_clicked_icon = dragged_icon;
-                    last_click_tick = now;
-                }
-            } else {
-                // Pergeseran besar, simpan posisi baru ikon desktop
-                save_desktop_icons();
+                extern int needs_redraw;
+                needs_redraw = 1;
             }
             dragged_icon = -1;
         }
