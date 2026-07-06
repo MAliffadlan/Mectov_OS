@@ -465,45 +465,32 @@ void swap_buffers(void) {
     int w = d_max_x - d_min_x;
 
     if (fb_bpp == 32) {
+        uint32_t copy_bytes = w * 4;
         for (int y = d_min_y; y < d_max_y; y++) {
             uint32_t* src = back_buffer + y * fb_width + d_min_x;
-            uint32_t* shadow = front_buffer_copy + y * fb_width + d_min_x;
             uint32_t* dst = (uint32_t*)((uint8_t*)fb_addr + y * fb_pitch) + d_min_x;
             
-            int w_dwords = w / 2;
-            uint64_t* src64 = (uint64_t*)src;
-            uint64_t* sh64 = (uint64_t*)shadow;
+            // Fast direct block copy to VRAM (MMIO)
+            memcpy(dst, src, copy_bytes);
             
-            // Compare 2 pixels (64-bit) at a time. If different, copy both pixels directly.
-            for (int i = 0; i < w_dwords; i++) {
-                if (src64[i] != sh64[i]) {
-                    int px = i * 2;
-                    dst[px] = src[px];
-                    dst[px+1] = src[px+1];
-                    sh64[i] = src64[i];
-                }
-            }
-            if (w & 1) {
-                int px = w - 1;
-                if (src[px] != shadow[px]) {
-                    dst[px] = src[px];
-                    shadow[px] = src[px];
-                }
+            // Also keep shadow copy in sync (RAM to RAM, very fast)
+            if (front_buffer_copy) {
+                uint32_t* shadow = front_buffer_copy + y * fb_width + d_min_x;
+                memcpy(shadow, src, copy_bytes);
             }
         }
     } else if (fb_bpp == 24) {
         for (int y = d_min_y; y < d_max_y; y++) {
             uint32_t* src = back_buffer + y * fb_width + d_min_x;
-            uint32_t* shadow = front_buffer_copy + y * fb_width + d_min_x;
             uint8_t*  dst = (uint8_t*)fb_addr + y * fb_pitch + d_min_x * 3;
             
             for (int x = 0; x < w; x++) {
-                if (src[x] != shadow[x]) {
-                    uint32_t c = src[x];
-                    dst[x * 3 + 0] = c & 0xFF;
-                    dst[x * 3 + 1] = (c >> 8) & 0xFF;
-                    dst[x * 3 + 2] = (c >> 16) & 0xFF;
-                    shadow[x] = c;
+                uint32_t c = src[x];
+                dst[x * 3 + 0] = c & 0xFF;
+                dst[x * 3 + 1] = (c >> 8) & 0xFF;
+                dst[x * 3 + 2] = (c >> 16) & 0xFF;
+                if (front_buffer_copy) {
+                    front_buffer_copy[y * fb_width + d_min_x + x] = c;
                 }
             }
         }
