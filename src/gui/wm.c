@@ -66,6 +66,120 @@ void wm_focus_next(void) {
     wm_wins[new_top_idx].minimized = 0; // Restore if minimized
 }
 
+int alt_tab_active = 0;
+int alt_tab_selected_idx = 0;
+
+void wm_alt_tab_start(void) {
+    if (wm_zcount <= 1) return;
+    alt_tab_active = 1;
+    alt_tab_selected_idx = 1; // Highlight the second window by default
+}
+
+void wm_alt_tab_next(void) {
+    if (!alt_tab_active || wm_zcount <= 1) return;
+    alt_tab_selected_idx = (alt_tab_selected_idx + 1) % wm_zcount;
+}
+
+void wm_alt_tab_end(void) {
+    if (!alt_tab_active) return;
+    alt_tab_active = 0;
+    
+    if (wm_zcount <= 1) return;
+    
+    // Select the highlighted window: HUD lists windows from top to bottom
+    int target_idx = wm_zorder[wm_zcount - 1 - alt_tab_selected_idx];
+    wm_wins[target_idx].minimized = 0;
+    wm_raise(wm_wins[target_idx].id);
+}
+
+static void draw_hud_icon(int ix, int iy, const char* title) {
+    uint32_t bg_col = 0x00FFFFFF;
+    if (strncmp(title, "Terminal", 8) == 0) bg_col = 0x002D3748;
+    else if (strncmp(title, "File Expl", 9) == 0 || strncmp(title, "Explorer", 8) == 0) bg_col = 0x003182CE;
+    else if (strncmp(title, "System In", 9) == 0 || strncmp(title, "SysInfo", 7) == 0) bg_col = 0x00E2E8F0;
+    else if (strncmp(title, "Clock", 5) == 0) bg_col = 0x00FFFFFF;
+    else if (strncmp(title, "PCI", 3) == 0) bg_col = 0x00DD6B20;
+    else if (strncmp(title, "Mini Brow", 9) == 0 || strncmp(title, "Browser", 7) == 0) bg_col = 0x00319795;
+    else if (strncmp(title, "Snake", 5) == 0) bg_col = 0x0038A169;
+    else if (strncmp(title, "Calc", 4) == 0) bg_col = 0x00718096;
+    else if (strncmp(title, "Editor", 6) == 0 || strncmp(title, "Notepad", 7) == 0) bg_col = 0x00718096;
+    else if (strncmp(title, "Task Mgr", 8) == 0 || strncmp(title, "Task Manager", 12) == 0) bg_col = 0x004A5568;
+    else if (strncmp(title, "Flappy", 6) == 0) bg_col = 0x00ECC94B;
+    else if (strncmp(title, "Media", 5) == 0) bg_col = 0x00D53F8C;
+    else bg_col = 0x00718096;
+
+    draw_rounded_rect(ix, iy, 24, 24, 6, bg_col);
+
+    if (strncmp(title, "Terminal", 8) == 0) {
+        draw_string_px(ix + 5, iy + 5, ">_", 0x0048BB78, 0xFFFFFFFF);
+    } else {
+        char letter[2];
+        letter[0] = title[0];
+        letter[1] = '\0';
+        uint32_t text_col = (bg_col == 0x00FFFFFF || bg_col == 0x00E2E8F0) ? 0x0011111B : 0x00FFFFFF;
+        draw_string_px(ix + 8, iy + 5, letter, text_col, 0xFFFFFFFF);
+    }
+}
+
+static void wm_draw_alt_tab_hud(void) {
+    if (!alt_tab_active || wm_zcount <= 1) return;
+
+    int item_w = 56;
+    int gap = 14;
+    int padding = 20;
+    
+    int hud_w = padding * 2 + wm_zcount * item_w + (wm_zcount - 1) * gap;
+    if (hud_w < 180) hud_w = 180;
+    int hud_h = 96;
+    
+    int hx = ((int)fb_width - hud_w) / 2;
+    int hy = ((int)fb_height - hud_h) / 2;
+    
+    // Background card (Catppuccin dark look)
+    draw_rounded_rect(hx, hy, hud_w, hud_h, 12, 0x00181825);
+    draw_rounded_rect_border(hx, hy, hud_w, hud_h, 12, 0x00313244);
+    
+    // Draw each visible window in switcher
+    for (int i = 0; i < wm_zcount; i++) {
+        int idx = wm_zorder[wm_zcount - 1 - i];
+        int item_x = hx + padding + i * (item_w + gap);
+        int item_y = hy + 16;
+        
+        int selected = (i == alt_tab_selected_idx);
+        
+        // Highlight box
+        if (selected) {
+            draw_rounded_rect(item_x - 4, item_y - 4, item_w + 8, item_w + 8, 8, 0x00313244);
+            draw_rounded_rect_border(item_x - 4, item_y - 4, item_w + 8, item_w + 8, 8, 0x0089B4FA);
+        }
+        
+        // Icon
+        int icon_x = item_x + (item_w - 24) / 2;
+        int icon_y = item_y + 6;
+        draw_hud_icon(icon_x, icon_y, wm_wins[idx].title);
+        
+        // Short text label
+        char short_title[6];
+        int j = 0;
+        for (; j < 4 && wm_wins[idx].title[j]; j++) {
+            short_title[j] = wm_wins[idx].title[j];
+        }
+        if (strlen(wm_wins[idx].title) > 4) {
+            short_title[j++] = '.';
+        }
+        short_title[j] = '\0';
+        
+        uint32_t text_col = selected ? 0x0089B4FA : 0x00A6ADC8;
+        draw_string_px(item_x + (item_w - j*8)/2, item_y + 36, short_title, text_col, 0xFFFFFFFF);
+    }
+    
+    // Selected window name at the bottom of the HUD card
+    int active_idx = wm_zorder[wm_zcount - 1 - alt_tab_selected_idx];
+    const char* full_title = wm_wins[active_idx].title;
+    int title_len = strlen(full_title);
+    draw_string_px(hx + (hud_w - title_len*8)/2, hy + 76, full_title, 0x00F5C2E7, 0xFFFFFFFF);
+}
+
 // ---- Open / Close ----
 int wm_open(int x, int y, int w, int h, const char* title,
             WinDrawFn draw_fn, WinKeyFn key_fn, WinTickFn tick_fn, WinMouseFn mouse_fn) {
@@ -335,6 +449,7 @@ static void draw_one(int idx) {
 
 void wm_draw_all() {
     for (int z = 0; z < wm_zcount; z++) draw_one(wm_zorder[z]);
+    wm_draw_alt_tab_hud();
 }
 
 // ---- Mouse handling ----

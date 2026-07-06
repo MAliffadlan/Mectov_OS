@@ -54,6 +54,12 @@ extern int wm_focused;
 void wm_init();
 void wm_raise(int id);
 void wm_focus_next(void);
+
+extern int alt_tab_active;
+extern int alt_tab_selected_idx;
+void wm_alt_tab_start(void);
+void wm_alt_tab_next(void);
+void wm_alt_tab_end(void);
 int  wm_open(int x, int y, int w, int h, const char* title,
              WinDrawFn draw_fn, WinKeyFn key_fn, WinTickFn tick_fn, WinMouseFn mouse_fn);
 void wm_close(int id);

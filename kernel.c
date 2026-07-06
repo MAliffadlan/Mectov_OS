@@ -231,10 +231,23 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             uint8_t sc = k_get_scancode();
             if (sc != 0) {
                 extern int keyboard_alt_held;
+                extern int alt_tab_active;
+                extern void wm_alt_tab_start(void);
+                extern void wm_alt_tab_next(void);
+                extern void wm_alt_tab_end(void);
+
                 if (sc == 0x0F && keyboard_alt_held) {
-                    extern void wm_focus_next(void);
-                    wm_focus_next();
+                    if (!alt_tab_active) {
+                        wm_alt_tab_start();
+                    } else {
+                        wm_alt_tab_next();
+                    }
                     needs_redraw = 1;
+                } else if (sc == 0xB8) { // Left Alt release
+                    if (alt_tab_active) {
+                        wm_alt_tab_end();
+                        needs_redraw = 1;
+                    }
                 } else if (sc < 0x80 || sc == 0xE0) {
                     char c = scancode_to_char(sc);
                     wm_handle_key(c, sc);
