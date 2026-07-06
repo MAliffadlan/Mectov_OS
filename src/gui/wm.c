@@ -46,6 +46,8 @@ void wm_raise(int id) {
             z_remove(i);
             if (wm_zcount < MAX_WINDOWS) wm_zorder[wm_zcount++] = i;
             wm_focused = id;
+            extern void mark_dirty(int, int, int, int);
+            mark_dirty(0, 0, fb_width, fb_height); // Mark fullscreen dirty on focus change
             return;
         }
     }
@@ -61,9 +63,12 @@ void wm_focus_next(void) {
     }
     wm_zorder[0] = top_idx;
     
+    // Find the new top window index in wm_wins
     int new_top_idx = wm_zorder[wm_zcount - 1];
     wm_focused = wm_wins[new_top_idx].id;
     wm_wins[new_top_idx].minimized = 0; // Restore if minimized
+    extern void mark_dirty(int, int, int, int);
+    mark_dirty(0, 0, fb_width, fb_height); // Mark fullscreen dirty on z-order shift
 }
 
 int alt_tab_active = 0;
@@ -289,6 +294,8 @@ void wm_close(int id) {
     write_serial('\n');
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (wm_wins[i].visible && wm_wins[i].id == id) {
+            extern void mark_dirty(int, int, int, int);
+            mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // Mark closed window area dirty
             // If owned by a user task, kill the task.
             // task_kill will automatically call wm_cleanup_task,
             // which will hide the window and remove it from z-order.
@@ -318,6 +325,9 @@ void wm_close(int id) {
 static void check_snap(int idx) {
     WmWin* w = &wm_wins[idx];
     if (w->maximized) return; // already fullscreen
+
+    int old_snap = w->snap_state;
+    int old_maximized = w->maximized;
 
     // Distance from edges
     int dist_left   = w->x;
@@ -363,6 +373,10 @@ static void check_snap(int idx) {
             w->snap_state = SNAP_NONE;
         }
     }
+    if (w->snap_state != old_snap || w->maximized != old_maximized) {
+        extern void mark_dirty(int, int, int, int);
+        mark_dirty(0, 0, fb_width, fb_height);
+    }
 }
 
 // ---- Draw a single window ----
@@ -371,9 +385,6 @@ static void draw_one(int idx) {
     if (!w->visible || w->minimized) return;
     int x = w->x, y = w->y, ww = w->w, wh = w->h;
     int focused = (wm_focused == w->id);
-    int radius = WIN_RADIUS;
-
-    // Skip border radius if snapped to edge (clean, modern look)
     int use_radius = (w->snap_state != SNAP_NONE || w->maximized) ? 4 : WIN_RADIUS;
 
     // ========== Window Body (rounded rect) ==========
@@ -504,6 +515,9 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
             if (wm_wins[i].visible) {
                 // Resize
                 if (wm_wins[i].resizing) {
+                    extern void mark_dirty(int, int, int, int);
+                    mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // Old bounds dirty
+                    
                     int dx = mx - wm_wins[i].resize_mx;
                     int dy = my - wm_wins[i].resize_my;
                     
@@ -536,10 +550,15 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                     wm_wins[i].y = new_y;
                     wm_wins[i].w = new_w;
                     wm_wins[i].h = new_h;
+                    
+                    mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // New bounds dirty
                     return 1;
                 }
                 // Drag
                 if (wm_wins[i].dragging) {
+                    extern void mark_dirty(int, int, int, int);
+                    mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // Old bounds dirty
+                    
                     wm_wins[i].x = wm_wins[i].drag_wx + (mx - wm_wins[i].drag_mx);
                     wm_wins[i].y = wm_wins[i].drag_wy + (my - wm_wins[i].drag_my);
 
@@ -553,6 +572,8 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                         if (wm_wins[i].x + wm_wins[i].w > (int)fb_width)
                             wm_wins[i].x = (int)fb_width - wm_wins[i].w;
                     }
+                    
+                    mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // New bounds dirty
                     return 1;
                 }
             }
@@ -599,6 +620,8 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                 dx = mx - w->max_cx; dy = my - w->max_cy;
                 dist2 = dx*dx + dy*dy;
                 if (dist2 <= w->max_r * w->max_r + 4) {
+                    extern void mark_dirty(int, int, int, int);
+                    mark_dirty(0, 0, fb_width, fb_height); // Mark fullscreen dirty for state transition
                     if (w->maximized || w->snap_state != SNAP_NONE) {
                         // Restore from snap/maximize
                         w->x = w->saved_x; w->y = w->saved_y;
@@ -613,6 +636,7 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                         w->h = (int)fb_height - (int)TASKBAR_H_PX;
                         w->maximized = 1;
                     }
+                    mark_dirty(0, 0, fb_width, fb_height);
                     return 1;
                 }
 
@@ -620,6 +644,7 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                 dx = mx - w->min_cx; dy = my - w->min_cy;
                 dist2 = dx*dx + dy*dy;
                 if (dist2 <= w->min_r * w->min_r + 4) {
+                    mark_dirty(w->x, w->y, w->w, w->h); // Mark old window bounds dirty
                     w->minimized = 1;
                     wm_focused = -1;
                     for (int zz = wm_zcount - 1; zz >= 0; zz--) {
@@ -721,6 +746,8 @@ void wm_cleanup_task(int tid) {
                 on_terminal_close();
             }
             
+            extern void mark_dirty(int, int, int, int);
+            mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // Mark bounds dirty before hiding
             wm_wins[i].visible = 0;
             if (wm_wins[i].content_buffer) {
                 extern void kfree(void*);

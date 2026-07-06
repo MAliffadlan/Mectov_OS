@@ -73,10 +73,7 @@ void full_redraw() {
     draw_string_px(fx, 23, fps_buf, 0x0000FF00, 0x00000000);
 
     draw_mouse_cursor(mouse_x, mouse_y);
-    
-    // Mark the whole screen dirty since full_redraw redraws everything
-    mark_dirty(0, 0, fb_width, fb_height);
-    
+
     wait_for_vsync();
     swap_buffers();
 
