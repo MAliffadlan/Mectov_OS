@@ -151,11 +151,11 @@ static void draw_dialog(int wid) {
     // Titlebar
     sys_draw_rect(wid, dx, dy, dw, 22, 0x0089B4FA);
     if (dialog_mode == 1) {
-        sys_draw_text(wid, dx + 8, dy + 3, "Berkas Baru", 0x00111111);
+        sys_draw_text(wid, dx + 8, dy + 3, "New File", 0x00111111);
     } else if (dialog_mode == 2) {
-        sys_draw_text(wid, dx + 8, dy + 3, "Direktori Baru", 0x00111111);
+        sys_draw_text(wid, dx + 8, dy + 3, "New Folder", 0x00111111);
     } else {
-        sys_draw_text(wid, dx + 8, dy + 3, "Ubah Nama", 0x00111111);
+        sys_draw_text(wid, dx + 8, dy + 3, "Rename", 0x00111111);
     }
 
     // Input text field box
@@ -172,7 +172,7 @@ static void draw_dialog(int wid) {
     sys_draw_text(wid, dx + 18, dy + 40, disp, 0x00A6E3A1);
 
     // Help Footer
-    sys_draw_text(wid, dx + 12, dy + 74, "ENTER = OK  |  ESC = Batal", 0x00585B70);
+    sys_draw_text(wid, dx + 12, dy + 74, "ENTER = OK  |  ESC = Cancel", 0x00585B70);
 }
 
 static void draw_explorer(int wid) {
@@ -221,11 +221,11 @@ static void draw_explorer(int wid) {
     sys_draw_rect(wid, 72, 25, 70, 17, 0x00313244);
     sys_draw_text(wid, 78, 26, "+Folder", 0x00CDD6F4);
 
-    // Draw "Hapus" button (only highlighted if selected >= 0)
+    // Draw "Delete" button (only highlighted if selected >= 0)
     uint32_t del_bg = (selected >= 0) ? 0x00F38BA8 : 0x00252535;
     uint32_t del_fg = (selected >= 0) ? 0x0011111B : 0x00585B70;
-    sys_draw_rect(wid, 148, 25, 55, 17, del_bg);
-    sys_draw_text(wid, 154, 26, "Hapus", del_fg);
+    sys_draw_rect(wid, 148, 25, 60, 17, del_bg);
+    sys_draw_text(wid, 154, 26, "Delete", del_fg);
 
     // Column headers
     sys_draw_rect(wid, 0, 44, cw, 20, 0x00181825);
@@ -281,7 +281,7 @@ static void draw_explorer(int wid) {
     }
 
     if (entry_count == 0) {
-        sys_draw_text(wid, 8, list_top + 8, "Direktori kosong.", 0x006C7086);
+        sys_draw_text(wid, 8, list_top + 8, "Directory is empty.", 0x006C7086);
     }
 
     // ====== Status bar ======
@@ -317,9 +317,9 @@ static void draw_explorer(int wid) {
         sys_draw_rect(wid, dx, dy, dw, dh, 0x00E2E8F0);
         
         const char* ctx_items[] = {
-            "Buka",
-            "Hapus",
-            "Ubah Nama"
+            "Open",
+            "Delete",
+            "Rename"
         };
         
         for (int i = 0; i < 3; i++) {
@@ -505,8 +505,8 @@ void _start() {
                         continue;
                     }
 
-                    // Check "Hapus" click
-                    if (click_x >= 148 && click_x <= 203 && click_y >= 25 && click_y <= 42) {
+                    // Check "Delete" click
+                    if (click_x >= 148 && click_x <= 208 && click_y >= 25 && click_y <= 42) {
                         if (selected >= 0) {
                             char full_path[256];
                             build_full_path(full_path, entries[selected].name);

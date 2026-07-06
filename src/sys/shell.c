@@ -785,12 +785,12 @@ static void run_cmd_internal() {
         // Use new VFS: read file data
         int node = vfs_get_node(fname);
         if (node < 0) {
-            print("File tidak ditemukan: ", 0x0C); print(fname, 0x0C); print("\n", 0x0C);
+            print("File not found: ", 0x0C); print(fname, 0x0C); print("\n", 0x0C);
         } else {
-            print("Membuka aplikasi MCT: ", 0x0A); print(fname, 0x0A); print("\n", 0x0A);
+            print("Launching MCT app: ", 0x0A); print(fname, 0x0A); print("\n", 0x0A);
             int res = load_mct_app_with_arg(fname, arg);
             if (res >= 0) {
-                print("[+] Task User Mode Dibuat! (Task ID: ", 0x0A); p_int(res, 0x0A); print(")\n", 0x0A);
+                print("[+] User Mode Task Created! (Task ID: ", 0x0A); p_int(res, 0x0A); print(")\n", 0x0A);
                 
                 extern int term_app_running;
                 extern int term_app_task_id;
@@ -798,7 +798,7 @@ static void run_cmd_internal() {
                 term_app_task_id = res;
                 return; // DO NOT PRINT PROMPT
             } else {
-                print("[-] Gagal mengeksekusi MCT.\n", 0x0C);
+                print("[-] Failed to execute MCT.\n", 0x0C);
             }
         }
     }
@@ -808,9 +808,9 @@ static void run_cmd_internal() {
         sanitize_path(fname);
         // Use new VFS
         int res = vfs_create_file(fname);
-        if (res >= 0) print("File berhasil dibuat.\n", 0x0A);
-        else if (res == -2) print("File sudah ada.\n", 0x0C);
-        else print("Disk penuh!\n", 0x0C);
+        if (res >= 0) print("File created successfully.\n", 0x0A);
+        else if (res == -2) print("File already exists.\n", 0x0C);
+        else print("Disk is full!\n", 0x0C);
     }
     // --- BACA ---
     else if (strncmp(cmd_b, "baca ", 5) == 0) {
@@ -818,7 +818,7 @@ static void run_cmd_internal() {
         sanitize_path(fname);
         char buf[512];
         int sz = vfs_read_file(fname, buf, 511);
-        if (sz < 0) print("File tidak ditemukan.\n", 0x0C);
+        if (sz < 0) print("File not found.\n", 0x0C);
         else { buf[sz] = '\0'; print(buf, 0x0F); print("\n", 0x0F); }
     }
     // --- Legacy: EDIT / TULIS / NANO ---
@@ -828,7 +828,7 @@ static void run_cmd_internal() {
         else if (strncmp(cmd_b, "tulis ", 6) == 0) fname = cmd_b + 6;
         else fname = cmd_b + 5;
         sanitize_path(fname);
-        print("Membuka Editor...\n", 0x0E);
+        print("Launching Editor...\n", 0x0E);
         st_ed(fname);
     }
     // --- Legacy: HAPUS ---
@@ -836,8 +836,8 @@ static void run_cmd_internal() {
         char* fname = cmd_b + 6;
         sanitize_path(fname);
         int res = vfs_delete_node(fname);
-        if (res < 0) print("File tidak ditemukan.\n", 0x0C);
-        else print("File dihapus.\n", 0x0A);
+        if (res < 0) print("File not found.\n", 0x0C);
+        else print("File deleted.\n", 0x0A);
     }
     // --- PING ---
     else if (strncmp(cmd_b, "ping ", 5) == 0) {

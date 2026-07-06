@@ -177,9 +177,9 @@ static void draw_statusbar(void) {
     sys_draw_rect(wid, 0, sy, CW, 1, 0x00D0D0D0);
 
     if (mode == MODE_SAVEAS) {
-        sys_draw_text(wid, 6, sy+3, "Menunggu nama berkas...", 0x00003399);
+        sys_draw_text(wid, 6, sy+3, "Waiting for filename...", 0x00003399);
     } else if (save_flash > 0) {
-        sys_draw_text(wid, 6, sy+3, "Tersimpan!", 0x00008800);
+        sys_draw_text(wid, 6, sy+3, "Saved!", 0x00008800);
         if (has_file)
             sys_draw_text(wid, 100, sy+3, filepath, 0x00555555);
     } else {
@@ -213,10 +213,10 @@ static void draw_saveas_dialog(void) {
     sys_draw_rect(wid, dx, dy, dw, dh, 0x00E2E8F0); // Card BG
     // Header bar
     sys_draw_rect(wid, dx, dy, dw, 24, 0x0089B4FA); // Blue titlebar
-    sys_draw_text(wid, dx + 10, dy + 5, "Simpan Sebagai...", 0x00111111);
+    sys_draw_text(wid, dx + 10, dy + 5, "Save As...", 0x00111111);
 
     // Label
-    sys_draw_text(wid, dx + 16, dy + 38, "Nama berkas (di /home):", 0x00313244);
+    sys_draw_text(wid, dx + 16, dy + 38, "Filename (in /home):", 0x00313244);
 
     // Input text field
     sys_draw_rect(wid, dx + 16, dy + 58, dw - 32, 22, 0x0011111B); // Dark input box
@@ -230,7 +230,7 @@ static void draw_saveas_dialog(void) {
     sys_draw_text(wid, dx + 24, dy + 61, disp, 0x00A6E3A1); // Green input text
 
     // Help Footer
-    sys_draw_text(wid, dx + 16, dy + 92, "ENTER = OK  |  ESC = Batal", 0x00585B70);
+    sys_draw_text(wid, dx + 16, dy + 92, "ENTER = OK  |  ESC = Cancel", 0x00585B70);
 }
 
 static void draw_all(void) {

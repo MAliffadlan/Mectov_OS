@@ -256,10 +256,10 @@ void desktop_draw() {
         draw_rect(dx + dw - 1, dy, 1, dh, 0x00313244);
         
         const char* menu_items[] = {
-            "Buka Terminal",
-            "Buka Explorer",
-            "Info Sistem",
-            "Muat Ulang"
+            "Open Terminal",
+            "Open Explorer",
+            "System Info",
+            "Refresh"
         };
         
         for (int i = 0; i < 4; i++) {

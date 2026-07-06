@@ -410,7 +410,7 @@ void taskbar_draw() {
             {"Clock", 5, 0x00FFFFFF},
             {"PCI Manager", 11, 0x00DD6B20},
             {"Snake Game", 10, 0x0038A169},
-            {"Manajer Tugas", 13, 0x00805AD5},
+            {"Task Manager", 12, 0x00805AD5},
             {"Logout", 6, 0x00000000},
             {"Power Off", 9, 0x00000000},
         };
