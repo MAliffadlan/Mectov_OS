@@ -1,4 +1,4 @@
-# Mectov OS v30.2 — The Alt+Tab Window Switching & English Localization Update
+# Mectov OS v31.0 — The Graphics Pipeline & Compositing Performance Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,14 +6,13 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v30.2 release delivers system-wide Alt+Tab window switching, standard Escape key driver mappings, fully English-localized menus/status feedback, integrated kernel clipboard support, and File Explorer VFS CRUD controls:
-1. **Alt+Tab Window Switcher:** Integrated Left Alt modifier key press/release tracking (`scancode 0x38`/`0xB8`) in the keyboard driver and intercepted Tab key (`scancode 0x0F`) in the kernel loop to cycle active focus through visible windows using `wm_focus_next()`.
-2. **Escape Key Mapping Fix:** Fixed keyboard driver's `scancode_to_char` to map the Escape key (scancode `0x01`) to its proper ASCII value `27` (`0x1B`). This resolves bugs where pressing ESC printed raw values and failed to close dialogs.
-3. **Full English Localization:** Translated all mixed Indonesian UI components, start menu options (e.g. `"Task Manager"`), dialog prompts, shell command printouts, and window context menus into English.
-4. **Kernel Clipboard Subsystem (v30.0):** Created a global clipboard manager (`src/sys/clipboard.c`) supporting copy-paste operations between applications via `SYS_CLIPBOARD_COPY` (56) and `SYS_CLIPBOARD_PASTE` (57).
-5. **Explorer CRUD Controls (v30.0):** Added a top toolbar to File Explorer (`explorer.c`) with "+File", "+Folder", and "Delete" buttons. Added modal input overlays to name files/folders and delete/rename VFS items.
-6. **VFS Syscall Upgrades (v30.0):** Added new kernel system calls `SYS_DELETE_FILE` (58), `SYS_MKDIR` (59), and `SYS_RENAME_FILE` (60) to support file/folder creation, deletion, and renaming from Ring 3.
-7. **Right-Click Context Menus (v30.0):** Implemented right-click mouse detection (`btn & 2`) in both Desktop (`src/gui/desktop.c`) and File Explorer to open custom Catppuccin-styled context menus with options to launch apps, delete, and rename items.
+The v31.0 release delivers significant graphics compositing optimizations, an event-driven redraw architecture, 64-bit comparison pixel blitting, system-wide Alt+Tab window switching, and Escape key driver mappings:
+1. **Event-Driven Compositor:** Replaced the forced 60Hz polling compositor with an event-driven compositor that only redraws on actual hardware interrupts or user space requests. This drops idle CPU load to 0% in virtual machines.
+2. **64-Bit Pixel Comparison:** Casts window buffer scans to 64-bit (`uint64_t*`) in `swap_buffers()`, comparing 2 pixels per clock cycle and instantly skipping identical areas to drastically reduce RAM copy overhead.
+3. **Redraw Syscall Trigger:** Configured `SYS_UPDATE_WINDOW` (17) syscall to set `needs_redraw = 1` globally, ensuring user-space window updates are instantly recomposed.
+4. **Alt+Tab Window Switcher (v30.4):** Integrated Alt modifier tracking and Tab interception with a Catppuccin Alt+Tab HUD card overlay displaying active app icons, titles, and a selection highlight.
+5. **Escape Key Mapping Fix (v30.1):** Fixed keyboard driver's `scancode_to_char` to map the Escape key (scancode `0x01`) to its proper ASCII value `27` (`0x1B`), fixing dialog dismiss behavior.
+6. **Full English Localization (v30.1):** Localized all Indonesian menu labels, status indicators, and shell command centers to English.
 
 Created by M Alif Fadlan.
 
@@ -382,6 +381,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v31.0 | **Graphics Pipeline & Compositing Performance Update:** Shifted the main rendering loop in `kernel.c` to an event-driven model, removing forced 60Hz polling to lower idle CPU load to 0%. Optimized VRAM compositing in `swap_buffers` (`src/drivers/vga.c`) by comparing 2 pixels per iteration using 64-bit casting (`uint64_t*`), skipping static content instantly. Configured `SYS_UPDATE_WINDOW` syscall to trigger compositor redraws via global `needs_redraw`. |
 | v30.2 | **Alt+Tab Window Switcher & English Localization Update:** Added Left Alt modifier key press/release state tracking in the keyboard driver and intercepted Tab scancodes in the main loop to cycle focus between active windows via `wm_focus_next()`. Fixed Escape key (scancode 0x01) ASCII translation mapping. Translated all remaining Indonesian strings across menus, shell feedback, dialog boxes, and toolbar layouts to English. |
 | v30.0 | **Clipboard, Explorer CRUD & Context Menu Update:** Implemented global kernel clipboard manager (`src/sys/clipboard.c`) and user stubs for app copy-paste capability. Added "+File", "+Folder", and "Hapus" toolbar buttons with name input modals in File Explorer. Added kernel syscalls `SYS_DELETE_FILE` (58), `SYS_MKDIR` (59), and `SYS_RENAME_FILE` (60) to support Ring 3 CRUD actions. Implemented custom Catppuccin right-click context menus on Desktop and File Explorer for direct app launches, deletion, and renaming. |
 | v29.0 | **File Association & Explorer Double-Click Update:** Upgraded File Explorer (`explorer.c`) to support double-click (second-click on selected item) file associations. Double-clicking `.mct` runs the binary, `.wav` plays in Media Player (`/apps/mplayer.mct`), and other text files edit in Notepad (`/apps/notepad.mct`). Upgraded kernel command executor (`src/sys/shell.c`) to parse arguments for the `jalankan` command, splitting program path from arguments and launching via `load_mct_app_with_arg()`. |
