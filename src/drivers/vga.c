@@ -470,30 +470,43 @@ void swap_buffers(void) {
             uint32_t* shadow = front_buffer_copy + y * fb_width + d_min_x;
             uint32_t* dst = (uint32_t*)((uint8_t*)fb_addr + y * fb_pitch) + d_min_x;
             
-            int w_dwords = w / 2;
-            uint64_t* src64 = (uint64_t*)src;
-            uint64_t* sh64 = (uint64_t*)shadow;
-            
-            // Compare 2 pixels at a time (64-bit) to skip matching blocks quickly
-            for (int i = 0; i < w_dwords; i++) {
-                if (src64[i] != sh64[i]) {
-                    int px0 = i * 2;
-                    int px1 = px0 + 1;
-                    if (src[px0] != shadow[px0]) {
+            if (w > 64) {
+                // Fast path: use rep movsd for large spans (window dragging/repaints)
+                uint32_t count = w;
+                __asm__ __volatile__(
+                    "rep movsd"
+                    : "+D"(dst), "+S"(src), "+c"(count)
+                    :: "memory"
+                );
+                // Sync shadow buffer
+                uint32_t* sh = shadow;
+                uint32_t* s = src;
+                uint32_t sh_count = w;
+                __asm__ __volatile__(
+                    "rep movsd"
+                    : "+D"(sh), "+S"(s), "+c"(sh_count)
+                    :: "memory"
+                );
+            } else {
+                // Slow path: 64-bit comparison for small updates (cursor, text caret)
+                int w_dwords = w / 2;
+                uint64_t* src64 = (uint64_t*)src;
+                uint64_t* sh64 = (uint64_t*)shadow;
+                
+                for (int i = 0; i < w_dwords; i++) {
+                    if (src64[i] != sh64[i]) {
+                        int px0 = i * 2;
                         dst[px0] = src[px0];
-                        shadow[px0] = src[px0];
-                    }
-                    if (src[px1] != shadow[px1]) {
-                        dst[px1] = src[px1];
-                        shadow[px1] = src[px1];
+                        dst[px0+1] = src[px0+1];
+                        sh64[i] = src64[i];
                     }
                 }
-            }
-            if (w & 1) {
-                int px = w - 1;
-                if (src[px] != shadow[px]) {
-                    dst[px] = src[px];
-                    shadow[px] = src[px];
+                if (w & 1) {
+                    int px = w - 1;
+                    if (src[px] != shadow[px]) {
+                        dst[px] = src[px];
+                        shadow[px] = src[px];
+                    }
                 }
             }
         }
