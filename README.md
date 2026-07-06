@@ -1,4 +1,4 @@
-# Mectov OS v28.0 — The DOOM Memory Protection & HUD Font Update
+# Mectov OS v29.0 — The File Association & Explorer Double-Click Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,12 +6,14 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v28.0 release delivers fully integrated DOOM game execution, kernel memory isolation, HUD font rendering via vsnprintf precision formatting, and desktop window recovery fixes:
-1. **DOOM Memory Protection:** Relocated the kernel heap basis (`kmalloc`) from 16MB to 24MB (`src/sys/mem.c`) and capped `max_heap` at 24MB, completely resolving overlapping memory collisions with DOOM's 16.95 MB BSS section and preventing Page Faults on game initialization.
-2. **HUD Font Precision Formatting:** Implemented standard integer precision padding (`%.3d`) in `doom_vsnprintf` (`doom/doom_libc.c`), allowing the game to successfully format and load `STCFN033`-`STCFN127` HUD font lumps from the WAD file.
-3. **Graceful Fullscreen Reset & Recovery:** Added automatic fullscreen flag reset (`doom_fullscreen = 0`) in the task cleanup function (`src/gui/wm.c`) to ensure the Desktop GUI is fully restored and remains responsive when the DOOM task is closed or terminated.
-4. **Desktop Icon Count Alignment:** Adjusted desktop `ICON_COUNT` to 11 (`src/include/desktop.h`) to properly hide the corrupt trash bin icon at coordinate `(0,0)`.
-5. **Per-Task Working Directory (v27.7):** Converted the VFS `current_dir` from a global system variable to a thread-local task property (`task_t.current_dir`), ensuring that navigation (`cd`) in one terminal does not conflict with other terminals or desktop apps.
+The v29.0 release delivers fully integrated file associations, double-click launch capability in File Explorer, shell argument parsing, DOOM game execution, kernel memory isolation, and GUI desktop recovery fixes:
+1. **File Association & Explorer Double-Click:** Upgraded File Explorer (`explorer.c`) to launch executable `.mct` binaries, play `.wav` audio files in Media Player (`mplayer.mct`), and open text/source files in Notepad (`notepad.mct`) automatically upon double-clicking (second-clicking a selected file).
+2. **Shell Argument Parser:** Enhanced the kernel shell command parser (`src/sys/shell.c`) to parse program path and trailing argument strings for the `jalankan` command, launching applications with arguments via `load_mct_app_with_arg()`.
+3. **DOOM Memory Protection (v28.0):** Relocated the kernel heap basis (`kmalloc`) from 16MB to 24MB (`src/sys/mem.c`) and capped `max_heap` at 24MB, completely resolving overlapping memory collisions with DOOM's 16.95 MB BSS section.
+4. **HUD Font Precision Formatting (v28.0):** Implemented standard integer precision padding (`%.3d`) in `doom_vsnprintf` (`doom/doom_libc.c`), allowing the game to successfully format and load `STCFN033`-`STCFN127` HUD font lumps from the WAD file.
+5. **Graceful Fullscreen Reset & Recovery (v28.0):** Added automatic fullscreen flag reset (`doom_fullscreen = 0`) in the task cleanup function (`src/gui/wm.c`) to ensure the Desktop GUI is fully restored when the DOOM task is closed.
+6. **Desktop Icon Count Alignment (v28.0):** Adjusted desktop `ICON_COUNT` to 11 (`src/include/desktop.h`) to properly hide the corrupt trash bin icon at coordinate `(0,0)`.
+7. **Per-Task Working Directory (v27.7):** Converted the VFS `current_dir` from a global system variable to a thread-local task property (`task_t.current_dir`), ensuring that navigation (`cd`) in one terminal does not conflict with other terminals or desktop apps.
 
 Created by M Alif Fadlan.
 
@@ -380,6 +382,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v29.0 | **File Association & Explorer Double-Click Update:** Upgraded File Explorer (`explorer.c`) to support double-click (second-click on selected item) file associations. Double-clicking `.mct` runs the binary, `.wav` plays in Media Player (`/apps/mplayer.mct`), and other text files edit in Notepad (`/apps/notepad.mct`). Upgraded kernel command executor (`src/sys/shell.c`) to parse arguments for the `jalankan` command, splitting program path from arguments and launching via `load_mct_app_with_arg()`. |
 | v28.0 | **DOOM Memory Protection, HUD Font & Crash Recovery Update:** Relocated kernel heap base from 16MB to 24MB (`src/sys/mem.c`) to completely resolve memory overlap/collision with the expanded kernel BSS section caused by DOOM's embedded static variables. Implemented integer precision formatting (`%.3d`) in `doom_vsnprintf` (`doom/doom_libc.c`) to fix HUD and quit-confirm pop-up font loading. Implemented automatic fullscreen flag reset (`doom_fullscreen = 0`) on task exit inside `wm_cleanup_task` (`src/gui/wm.c`) to prevent system-wide freezes on game exit/crash. Fixed overlapping desktop icons by aligning `ICON_COUNT` to 11 (`src/include/desktop.h`). |
 | v27.8 | **Nano Path Resolution Update:** Fixed relative path saving context bugs inside the kernel Nano editor (`src/apps/nano.c`) by resolving files to absolute paths via `vfs_resolve_path()` on startup. Upgraded the `ed_fn` buffer size from `MAX_FILENAME` (32) to `MAX_PATH` (256) in `nano.c` and `apps.h` to fully support deep path strings. |
 | v27.7 | **Per-Task Working Directory Update:** Refactored the VFS `current_dir` from a global system variable to a task-specific thread-local attribute (`task_t.current_dir`). This isolates working directories between terminals and GUI applications. Disabled active directory persistent restoration on boot to prevent prompt synchronization desync on startup. |

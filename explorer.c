@@ -285,10 +285,50 @@ void _start() { sys_print("starting explorer...\n", 0x0A);
                     if (click_y >= list_top && click_y < 340 - 20) {
                         int row = (click_y - list_top) / row_h + scroll_offset;
                         if (row >= 0 && row < entry_count) {
-                            selected = row;
-                            // Enter directory on click
-                            if (entries[row].type == 1) {
-                                navigate_into(entries[row].node_idx, entries[row].name);
+                            if (selected == row) {
+                                // Second click on the same row!
+                                if (entries[row].type == 0) {
+                                    // It's a file! Open it!
+                                    // Construct full path
+                                    char full_path[256];
+                                    int p_len = my_strlen(path_bar);
+                                    my_strcpy(full_path, path_bar);
+                                    if (p_len > 1 && path_bar[p_len - 1] != '/') {
+                                        full_path[p_len++] = '/';
+                                        full_path[p_len] = '\0';
+                                    }
+                                    my_strcpy(full_path + p_len, entries[row].name);
+
+                                    // Check extension
+                                    int nlen = my_strlen(entries[row].name);
+                                    char cmd[512];
+                                    if (nlen > 4 && entries[row].name[nlen-4] == '.' && 
+                                        entries[row].name[nlen-3] == 'm' && 
+                                        entries[row].name[nlen-2] == 'c' && 
+                                        entries[row].name[nlen-1] == 't') {
+                                        // Run executable directly
+                                        my_strcpy(cmd, "jalankan ");
+                                        my_strcpy(cmd + 9, full_path);
+                                    } else if (nlen > 4 && entries[row].name[nlen-4] == '.' && 
+                                               (entries[row].name[nlen-3] == 'w' || entries[row].name[nlen-3] == 'W') && 
+                                               (entries[row].name[nlen-2] == 'a' || entries[row].name[nlen-2] == 'A') && 
+                                               (entries[row].name[nlen-1] == 'v' || entries[row].name[nlen-1] == 'V')) {
+                                        // Play WAV file in mplayer
+                                        my_strcpy(cmd, "jalankan /apps/mplayer.mct ");
+                                        my_strcpy(cmd + 27, full_path);
+                                    } else {
+                                        // Open standard files in Notepad
+                                        my_strcpy(cmd, "jalankan /apps/notepad.mct ");
+                                        my_strcpy(cmd + 27, full_path);
+                                    }
+                                    sys_exec_cmd(cmd);
+                                }
+                            } else {
+                                selected = row;
+                                // Enter directory on click
+                                if (entries[row].type == 1) {
+                                    navigate_into(entries[row].node_idx, entries[row].name);
+                                }
                             }
                         }
                     }

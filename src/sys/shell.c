@@ -769,13 +769,26 @@ static void run_cmd_internal() {
     else if (strncmp(cmd_b, "jalankan ", 9) == 0) {
         char* fname = cmd_b + 9;
         sanitize_path(fname);
+        
+        // Split program name and arguments
+        char* arg = "";
+        for (int i = 0; fname[i]; i++) {
+            if (fname[i] == ' ') {
+                fname[i] = '\0';
+                arg = fname + i + 1;
+                // Trim leading spaces from argument
+                while (*arg == ' ') arg++;
+                break;
+            }
+        }
+
         // Use new VFS: read file data
         int node = vfs_get_node(fname);
         if (node < 0) {
             print("File tidak ditemukan: ", 0x0C); print(fname, 0x0C); print("\n", 0x0C);
         } else {
             print("Membuka aplikasi MCT: ", 0x0A); print(fname, 0x0A); print("\n", 0x0A);
-            int res = load_mct_app(fname);
+            int res = load_mct_app_with_arg(fname, arg);
             if (res >= 0) {
                 print("[+] Task User Mode Dibuat! (Task ID: ", 0x0A); p_int(res, 0x0A); print(")\n", 0x0A);
                 
