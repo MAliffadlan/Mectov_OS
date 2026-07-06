@@ -101,17 +101,58 @@ static void draw_hud_icon(int ix, int iy, const char* title) {
     else if (strncmp(title, "PCI", 3) == 0) bg_col = 0x00DD6B20;
     else if (strncmp(title, "Mini Brow", 9) == 0 || strncmp(title, "Browser", 7) == 0) bg_col = 0x00319795;
     else if (strncmp(title, "Snake", 5) == 0) bg_col = 0x0038A169;
-    else if (strncmp(title, "Calc", 4) == 0) bg_col = 0x00718096;
+    else if (strncmp(title, "Calc", 4) == 0 || strncmp(title, "Calculator", 10) == 0) bg_col = 0x00718096;
     else if (strncmp(title, "Editor", 6) == 0 || strncmp(title, "Notepad", 7) == 0) bg_col = 0x00718096;
     else if (strncmp(title, "Task Mgr", 8) == 0 || strncmp(title, "Task Manager", 12) == 0) bg_col = 0x004A5568;
     else if (strncmp(title, "Flappy", 6) == 0) bg_col = 0x00ECC94B;
-    else if (strncmp(title, "Media", 5) == 0) bg_col = 0x00D53F8C;
+    else if (strncmp(title, "Media", 5) == 0 || strncmp(title, "Mplayer", 7) == 0) bg_col = 0x00D53F8C;
     else bg_col = 0x00718096;
 
-    draw_rounded_rect(ix, iy, 24, 24, 6, bg_col);
+    int size = 24;
+    int cx = ix + 12;
+    int cy = iy + 12;
+
+    draw_rounded_rect(ix, iy, size, size, 6, bg_col);
 
     if (strncmp(title, "Terminal", 8) == 0) {
-        draw_string_px(ix + 5, iy + 5, ">_", 0x0048BB78, 0xFFFFFFFF);
+        draw_string_px(ix + 4, iy + 4, ">_", 0x0048BB78, 0xFFFFFFFF);
+    } else if (strncmp(title, "File Expl", 9) == 0 || strncmp(title, "Explorer", 8) == 0) {
+        draw_rect(cx - size/3, cy - size/4, size*2/3, size/2, 0x00FFFFFF);
+        draw_rect(cx - size/3, cy - size/4 - 1, size/4, 2, 0x00EBF8FF);
+    } else if (strncmp(title, "System In", 9) == 0 || strncmp(title, "SysInfo", 7) == 0) {
+        draw_rect(cx - size/3, cy - size/4, size*2/3, size/2, 0x002D3748);
+        draw_rect(cx - size/4, cy - size/6, size/2, size/3, 0x00A0AEC0);
+    } else if (strncmp(title, "Clock", 5) == 0) {
+        draw_circle(cx, cy, size/2 - 2, 0x002D3748);
+        draw_line(cx, cy, cx, cy - size/4, 0x00E53E3E);
+        draw_line(cx, cy, cx + size/6, cy + size/6, 0x002D3748);
+    } else if (strncmp(title, "PCI", 3) == 0) {
+        draw_rect(cx - size/3, cy - size/3, size*2/3, size*2/3, 0x00FFFFFF);
+    } else if (strncmp(title, "Mini Brow", 9) == 0 || strncmp(title, "Browser", 7) == 0) {
+        draw_circle(cx, cy, size/2 - 2, 0x00FFFFFF);
+        draw_line(cx - size/2 + 2, cy, cx + size/2 - 2, cy, 0x00FFFFFF);
+        draw_line(cx, cy - size/2 + 2, cx, cy + size/2 - 2, 0x00FFFFFF);
+    } else if (strncmp(title, "Task Mgr", 8) == 0 || strncmp(title, "Task Manager", 12) == 0) {
+        draw_rect(ix + 4, iy + 4, 16, 16, 0x00FFFFFF);
+        draw_rect(ix + 7, iy + 7, 10, 3, 0x00CBD5E0);
+        draw_rect(ix + 7, iy + 13, 10, 3, 0x00CBD5E0);
+    } else if (strncmp(title, "Flappy", 6) == 0) {
+        draw_rect(ix + 6, iy + 6, 12, 12, 0x00FFFFFF);
+        draw_rect(ix + 14, iy + 10, 4, 4, 0x00E53E3E);
+    } else if (strncmp(title, "Snake", 5) == 0) {
+        draw_rect(cx - size/3, cy - 2, size/2, 4, 0x00FFFFFF);
+        draw_rect(cx + 2, cy - size/3, 4, size/3, 0x00FFFFFF);
+    } else if (strncmp(title, "Calc", 4) == 0 || strncmp(title, "Calculator", 10) == 0) {
+        draw_rect(cx - 6, cy - 6, 12, 12, 0x00FFFFFF);
+        draw_rect(cx - 4, cy - 4, 8, 2, 0x0011111B);
+    } else if (strncmp(title, "Editor", 6) == 0 || strncmp(title, "Notepad", 7) == 0) {
+        draw_rect(cx - 5, cy - 7, 10, 14, 0x00FFFFFF);
+        draw_rect(cx - 3, cy - 3, 6, 1, 0x00888888);
+        draw_rect(cx - 3, cy + 1, 6, 1, 0x00888888);
+    } else if (strncmp(title, "Media", 5) == 0 || strncmp(title, "Mplayer", 7) == 0) {
+        draw_line(cx - size/4, cy - size/4, cx - size/4, cy + size/4, 0x00FFFFFF);
+        draw_line(cx - size/4, cy - size/4, cx + size/4, cy, 0x00FFFFFF);
+        draw_line(cx - size/4, cy + size/4, cx + size/4, cy, 0x00FFFFFF);
     } else {
         char letter[2];
         letter[0] = title[0];
