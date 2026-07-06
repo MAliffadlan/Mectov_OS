@@ -169,6 +169,19 @@ static int days_in_month(int m, int y) {
 
 void taskbar_draw() {
     if (!is_vbe) return;
+
+    // Detect popup state changes and force fullscreen dirty mark to paint/erase popups cleanly
+    static int last_sm = 0;
+    static int last_cal = 0;
+    static int last_vol = 0;
+    if (start_menu_open != last_sm || calendar_open != last_cal || volume_popup_open != last_vol) {
+        last_sm = start_menu_open;
+        last_cal = calendar_open;
+        last_vol = volume_popup_open;
+        extern void mark_dirty(int, int, int, int);
+        mark_dirty(0, 0, fb_width, fb_height);
+    }
+
     int ty = (int)fb_height - TASKBAR_H_PX;
     
     extern int d_max_y;

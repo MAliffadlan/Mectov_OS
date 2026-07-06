@@ -403,6 +403,11 @@ static void check_snap(int idx) {
 static void draw_one(int idx) {
     WmWin* w = &wm_wins[idx];
     if (!w->visible || w->minimized) return;
+
+    if (w->buffer_dirty) {
+        extern void mark_dirty(int, int, int, int);
+        mark_dirty(w->x, w->y, w->w, w->h);
+    }
     
     extern int d_min_x, d_min_y, d_max_x, d_max_y;
     // Check if the window overlaps the active dirty rectangle OR if it has a dirty buffer.
