@@ -179,6 +179,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     int prev_btn  = 0;
     int prev_mx   = mouse_x, prev_my = mouse_y;
     uint32_t last_clock_tick = 0;
+    uint32_t last_frame_tick = 0;
 
     while (1) {
         int mx  = mouse_x, my = mouse_y;
@@ -287,18 +288,19 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             needs_redraw = 1;
         }
 
+        // Update FPS counter every second (1000 ticks) in real-time
+        if (now - fps_last_tick >= 1000) {
+            fps_val = fps_frames;
+            fps_frames = 0;
+            fps_last_tick = now;
+            needs_redraw = 1;
+        }
 
-
-        if (needs_redraw) {
+        // Limit composition rate to maximum 60 FPS (16ms per frame) to prevent CPU choking
+        if (needs_redraw && (now - last_frame_tick >= 16)) {
             needs_redraw = 0;
+            last_frame_tick = now;
             fps_frames++;
-            
-            // Update FPS counter every second (1000 ticks)
-            if (now - fps_last_tick >= 1000) {
-                fps_val = fps_frames;
-                fps_frames = 0;
-                fps_last_tick = now;
-            }
             full_redraw();
         }
 
