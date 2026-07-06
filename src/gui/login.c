@@ -118,7 +118,6 @@ int gui_login() {
             extern void mark_dirty(int, int, int, int);
             mark_dirty(0, 0, fb_width, fb_height);
             draw_login(idx, shake, err, cap_lock_active);
-            draw_mouse_cursor(mouse_x, mouse_y);
             swap_buffers();
             if (shake > 0) shake--;
         }

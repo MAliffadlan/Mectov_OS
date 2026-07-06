@@ -511,6 +511,10 @@ void swap_buffers(void) {
 
     // Reset dirty rect
     d_min_x = 9999; d_min_y = 9999; d_max_x = -1; d_max_y = -1;
+
+    // Draw the cursor directly to VRAM on top of everything
+    extern int mouse_x, mouse_y;
+    draw_mouse_cursor(mouse_x, mouse_y);
 }
 
 // ============================================================
@@ -818,46 +822,60 @@ uint32_t cursor_save_buf[24*24];
 int cursor_saved_x = -1, cursor_saved_y = -1;
 
 void restore_cursor_bg() {
-    if (!is_vbe || cursor_saved_x == -1 || cursor_saved_y == -1) return;
-    restore_bg(cursor_saved_x, cursor_saved_y, 24, 24, cursor_save_buf);
-    mark_dirty(cursor_saved_x, cursor_saved_y, 24, 24);
-    cursor_saved_x = -1;
-    cursor_saved_y = -1;
+    // No-op! Software cursor composited on VRAM doesn't pollute back buffer.
+}
+
+static void put_pixel_vram(int x, int y, uint32_t color) {
+    if (!fb_addr) return;
+    if (x < 0 || x >= (int)fb_width || y < 0 || y >= (int)fb_height) return;
+    if (fb_bpp == 32) {
+        fb_addr[y * (fb_pitch / 4) + x] = color;
+    } else if (fb_bpp == 24) {
+        uint8_t* p = (uint8_t*)fb_addr + (y * fb_pitch) + (x * 3);
+        p[0] = color & 0xFF;
+        p[1] = (color >> 8) & 0xFF;
+        p[2] = (color >> 16) & 0xFF;
+    }
+}
+
+static void darken_pixel_vram(int x, int y) {
+    if (!fb_addr) return;
+    if (x < 0 || x >= (int)fb_width || y < 0 || y >= (int)fb_height) return;
+    if (fb_bpp == 32) {
+        uint32_t* p = (uint32_t*)((uint8_t*)fb_addr + y * fb_pitch) + x;
+        *p = ((*p & 0xFEFEFE) >> 1);
+    } else if (fb_bpp == 24) {
+        uint8_t* p = (uint8_t*)fb_addr + (y * fb_pitch) + (x * 3);
+        p[0] >>= 1;
+        p[1] >>= 1;
+        p[2] >>= 1;
+    }
 }
 
 void draw_mouse_cursor(int x, int y) {
-    if (!is_vbe) return;
+    if (!is_vbe || !fb_addr) return;
     extern volatile int doom_fullscreen;
     if (doom_fullscreen) return;  // Don't draw cursor during DOOM
     
-    save_bg(x, y, 24, 24, cursor_save_buf);
-    cursor_saved_x = x; cursor_saved_y = y;
-    
-    // Draw fast 50% alpha drop shadow (refined offset)
+    // Draw shadow directly to VRAM
     for (int j = 0; j < 24; j++) {
         uint16_t mask = cursor_mask[j];
         for (int i = 0; i < 16; i++) {
             if (mask & (0x8000 >> i)) {
-                int sx = x + i + 1;
-                int sy = y + j + 1;
-                if (sx < (int)active_rt_width && sy < (int)active_rt_height) {
-                    uint32_t* p = active_rt_buf + sy * (active_rt_pitch/4) + sx;
-                    *p = ((*p & 0xFEFEFE) >> 1); // 50% darken
-                }
+                darken_pixel_vram(x + i + 1, y + j + 1);
             }
         }
     }
     
-    // Draw Pro White macOS-style cursor (White fill, Black outline)
+    // Draw cursor directly to VRAM (White fill, Black outline)
     for (int j = 0; j < 24; j++) {
         uint16_t mask = cursor_mask[j];
         uint16_t inner = cursor_inner[j];
         for (int i = 0; i < 16; i++) {
             if (mask & (0x8000 >> i)) {
                 uint32_t col = (inner & (0x8000 >> i)) ? 0x00FFFFFF : 0x00111111;
-                put_pixel(x + i, y + j, col);
+                put_pixel_vram(x + i, y + j, col);
             }
         }
     }
-    mark_dirty(x, y, 24, 24);
 }

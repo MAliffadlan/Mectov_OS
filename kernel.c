@@ -72,8 +72,6 @@ void full_redraw() {
     draw_rect(fb_width - 200, 22, 200, 18, 0x00000000);
     draw_string_px(fx, 23, fps_buf, 0x0000FF00, 0x00000000);
 
-    draw_mouse_cursor(mouse_x, mouse_y);
-
     wait_for_vsync();
     swap_buffers();
 
@@ -184,6 +182,11 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         int btn = (int)(uint32_t)mouse_btn;
 
         if (mx != prev_mx || my != prev_my || btn != prev_btn) {
+            if (mx != prev_mx || my != prev_my) {
+                mark_dirty(prev_mx, prev_my, 24, 24);
+                mark_dirty(mx, my, 24, 24);
+            }
+
             int in_taskbar = (my >= (int)fb_height - TASKBAR_H_PX);
             // Check if any taskbar popup is open (volume, calendar, start menu)
             extern int start_menu_open;
@@ -216,8 +219,6 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                 needs_redraw = 1;
             } else {
                 // Pure mouse move: no full redraw needed
-                restore_cursor_bg();
-                draw_mouse_cursor(mx, my);
                 wait_for_vsync();
                 swap_buffers();
             }
