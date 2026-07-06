@@ -394,6 +394,8 @@ void draw_soft_shadow(int x, int y, int w, int h, int radius, uint32_t intensity
     mark_dirty(sx0, sy0, sx1 - sx0, sy1 - sy0);
 }
 
+int cursor_draw_x = 0;
+int cursor_draw_y = 0;
 uint32_t* front_buffer_copy = NULL;
 
 // ============================================================
@@ -499,9 +501,9 @@ void swap_buffers(void) {
     // Reset dirty rect
     d_min_x = 9999; d_min_y = 9999; d_max_x = -1; d_max_y = -1;
 
-    // Draw the cursor directly to VRAM on top of everything
-    extern int mouse_x, mouse_y;
-    draw_mouse_cursor(mouse_x, mouse_y);
+    // Draw the cursor directly to VRAM on top of everything using stable coordinates
+    extern int cursor_draw_x, cursor_draw_y;
+    draw_mouse_cursor(cursor_draw_x, cursor_draw_y);
 }
 
 // ============================================================

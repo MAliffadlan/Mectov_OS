@@ -72,6 +72,9 @@ void full_redraw() {
     draw_rect(fb_width - 200, 22, 200, 18, 0x00000000);
     draw_string_px(fx, 23, fps_buf, 0x0000FF00, 0x00000000);
 
+    extern int cursor_draw_x, cursor_draw_y;
+    cursor_draw_x = mouse_x;
+    cursor_draw_y = mouse_y;
     wait_for_vsync();
     swap_buffers();
 
@@ -182,6 +185,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         int btn = (int)(uint32_t)mouse_btn;
 
         if (mx != prev_mx || my != prev_my || btn != prev_btn) {
+            extern int cursor_draw_x, cursor_draw_y;
+            cursor_draw_x = mx;
+            cursor_draw_y = my;
+
             if (mx != prev_mx || my != prev_my) {
                 mark_dirty(prev_mx, prev_my, 24, 24);
                 mark_dirty(mx, my, 24, 24);
