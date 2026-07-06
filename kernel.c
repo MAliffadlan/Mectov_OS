@@ -289,9 +289,14 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             needs_redraw = 1;
         }
 
-        // Update FPS counter every second (1000 ticks) in real-time
-        if (now - fps_last_tick >= 1000) {
-            fps_val = fps_frames;
+        // Update FPS counter every 200ms (real-time responsive feel)
+        if (now - fps_last_tick >= 200) {
+            uint32_t elapsed_ms = now - fps_last_tick;
+            if (elapsed_ms > 0) {
+                fps_val = (fps_frames * 1000) / elapsed_ms;
+            } else {
+                fps_val = 0;
+            }
             fps_frames = 0;
             fps_last_tick = now;
             needs_redraw = 1;
