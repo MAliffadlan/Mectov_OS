@@ -424,8 +424,8 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
             int dy = icons[dragged_icon].y - drag_start_y;
             int dist_sq = dx * dx + dy * dy;
 
-            // Jika pergeseran mouse sangat kecil (toleransi 5 piksel), anggap sebagai klik
-            if (dist_sq < 25) {
+            // Jika pergeseran mouse sangat kecil (toleransi 20 piksel), anggap sebagai klik
+            if (dist_sq < 400) {
                 extern void mark_dirty(int, int, int, int);
                 mark_dirty(icons[dragged_icon].x - 4, icons[dragged_icon].y - 4, 88, 104);
 
