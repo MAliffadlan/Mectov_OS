@@ -34,6 +34,9 @@ echo "[*] Menjalankan Mectov Web Gateway Proxy di background..."
 python3 gateway.py > gateway.log 2>&1 &
 GATEWAY_PID=$!
 
+# Bersihkan log serial lama
+rm -f serial_debug.log log.txt
+
 echo "[*] Menjalankan Mectov OS di QEMU (VBE GRUB Mode)..."
 echo "[*] Serial debug output -> serial_debug.log"
 qemu-system-i386 -enable-kvm -cpu host \
@@ -50,3 +53,9 @@ qemu-system-i386 -enable-kvm -cpu host \
 
 echo "[*] Menghentikan Mectov Web Gateway Proxy..."
 kill $GATEWAY_PID 2>/dev/null
+
+# Salin ke log.txt agar mudah diakses
+if [ -f "serial_debug.log" ]; then
+    cp serial_debug.log log.txt
+    echo "[*] Log aktivitas OS terbaru disimpan ke log.txt"
+fi
