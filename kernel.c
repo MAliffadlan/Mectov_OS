@@ -192,15 +192,26 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             extern int calendar_open;
             int popup_open = start_menu_open || calendar_open || taskbar_volume_popup_open();
             
-            int handled = wm_handle_mouse(mx, my, btn, prev_btn);
-            if (!handled) {
-                if (in_taskbar && !btn && prev_btn) {
-                    taskbar_handle_click(mx, my);
-                } else if (!in_taskbar && !btn && prev_btn && popup_open) {
-                    // Route clicks above taskbar to taskbar if a popup is open
-                    taskbar_handle_click(mx, my);
-                } else if (!in_taskbar && !popup_open) {
-                    desktop_handle_mouse(mx, my, btn, prev_btn);
+            int handled = 0;
+            extern int alt_tab_active;
+            if (alt_tab_active) {
+                if (btn && !prev_btn) {
+                    extern void wm_alt_tab_end(void);
+                    wm_alt_tab_end();
+                    needs_redraw = 1;
+                }
+                handled = 1;
+            } else {
+                handled = wm_handle_mouse(mx, my, btn, prev_btn);
+                if (!handled) {
+                    if (in_taskbar && !btn && prev_btn) {
+                        taskbar_handle_click(mx, my);
+                    } else if (!in_taskbar && !btn && prev_btn && popup_open) {
+                        // Route clicks above taskbar to taskbar if a popup is open
+                        taskbar_handle_click(mx, my);
+                    } else if (!in_taskbar && !popup_open) {
+                        desktop_handle_mouse(mx, my, btn, prev_btn);
+                    }
                 }
             }
             
@@ -221,7 +232,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             int8_t scroll = mouse_scroll;
             if (scroll != 0) {
                 mouse_scroll = 0; // consume
-                wm_handle_scroll(mx, my, (int)scroll);
+                extern int alt_tab_active;
+                if (!alt_tab_active) {
+                    wm_handle_scroll(mx, my, (int)scroll);
+                }
                 needs_redraw = 1;
             }
         }
@@ -236,22 +250,29 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                 extern void wm_alt_tab_next(void);
                 extern void wm_alt_tab_end(void);
 
-                if (sc == 0x0F && keyboard_alt_held) {
-                    if (!alt_tab_active) {
-                        wm_alt_tab_start();
-                    } else {
+                if (alt_tab_active) {
+                    if (sc == 0x0F) { // Tab press: cycle
                         wm_alt_tab_next();
-                    }
-                    needs_redraw = 1;
-                } else if (sc == 0xB8) { // Left Alt release
-                    if (alt_tab_active) {
+                        needs_redraw = 1;
+                    } else if (sc == 0xB8) { // Alt release: select
+                        wm_alt_tab_end();
+                        needs_redraw = 1;
+                    } else if (sc == 0x01) { // Escape press: cancel without focus change
+                        alt_tab_active = 0;
+                        needs_redraw = 1;
+                    } else if (sc == 0x1C) { // Enter press: select
                         wm_alt_tab_end();
                         needs_redraw = 1;
                     }
-                } else if (sc < 0x80 || sc == 0xE0) {
-                    char c = scancode_to_char(sc);
-                    wm_handle_key(c, sc);
-                    needs_redraw = 1;
+                } else {
+                    if (sc == 0x0F && keyboard_alt_held) {
+                        wm_alt_tab_start();
+                        needs_redraw = 1;
+                    } else if (sc < 0x80 || sc == 0xE0) {
+                        char c = scancode_to_char(sc);
+                        wm_handle_key(c, sc);
+                        needs_redraw = 1;
+                    }
                 }
             }
         }
