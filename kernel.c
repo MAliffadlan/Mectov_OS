@@ -222,10 +222,12 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                 }
             }
             
-            if (btn != prev_btn || handled) {
+            // Always trigger full redraw if needs_redraw was set by any handler
+            // (desktop_handle_mouse sets it during icon drag, wm sets it during window drag, etc.)
+            if (btn != prev_btn || handled || needs_redraw) {
                 needs_redraw = 1;
             } else {
-                // Pure mouse move: no full redraw needed
+                // Pure mouse move with no state change: just update cursor on VRAM
                 wait_for_vsync();
                 swap_buffers();
             }

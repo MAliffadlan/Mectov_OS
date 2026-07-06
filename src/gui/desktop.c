@@ -74,15 +74,26 @@ static void init_icons() {
     // Notepad
     icons[10] = (Icon){ start_x + 2 * grid_gap_x, start_y + 2 * grid_gap_y, "Notepad",  open_notepad_wrapper };
 
-    // Load saved positions
+    // Load saved positions (with validation to prevent corrupt data)
     int read_buf[ICON_COUNT * 2];
     int sz = vfs_read_file("icons.cfg", (char*)read_buf, sizeof(read_buf));
     if (sz >= 8) { // Minimal 1 icon (2 * sizeof(int) = 8 bytes)
         int saved_count = sz / (2 * sizeof(int));
         if (saved_count > ICON_COUNT) saved_count = ICON_COUNT;
+        int valid = 1;
         for (int i = 0; i < saved_count; i++) {
-            icons[i].x = read_buf[i*2];
-            icons[i].y = read_buf[i*2+1];
+            // Reject if any icon is out of screen bounds
+            if (read_buf[i*2] < 0 || read_buf[i*2] >= (int)fb_width ||
+                read_buf[i*2+1] < 0 || read_buf[i*2+1] >= (int)fb_height) {
+                valid = 0;
+                break;
+            }
+        }
+        if (valid) {
+            for (int i = 0; i < saved_count; i++) {
+                icons[i].x = read_buf[i*2];
+                icons[i].y = read_buf[i*2+1];
+            }
         }
     }
 }
