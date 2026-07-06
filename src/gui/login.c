@@ -113,8 +113,10 @@ int gui_login() {
 
     while (1) {
         uint32_t now = get_ticks();
-        if (now != last_draw) {
+        if (now - last_draw >= 16) {
             last_draw = now;
+            extern void mark_dirty(int, int, int, int);
+            mark_dirty(0, 0, fb_width, fb_height);
             draw_login(idx, shake, err, cap_lock_active);
             draw_mouse_cursor(mouse_x, mouse_y);
             swap_buffers();
