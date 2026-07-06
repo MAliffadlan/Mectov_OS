@@ -53,14 +53,17 @@ void wm_raise(int id) {
 
 void wm_focus_next(void) {
     if (wm_zcount <= 1) return;
-    for (int z = wm_zcount - 2; z >= 0; z--) {
-        int idx = wm_zorder[z];
-        if (wm_wins[idx].visible) {
-            wm_wins[idx].minimized = 0; // Restore if minimized
-            wm_raise(wm_wins[idx].id);
-            break;
-        }
+    
+    // Circularly rotate z-order to cycle focus: move top to bottom
+    int top_idx = wm_zorder[wm_zcount - 1];
+    for (int i = wm_zcount - 1; i > 0; i--) {
+        wm_zorder[i] = wm_zorder[i - 1];
     }
+    wm_zorder[0] = top_idx;
+    
+    int new_top_idx = wm_zorder[wm_zcount - 1];
+    wm_focused = wm_wins[new_top_idx].id;
+    wm_wins[new_top_idx].minimized = 0; // Restore if minimized
 }
 
 // ---- Open / Close ----
