@@ -325,6 +325,10 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
                 }
             }
             ctx_menu_open = 0;
+            extern void mark_dirty(int, int, int, int);
+            mark_dirty(dx, dy, dw, dh); // Erase context menu cleanly
+            extern int needs_redraw;
+            needs_redraw = 1;
             return;
         } else if ((btn & 2) && !(pbtn & 2)) {
             // Right click while menu open: reposition it
@@ -333,7 +337,23 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
             ctx_menu_y = my;
             if (ctx_menu_x + 130 > (int)fb_width) ctx_menu_x = fb_width - 130;
             if (ctx_menu_y + 78 > ty) ctx_menu_y = ty - 78;
+            extern void mark_dirty(int, int, int, int);
+            mark_dirty(0, 0, fb_width, fb_height); // Refresh screen for reposition
+            extern int needs_redraw;
+            needs_redraw = 1;
             return;
+        } else {
+            // Hover check: if mouse moves over context menu, refresh it
+            int dx = ctx_menu_x;
+            int dy = ctx_menu_y;
+            int dw = 130;
+            int dh = 78;
+            if (mx >= dx && mx < dx + dw && my >= dy && my < dy + dh) {
+                extern void mark_dirty(int, int, int, int);
+                mark_dirty(dx, dy, dw, dh);
+                extern int needs_redraw;
+                needs_redraw = 1;
+            }
         }
         return;
     }
@@ -345,6 +365,10 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
         ctx_menu_y = my;
         if (ctx_menu_x + 130 > (int)fb_width) ctx_menu_x = fb_width - 130;
         if (ctx_menu_y + 78 > ty) ctx_menu_y = ty - 78;
+        extern void mark_dirty(int, int, int, int);
+        mark_dirty(ctx_menu_x, ctx_menu_y, 130, 78);
+        extern int needs_redraw;
+        needs_redraw = 1;
         return;
     }
 
@@ -372,8 +396,27 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
         }
     } else if (btn && pbtn) {
         if (dragged_icon != -1) {
-            icons[dragged_icon].x = mx - drag_offset_x;
-            icons[dragged_icon].y = my - drag_offset_y;
+            extern void mark_dirty(int, int, int, int);
+            // Mark old position dirty to erase
+            mark_dirty(icons[dragged_icon].x - 4, icons[dragged_icon].y - 4, 88, 104);
+
+            int new_x = mx - drag_offset_x;
+            int new_y = my - drag_offset_y;
+
+            // Clamp to desktop bounds to prevent icons from getting lost off-screen
+            if (new_x < 10) new_x = 10;
+            if (new_x > (int)fb_width - ICON_W - 10) new_x = fb_width - ICON_W - 10;
+            if (new_y < 10) new_y = 10;
+            if (new_y > (int)fb_height - TASKBAR_H_PX - ICON_H - 26) new_y = fb_height - TASKBAR_H_PX - ICON_H - 26;
+
+            icons[dragged_icon].x = new_x;
+            icons[dragged_icon].y = new_y;
+
+            // Mark new position dirty to draw
+            mark_dirty(icons[dragged_icon].x - 4, icons[dragged_icon].y - 4, 88, 104);
+
+            extern int needs_redraw;
+            needs_redraw = 1;
         }
     } else if (!btn && pbtn) {
         if (dragged_icon != -1) {
@@ -383,9 +426,14 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
 
             // Jika pergeseran mouse sangat kecil (toleransi 5 piksel), anggap sebagai klik
             if (dist_sq < 25) {
+                extern void mark_dirty(int, int, int, int);
+                mark_dirty(icons[dragged_icon].x - 4, icons[dragged_icon].y - 4, 88, 104);
+
                 // Kembalikan ikon ke posisi awal agar tidak bergeser sedikit demi sedikit akibat jitter klik
                 icons[dragged_icon].x = drag_start_x;
                 icons[dragged_icon].y = drag_start_y;
+                
+                mark_dirty(icons[dragged_icon].x - 4, icons[dragged_icon].y - 4, 88, 104);
                 
                 uint32_t now = get_ticks();
                 if (dragged_icon == last_clicked_icon && (now - last_click_tick) < 500) {
