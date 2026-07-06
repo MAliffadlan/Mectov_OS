@@ -5,6 +5,7 @@
 
 int shift_p = 0, caps_a = 0;
 int keyboard_ctrl_held = 0;
+int keyboard_alt_held = 0;
 
 // Scancode Buffer (Gudang Antrean)
 #define KBD_BUFFER_SIZE 2048
@@ -27,6 +28,8 @@ static void keyboard_handler(registers_t* regs) {
         else if (scancode == 0x3A) caps_a = !caps_a;
         else if (scancode == 0x1D) keyboard_ctrl_held = 1;  // Left Ctrl press
         else if (scancode == 0x9D) keyboard_ctrl_held = 0;  // Left Ctrl release
+        else if (scancode == 0x38) keyboard_alt_held = 1;   // Left Alt press
+        else if (scancode == 0xB8) keyboard_alt_held = 0;   // Left Alt release
 
         // Push to buffer
         uint32_t next = (kbd_head + 1) % KBD_BUFFER_SIZE;

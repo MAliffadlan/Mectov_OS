@@ -229,10 +229,17 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         extern volatile int doom_fullscreen;
         if (!doom_fullscreen) {
             uint8_t sc = k_get_scancode();
-            if (sc != 0 && (sc < 0x80 || sc == 0xE0)) {
-                char c = scancode_to_char(sc);
-                wm_handle_key(c, sc);
-                needs_redraw = 1;
+            if (sc != 0) {
+                extern int keyboard_alt_held;
+                if (sc == 0x0F && keyboard_alt_held) {
+                    extern void wm_focus_next(void);
+                    wm_focus_next();
+                    needs_redraw = 1;
+                } else if (sc < 0x80 || sc == 0xE0) {
+                    char c = scancode_to_char(sc);
+                    wm_handle_key(c, sc);
+                    needs_redraw = 1;
+                }
             }
         }
 

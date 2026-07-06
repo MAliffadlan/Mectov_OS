@@ -5,6 +5,7 @@
 
 extern int shift_p, caps_a;
 extern int keyboard_ctrl_held;
+extern int keyboard_alt_held;
 
 void init_keyboard();
 uint8_t k_get_scancode();

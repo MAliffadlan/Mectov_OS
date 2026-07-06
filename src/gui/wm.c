@@ -51,6 +51,18 @@ void wm_raise(int id) {
     }
 }
 
+void wm_focus_next(void) {
+    if (wm_zcount <= 1) return;
+    for (int z = wm_zcount - 2; z >= 0; z--) {
+        int idx = wm_zorder[z];
+        if (wm_wins[idx].visible) {
+            wm_wins[idx].minimized = 0; // Restore if minimized
+            wm_raise(wm_wins[idx].id);
+            break;
+        }
+    }
+}
+
 // ---- Open / Close ----
 int wm_open(int x, int y, int w, int h, const char* title,
             WinDrawFn draw_fn, WinKeyFn key_fn, WinTickFn tick_fn, WinMouseFn mouse_fn) {

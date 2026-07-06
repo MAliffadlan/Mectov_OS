@@ -53,6 +53,7 @@ extern int wm_focused;
 
 void wm_init();
 void wm_raise(int id);
+void wm_focus_next(void);
 int  wm_open(int x, int y, int w, int h, const char* title,
              WinDrawFn draw_fn, WinKeyFn key_fn, WinTickFn tick_fn, WinMouseFn mouse_fn);
 void wm_close(int id);
