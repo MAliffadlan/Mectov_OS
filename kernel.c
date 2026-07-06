@@ -27,6 +27,7 @@ extern void init_double_buffer(void);
 extern volatile int power_overlay_active;
 
 volatile int pending_logout = 0;
+volatile int needs_redraw = 1;
 static int fps_val = 0;
 static int fps_frames = 0;
 static uint32_t fps_last_tick = 0;
@@ -178,8 +179,6 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     int prev_btn  = 0;
     int prev_mx   = mouse_x, prev_my = mouse_y;
     uint32_t last_clock_tick = 0;
-    uint32_t last_frame_tick = 0;
-    int needs_redraw = 1;
 
     while (1) {
         int mx  = mouse_x, my = mouse_y;
@@ -288,14 +287,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             needs_redraw = 1;
         }
 
-        // Force 60Hz redraw to keep FPS high and UI feeling real-time
-        if (now - last_frame_tick >= 16) {
-            needs_redraw = 1;
-        }
+
 
         if (needs_redraw) {
             needs_redraw = 0;
-            last_frame_tick = now;
             fps_frames++;
             
             // Update FPS counter every second (1000 ticks)

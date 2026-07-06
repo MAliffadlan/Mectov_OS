@@ -435,9 +435,14 @@ int d_min_x = 9999, d_min_y = 9999, d_max_x = -1, d_max_y = -1;
 
 void mark_dirty(int x, int y, int w, int h) {
     if (active_rt_buf != back_buffer) return; // Only dirty the screen when drawing to back buffer
-    if (x < d_min_x) d_min_x = x;
+    
+    // Ensure even alignment for 64-bit fast copies in swap_buffers
+    int align_x = x & ~1;
+    int align_max_x = (x + w + 1) & ~1;
+
+    if (align_x < d_min_x) d_min_x = align_x;
     if (y < d_min_y) d_min_y = y;
-    if (x + w > d_max_x) d_max_x = x + w;
+    if (align_max_x > d_max_x) d_max_x = align_max_x;
     if (y + h > d_max_y) d_max_y = y + h;
 }
 
@@ -458,7 +463,6 @@ void swap_buffers(void) {
     if (d_max_y > (int)fb_height) d_max_y = fb_height;
 
     int w = d_max_x - d_min_x;
-    int h = d_max_y - d_min_y;
 
     if (fb_bpp == 32) {
         for (int y = d_min_y; y < d_max_y; y++) {
@@ -466,11 +470,30 @@ void swap_buffers(void) {
             uint32_t* shadow = front_buffer_copy + y * fb_width + d_min_x;
             uint32_t* dst = (uint32_t*)((uint8_t*)fb_addr + y * fb_pitch) + d_min_x;
             
-            // Compare and write ONLY changed pixels to avoid expensive MMIO VM-Exits
-            for (int x = 0; x < w; x++) {
-                if (src[x] != shadow[x]) {
-                    dst[x] = src[x];
-                    shadow[x] = src[x];
+            int w_dwords = w / 2;
+            uint64_t* src64 = (uint64_t*)src;
+            uint64_t* sh64 = (uint64_t*)shadow;
+            
+            // Compare 2 pixels at a time (64-bit) to skip matching blocks quickly
+            for (int i = 0; i < w_dwords; i++) {
+                if (src64[i] != sh64[i]) {
+                    int px0 = i * 2;
+                    int px1 = px0 + 1;
+                    if (src[px0] != shadow[px0]) {
+                        dst[px0] = src[px0];
+                        shadow[px0] = src[px0];
+                    }
+                    if (src[px1] != shadow[px1]) {
+                        dst[px1] = src[px1];
+                        shadow[px1] = src[px1];
+                    }
+                }
+            }
+            if (w & 1) {
+                int px = w - 1;
+                if (src[px] != shadow[px]) {
+                    dst[px] = src[px];
+                    shadow[px] = src[px];
                 }
             }
         }

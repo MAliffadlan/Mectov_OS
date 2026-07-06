@@ -441,6 +441,8 @@ static void syscall_handler(registers_t* regs) {
                 
                 // Composite WM: trigger a redraw for this window's buffer
                 wm_wins[idx].buffer_dirty = 1;
+                extern volatile int needs_redraw;
+                needs_redraw = 1;
             } else {
                 write_serial_string("UPD_WIN: Invalid WID\n");
             }
