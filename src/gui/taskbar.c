@@ -167,10 +167,10 @@ static int days_in_month(int m, int y) {
     return days[m - 1];
 }
 
-void taskbar_draw() {
+void taskbar_pre_draw() {
     if (!is_vbe) return;
-
     // Detect popup state changes and force fullscreen dirty mark to paint/erase popups cleanly
+    // This must be called BEFORE desktop_draw() so the background can actually redraw over closed popups!
     static int last_sm = 0;
     static int last_cal = 0;
     static int last_vol = 0;
@@ -181,6 +181,10 @@ void taskbar_draw() {
         extern void mark_dirty(int, int, int, int);
         mark_dirty(0, 0, fb_width, fb_height);
     }
+}
+
+void taskbar_draw() {
+    if (!is_vbe) return;
 
     int ty = (int)fb_height - TASKBAR_H_PX;
     

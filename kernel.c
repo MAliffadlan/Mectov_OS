@@ -36,6 +36,9 @@ static uint32_t last_render_us = 0;
 void full_redraw() {
     uint32_t start_us = timer_get_us();
 
+    extern void taskbar_pre_draw(void);
+    taskbar_pre_draw();
+
     desktop_draw();
     wm_draw_all();
     taskbar_draw();
