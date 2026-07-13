@@ -114,6 +114,9 @@ int load_mct_app_with_arg(const char* filename, const char* arg) {
     } else {
         task_set_launch_arg(task_id, filename);
     }
+    extern void task_set_heap_ptr(int tid, uint32_t ptr);
+    uint32_t heap_start = 0x08000000 + (num_pages * 4096);
+    task_set_heap_ptr(task_id, heap_start);
     __asm__ volatile("sti");
     
     write_serial_string("OK\n");

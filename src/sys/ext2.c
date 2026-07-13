@@ -108,14 +108,18 @@ void ext2_populate_vfs(uint32_t inode_num, int vfs_parent_node) {
             if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0 && strcmp(name, "lost+found") != 0) {
                 if (entry->file_type == EXT2_FT_DIR) {
                     int new_dir = vfs_create_node(name, FS_EXT2_DIR, vfs_parent_node);
-                    fs_nodes[new_dir].ext2_inode = entry->inode;
-                    ext2_populate_vfs(entry->inode, new_dir);
+                    if (new_dir >= 0) {
+                        fs_nodes[new_dir].ext2_inode = entry->inode;
+                        ext2_populate_vfs(entry->inode, new_dir);
+                    }
                 } else if (entry->file_type == EXT2_FT_REG_FILE) {
                     int new_file = vfs_create_node(name, FS_EXT2_FILE, vfs_parent_node);
-                    fs_nodes[new_file].ext2_inode = entry->inode;
-                    ext2_inode_t finode;
-                    ext2_read_inode(entry->inode, &finode);
-                    fs_nodes[new_file].size = finode.i_size;
+                    if (new_file >= 0) {
+                        fs_nodes[new_file].ext2_inode = entry->inode;
+                        ext2_inode_t finode;
+                        ext2_read_inode(entry->inode, &finode);
+                        fs_nodes[new_file].size = finode.i_size;
+                    }
                 }
             }
             offset += entry->rec_len;

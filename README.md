@@ -1,4 +1,4 @@
-# Mectov OS v31.0 — The Graphics Pipeline & Compositing Performance Update
+# Mectov OS v32.0 — The Syscall Modularization & VMM Memory Safety Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,13 +6,12 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v31.0 release delivers significant graphics compositing optimizations, an event-driven redraw architecture, 64-bit comparison pixel blitting, system-wide Alt+Tab window switching, and Escape key driver mappings:
-1. **Event-Driven Compositor:** Replaced the forced 60Hz polling compositor with an event-driven compositor that only redraws on actual hardware interrupts or user space requests. This drops idle CPU load to 0% in virtual machines.
-2. **64-Bit Pixel Comparison:** Casts window buffer scans to 64-bit (`uint64_t*`) in `swap_buffers()`, comparing 2 pixels per clock cycle and instantly skipping identical areas to drastically reduce RAM copy overhead.
-3. **Redraw Syscall Trigger:** Configured `SYS_UPDATE_WINDOW` (17) syscall to set `needs_redraw = 1` globally, ensuring user-space window updates are instantly recomposed.
-4. **Alt+Tab Window Switcher (v30.4):** Integrated Alt modifier tracking and Tab interception with a Catppuccin Alt+Tab HUD card overlay displaying active app icons, titles, and a selection highlight.
-5. **Escape Key Mapping Fix (v30.1):** Fixed keyboard driver's `scancode_to_char` to map the Escape key (scancode `0x01`) to its proper ASCII value `27` (`0x1B`), fixing dialog dismiss behavior.
-6. **Full English Localization (v30.1):** Localized all Indonesian menu labels, status indicators, and shell command centers to English.
+The v32.0 release delivers modular syscall routing, robust process memory heap sandboxing, address space use-after-free protection, and hardened filesystem bounds checks:
+1. **Syscall Modularization:** Refactored the monolithic `syscall.c` file by grouping syscall logic into modular sub-systems (`syscall_gui.c`, `syscall_vfs.c`, `syscall_net.c`, `syscall_proc.c`, `syscall_ipc.c`), using the central syscall handler purely as a router.
+2. **Process Code/Heap Separation:** Resolved a critical bug where task `heap_ptr` overlapped with the application's executable segments at `0x08000000`. Loader now positions initial heaps directly after loaded program pages.
+3. **Task Tear-down Protection:** Switched CPU paging directory (`CR3`) to kernel boot directory *before* reclaiming the address space of a terminating user task, eliminating page-directory use-after-free conditions.
+4. **Hardened VFS Bounds Checking:** Patched recursive Ext2 directory traversal in `ext2_populate_vfs` to validate VFS node allocation index, preventing adjacent memory corruption (`fs_nodes[-1]`) when the system VFS table limit (64) is reached.
+5. **Heap-Library Protection:** Restricted user heap growth limit to `0x08F00000` to prevent collision with libraries mapped at `0x09000000`.
 
 Created by M Alif Fadlan.
 
@@ -381,6 +380,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v32.0 | **Syscall Modularization & VMM Memory Safety Update:** Refactored monolithic `syscall.c` into modular handlers (`syscall_gui.c`, `syscall_vfs.c`, etc.). Fixed virtual memory heap overlap at `0x08000000` by placing `heap_ptr` after loaded app segments. Patched `task_cleanup` to switch `CR3` back to kernel boot directory before freeing process address space. Bound-checked VFS node allocation in `ext2.c` to prevent `fs_nodes[-1]` array underflow. |
 | v31.0 | **Graphics Pipeline & Compositing Performance Update:** Shifted the main rendering loop in `kernel.c` to an event-driven model, removing forced 60Hz polling to lower idle CPU load to 0%. Optimized VRAM compositing in `swap_buffers` (`src/drivers/vga.c`) by comparing 2 pixels per iteration using 64-bit casting (`uint64_t*`), skipping static content instantly. Configured `SYS_UPDATE_WINDOW` syscall to trigger compositor redraws via global `needs_redraw`. |
 | v30.2 | **Alt+Tab Window Switcher & English Localization Update:** Added Left Alt modifier key press/release state tracking in the keyboard driver and intercepted Tab scancodes in the main loop to cycle focus between active windows via `wm_focus_next()`. Fixed Escape key (scancode 0x01) ASCII translation mapping. Translated all remaining Indonesian strings across menus, shell feedback, dialog boxes, and toolbar layouts to English. |
 | v30.0 | **Clipboard, Explorer CRUD & Context Menu Update:** Implemented global kernel clipboard manager (`src/sys/clipboard.c`) and user stubs for app copy-paste capability. Added "+File", "+Folder", and "Hapus" toolbar buttons with name input modals in File Explorer. Added kernel syscalls `SYS_DELETE_FILE` (58), `SYS_MKDIR` (59), and `SYS_RENAME_FILE` (60) to support Ring 3 CRUD actions. Implemented custom Catppuccin right-click context menus on Desktop and File Explorer for direct app launches, deletion, and renaming. |

@@ -26,6 +26,7 @@ typedef struct {
     int      fd_table[16]; // local file descriptors mapped to global FDs
     char     launch_arg[128]; // command-line argument passed at launch
     int      current_dir;  // per-task working directory
+    uint32_t heap_ptr;     // current heap break (e.g. 0x08000000)
 } task_t;
 
 static task_t tasks[MAX_TASKS];
@@ -39,6 +40,7 @@ void init_tasking() {
         tasks[i].priority = PRIORITY_INTERACTIVE;
         tasks[i].sleep_ticks = 0;
         tasks[i].page_dir = 0;
+        tasks[i].heap_ptr = 0x08000000;
         tasks[i].launch_arg[0] = '\0';
         tasks[i].current_dir = 0;
         for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
@@ -111,6 +113,7 @@ int create_user_task(void (*entry)()) {
             __asm__ volatile("cli");
             
             tasks[i].ring = 3;
+            tasks[i].heap_ptr = 0x08000000;
             tasks[i].current_dir = (current_task >= 0) ? tasks[current_task].current_dir : 0;
             task_set_launch_arg(i, "sys_user");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
@@ -163,6 +166,12 @@ static void task_cleanup(int tid) {
     
     // 2. Free address space (if it's not the kernel's)
     if (tasks[tid].page_dir != 0 && tasks[tid].page_dir != tasks[0].page_dir) {
+        uint32_t active_cr3;
+        __asm__ volatile("mov %%cr3, %0" : "=r"(active_cr3));
+        if ((active_cr3 & 0xFFFFF000) == (tasks[tid].page_dir & 0xFFFFF000)) {
+            extern void vmm_switch_page_dir(uint32_t);
+            vmm_switch_page_dir(tasks[0].page_dir);
+        }
         extern void vmm_free_address_space(uint32_t);
         vmm_free_address_space(tasks[tid].page_dir);
         tasks[tid].page_dir = 0;
@@ -284,6 +293,7 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             __asm__ volatile("cli");
             
             tasks[i].ring = 3;  // Threads are user tasks by default
+            tasks[i].heap_ptr = 0x08000000;
             tasks[i].current_dir = (current_task >= 0) ? tasks[current_task].current_dir : 0;
             tasks[i].priority = priority;
             tasks[i].page_dir = page_dir;
@@ -428,4 +438,14 @@ void task_set_launch_arg(int tid, const char* arg) {
 const char* task_get_launch_arg(int tid) {
     if (tid < 0 || tid >= MAX_TASKS) return "";
     return tasks[tid].launch_arg;
+}
+
+uint32_t task_get_heap_ptr(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0x08000000;
+    return tasks[tid].heap_ptr;
+}
+
+void task_set_heap_ptr(int tid, uint32_t ptr) {
+    if (tid < 0 || tid >= MAX_TASKS) return;
+    tasks[tid].heap_ptr = ptr;
 }
