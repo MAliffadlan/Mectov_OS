@@ -2,6 +2,10 @@
 #include "../include/mem.h"
 #include "../include/utils.h"
 #include "../include/serial.h"
+#include "../include/spinlock.h"
+
+static spinlock_t vmm_lock = SPINLOCK_INIT;
+
 
 // ============================================================
 // Virtual Memory Manager — Layer di atas existing identity paging
@@ -60,19 +64,23 @@ void vmm_init(void) {
 
 // Allocate one physical frame. Returns physical address or 0.
 uint32_t frame_alloc(void) {
+    spin_lock(&vmm_lock);
     for (int i = KERNEL_RESERVED_PAGES; i < TOTAL_PHYSICAL_PAGES; i++) {
         if (!bitmap_test(i)) {
             bitmap_set(i);
             frame_ref_count[i] = 1;
+            spin_unlock(&vmm_lock);
             return (uint32_t)i * 4096;
         }
     }
+    spin_unlock(&vmm_lock);
     write_serial_string("[VMM] OUT OF PHYSICAL FRAMES!\n");
     return 0;
 }
 
 void frame_free(uint32_t paddr) {
     if (paddr == 0) return;
+    spin_lock(&vmm_lock);
     int idx = paddr / 4096;
     if (idx >= KERNEL_RESERVED_PAGES && idx < TOTAL_PHYSICAL_PAGES) {
         if (frame_ref_count[idx] > 0) {
@@ -82,6 +90,7 @@ void frame_free(uint32_t paddr) {
             }
         }
     }
+    spin_unlock(&vmm_lock);
 }
 
 // ============================================================

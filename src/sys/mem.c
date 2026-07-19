@@ -1,9 +1,13 @@
 #include "../include/mem.h"
 #include "../include/vga.h"
 #include "../include/utils.h"
+#include "../include/spinlock.h"
+
+static spinlock_t heap_lock = SPINLOCK_INIT;
+
 
 static uint32_t page_directory[1024] __attribute__((aligned(4096)));
-static uint32_t page_tables[32][1024] __attribute__((aligned(4096)));  // 32 × 4MB = 128MB identity map
+static uint32_t page_tables[64][1024] __attribute__((aligned(4096)));  // 64 × 4MB = 256MB identity map
 static uint32_t fb_page_tables[2][1024] __attribute__((aligned(4096))); 
 
 static uint8_t *mem_bitmap = NULL;
@@ -29,10 +33,10 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     (void)fb_size;
     memset(page_directory, 0, sizeof(page_directory));
     
-    // Map available physical memory (up to 128MB)
-    uint32_t num_tables = total_pages / 1024;
+    // Map available physical memory
+    uint32_t num_tables = (total_pages + 1023) / 1024;
     if (num_tables == 0) num_tables = 8;
-    if (num_tables > 32) num_tables = 32;
+    if (num_tables > 64) num_tables = 64;
 
     for(uint32_t t = 0; t < num_tables; t++) {
         for(unsigned int j = 0; j < 1024; j++) {
@@ -42,16 +46,26 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     }
 
     // Map Framebuffer separately if it's above our identity mapped RAM
-    if (fb_paddr >= (num_tables * 0x400000)) {
-        uint32_t dir_start = fb_paddr >> 22;
-        uint32_t base_phys = fb_paddr & 0xFFC00000;
-        for(int t = 0; t < 2; t++) {
-            for(int i = 0; i < 1024; i++) {
-                fb_page_tables[t][i] = (base_phys + (t * 1024 + i) * 4096) | 7;
+    if (fb_paddr >= (num_tables * 4 * 1024 * 1024)) {
+        uint32_t fb_pde_idx = fb_paddr >> 22;
+        for (int i = 0; i < 2; i++) {
+            for (int j = 0; j < 1024; j++) {
+                fb_page_tables[i][j] = (fb_paddr + i * 0x400000 + j * 0x1000) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
             }
-            page_directory[dir_start + t] = ((uint32_t)fb_page_tables[t]) | 7;
+            page_directory[fb_pde_idx + i] = ((uint32_t)fb_page_tables[i]) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
         }
     }
+
+    // Map APIC (0xFEE00000) and IOAPIC (0xFEC00000)
+    // They both fall into the same 4MB page directory entry (0x3FB, which is 1019)
+    static uint32_t apic_page_table[1024] __attribute__((aligned(4096)));
+    for (int j = 0; j < 1024; j++) {
+        apic_page_table[j] = (0xFEC00000 + j * 0x1000) | PAGE_PRESENT | PAGE_RW;
+    }
+    // Set caching disabled for APIC regions
+    apic_page_table[0x200] |= 0x18; // 0xFEE00000 offset 0x200 pages
+    apic_page_table[0x000] |= 0x18; // 0xFEC00000 offset 0
+    page_directory[1019] = ((uint32_t)apic_page_table) | PAGE_PRESENT | PAGE_RW;
 
     __asm__ __volatile__("mov %0, %%cr3": : "r"(page_directory));
     uint32_t cr0;
@@ -116,6 +130,7 @@ void* kmalloc(uint32_t size) {
 
     uint32_t eflags;
     __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&heap_lock);
 
     void* result = NULL;
     if (!global_base) { // First call
@@ -148,6 +163,7 @@ void* kmalloc(uint32_t size) {
         }
     }
 
+    spin_unlock(&heap_lock);
     __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
     return result;
 }
@@ -157,6 +173,7 @@ void kfree(void* p) {
 
     uint32_t eflags;
     __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&heap_lock);
 
     block_meta *block = (block_meta*)p - 1;
     block->free = 1;
@@ -177,6 +194,7 @@ void kfree(void* p) {
         }
     }
 
+    spin_unlock(&heap_lock);
     __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
 }
 

@@ -94,17 +94,23 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     uint32_t fb_p = 0, fb_s = 0;
     uint32_t mem_size = 32 * 1024 * 1024; // Default fallback 32MB
 
+    write_serial_string("1\n");
     if (magic == 0x2BADB002 && mbi != NULL) {
         // Auto-detect RAM size from GRUB Multiboot header
+        write_serial_string("2\n");
         if (mbi->flags & 1) {
             // mem_upper is in KB and starts at 1MB
             mem_size = (mbi->mem_upper * 1024) + (1024 * 1024);
         }
+        write_serial_string("3\n");
 
         if (mbi->flags & (1 << 12)) {
+            write_serial_string("4\n");
             fb_p = (uint32_t)mbi->framebuffer_addr;
             fb_s = mbi->framebuffer_height * mbi->framebuffer_pitch;
+            write_serial_string("5\n");
             init_vbe(fb_p, mbi->framebuffer_width, mbi->framebuffer_height, mbi->framebuffer_pitch, mbi->framebuffer_bpp);
+            write_serial_string("6\n");
         }
     }
     write_serial_string("[K] gdt\n");
@@ -115,8 +121,24 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     init_mem(mem_size);
     write_serial_string("[K] paging\n");
     paging_init(fb_p, fb_s);
+    
+    write_serial_string("[K] acpi\n");
+    extern void acpi_init(void);
+    acpi_init();
+    
     write_serial_string("[K] idt\n");
     idt_init();
+    
+    write_serial_string("[K] apic\n");
+    extern void apic_init(void);
+    extern void ioapic_init(void);
+    apic_init();
+    ioapic_init();
+
+    write_serial_string("[K] smp\n");
+    extern void smp_init(void);
+    smp_init();
+
     write_serial_string("[K] syscalls\n");
     extern void init_syscalls(void);
     init_syscalls();
@@ -151,14 +173,21 @@ void kernel_main(uint32_t magic, uint32_t addr) {
 
     __asm__ __volatile__ ("sti");
     
+    write_serial_string("[K] sti done\n");
+
     // Removed dummy task creation
 
+    write_serial_string("[K] mouse\n");
     init_mouse();
+    write_serial_string("[K] startup_logo\n");
     draw_startup_logo();
+    write_serial_string("[K] nada\n");
     nada(440, 150); nada(523, 150); nada(659, 300);
 
+    write_serial_string("[K] wm\n");
     wm_init();
     cursor_saved_x = -1;
+    write_serial_string("[K] login\n");
     gui_login();
     
     write_serial_string("BOOTED KERNEL LOOP\n");

@@ -44,6 +44,10 @@ int task_kill(int tid);
 int task_get_fd(int tid, int local_fd);
 void task_set_fd(int tid, int local_fd, int global_fd);
 
+// === NEW: Heap Pointer for Demand Paging ===
+uint32_t task_get_heap_ptr(int tid);
+void task_set_heap_ptr(int tid, uint32_t ptr);
+
 // === NEW: Task Info for GUI ===
 typedef struct {
     int id;

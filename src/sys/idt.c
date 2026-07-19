@@ -44,14 +44,23 @@ void idt_init() {
         idt_set_gate(i, (uint32_t)isr_default, 0x08, 0x8E); // DPL=0 interrupt gate
     }
 
-    // PIC: remap IRQ0-7 → INT 32-39, IRQ8-15 → INT 40-47
-    outb(0x20, 0x11); outb(0xA0, 0x11);
-    outb(0x21, 0x20); outb(0xA1, 0x28);
-    outb(0x21, 0x04); outb(0xA1, 0x02);
-    outb(0x21, 0x01); outb(0xA1, 0x01);
-    // Unmask: IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade), IRQ12 (mouse)
-    outb(0x21, 0xF8);
-    outb(0xA1, 0xEF);
+    // If APIC is present, disable PIC
+    extern uint32_t smp_lapic_addr;
+    if (smp_lapic_addr) {
+        write_serial_string("[IDT] Disabling legacy PIC\n");
+        outb(0x21, 0xFF);
+        outb(0xA1, 0xFF);
+        // Initialization of APIC/IOAPIC will happen in kernel_main
+    } else {
+        // PIC: remap IRQ0-7 → INT 32-39, IRQ8-15 → INT 40-47
+        outb(0x20, 0x11); outb(0xA0, 0x11);
+        outb(0x21, 0x20); outb(0xA1, 0x28);
+        outb(0x21, 0x04); outb(0xA1, 0x02);
+        outb(0x21, 0x01); outb(0xA1, 0x01);
+        // Unmask: IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade), IRQ12 (mouse)
+        outb(0x21, 0xF8);
+        outb(0xA1, 0xEF);
+    }
 
     // CPU Exceptions
     idt_set_gate(0,  (uint32_t)isr0,  0x08, 0x8E);  // Division by Zero
@@ -77,14 +86,26 @@ void register_interrupt_handler(uint8_t n, isr_t handler) {
     interrupt_handlers[n] = handler;
 }
 
+void idt_load_ap() {
+    idt_flush((uint32_t)&idt_ptr);
+    write_serial_string("[IDT] Loaded for AP\n");
+}
+
 // IRQ handler — called from irq_common_stub
 // Returns (possibly new) ESP for context switching
 uint32_t irq_handler(uint32_t esp) {
     registers_t *r = (registers_t*)esp;
     
-    // Send EOI to PIC
-    if (r->int_no >= 40) outb(0xA0, 0x20);
-    outb(0x20, 0x20);
+    // Send EOI
+    extern uint32_t smp_lapic_addr;
+    extern void apic_send_eoi(void);
+    
+    if (smp_lapic_addr) {
+        apic_send_eoi();
+    } else {
+        if (r->int_no >= 40) outb(0xA0, 0x20);
+        outb(0x20, 0x20);
+    }
     
     // Call registered handler
     if (interrupt_handlers[r->int_no] != 0) {
@@ -164,6 +185,32 @@ void isr_handler(registers_t *r) {
                         write_serial_string(")\n");
                         return; // Resume execution
                     }
+                }
+            }
+        }
+        // --- NEW: Demand Paging for Ring 3 Heap ---
+        if ((r->cs & 3) == 3 && faulting_address >= 0x08000000 && faulting_address < 0x20000000) {
+            extern int get_current_task(void);
+            extern uint32_t task_get_heap_ptr(int tid);
+            int tid = get_current_task();
+            uint32_t max_heap = task_get_heap_ptr(tid);
+            
+            if (faulting_address < max_heap) {
+                // Address is within the reserved heap space! Map it.
+                uint32_t phys = frame_alloc();
+                if (phys) {
+                    vmm_map_page(cr3_val, faulting_address, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+                    // Clear the page to 0 (important for security & determinism)
+                    memset((void*)(faulting_address & 0xFFFFF000), 0, 4096);
+                    
+                    write_serial_string("[VMM] Demand Paged addr ");
+                    write_serial_hex(faulting_address);
+                    write_serial_string(" for TID ");
+                    write_serial_hex(tid);
+                    write_serial_string("\n");
+                    return; // Resume execution, instruction will restart
+                } else {
+                    write_serial_string("[VMM] OUT OF MEMORY during Demand Paging!\n");
                 }
             }
         }

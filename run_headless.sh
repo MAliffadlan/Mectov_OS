@@ -34,6 +34,8 @@ timeout 15s qemu-system-i386 \
   -cdrom mectov.iso \
   -vga std \
   -m 256M \
+  -smp 4 \
+  -no-reboot \
   -serial file:serial_debug.log \
   -display none \
   -drive file=disk.img,format=raw,index=0,media=disk

@@ -2,6 +2,10 @@
 #include "../include/mem.h"
 #include "../include/serial.h"
 #include "../include/io.h"
+#include "../include/spinlock.h"
+#include "../include/apic.h"
+
+static spinlock_t task_lock = SPINLOCK_INIT;
 
 #define MAX_TASKS 64
 #define KERNEL_STACK_SIZE 16384
@@ -30,10 +34,12 @@ typedef struct {
 } task_t;
 
 static task_t tasks[MAX_TASKS];
-static int current_task = -1;
+static int current_task[16] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+static inline int get_cid() { extern uint32_t smp_lapic_addr; return smp_lapic_addr ? (apic_get_id() & 15) : 0; }
 static int num_tasks = 0;
 
 void init_tasking() {
+    int cid = get_cid();
     for (int i = 0; i < MAX_TASKS; i++) {
         tasks[i].state = TASK_STATE_FREE;
         tasks[i].ring = 0;
@@ -55,7 +61,7 @@ void init_tasking() {
     __asm__ __volatile__("mov %%cr3, %0" : "=r"(boot_cr3));
     tasks[0].page_dir = boot_cr3;
     
-    current_task = 0;
+    current_task[cid] = 0;
     num_tasks = 1;
     task_set_launch_arg(0, "idle");
 }
@@ -66,14 +72,15 @@ uint32_t tasks_get_boot_cr3(void) {
 
 // Create a Ring 0 (kernel) task
 int create_task(void (*entry)()) {
+    int cid = get_cid();
+    // CRITICAL: Disable interrupts BEFORE taking the lock to prevent scheduler deadlocks!
+    __asm__ volatile("cli");
+    spin_lock(&task_lock);
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == 0) {
-            // CRITICAL: Disable interrupts to prevent scheduler from
-            // picking up this half-initialized task!
-            __asm__ volatile("cli");
             
             tasks[i].ring = 0;
-            tasks[i].current_dir = (current_task >= 0) ? tasks[current_task].current_dir : 0;
+            tasks[i].current_dir = (current_task[cid] >= 0) ? tasks[current_task[cid]].current_dir : 0;
             task_set_launch_arg(i, "sys_kernel");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
@@ -95,26 +102,29 @@ int create_task(void (*entry)()) {
             // Set state LAST — only now is it safe for the scheduler
             tasks[i].state = 2;
             
+            spin_unlock(&task_lock);
             __asm__ volatile("sti");
             return i;
         }
     }
+    spin_unlock(&task_lock);
+    __asm__ volatile("sti");
     return -1;
 }
 
 // Create a Ring 3 (user) task
 int create_user_task(void (*entry)()) {
+    int cid = get_cid();
     write_serial_string("[TASK] create_user_task\n");
     
+    __asm__ volatile("cli");
+    spin_lock(&task_lock);
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == 0) {
-            // CRITICAL: Disable interrupts to prevent scheduler from
-            // picking up this half-initialized task!
-            __asm__ volatile("cli");
             
             tasks[i].ring = 3;
             tasks[i].heap_ptr = 0x08000000;
-            tasks[i].current_dir = (current_task >= 0) ? tasks[current_task].current_dir : 0;
+            tasks[i].current_dir = (current_task[cid] >= 0) ? tasks[current_task[cid]].current_dir : 0;
             task_set_launch_arg(i, "sys_user");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
@@ -147,10 +157,12 @@ int create_user_task(void (*entry)()) {
             __asm__ volatile("sti");
             
             write_serial_string("[TASK] Ring 3 task created OK\n");
+            spin_unlock(&task_lock);
             return i;
         }
     }
     write_serial_string("[TASK] No free slots!\n");
+    spin_unlock(&task_lock);
     return -1;
 }
 
@@ -158,6 +170,7 @@ extern void tss_set_kernel_stack(uint32_t stack);
 
 // Shared cleanup for task termination (exit or kill)
 static void task_cleanup(int tid) {
+    int cid = get_cid();
     if (tid <= 0 || tid >= MAX_TASKS) return;
     
     // 1. Clean up windows owned by this task
@@ -179,14 +192,21 @@ static void task_cleanup(int tid) {
 }
 
 uint32_t schedule(uint32_t esp) {
-    if (current_task < 0) return esp;
+    int cid = get_cid();
+    if (current_task[cid] < 0) return esp;
+    // NOTE: No spinlock needed here. schedule() is called from the timer IRQ
+    // handler, which runs with interrupts disabled (IDT gate 0x8E auto-clears IF).
+    // Using a spinlock would cause self-deadlock if any other code path
+    // (e.g. create_task) holds task_lock when the timer interrupt fires.
     
     // Auto-poll network on every schedule tick to process ARP/DNS/TCP packets in the background
     extern void net_poll(void);
     net_poll();
     
     // If we're the only task AND we're active, no need to switch
-    if (num_tasks <= 1 && tasks[current_task].state != 0) return esp;
+    if (num_tasks <= 1 && tasks[current_task[cid]].state != 0) {
+        return esp;
+    }
     
     // 1. Update sleeping tasks
     for (int i = 0; i < MAX_TASKS; i++) {
@@ -201,13 +221,13 @@ uint32_t schedule(uint32_t esp) {
     }
 
     // Save current task's register frame pointer
-    tasks[current_task].esp = esp;
-    if (tasks[current_task].state == TASK_STATE_RUNNING) {
-        tasks[current_task].state = TASK_STATE_READY;
+    tasks[current_task[cid]].esp = esp;
+    if (tasks[current_task[cid]].state == TASK_STATE_RUNNING) {
+        tasks[current_task[cid]].state = TASK_STATE_READY;
     }
     
     // Find next ready task (round-robin)
-    int next = current_task;
+    int next = current_task[cid];
     int found = 0;
     for (int i = 0; i < MAX_TASKS; i++) {
         next = (next + 1) % MAX_TASKS;
@@ -219,8 +239,8 @@ uint32_t schedule(uint32_t esp) {
     
     if (!found) {
         // If no other task is ready, keep running current (if it's not free/sleeping)
-        if (tasks[current_task].state == TASK_STATE_READY || tasks[current_task].state == TASK_STATE_RUNNING) {
-            next = current_task;
+        if (tasks[current_task[cid]].state == TASK_STATE_READY || tasks[current_task[cid]].state == TASK_STATE_RUNNING) {
+            next = current_task[cid];
         } else {
             // Fallback to task 0 (kernel/idle)
             next = 0;
@@ -228,7 +248,7 @@ uint32_t schedule(uint32_t esp) {
     }
     
     tasks[next].state = 1;
-    current_task = next;
+    current_task[cid] = next;
     
     // CRITICAL: Update TSS.esp0 for the next task.
     // When a Ring 3 task gets interrupted, the CPU loads ESP from TSS.esp0.
@@ -250,15 +270,16 @@ uint32_t schedule(uint32_t esp) {
 
 // Terminate the current task — called from SYS_EXIT syscall
 void task_exit(void) {
-    if (current_task <= 0) return; // Never kill task 0 (kernel)
+    int cid = get_cid();
+    if (current_task[cid] <= 0) return; // Never kill task 0 (kernel)
     
     write_serial_string("[TASK] task_exit tid=");
-    write_serial('0' + current_task);
+    write_serial('0' + current_task[cid]);
     write_serial('\n');
     
     __asm__ volatile("cli");
-    task_cleanup(current_task);
-    tasks[current_task].state = TASK_STATE_FREE;
+    task_cleanup(current_task[cid]);
+    tasks[current_task[cid]].state = TASK_STATE_FREE;
     num_tasks--;
     
     __asm__ volatile("sti");
@@ -266,20 +287,23 @@ void task_exit(void) {
 }
 
 int get_current_task(void) {
-    return current_task;
+    int cid = get_cid();
+    return current_task[cid];
 }
 
 int get_current_dir(void) {
-    if (current_task >= 0 && current_task < MAX_TASKS) {
-        return tasks[current_task].current_dir;
+    int cid = get_cid();
+    if (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS) {
+        return tasks[current_task[cid]].current_dir;
     }
     static int boot_current_dir = 0;
     return boot_current_dir;
 }
 
 void set_current_dir(int dir) {
-    if (current_task >= 0 && current_task < MAX_TASKS) {
-        tasks[current_task].current_dir = dir;
+    int cid = get_cid();
+    if (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS) {
+        tasks[current_task[cid]].current_dir = dir;
     } else {
         static int boot_current_dir = 0;
         boot_current_dir = dir;
@@ -288,13 +312,15 @@ void set_current_dir(int dir) {
 
 // === NEW: Thread creation with priority + page_dir ===
 int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
+    int cid = get_cid();
+    __asm__ volatile("cli");
+    spin_lock(&task_lock);
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == TASK_STATE_FREE) {
-            __asm__ volatile("cli");
             
             tasks[i].ring = 3;  // Threads are user tasks by default
             tasks[i].heap_ptr = 0x08000000;
-            tasks[i].current_dir = (current_task >= 0) ? tasks[current_task].current_dir : 0;
+            tasks[i].current_dir = (current_task[cid] >= 0) ? tasks[current_task[cid]].current_dir : 0;
             tasks[i].priority = priority;
             tasks[i].page_dir = page_dir;
             tasks[i].sleep_ticks = 0;
@@ -320,27 +346,32 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             tasks[i].state = TASK_STATE_READY;
             
             // NOTE: Interrupts stay DISABLED. Caller must call sti after
-            // finishing any post-create setup (e.g. setting launch_arg).
+            // finishing any post-create setup
+            spin_unlock(&task_lock);
+            __asm__ volatile("sti");
             return i;
         }
     }
+    spin_unlock(&task_lock);
+    __asm__ volatile("sti");
     return -1;
 }
 
 // Sleep the current task for N timer ticks
 void task_sleep(int ticks) {
-    if (current_task < 0 || ticks <= 0) return;
+    int cid = get_cid();
+    if (current_task[cid] < 0 || ticks <= 0) return;
     
     __asm__ volatile("cli");
-    tasks[current_task].sleep_ticks = ticks;
-    tasks[current_task].state = TASK_STATE_SLEEP;
+    tasks[current_task[cid]].sleep_ticks = ticks;
+    tasks[current_task[cid]].state = TASK_STATE_SLEEP;
     __asm__ volatile("sti");
     
     // Yield — wait for scheduler to skip us until wake
     __asm__ volatile("sti");
     for (int i = 0; i < 100000; i++) {
         __asm__ volatile("pause");
-        if (tasks[current_task].state != TASK_STATE_SLEEP) break;
+        if (tasks[current_task[cid]].state != TASK_STATE_SLEEP) break;
     }
 }
 

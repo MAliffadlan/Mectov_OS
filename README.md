@@ -1,4 +1,4 @@
-# Mectov OS v32.0 — The Syscall Modularization & VMM Memory Safety Update
+# Mectov OS v33.0 — The Multi-Core (SMP) & APIC Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,12 +6,11 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v32.0 release delivers modular syscall routing, robust process memory heap sandboxing, address space use-after-free protection, and hardened filesystem bounds checks:
-1. **Syscall Modularization:** Refactored the monolithic `syscall.c` file by grouping syscall logic into modular sub-systems (`syscall_gui.c`, `syscall_vfs.c`, `syscall_net.c`, `syscall_proc.c`, `syscall_ipc.c`), using the central syscall handler purely as a router.
-2. **Process Code/Heap Separation:** Resolved a critical bug where task `heap_ptr` overlapped with the application's executable segments at `0x08000000`. Loader now positions initial heaps directly after loaded program pages.
-3. **Task Tear-down Protection:** Switched CPU paging directory (`CR3`) to kernel boot directory *before* reclaiming the address space of a terminating user task, eliminating page-directory use-after-free conditions.
-4. **Hardened VFS Bounds Checking:** Patched recursive Ext2 directory traversal in `ext2_populate_vfs` to validate VFS node allocation index, preventing adjacent memory corruption (`fs_nodes[-1]`) when the system VFS table limit (64) is reached.
-5. **Heap-Library Protection:** Restricted user heap growth limit to `0x08F00000` to prevent collision with libraries mapped at `0x09000000`.
+The v33.0 release delivers Multi-Core (SMP) multiprocessing, APIC/IOAPIC interrupt routing, and scheduler deadlock protection:
+1. **Multi-Core (SMP) Support:** Boot and initialize Application Processors (APs) using the standard INIT-SIPI-SIPI sequence. Supports per-core GDT/TSS configuration and IDT loading, bringing true multi-core capabilities.
+2. **APIC & IOAPIC Drivers:** Configured Local APIC (LAPIC) and I/O APIC routing, completely disabling the legacy PIC. Routed hardware interrupts (Keyboard, Mouse, System Timer) to the bootstrap processor (BSP).
+3. **Dynamic Interrupt Source Override Parsing:** Parses MADT (Multiple APIC Description Table) to dynamically detect Interrupt Source Overrides (ISOs), correctly routing the PIT (IRQ0) timer to GSI 2 in QEMU.
+4. **Re-entrant Lock-free Scheduler:** Resolved nested interrupt deadlocks in the scheduler by removing standard spinlocks from `schedule()` (since it executes with interrupts already disabled by the CPU) and ensuring interrupts are disabled before acquiring `task_lock` in task helper functions.
 
 Created by M Alif Fadlan.
 

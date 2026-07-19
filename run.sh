@@ -43,6 +43,7 @@ qemu-system-i386 -enable-kvm -cpu host \
     -vga std \
     -cdrom mectov.iso \
     -m 128 \
+    -smp 4 \
     -audiodev pa,id=snd0 \
     -device sb16,audiodev=snd0 \
     -machine pcspk-audiodev=snd0 \

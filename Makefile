@@ -28,6 +28,7 @@ DOOM_SRCS = $(wildcard doom/*.c)
 DOOM_OBJS = $(DOOM_SRCS:doom/%.c=$(OBJ_DIR)/doom/%.o)
 
 OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
+       $(OBJ_DIR)/src/sys/smp_trampoline.o \
        $(SRCS:%.c=$(OBJ_DIR)/%.o) \
        $(OBJ_DIR)/boot.o \
        $(OBJ_DIR)/wallpaper.o \
@@ -66,6 +67,12 @@ $(OBJ_DIR)/boot.o: boot.asm | $(OBJ_DIR)
 
 $(OBJ_DIR)/src/sys/interrupt_entry.o: src/sys/interrupt_entry.asm | $(OBJ_DIR)
 	$(AS) $(ASFLAGS) $< -o $@
+
+$(OBJ_DIR)/src/sys/smp_trampoline.bin: src/sys/smp_trampoline.asm | $(OBJ_DIR)
+	nasm -f bin $< -o $@
+
+$(OBJ_DIR)/src/sys/smp_trampoline.o: $(OBJ_DIR)/src/sys/smp_trampoline.bin
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
 $(OBJ_DIR)/gcalc_mct.o: gcalc.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
