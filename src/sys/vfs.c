@@ -782,10 +782,15 @@ int vfs_rename(const char* old_path, const char* new_path) {
     return 0;
 }
 
+// Reads up to max_size bytes and returns the byte count. A NUL terminator is
+// appended ONLY when there is room left over — callers such as load_mct_app()
+// pass max_size == the exact file size and need every one of those bytes, so
+// the data must never be clamped to max_size - 1 to make space for it.
 int vfs_read_file(const char* path, char* buf, int max_size) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
-    
+    if (max_size <= 0) return -1;
+
     if (fs_nodes[node].type == FS_DEV) {
         if (strcmp(fs_nodes[node].name, "zero") == 0) {
             memset(buf, 0, max_size);
@@ -833,7 +838,9 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
         remaining -= chunk;
     }
     
-    buf[size] = '\0';
+    // Only terminate if the data left room — size == max_size means the file
+    // exactly filled the caller's buffer and buf[size] is one past the end.
+    if (size < max_size) buf[size] = '\0';
     return size;
 }
 

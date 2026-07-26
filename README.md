@@ -1,4 +1,4 @@
-# Mectov OS v33.0 — The Multi-Core (SMP) & APIC Update
+# Mectov OS v34.0 — The Input Integrity & Compositor Correctness Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,11 +6,13 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v33.0 release delivers Multi-Core (SMP) multiprocessing, APIC/IOAPIC interrupt routing, and scheduler deadlock protection:
-1. **Multi-Core (SMP) Support:** Boot and initialize Application Processors (APs) using the standard INIT-SIPI-SIPI sequence. Supports per-core GDT/TSS configuration and IDT loading, bringing true multi-core capabilities.
-2. **APIC & IOAPIC Drivers:** Configured Local APIC (LAPIC) and I/O APIC routing, completely disabling the legacy PIC. Routed hardware interrupts (Keyboard, Mouse, System Timer) to the bootstrap processor (BSP).
-3. **Dynamic Interrupt Source Override Parsing:** Parses MADT (Multiple APIC Description Table) to dynamically detect Interrupt Source Overrides (ISOs), correctly routing the PIT (IRQ0) timer to GSI 2 in QEMU.
-4. **Re-entrant Lock-free Scheduler:** Resolved nested interrupt deadlocks in the scheduler by removing standard spinlocks from `schedule()` (since it executes with interrupts already disabled by the CPU) and ensuring interrupts are disabled before acquiring `task_lock` in task helper functions.
+The v34.0 release is a correctness pass over the input path, the compositor, and the shell. Every item here is a subsystem that looked finished but was silently not doing its job:
+
+1. **Enforced Compositor Clipping:** `vga_set_clip()` wrote four globals that no drawing primitive ever read, so the clip rectangle was a no-op and the Window Manager's content-area clip was never actually applied. Every primitive now intersects against it through shared `clip_test()` / `clip_box()` helpers, and `vga_set_render_target()` resets the clip so a stale rectangle cannot leak from one target into the next. Edge arithmetic moved to 64-bit so a caller-supplied width/height can no longer wrap an `int`.
+2. **Centralized Window Damage Tracking:** Minimize and restore now live in `wm_minimize()` / `wm_restore()`, which own both halves of the operation — the state change *and* the dirty-region marking. This fixes minimizing from a taskbar button leaving the window painted on screen: that path duplicated the titlebar button's logic minus its `mark_dirty()` call.
+3. **Unified PS/2 Byte Arbitration:** The 8042 controller has a single output buffer shared by the keyboard and the mouse. IRQ1, IRQ12, and `speaker.c`'s delay loop each read port `0x60` without testing the AUX status bit, so they cannibalised each other's byte streams — the root cause of both stuck modifier keys and cursor teleporting. All three now route through one `ps2_drain()` that dispatches on status bit 5. Mouse packets with the X/Y overflow bits set are also no longer trusted for movement.
+4. **Eliminated Unkillable Shell Spins:** `int 0x80` is an interrupt gate, so `IF=0` for the whole syscall and IRQ0 can never fire — every `get_ticks()` deadline reachable from the Ring 3 shell was therefore unreachable, wedging the machine with a task that could not even be killed. `tunggu` now uses the scheduler's sleep path, and the ping/DNS waits are bounded by `net_wait_for()`. `timer_ticks` is now correctly `volatile`.
+5. **VFS Read Buffer Overflow:** `vfs_read_file()` wrote its NUL terminator one byte past the caller's buffer whenever a file exactly filled it — triggered on every boot through `icons.cfg` and on every `.mct` application launch.
 
 Created by M Alif Fadlan.
 
@@ -76,13 +78,14 @@ Created by M Alif Fadlan.
 - **Aero Snap:** Drag windows to screen edges for automatic half-screen (left/right) or full-screen (top) snapping with saved geometry restore.
 - **Window Resizing:** Drag any window edge or corner to resize. 8-directional edge detection with minimum size constraints (220×150).
 - **Window Close Callback:** `wm_close` now notifies the terminal to kill child processes and reset state.
+- **Single-Owner Minimize/Restore:** `wm_minimize()` and `wm_restore()` are the only supported ways to change a window's minimized state. They mark the damaged region dirty as part of the operation, because `draw_one()` skips minimized windows — nothing will ever repaint over the pixels a window leaves behind, so a caller that sets `WmWin.minimized` by hand produces a ghost. `wm_focus_next()` is the one deliberate exception: it rebuilds the z-order itself and covers the damage with a fullscreen mark.
 - Clean Flat Aesthetic: Removed heavy shadows around windows to focus on a crisp, modern UI.
 
 ### 3. Taskbar & System Tray (src/gui/taskbar.c)
 - WiFi Status Indicator: Replaced the RAM bar with a classic 3-arc WiFi icon, representing the OS's network capability.
 - "Mectov OS" Start button with vertical separator line for distinct UI partitioning.
 - Glossy dark background with Catppuccin Mocha accent border.
-- Icon-only window buttons: each open app shown as a 16x16 squircle icon matching the desktop style.
+- Icon-only window buttons: each open app shown as a 16x16 squircle icon matching the desktop style. Clicking a button raises, minimizes, or restores its window through the Window Manager's `wm_minimize()` / `wm_restore()` API rather than reimplementing the state transition locally.
 - System tray with:
   - CAPS indicator (vibrant red when active)
   - HDD activity LED (red flash on disk I/O)
@@ -93,6 +96,7 @@ Created by M Alif Fadlan.
 - **VSync Disabled:** Removed VGA port 0x3DA polling which caused massive latency spikes under KVM virtualization.
 - Forced 60Hz Loop: Constant 16ms redraw cycle with ultra-low render times (~4ms) thanks to delta-only copying.
 - Microsecond Timing: Real-time FPS and render time measurement using PIT hardware counters.
+- **Enforced Clip Rectangle:** `vga_set_clip()` / `vga_reset_clip()` define a rectangle in *active render target* coordinates that every primitive respects. `put_pixel()` gates on `clip_test()`, covering lines, circles, rounded-rect borders and all text rendering; `draw_rect()`, `draw_rect_alpha()` and `draw_soft_shadow()` gate on `clip_box()`, covering the filled and gradient primitives built on top of them. `vga_blit_buffer()` is deliberately exempt — it is a compositor operation that writes to `back_buffer` rather than to the render target, so it clips to the screen only.
 
 ### 5. Desktop Environment (src/gui/desktop.c)
 - Custom Baked Wallpaper: Full-color 1024x768 image processed via Python build script.
@@ -140,6 +144,7 @@ Created by M Alif Fadlan.
 ### 11. Persistent File System (src/sys/vfs.c)
 - Virtual File System (16 file slots) with auto-save to disk.img via ATA PIO.
 - Persistence Fix: Reliable saving for configuration files like icons.cfg.
+- **Read Terminator Contract:** `vfs_read_file()` returns the byte count and appends a NUL terminator *only when the data left room for one*. It never clamps the payload to `max_size - 1` to make space, because `load_mct_app_with_arg()` passes `max_size` equal to the exact file size and needs every byte of it.
 
 ### 12. File Descriptor Layer (src/sys/fd.c + src/include/fd.h)
 - **UNIX-style FD abstraction:** Per-task file descriptor table (16 FDs per task, 128 global) wrapping VFS nodes.
@@ -168,6 +173,8 @@ Created by M Alif Fadlan.
 - **Privilege Separation:** Use of Global Descriptor Table (GDT) and Task State Segment (TSS) to strictly enforce CPU privilege levels (Ring 0 vs Ring 3).
 
 ### 16. PS/2 IntelliMouse Scroll Wheel Support (src/drivers/mouse.c & src/gui/wm.c)
+- **Shared-Buffer Arbitration:** The 8042 controller exposes one output buffer at port `0x60` for *both* the keyboard and the mouse, and status bit 5 is the only thing that says which device a byte came from. A single `ps2_drain()` (`src/drivers/keyboard.c`) owns the port: it loops while status bit 0 is set, dispatches each byte to `keyboard_feed_byte()` or `mouse_feed_byte()`, and is called by IRQ1, IRQ12, and `speaker.c`'s delay loop alike — whichever gets there first delivers the byte to the right device instead of consuming it. The loop is capped at 64 iterations so an ISR can never spin unbounded on hardware.
+- **Packet Overflow Rejection:** Bits 6/7 of packet byte 0 flag X/Y delta overflow. Those deltas are meaningless, so the driver keeps the button state and discards the movement rather than teleporting the cursor.
 - **Driver Upgrade:** Upgraded PS/2 mouse driver to the 4-byte IntelliMouse protocol, using a custom rate-negotiation sequence (200 -> 100 -> 80) to detect scroll-capable hardware.
 - **Kernel Event Routing:** The main kernel loop catches scroll deltas and dispatches them via `wm_handle_scroll()` to targeted windows, encoding up/down ticks as custom button events (0x10 and 0x20).
 - **Ring 3 Event Propagation:** Emits standard event type 4 (Scroll Event) containing scroll direction delta (+1 for up, -1 for down) to Ring 3 apps via the `SYS_GET_EVENT` syscall.
@@ -217,6 +224,7 @@ Created by M Alif Fadlan.
 - **Active Shell Context:** Supports variable exports (e.g. `export USER=bos_alif`) and dynamic `$VAR` string interpolation for all script and terminal inputs.
 - **Interactive Aliasing:** Built-in shell commands (`alias`, `unalias`, `history`) to manage custom command shortcuts, circular command history, and inline expansions.
 - **Robust Path Sanitization:** Built-in `sanitize_path` to strip quotes, clean whitespace, and ensure resilient navigation (`cd`) and text display (`cat`, `baca`) even with spaces in pathnames (e.g. `"notepad tes"`).
+- **Hang-Free Waiting:** `ex_cmd()`'s live entry point is `SYS_EXEC_CMD`, and `int 0x80` is an interrupt gate — so the whole command runs with `IF=0` and the PIT cannot tick. Nothing in the shell may therefore block on the clock. `tunggu` calls `task_sleep()`, which re-enables interrupts and yields to the scheduler; the ARP/ping/DNS waits go through `net_wait_for()`, bounded by both a tick deadline *and* a hard spin cap so they return even when the tick source is frozen. Making the syscall path itself preemptible (a trap gate) remains the deeper fix and requires auditing every handler for re-entrancy first.
 
 ### 24. Process Control & Task Diagnostics (src/sys/task.c & src/sys/shell.c)
 - **Task Identification:** Scheduler tracks process names dynamically via `task_set_launch_arg()` and `task_get_launch_arg()`, naming system services and desktop binaries accordingly.
@@ -379,6 +387,9 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v34.0 | **Input Integrity & Compositor Correctness Update:** Made `vga_set_clip()` real — the clip rectangle was previously four globals that no drawing primitive ever read, so the WM's content-area clip silently did nothing; all primitives now gate on shared `clip_test()`/`clip_box()` helpers with 64-bit edge arithmetic, and `vga_set_render_target()` resets the clip between targets. Consolidated minimize/restore into `wm_minimize()`/`wm_restore()` so the state change and its dirty-region marking can no longer be separated, fixing windows minimized from the taskbar staying painted on screen. Unified all port `0x60` access behind a single `ps2_drain()` that dispatches on the 8042 AUX status bit, ending the keyboard/mouse byte theft behind stuck modifier keys and cursor teleporting, and added mouse packet overflow-bit rejection. Removed every unkillable spin from the shell: `tunggu` now uses `task_sleep()` and the ARP/ping/DNS waits use the doubly-bounded `net_wait_for()`, since `int 0x80` is an interrupt gate and `get_ticks()` cannot advance during a syscall. Fixed `vfs_read_file()` writing its NUL terminator one byte past the caller's buffer on exact-fit reads. Marked `timer_ticks` `volatile`. |
+| v33.1 | **Start Menu Ghosting Fix:** Reordered `full_redraw` to call `taskbar_pre_draw()` before `desktop_draw()` so dirty rectangles are applied before the background is painted, ensuring closed popups are erased from the screen. |
+| v33.0 | **Multi-Core (SMP) & APIC Update:** Boot and initialize Application Processors via the INIT-SIPI-SIPI sequence with per-core GDT/TSS and IDT loading. Added Local APIC and I/O APIC drivers, disabling the legacy PIC and routing keyboard, mouse, and timer interrupts to the BSP. Parses the MADT for Interrupt Source Overrides to correctly route the PIT (IRQ0) to GSI 2 under QEMU. Resolved nested-interrupt scheduler deadlocks by removing spinlocks from `schedule()` and disabling interrupts before acquiring `task_lock` in task helpers. Also fixed Start Menu dismissal on outside clicks and desktop icon dragging. |
 | v32.0 | **Syscall Modularization & VMM Memory Safety Update:** Refactored monolithic `syscall.c` into modular handlers (`syscall_gui.c`, `syscall_vfs.c`, etc.). Fixed virtual memory heap overlap at `0x08000000` by placing `heap_ptr` after loaded app segments. Patched `task_cleanup` to switch `CR3` back to kernel boot directory before freeing process address space. Bound-checked VFS node allocation in `ext2.c` to prevent `fs_nodes[-1]` array underflow. |
 | v31.0 | **Graphics Pipeline & Compositing Performance Update:** Shifted the main rendering loop in `kernel.c` to an event-driven model, removing forced 60Hz polling to lower idle CPU load to 0%. Optimized VRAM compositing in `swap_buffers` (`src/drivers/vga.c`) by comparing 2 pixels per iteration using 64-bit casting (`uint64_t*`), skipping static content instantly. Configured `SYS_UPDATE_WINDOW` syscall to trigger compositor redraws via global `needs_redraw`. |
 | v30.2 | **Alt+Tab Window Switcher & English Localization Update:** Added Left Alt modifier key press/release state tracking in the keyboard driver and intercepted Tab scancodes in the main loop to cycle focus between active windows via `wm_focus_next()`. Fixed Escape key (scancode 0x01) ASCII translation mapping. Translated all remaining Indonesian strings across menus, shell feedback, dialog boxes, and toolbar layouts to English. |

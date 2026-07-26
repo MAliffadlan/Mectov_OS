@@ -9,5 +9,7 @@ extern volatile int mouse_updated;    // flag: new packet arrived
 extern volatile int8_t mouse_scroll;  // scroll wheel delta (>0 = up, <0 = down)
 
 void init_mouse();
+// Feeds one AUX byte into the packet state machine. Call only from ps2_drain().
+void mouse_feed_byte(uint8_t data);
 
 #endif

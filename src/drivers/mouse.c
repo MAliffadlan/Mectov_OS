@@ -2,6 +2,7 @@
 #include "../include/io.h"
 #include "../include/idt.h"
 #include "../include/vga.h"
+#include "../include/keyboard.h"   // ps2_drain()
 
 volatile int mouse_x = 400, mouse_y = 300;
 volatile uint8_t mouse_btn = 0;
@@ -28,12 +29,11 @@ static void mouse_set_sample_rate(uint8_t rate) {
     mouse_write(rate); mouse_read(); // ACK
 }
 
-// ---- IRQ12 handler ----
-static void mouse_handler(registers_t* regs) {
-    (void)regs;
-    uint8_t data = inb(0x60);
-    int max_cycle = mouse_has_wheel ? 3 : 2;
-
+// ---- PS/2 packet state machine ----
+// Fed one byte at a time by ps2_drain() (keyboard.c). The byte may arrive via
+// IRQ12 or via IRQ1 — the 8042 has a single output buffer shared by both
+// devices, so whichever IRQ runs first can pick up the other device's byte.
+void mouse_feed_byte(uint8_t data) {
     switch (mouse_cycle) {
         case 0:
             mouse_bytes[0] = (int8_t)data;
@@ -60,20 +60,25 @@ static void mouse_handler(registers_t* regs) {
             // Update buttons
             mouse_btn = mouse_bytes[0] & 0x07; // bits 0-2: left, right, middle
 
-            // Update position (Y is inverted in PS/2)
-            int dx = mouse_bytes[1];
-            int dy = mouse_bytes[2];
-            if (mouse_bytes[0] & 0x10) dx |= (int)0xFFFFFF00;
-            if (mouse_bytes[0] & 0x20) dy |= (int)0xFFFFFF00;
+            // Bits 6/7 of byte 0 are the X/Y overflow flags. When either is set
+            // the deltas in bytes 1/2 are meaningless, so keep the button state
+            // but drop the movement instead of teleporting the cursor.
+            if (!((uint8_t)mouse_bytes[0] & 0xC0)) {
+                // Update position (Y is inverted in PS/2)
+                int dx = mouse_bytes[1];
+                int dy = mouse_bytes[2];
+                if (mouse_bytes[0] & 0x10) dx |= (int)0xFFFFFF00;
+                if (mouse_bytes[0] & 0x20) dy |= (int)0xFFFFFF00;
 
-            mouse_x += dx;
-            mouse_y -= dy;
+                mouse_x += dx;
+                mouse_y -= dy;
 
-            // Clamp to screen bounds
-            if (mouse_x < 0)              mouse_x = 0;
-            if (mouse_x >= (int)fb_width) mouse_x = (int)fb_width  - 1;
-            if (mouse_y < 0)              mouse_y = 0;
-            if (mouse_y >= (int)fb_height)mouse_y = (int)fb_height - 1;
+                // Clamp to screen bounds
+                if (mouse_x < 0)              mouse_x = 0;
+                if (mouse_x >= (int)fb_width) mouse_x = (int)fb_width  - 1;
+                if (mouse_y < 0)              mouse_y = 0;
+                if (mouse_y >= (int)fb_height)mouse_y = (int)fb_height - 1;
+            }
 
             // Update scroll wheel (4th byte, only in IntelliMouse mode)
             if (mouse_has_wheel) {
@@ -88,6 +93,12 @@ static void mouse_handler(registers_t* regs) {
             mouse_updated = 1;
             break;
     }
+}
+
+// ---- IRQ12 handler ----
+static void mouse_handler(registers_t* regs) {
+    (void)regs;
+    ps2_drain(); // routes by the AUX status bit, not by which IRQ fired
 }
 
 void init_mouse() {

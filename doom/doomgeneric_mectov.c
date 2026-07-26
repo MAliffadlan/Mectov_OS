@@ -13,7 +13,7 @@ extern uint32_t  fb_height;
 extern uint32_t  fb_pitch;
 extern uint32_t  bb_pitch;
 
-extern uint32_t  timer_ticks;  // 1000 Hz tick counter
+extern volatile uint32_t timer_ticks;  // 1000 Hz tick counter
 extern uint8_t   k_get_scancode(void);
 extern void      write_serial_string(const char *s);
 

@@ -445,6 +445,28 @@ static void sanitize_path(char* path) {
     path[len] = '\0';
 }
 
+// Poll the network until *flag goes non-zero. Returns 1 on success, 0 on give-up.
+//
+// Bounded two ways on purpose. The tick deadline is the real timeout while the
+// clock is running, but ex_cmd()'s live entry point is SYS_EXEC_CMD and int 0x80
+// is an interrupt gate (IF=0), so IRQ0 cannot fire and get_ticks() may never
+// advance at all. The spin cap is what actually guarantees we return in that
+// case: a timeout of the wrong length beats wedging the box with a task that
+// cannot even be killed. Remove the cap only once the syscall path is
+// preemptible (trap gate) and every handler has been audited for re-entrancy.
+#define NET_WAIT_MAX_SPINS 4000000u
+
+static int net_wait_for(volatile int* flag, uint32_t timeout_ms) {
+    uint32_t start = get_ticks();
+    uint32_t spins = 0;
+    while (!*flag) {
+        if ((get_ticks() - start) >= timeout_ms) break;
+        if (++spins >= NET_WAIT_MAX_SPINS) break;
+        net_poll();
+    }
+    return *flag != 0;
+}
+
 // ============================================================
 // Main command execution
 // ============================================================
@@ -862,19 +884,15 @@ static void run_cmd_internal() {
             if (!net_ready) {
                 print("Resolving gateway (ARP)...\n", 0x07);
                 net_send_arp_request(gateway_ip);
-                uint32_t arp_start = get_ticks();
-                while (!net_ready && (get_ticks() - arp_start) < 2000) net_poll();
-                if (!net_ready) {
+                if (!net_wait_for(&net_ready, 2000)) {
                     print("ARP timeout: gateway not found.\n", 0x0C);
                     goto ping_done;
                 }
                 print("Gateway resolved!\n", 0x0A);
             }
-            
+
             net_send_ping(tip);
-            uint32_t start = get_ticks();
-            while (!ping_replied && (get_ticks() - start) < 3000) net_poll();
-            if (ping_replied) {
+            if (net_wait_for(&ping_replied, 3000)) {
                 uint32_t ms = (ping_rtt * 1000) / 60;
                 print("Reply from ", 0x0A);
                 p_int(tip[0], 0x0F); print(".", 0x0F);
@@ -898,19 +916,14 @@ static void run_cmd_internal() {
             
             if (!net_ready) {
                 net_send_arp_request(gateway_ip);
-                uint32_t arp_start = get_ticks();
-                while (!net_ready && (get_ticks() - arp_start) < 2000) net_poll();
-                if (!net_ready) {
+                if (!net_wait_for(&net_ready, 2000)) {
                     print("  [!] Gateway ARP timeout!\n", 0x0C);
                     goto host_done;
                 }
             }
-            
+
             net_send_dns_query(domain);
-            uint32_t start = get_ticks();
-            while (!dns_resolved && (get_ticks() - start) < 3000) net_poll();
-            
-            if (dns_resolved) {
+            if (net_wait_for(&dns_resolved, 3000)) {
                 print(domain, 0x0A); print(" has address ", 0x0F);
                 p_int(dns_resolved_ip[0], 0x0A); print(".", 0x0A);
                 p_int(dns_resolved_ip[1], 0x0A); print(".", 0x0A);
@@ -1160,8 +1173,13 @@ static void run_cmd_internal() {
     else if (strncmp(cmd_b, "tunggu ", 7) == 0) {
         int ms = atoi(cmd_b + 7);
         if (ms > 0 && ms < 60000) {
-            uint32_t start = get_ticks();
-            while ((get_ticks() - start) < (uint32_t)ms) { /* wait */ }
+            // Must NOT busy-wait on get_ticks(): ex_cmd()'s live entry point is
+            // SYS_EXEC_CMD, and int 0x80 is an interrupt gate (IF=0), so IRQ0
+            // never fires and the tick count can never reach the target — the
+            // box wedges with no way to kill the task. task_sleep() re-enables
+            // interrupts and hands us to the scheduler, which is what actually
+            // makes time pass here. PIT runs at 1000 Hz, so 1 tick == 1 ms.
+            task_sleep(ms);
         }
     }
     // --- NADA (beep frequency) ---

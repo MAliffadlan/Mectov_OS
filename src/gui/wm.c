@@ -55,6 +55,46 @@ void wm_raise(int id) {
     }
 }
 
+// ---- Minimize / restore ----
+// These own BOTH halves of the operation: the state change and the damage it
+// causes. Do not set .minimized directly from a call site — draw_one() skips
+// minimized windows, so nothing will ever repaint over the pixels the window
+// left behind and it stays painted on screen as a ghost.
+void wm_minimize(int id) {
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (!wm_wins[i].visible || wm_wins[i].id != id) continue;
+        if (wm_wins[i].minimized) return; // already hidden, nothing to erase
+
+        extern void mark_dirty(int, int, int, int);
+        mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h);
+        wm_wins[i].minimized = 1;
+
+        // Focus falls through to the topmost window still on screen
+        wm_focused = -1;
+        for (int zz = wm_zcount - 1; zz >= 0; zz--) {
+            WmWin* nw = &wm_wins[wm_zorder[zz]];
+            if (nw->visible && !nw->minimized) {
+                wm_focused = nw->id;
+                break;
+            }
+        }
+
+        extern volatile int needs_redraw;
+        needs_redraw = 1;
+        return;
+    }
+}
+
+void wm_restore(int id) {
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (wm_wins[i].visible && wm_wins[i].id == id) {
+            wm_wins[i].minimized = 0;
+            wm_raise(id); // marks the screen dirty and sets needs_redraw
+            return;
+        }
+    }
+}
+
 void wm_focus_next(void) {
     if (wm_zcount <= 1) return;
     
@@ -68,6 +108,9 @@ void wm_focus_next(void) {
     // Find the new top window index in wm_wins
     int new_top_idx = wm_zorder[wm_zcount - 1];
     wm_focused = wm_wins[new_top_idx].id;
+    // Exempt from wm_restore(): that would call wm_raise(), which rebuilds the
+    // z-order and would undo the rotation above. The fullscreen mark_dirty on
+    // the next line covers the damage instead.
     wm_wins[new_top_idx].minimized = 0; // Restore if minimized
     extern void mark_dirty(int, int, int, int);
     mark_dirty(0, 0, fb_width, fb_height); // Mark fullscreen dirty on z-order shift
@@ -110,8 +153,7 @@ void wm_alt_tab_end(void) {
     
     // Select the highlighted window: HUD lists windows from top to bottom
     int target_idx = wm_zorder[wm_zcount - 1 - alt_tab_selected_idx];
-    wm_wins[target_idx].minimized = 0;
-    wm_raise(wm_wins[target_idx].id);
+    wm_restore(wm_wins[target_idx].id);
 }
 
 static void draw_hud_icon(int ix, int iy, const char* title) {
@@ -709,18 +751,7 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                 dx = mx - w->min_cx; dy = my - w->min_cy;
                 dist2 = dx*dx + dy*dy;
                 if (dist2 <= w->min_r * w->min_r + 4) {
-                    mark_dirty(w->x, w->y, w->w, w->h); // Mark old window bounds dirty
-                    w->minimized = 1;
-                    wm_focused = -1;
-                    for (int zz = wm_zcount - 1; zz >= 0; zz--) {
-                        WmWin* nw = &wm_wins[wm_zorder[zz]];
-                        if (nw->visible && !nw->minimized) {
-                            wm_focused = nw->id;
-                            break;
-                        }
-                    }
-                    extern volatile int needs_redraw;
-                    needs_redraw = 1;
+                    wm_minimize(w->id);
                     return 1;
                 }
 

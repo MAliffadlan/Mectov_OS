@@ -53,6 +53,10 @@ extern int wm_focused;
 
 void wm_init();
 void wm_raise(int id);
+// Minimize/restore. Always go through these — they mark the damaged region
+// dirty, which setting WmWin.minimized by hand does not.
+void wm_minimize(int id);
+void wm_restore(int id);
 void wm_focus_next(void);
 
 extern int alt_tab_active;

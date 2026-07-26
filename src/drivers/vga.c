@@ -37,8 +37,15 @@ void vga_set_render_target(uint32_t* buf, int w, int h, int pitch) {
         active_rt_height = h;
         active_rt_pitch  = pitch;
     }
+    // Drop any clip left behind by the previous target — it was expressed in
+    // that target's coordinates and is meaningless here.
+    vga_reset_clip();
 }
 
+// NOTE: this is a compositor operation. It writes to back_buffer directly
+// rather than to the active render target, so the clip rect (which is in
+// render target coordinates) deliberately does not apply — only the screen
+// bounds do.
 void vga_blit_buffer(uint32_t* src, int sw, int sh, int dx, int dy) {
     if (!src || !back_buffer) return;
     int x0 = dx < 0 ? 0 : dx;
@@ -69,21 +76,70 @@ volatile char* video_m = (volatile char*) 0xb8000;
 int cx = 0, cy = 0;
 unsigned char cur_col = 0x0F;
 
-// ---- Clipping Rectangle ----
-int clip_x1 = 0, clip_y1 = 0, clip_x2 = 0x7FFFFFFF, clip_y2 = 0x7FFFFFFF;
+// ============================================================
+// Clipping Rectangle
+// ============================================================
+// The clip rect is expressed in ACTIVE RENDER TARGET coordinates, not screen
+// coordinates. Every primitive that goes through put_pixel() or draw_rect()
+// honours it, on top of the render target bounds it already enforced.
+//
+// "Unbounded" is CLIP_NONE rather than INT_MAX so that the x + w arithmetic
+// inside vga_set_clip() can never overflow an int.
+#define CLIP_NONE 0x3FFFFFFF
+
+static int clip_x1 = 0, clip_y1 = 0, clip_x2 = CLIP_NONE, clip_y2 = CLIP_NONE;
 
 void vga_set_clip(int x, int y, int w, int h) {
-    clip_x1 = x;
-    clip_y1 = y;
-    clip_x2 = x + w;
-    clip_y2 = y + h;
+    clip_x1 = x < 0 ? 0 : x;
+    clip_y1 = y < 0 ? 0 : y;
+    // Compute the right/bottom edges in 64-bit: a caller-supplied w/h must not
+    // be able to wrap around into a negative int, which would silently turn the
+    // clip into "reject everything" (or, worse, into a no-op).
+    long long x2 = (long long)x + w;
+    long long y2 = (long long)y + h;
+    clip_x2 = x2 > CLIP_NONE ? CLIP_NONE : (int)x2;
+    clip_y2 = y2 > CLIP_NONE ? CLIP_NONE : (int)y2;
 }
 
 void vga_reset_clip(void) {
     clip_x1 = 0;
     clip_y1 = 0;
-    clip_x2 = 0x7FFFFFFF;
-    clip_y2 = 0x7FFFFFFF;
+    clip_x2 = CLIP_NONE;
+    clip_y2 = CLIP_NONE;
+}
+
+// Is this pixel inside both the render target and the clip rect?
+static inline int clip_test(int x, int y) {
+    return x >= clip_x1 && x < clip_x2 &&
+           y >= clip_y1 && y < clip_y2 &&
+           x >= 0 && x < (int)active_rt_width &&
+           y >= 0 && y < (int)active_rt_height;
+}
+
+// Intersect a box with the render target and the clip rect. Returns 0 when
+// nothing survives, otherwise fills in the half-open bounds [x0,x1) x [y0,y1).
+static int clip_box(int x, int y, int w, int h,
+                    int* ox0, int* oy0, int* ox1, int* oy1) {
+    if (w <= 0 || h <= 0) return 0;
+
+    int x0 = x > clip_x1 ? x : clip_x1;
+    int y0 = y > clip_y1 ? y : clip_y1;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+
+    // Same 64-bit reasoning as vga_set_clip: w/h reaches here straight from
+    // callers such as wm.c's window geometry, so x + w may not wrap.
+    long long ex = (long long)x + w;
+    long long ey = (long long)y + h;
+
+    int lim_x = clip_x2 < (int)active_rt_width  ? clip_x2 : (int)active_rt_width;
+    int lim_y = clip_y2 < (int)active_rt_height ? clip_y2 : (int)active_rt_height;
+    int x1 = ex < lim_x ? (int)ex : lim_x;
+    int y1 = ey < lim_y ? (int)ey : lim_y;
+
+    if (x0 >= x1 || y0 >= y1) return 0;
+    *ox0 = x0; *oy0 = y0; *ox1 = x1; *oy1 = y1;
+    return 1;
 }
 
 // ============================================================
@@ -107,7 +163,7 @@ uint32_t vga_to_rgb(unsigned char col) {
 // Core drawing — all write to back_buffer
 // ============================================================
 void put_pixel(int x, int y, uint32_t color) {
-    if (x < 0 || x >= (int)active_rt_width || y < 0 || y >= (int)active_rt_height) return;
+    if (!clip_test(x, y)) return;
     mark_dirty(x, y, 1, 1);
     if (active_rt_buf)
         active_rt_buf[y * (active_rt_pitch / 4) + x] = color;
@@ -125,12 +181,9 @@ void put_pixel(int x, int y, uint32_t color) {
 }
 
 void draw_rect(int x, int y, int w, int h, uint32_t color) {
-    // Clip to screen or active render target
-    int x0 = x < 0 ? 0 : x;
-    int y0 = y < 0 ? 0 : y;
-    int x1 = (x + w > (int)active_rt_width)  ? (int)active_rt_width  : (x + w);
-    int y1 = (y + h > (int)active_rt_height) ? (int)active_rt_height : (y + h);
-    if (x0 >= x1 || y0 >= y1) return;
+    // Clip to the active render target and the clip rect
+    int x0, y0, x1, y1;
+    if (!clip_box(x, y, w, h, &x0, &y0, &x1, &y1)) return;
     mark_dirty(x0, y0, x1 - x0, y1 - y0);
 
     if (active_rt_buf) {
@@ -155,12 +208,9 @@ void draw_rect(int x, int y, int w, int h, uint32_t color) {
 }
 
 void draw_rect_alpha(int x, int y, int w, int h, uint32_t color) {
-    // Clip to screen or active render target
-    int x0 = x < 0 ? 0 : x;
-    int y0 = y < 0 ? 0 : y;
-    int x1 = (x + w > (int)active_rt_width)  ? (int)active_rt_width  : (x + w);
-    int y1 = (y + h > (int)active_rt_height) ? (int)active_rt_height : (y + h);
-    if (x0 >= x1 || y0 >= y1) return;
+    // Clip to the active render target and the clip rect
+    int x0, y0, x1, y1;
+    if (!clip_box(x, y, w, h, &x0, &y0, &x1, &y1)) return;
     mark_dirty(x0, y0, x1 - x0, y1 - y0);
 
     if (active_rt_buf) {
@@ -337,14 +387,11 @@ void draw_soft_shadow(int x, int y, int w, int h, int radius, uint32_t intensity
     int shadow_x = x + shadow_offset;
     int shadow_y = y + shadow_offset;
     
-    // Clip shadow to screen
-    int sx0 = shadow_x - radius < 0 ? 0 : shadow_x - radius;
-    int sy0 = shadow_y - radius < 0 ? 0 : shadow_y - radius;
-    int sx1 = shadow_x + w + radius > (int)active_rt_width  ? (int)active_rt_width  : shadow_x + w + radius;
-    int sy1 = shadow_y + h + radius > (int)active_rt_height ? (int)active_rt_height : shadow_y + h + radius;
-    
-    if (sx0 >= sx1 || sy0 >= sy1) return;
-    
+    // Clip the feathered shadow box to the render target and the clip rect
+    int sx0, sy0, sx1, sy1;
+    if (!clip_box(shadow_x - radius, shadow_y - radius,
+                  w + 2 * radius, h + 2 * radius, &sx0, &sy0, &sx1, &sy1)) return;
+
     uint32_t stride = active_rt_pitch / 4;
     
     // Pre-compute intensity blend factor

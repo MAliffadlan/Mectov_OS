@@ -2,7 +2,10 @@
 #include "../include/vga.h"
 #include "../include/io.h"
 
-uint32_t timer_ticks = 0;
+// volatile: written by the IRQ0 handler, read by wait loops in thread context.
+// Without it the compiler may hoist the load out of a polling loop and spin on
+// a stale value forever. (syscall.c already declared it extern volatile.)
+volatile uint32_t timer_ticks = 0;
 
 // Direct serial write (no function call overhead, no blocking risk)
 static inline void serial_char(char c) {

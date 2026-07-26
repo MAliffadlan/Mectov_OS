@@ -735,18 +735,9 @@ void taskbar_handle_click(int mx, int my) {
 
         if (mx >= wx && mx < wx + btn_w) {
             if (wm_wins[i].minimized) {
-                wm_wins[i].minimized = 0;
-                wm_raise(wm_wins[i].id);
+                wm_restore(wm_wins[i].id);
             } else if (wm_focused == wm_wins[i].id) {
-                wm_wins[i].minimized = 1;
-                wm_focused = -1;
-                for (int zz = wm_zcount - 1; zz >= 0; zz--) {
-                    WmWin* nw = &wm_wins[wm_zorder[zz]];
-                    if (nw->visible && !nw->minimized) {
-                        wm_focused = nw->id;
-                        break;
-                    }
-                }
+                wm_minimize(wm_wins[i].id);
             } else {
                 wm_raise(wm_wins[i].id);
             }
