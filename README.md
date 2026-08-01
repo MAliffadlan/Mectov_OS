@@ -1,4 +1,4 @@
-# Mectov OS v34.0 — The Input Integrity & Compositor Correctness Update
+# Mectov OS v34.1 — The Kernel Ownership Hardening Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,13 +6,13 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v34.0 release is a correctness pass over the input path, the compositor, and the shell. Every item here is a subsystem that looked finished but was silently not doing its job:
+The v34.1 release is a kernel hardening pass over ownership boundaries, parser safety, and startup resilience. The recent fixes are:
 
-1. **Enforced Compositor Clipping:** `vga_set_clip()` wrote four globals that no drawing primitive ever read, so the clip rectangle was a no-op and the Window Manager's content-area clip was never actually applied. Every primitive now intersects against it through shared `clip_test()` / `clip_box()` helpers, and `vga_set_render_target()` resets the clip so a stale rectangle cannot leak from one target into the next. Edge arithmetic moved to 64-bit so a caller-supplied width/height can no longer wrap an `int`.
-2. **Centralized Window Damage Tracking:** Minimize and restore now live in `wm_minimize()` / `wm_restore()`, which own both halves of the operation — the state change *and* the dirty-region marking. This fixes minimizing from a taskbar button leaving the window painted on screen: that path duplicated the titlebar button's logic minus its `mark_dirty()` call.
-3. **Unified PS/2 Byte Arbitration:** The 8042 controller has a single output buffer shared by the keyboard and the mouse. IRQ1, IRQ12, and `speaker.c`'s delay loop each read port `0x60` without testing the AUX status bit, so they cannibalised each other's byte streams — the root cause of both stuck modifier keys and cursor teleporting. All three now route through one `ps2_drain()` that dispatches on status bit 5. Mouse packets with the X/Y overflow bits set are also no longer trusted for movement.
-4. **Eliminated Unkillable Shell Spins:** `int 0x80` is an interrupt gate, so `IF=0` for the whole syscall and IRQ0 can never fire — every `get_ticks()` deadline reachable from the Ring 3 shell was therefore unreachable, wedging the machine with a task that could not even be killed. `tunggu` now uses the scheduler's sleep path, and the ping/DNS waits are bounded by `net_wait_for()`. `timer_ticks` is now correctly `volatile`.
-5. **VFS Read Buffer Overflow:** `vfs_read_file()` wrote its NUL terminator one byte past the caller's buffer whenever a file exactly filled it — triggered on every boot through `icons.cfg` and on every `.mct` application launch.
+1. **Centralized Session Reset:** logout now resets window/session state through a single WM path instead of letting the taskbar, kernel, and app launcher each clean up different parts of the desktop on their own.
+2. **Safer Syscall Array Validation:** pointer+length syscalls now validate the full span before touching user buffers, preventing wraparound bugs in window, PCI, and clipboard queries.
+3. **Hardened VFS Bootstrap:** path splitting and node creation now reject malformed/overlong input, and the initial `home/user` tree is created as nested directories instead of a literal slash-containing name.
+4. **Bounded Shell/App Waits:** shell sleep semantics now match the documented seconds-based behavior, and browser requests time out instead of hanging forever on network stalls.
+5. **Safer ACPI Discovery:** EBDA lookup and MADT parsing now have explicit bounds checks, avoiding bad reads during early hardware discovery.
 
 Created by M Alif Fadlan.
 
@@ -387,6 +387,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v34.1 | **Kernel Ownership Hardening Update:** Centralized logout/session cleanup through `wm_reset_session()` so the taskbar and kernel no longer duplicate teardown; hardened syscall array validation for window/PCI/clipboard buffers; fixed VFS path splitting and bootstrap directory creation; aligned shell sleep with its documented seconds-based behavior; added browser request timeouts; and tightened ACPI EBDA/MADT discovery bounds. |
 | v34.0 | **Input Integrity & Compositor Correctness Update:** Made `vga_set_clip()` real — the clip rectangle was previously four globals that no drawing primitive ever read, so the WM's content-area clip silently did nothing; all primitives now gate on shared `clip_test()`/`clip_box()` helpers with 64-bit edge arithmetic, and `vga_set_render_target()` resets the clip between targets. Consolidated minimize/restore into `wm_minimize()`/`wm_restore()` so the state change and its dirty-region marking can no longer be separated, fixing windows minimized from the taskbar staying painted on screen. Unified all port `0x60` access behind a single `ps2_drain()` that dispatches on the 8042 AUX status bit, ending the keyboard/mouse byte theft behind stuck modifier keys and cursor teleporting, and added mouse packet overflow-bit rejection. Removed every unkillable spin from the shell: `tunggu` now uses `task_sleep()` and the ARP/ping/DNS waits use the doubly-bounded `net_wait_for()`, since `int 0x80` is an interrupt gate and `get_ticks()` cannot advance during a syscall. Fixed `vfs_read_file()` writing its NUL terminator one byte past the caller's buffer on exact-fit reads. Marked `timer_ticks` `volatile`. |
 | v33.1 | **Start Menu Ghosting Fix:** Reordered `full_redraw` to call `taskbar_pre_draw()` before `desktop_draw()` so dirty rectangles are applied before the background is painted, ensuring closed popups are erased from the screen. |
 | v33.0 | **Multi-Core (SMP) & APIC Update:** Boot and initialize Application Processors via the INIT-SIPI-SIPI sequence with per-core GDT/TSS and IDT loading. Added Local APIC and I/O APIC drivers, disabling the legacy PIC and routing keyboard, mouse, and timer interrupts to the BSP. Parses the MADT for Interrupt Source Overrides to correctly route the PIT (IRQ0) to GSI 2 under QEMU. Resolved nested-interrupt scheduler deadlocks by removing spinlocks from `schedule()` and disabling interrupts before acquiring `task_lock` in task helpers. Also fixed Start Menu dismissal on outside clicks and desktop icon dragging. |
