@@ -11,6 +11,7 @@
 #include "../include/mouse.h"
 #include "../include/fd.h"
 #include "../include/shell.h"
+#include "../include/vmm.h"   // USER_STACK_BOTTOM
 
 extern int validate_user_ptr(const void* ptr, uint32_t size);
 extern int safe_strlen(const char* s, int max);
@@ -21,6 +22,21 @@ extern void push_event(int wid, int type, int x, int y, int key);
 extern void win_draw_cb(int id, int cx, int cy, int cw, int ch);
 extern void win_key_cb(int id, char c, uint8_t sc);
 extern void win_mouse_cb(int id, int cx, int cy, int btn);
+
+static int str_contains(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return 0;
+    for (int i = 0; haystack[i]; i++) {
+        int match = 1;
+        for (int j = 0; needle[j]; j++) {
+            if (haystack[i + j] != needle[j]) {
+                match = 0;
+                break;
+            }
+        }
+        if (match) return 1;
+    }
+    return 0;
+}
 
 #define MAX_EVENTS 64
 typedef struct {
@@ -59,12 +75,27 @@ uint32_t handle_syscall_proc(registers_t* regs) {
         case SYS_THREAD_CREATE: {
             void (*entry)() = (void (*)())regs->ebx;
             int priority = (int)regs->ecx;
-            uint32_t page_dir = (uint32_t)regs->edx;
-            int tid = thread_create(entry, priority, page_dir);
+
+            // EDX is deliberately ignored. It used to be the new task's page
+            // directory, i.e. Ring 3 chose the value the scheduler would load
+            // into CR3 — pointing it at a page directory the app authored in
+            // its own memory handed it the whole machine, and pointing it at
+            // junk triple-faulted the box. A thread always shares its
+            // creator's address space.
+            int caller = get_current_task();
+
+            // The entry point has to be code the caller can actually execute.
+            uint32_t eip = (uint32_t)regs->ebx;
+            if (task_in_kernel_space(caller) || eip < 0x08000000 || eip >= USER_STACK_BOTTOM) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+
+            int tid = thread_create(entry, priority, task_get_page_dir(caller));
             __asm__ volatile("sti"); // thread_create leaves interrupts disabled
             regs->eax = (uint32_t)tid;
             write_serial_string("[SYS] thread_create -> TID=");
-            write_serial('0' + tid);
+            write_serial('0' + (tid < 0 ? 0 : tid));
             write_serial('\n');
             break;
         }
@@ -122,6 +153,23 @@ uint32_t handle_syscall_proc(registers_t* regs) {
         case SYS_KILL_TASK: {
             int tid = (int)regs->ebx;
             if (tid <= 0) { regs->eax = (uint32_t)-1; break; }
+            
+            // Privilege check
+            int caller_tid = get_current_task();
+            if (!task_in_kernel_space(caller_tid)) {
+                const char* launch_arg = task_get_launch_arg(caller_tid);
+                if (!str_contains(launch_arg, "terminal.mct") && 
+                    !str_contains(launch_arg, "explorer.mct") && 
+                    !str_contains(launch_arg, "taskmgr.mct")) {
+                    write_serial_string("[SYS] Access denied for SYS_KILL_TASK from TID=");
+                    write_serial_hex(caller_tid);
+                    write_serial_string(" (");
+                    write_serial_string(launch_arg);
+                    write_serial_string(")\n");
+                    regs->eax = (uint32_t)-1;
+                    break;
+                }
+            }
             regs->eax = (uint32_t)task_kill(tid);
             break;
         }
@@ -153,6 +201,23 @@ uint32_t handle_syscall_proc(registers_t* regs) {
         case SYS_EXEC_CMD: {
             const char* cmd_str = (const char*)regs->ebx;
             if (safe_strlen(cmd_str, CMD_BUF_SIZE) < 0) { regs->eax = (uint32_t)-1; break; }
+            
+            // Privilege check
+            int caller_tid = get_current_task();
+            if (!task_in_kernel_space(caller_tid)) {
+                const char* launch_arg = task_get_launch_arg(caller_tid);
+                if (!str_contains(launch_arg, "terminal.mct") && 
+                    !str_contains(launch_arg, "explorer.mct")) {
+                    write_serial_string("[SYS] Access denied for SYS_EXEC_CMD from TID=");
+                    write_serial_hex(caller_tid);
+                    write_serial_string(" (");
+                    write_serial_string(launch_arg);
+                    write_serial_string(")\n");
+                    regs->eax = (uint32_t)-1;
+                    break;
+                }
+            }
+            
             extern char cmd_b[CMD_BUF_SIZE];
             extern int b_idx;
             int len2 = 0;
@@ -165,7 +230,6 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             extern int stdout_ipc_qid;
             int saved_qid = stdout_ipc_qid;
             extern int use_term_buf;
-            extern int term_app_running;
             use_term_buf = 0;
             extern void ex_cmd(void);
             ex_cmd();

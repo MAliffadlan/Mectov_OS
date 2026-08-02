@@ -2,6 +2,7 @@
 #include "../include/vga.h"
 #include "../include/utils.h"
 #include "../include/taskbar.h"
+#include "../include/serial.h"
 
 #define SNAP_THRESHOLD  10      // px from edge to trigger snap
 #define SNAP_AREA_W     (int)(fb_width / 2)  // half width for left/right snap
@@ -863,6 +864,54 @@ void wm_cleanup_task(int tid) {
     }
     // Update focus
     wm_focused = (wm_zcount > 0) ? wm_wins[wm_zorder[wm_zcount-1]].id : -1;
+    extern volatile int needs_redraw;
+    needs_redraw = 1;
+}
+
+void wm_reset_session(void) {
+    // First close windows owned by user tasks so their lifecycle cleanup runs
+    // through the same path used by task_exit()/task_kill().
+    int cleaned_tasks[MAX_WINDOWS];
+    int cleaned_count = 0;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (!wm_wins[i].visible || wm_wins[i].owner_task <= 0) continue;
+        int seen = 0;
+        for (int j = 0; j < cleaned_count; j++) {
+            if (cleaned_tasks[j] == wm_wins[i].owner_task) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen && cleaned_count < MAX_WINDOWS) {
+            cleaned_tasks[cleaned_count++] = wm_wins[i].owner_task;
+            wm_cleanup_task(wm_wins[i].owner_task);
+        }
+    }
+
+    // Then clear any remaining kernel-owned windows directly.
+    extern void mark_dirty(int, int, int, int);
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (!wm_wins[i].visible) continue;
+        mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h);
+        wm_wins[i].visible = 0;
+        wm_wins[i].dragging = 0;
+        wm_wins[i].resizing = 0;
+        wm_wins[i].minimized = 0;
+        wm_wins[i].maximized = 0;
+        wm_wins[i].snap_state = SNAP_NONE;
+        wm_wins[i].owner_task = -1;
+        if (wm_wins[i].content_buffer) {
+            extern void kfree(void*);
+            kfree(wm_wins[i].content_buffer);
+            wm_wins[i].content_buffer = NULL;
+        }
+    }
+
+    wm_focused = -1;
+    wm_zcount = 0;
+    alt_tab_active = 0;
+    alt_tab_selected_idx = 0;
+
     extern volatile int needs_redraw;
     needs_redraw = 1;
 }

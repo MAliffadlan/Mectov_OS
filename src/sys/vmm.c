@@ -261,11 +261,48 @@ int vmm_map_page(uint32_t page_dir, uint32_t vaddr, uint32_t paddr, uint32_t fla
         write_serial('\n');
     }
     
+    // The CPU requires PAGE_USER at EVERY level, so a user page under a
+    // kernel-only PDE is unreachable from Ring 3. This matters because
+    // vmm_create_address_space() clones the kernel's identity-map page tables
+    // (which are kernel-only since paging_init stopped setting PAGE_USER), and
+    // on a machine with enough RAM the user window at 0x08000000 falls inside
+    // one of them. Widening the PDE is safe: this page table is always this
+    // address space's private clone, and the identity-mapped PTEs inside it
+    // still lack PAGE_USER individually, so kernel memory stays protected.
+    if (flags & PAGE_USER) pd[pd_idx] |= PAGE_USER;
+
     uint32_t pt_paddr = pd[pd_idx] & 0xFFFFF000;
     uint32_t* pt = (uint32_t*)(uintptr_t)pt_paddr;
     pt[pt_idx] = (paddr & 0xFFFFF000) | (flags & 0xFFF) | PAGE_PRESENT;
-    
+
     return 0;
+}
+
+// Map a fresh Ring 3 stack into page_dir. Returns the initial ESP, or 0.
+//
+// On partial failure the frames already mapped are left in place; every caller
+// abandons the whole address space on failure, and vmm_free_address_space()
+// reclaims them.
+uint32_t vmm_setup_user_stack(uint32_t page_dir) {
+    if (page_dir == 0) return 0;  // a Ring 3 task needs a private address space
+
+    for (uint32_t i = 0; i < USER_STACK_PAGES; i++) {
+        uint32_t va = USER_STACK_BOTTOM + i * 4096;
+        uint32_t paddr = frame_alloc();
+        if (paddr == 0) {
+            write_serial_string("[VMM] user stack: out of frames\n");
+            return 0;
+        }
+        // Zero through the kernel identity map before the page is ever visible
+        // to Ring 3, so a new task cannot read what the previous owner left.
+        zero_phys_page(paddr);
+        if (vmm_map_page(page_dir, va, paddr, PAGE_PRESENT | PAGE_RW | PAGE_USER) != 0) {
+            frame_free(paddr);
+            write_serial_string("[VMM] user stack: map failed\n");
+            return 0;
+        }
+    }
+    return USER_STACK_TOP;
 }
 
 int vmm_unmap_page(uint32_t page_dir, uint32_t vaddr) {
@@ -379,7 +416,9 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
             // Increment the reference count of the physical frame
             uint32_t page_paddr = src_pt[e] & 0xFFFFF000;
             if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
-                frame_ref_count[page_paddr / 4096]++;
+                if (frame_ref_count[page_paddr / 4096] < 255)
+                    frame_ref_count[page_paddr / 4096]++;
+                // At 255 the frame is pinned — never freed. Acceptable.
             }
         }
         

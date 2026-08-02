@@ -25,10 +25,15 @@ static int string_starts_with(const char* str, const char* prefix) {
     return 1;
 }
 
+static uint16_t read_phys_u16(uintptr_t addr) {
+    uint16_t value;
+    __asm__ __volatile__("movw (%1), %0" : "=r"(value) : "r"(addr) : "memory");
+    return value;
+}
+
 static rsdp_t* find_rsdp(void) {
     // 1. Search in EBDA first 1KB
-    uint16_t* bda = (uint16_t*)(uintptr_t)0x40E;
-    uint32_t ebda = *bda << 4;
+    uint32_t ebda = ((uint32_t)read_phys_u16(0x40E)) << 4;
     for (uint32_t i = ebda; i < ebda + 1024; i += 16) {
         if (string_starts_with((const char*)i, "RSD PTR ") && checksum((char*)i, 20)) {
             return (rsdp_t*)i;
@@ -57,6 +62,12 @@ static void parse_madt(madt_t* madt) {
     
     while (ptr < end) {
         madt_entry_header_t* header = (madt_entry_header_t*)ptr;
+        if (header->length < sizeof(madt_entry_header_t)) {
+            break;
+        }
+        if (ptr + header->length > end) {
+            break;
+        }
         
         if (header->type == 0) { // Processor Local APIC
             madt_local_apic_t* lapic = (madt_local_apic_t*)ptr;
@@ -116,7 +127,7 @@ void acpi_init(void) {
     write_serial_string("\n");
     
     rsdt_t* rsdt = (rsdt_t*)addr;
-    if (len > 1024 * 1024) {
+    if (len < sizeof(acpi_header_t) || len > 1024 * 1024) {
         write_serial_string("Invalid len\n");
         return;
     }
@@ -129,6 +140,9 @@ void acpi_init(void) {
     int entries = (len - sizeof(acpi_header_t)) / 4;
     for (int i = 0; i < entries; i++) {
         acpi_header_t* header = (acpi_header_t*)rsdt->pointers[i];
+        if ((uintptr_t)header < addr || (uintptr_t)header + sizeof(acpi_header_t) > addr + len) {
+            continue;
+        }
         if (string_starts_with(header->signature, "APIC")) {
             parse_madt((madt_t*)header);
             break;

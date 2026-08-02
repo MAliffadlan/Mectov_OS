@@ -12,12 +12,6 @@
 #include "../include/login.h"
 #include "../include/sb16.h"
 
-// Helpers
-static void draw_num2(int px, int py, unsigned char n, uint32_t fg, uint32_t bg) {
-    char buf[3]; buf[0] = '0' + n/10; buf[1] = '0' + n%10; buf[2] = '\0';
-    draw_string_px(px, py, buf, fg, bg);
-}
-
 // ---------- Mouse hover tracking for taskbar ----------
 static int hover_start_x = 0;   // start button
 static int hover_win_idx = -1;   // which window button is hovered
@@ -319,7 +313,6 @@ void taskbar_draw() {
     unsigned char dow  = tm.dow;
     unsigned char c_day = tm.day;
     unsigned char c_mon = tm.month;
-    unsigned int  c_yr  = tm.year;
     int h_tmp = hour + 7;
     if (h_tmp >= 24) { dow++; if (dow > 7) dow = 1; c_day++; }
     hour = h_tmp % 24;
@@ -609,13 +602,9 @@ static void handle_start_menu_click(int item) {
         case 9: // Logout
             {
                 extern volatile int pending_logout;
-                // Close all windows first
-                for (int i = 0; i < MAX_WINDOWS; i++) {
-                    wm_wins[i].visible = 0;
-                }
-                wm_focused = -1;
-                wm_zcount = 0;
+                start_menu_open = 0;
                 calendar_open = 0;
+                volume_popup_open = 0;
                 pending_logout = 1;
             }
             break;

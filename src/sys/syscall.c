@@ -27,6 +27,8 @@
 #include "../include/net.h"
 #include "../include/shell.h"
 
+extern int validate_user_ptr(const void* ptr, uint32_t size);
+
 // Global IPC queue ID for stdout redirection (Terminal Ring 3)
 int stdout_ipc_qid = 0;
 
@@ -147,21 +149,99 @@ void win_mouse_cb(int id, int cx, int cy, int btn) {
 // kernel from following wild pointers into unmapped memory.
 // In the future, per-task page tables would allow finer checks.
 // ============================================================
-#define USER_MEM_LIMIT 0x10000000  // 256MB (covers 128MB identity map + user space at 0x08000000)
+#define USER_MEM_LIMIT 0x10000000  // only used for kernel-task callers now
 
-int validate_user_ptr(const void* ptr, uint32_t size) {
-    uint32_t addr = (uint32_t)ptr;
-    // Check: not NULL, not wrapping, and within mapped memory
-    if (addr == 0) return 0;
-    if (addr + size < addr) return 0; // overflow check
-    if (addr + size > USER_MEM_LIMIT) return 0;
+// No legitimate syscall buffer is this big. Rejecting early also neutralises
+// the `sizeof(T) * max_count` overflow bypasses in the array-returning
+// syscalls, and keeps the page walk below bounded.
+#define USER_PTR_MAX_SIZE 0x1000000  // 16MB
+
+// Confirm one page is mapped user-accessible in this address space, faulting it
+// in first if it is merely un-touched heap.
+//
+// The demand pager in idt.c only runs for faults taken at CPL 3. If the kernel
+// is the first to touch a freshly sys_malloc'd page — the ordinary
+// `read(fd, malloc(n), n)` idiom — the fault arrives with CS=0x08 and becomes
+// an unrecoverable panic. So materialise the page here, at validation time,
+// while we can still fail cleanly and return -1 to the caller.
+static int user_page_ok(uint32_t pd_paddr, uint32_t va, uint32_t heap_top) {
+    uint32_t* pd = (uint32_t*)(uintptr_t)(pd_paddr & 0xFFFFF000);
+    uint32_t pde = pd[va >> 22];
+
+    if ((pde & (PAGE_PRESENT | PAGE_USER)) == (PAGE_PRESENT | PAGE_USER)) {
+        uint32_t* pt = (uint32_t*)(uintptr_t)(pde & 0xFFFFF000);
+        uint32_t pte = pt[(va >> 12) & 0x3FF];
+        // PAGE_USER is required at both levels; a COW page is fine here, the
+        // fault handler in idt.c copies it when the write actually happens.
+        if ((pte & (PAGE_PRESENT | PAGE_USER)) == (PAGE_PRESENT | PAGE_USER)) return 1;
+    }
+
+    // Not mapped. The only addresses we will fault in on the caller's behalf
+    // are inside its own reserved heap window.
+    if (va < 0x08000000 || va >= heap_top) return 0;
+
+    uint32_t phys = frame_alloc();
+    if (phys == 0) return 0;
+    memset((void*)(uintptr_t)phys, 0, 4096);  // zero via the kernel identity map
+    if (vmm_map_page(pd_paddr, va, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER) != 0) {
+        frame_free(phys);
+        return 0;
+    }
+    __asm__ __volatile__("invlpg (%0)" : : "r"(va));
     return 1;
 }
 
-// Safe strlen for user strings (max 256 chars to prevent infinite scan)
+static int validate_user_array_ptr(const void* ptr, uint32_t elem_size, int count) {
+    if (count <= 0 || elem_size == 0) return 0;
+    uint64_t total = (uint64_t)elem_size * (uint64_t)count;
+    if (total == 0 || total > USER_PTR_MAX_SIZE) return 0;
+    return validate_user_ptr(ptr, (uint32_t)total);
+}
+
+// Is [ptr, ptr+size) memory the CALLER is allowed to hand us?
+//
+// This used to compare the pointer against a 256MB constant, which accepted
+// every kernel address in the identity map — so any syscall taking an output
+// buffer could be aimed at kernel .text, the task table, or a page directory.
+// Now it walks the caller's own page directory and demands PAGE_USER on every
+// page of the range.
+int validate_user_ptr(const void* ptr, uint32_t size) {
+    uint32_t addr = (uint32_t)ptr;
+    if (addr == 0) return 0;
+    if (size == 0) size = 1;
+    if (size > USER_PTR_MAX_SIZE) return 0;
+    if (addr + size < addr) return 0;  // wrap
+
+    int tid = get_current_task();
+
+    // Kernel tasks run on the global identity map, where there is no user/kernel
+    // split to enforce and every caller is already Ring 0 code. Keep the old
+    // constant bound for them.
+    if (task_in_kernel_space(tid)) return (addr + size) <= USER_MEM_LIMIT;
+
+    uint32_t pd = task_get_page_dir(tid);
+    uint32_t heap_top = task_get_heap_ptr(tid);
+    uint32_t last = (addr + size - 1) & 0xFFFFF000;
+    for (uint32_t va = addr & 0xFFFFF000; ; va += 4096) {
+        if (!user_page_ok(pd, va, heap_top)) return 0;
+        if (va == last) break;
+    }
+    return 1;
+}
+
+// Safe strlen for user strings (bounded by max to prevent an infinite scan).
+//
+// Validates page by page as it walks rather than only checking the first byte:
+// an unterminated string can run off the end of the caller's mapped region, and
+// now that the kernel identity map is no longer user-accessible there is real
+// unmapped memory to run into. A fault here arrives at CPL 0 and panics.
 int safe_strlen(const char* s, int max) {
-    if (!validate_user_ptr(s, 1)) return -1;
+    if (max <= 0) return -1;
+    uint32_t addr = (uint32_t)s;
     for (int i = 0; i < max; i++) {
+        if (i == 0 || (((addr + (uint32_t)i) & 0xFFF) == 0)) {
+            if (!validate_user_ptr((const void*)(uintptr_t)(addr + (uint32_t)i), 1)) return -1;
+        }
         if (s[i] == '\0') return i;
     }
     return max;
@@ -290,7 +370,12 @@ static void syscall_handler(registers_t* regs) {
         // ----- SYS_FREE (7): Free memory -----
         case SYS_FREE: {
             void* ptr = (void*)regs->ebx;
-            if (validate_user_ptr(ptr, 1)) {
+            // A Ring 3 task's memory never came from kmalloc — SYS_MALLOC just
+            // bumps its heap_ptr and the demand pager backs it, and the whole
+            // address space is reclaimed by task_cleanup(). Passing a user
+            // pointer to kfree() only ever corrupted the kernel free list, so
+            // this is a no-op for anything with a private address space.
+            if (task_in_kernel_space(get_current_task()) && validate_user_ptr(ptr, 1)) {
                 kfree(ptr);
             }
             regs->eax = 0;
@@ -324,9 +409,11 @@ static void syscall_handler(registers_t* regs) {
         // ----- SYS_GET_TIME (33) -----
         case SYS_GET_TIME: {
             rtc_time_t* out_time = (rtc_time_t*)regs->ebx;
-            if (out_time) {
-                *out_time = rtc_read_time();
+            if (!validate_user_ptr(out_time, sizeof(rtc_time_t))) {
+                regs->eax = (uint32_t)-1;
+                break;
             }
+            *out_time = rtc_read_time();
             regs->eax = 0;
             break;
         }
@@ -362,7 +449,7 @@ static void syscall_handler(registers_t* regs) {
         case SYS_GET_PCI_INFO: {
             pci_device_t* array = (pci_device_t*)regs->ebx;
             int max_count = (int)regs->ecx;
-            if (validate_user_ptr(array, sizeof(pci_device_t) * max_count)) {
+            if (validate_user_array_ptr(array, sizeof(pci_device_t), max_count)) {
                 int count = (pci_device_count < max_count) ? pci_device_count : max_count;
                 for (int i = 0; i < count; i++) {
                     array[i] = pci_devices[i];
@@ -378,7 +465,7 @@ static void syscall_handler(registers_t* regs) {
         case SYS_GET_WINDOWS: {
             sys_win_info_t* array = (sys_win_info_t*)regs->ebx;
             int max_count = (int)regs->ecx;
-            if (!validate_user_ptr(array, sizeof(sys_win_info_t) * max_count)) { regs->eax = (uint32_t)-1; break; }
+            if (!validate_user_array_ptr(array, sizeof(sys_win_info_t), max_count)) { regs->eax = (uint32_t)-1; break; }
             int count = 0;
             for (int i = 0; i < MAX_WINDOWS && count < max_count; i++) {
                 if (wm_wins[i].id >= 0 && wm_wins[i].visible) {
@@ -432,28 +519,41 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
         // ----- SYS_VMM_MAP (29) -----
-        case SYS_VMM_MAP: {
-            uint32_t vaddr = (uint32_t)regs->ebx;
-            uint32_t paddr = (uint32_t)regs->ecx;
-            uint32_t flags = (uint32_t)regs->edx;
-            uint32_t pd = task_get_page_dir(get_current_task());
-            regs->eax = (uint32_t)vmm_map_page(pd, vaddr, paddr, flags);
+        // REMOVED. This took a raw physical address and raw PTE flags straight
+        // from Ring 3 and installed them, which is a complete bypass of every
+        // other check in this file: an app could map kernel .text, another
+        // task's page directory, or LAPIC MMIO into its own address space as
+        // user-writable, or forge a PAGE_COW entry to drive the fault handler
+        // out of bounds. Nothing in the tree uses it — SYS_MALLOC plus the
+        // demand pager already covers user allocation.
+        case SYS_VMM_MAP:
+            regs->eax = (uint32_t)-1;
             break;
-        }
+
         // ----- SYS_VMM_ALLOC (30) -----
+        // Kept, but the caller no longer picks the flags and cannot name an
+        // address outside its own user window.
         case SYS_VMM_ALLOC: {
-            uint32_t vaddr = (uint32_t)regs->ebx;
-            uint32_t flags = (uint32_t)regs->ecx;
-            uint32_t pd = task_get_page_dir(get_current_task());
-            regs->eax = vmm_alloc_page_at(pd, vaddr, flags);
+            uint32_t vaddr = (uint32_t)regs->ebx & 0xFFFFF000;
+            int tid = get_current_task();
+            if (task_in_kernel_space(tid) || vaddr < 0x08000000 || vaddr >= USER_STACK_BOTTOM) {
+                regs->eax = 0;
+                break;
+            }
+            regs->eax = vmm_alloc_page_at(task_get_page_dir(tid), vaddr,
+                                          PAGE_PRESENT | PAGE_RW | PAGE_USER);
             break;
         }
 
         // ----- SYS_VMM_FREE (31) -----
         case SYS_VMM_FREE: {
-            uint32_t vaddr = (uint32_t)regs->ebx;
-            uint32_t pd = task_get_page_dir(get_current_task());
-            regs->eax = (uint32_t)vmm_unmap_page(pd, vaddr);
+            uint32_t vaddr = (uint32_t)regs->ebx & 0xFFFFF000;
+            int tid = get_current_task();
+            if (task_in_kernel_space(tid) || vaddr < 0x08000000 || vaddr >= USER_STACK_BOTTOM) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            regs->eax = (uint32_t)vmm_unmap_page(task_get_page_dir(tid), vaddr);
             break;
         }
 
@@ -461,7 +561,7 @@ static void syscall_handler(registers_t* regs) {
         case SYS_CLIPBOARD_COPY: {
             const char* user_data = (const char*)regs->ebx;
             int len = (int)regs->ecx;
-            if (len <= 0 || len >= 4096 || !validate_user_ptr(user_data, len)) {
+            if (len <= 0 || len >= 4096 || !validate_user_array_ptr(user_data, 1, len)) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
@@ -474,7 +574,7 @@ static void syscall_handler(registers_t* regs) {
         case SYS_CLIPBOARD_PASTE: {
             char* user_buf = (char*)regs->ebx;
             int max_len = (int)regs->ecx;
-            if (max_len <= 0 || !validate_user_ptr(user_buf, max_len)) {
+            if (max_len <= 0 || !validate_user_array_ptr(user_buf, 1, max_len)) {
                 regs->eax = (uint32_t)-1;
                 break;
             }

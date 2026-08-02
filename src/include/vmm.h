@@ -8,8 +8,28 @@
 // Tasks can optionally use per-process page directories.
 // Default page_dir = 0 means use the global identity map.
 
+// ---- Ring 3 stack layout (one per address space) ----
+// The Ring 3 stack MUST live in the task's own address space, never in kernel
+// BSS: the kernel identity map is not user-accessible, and a stack inside
+// task_t would put the scheduler's saved register frames one buffer overrun
+// away from any user program.
+//
+// Placed at the top of the demand-paging window handled in idt.c, well clear of
+// the app image and heap (0x08000000..0x08F00000, capped by SYS_MALLOC) and the
+// shared library base at 0x09000000. The page below the stack is deliberately
+// left unmapped as a guard page, so an overflow faults instead of silently
+// corrupting whatever sits underneath.
+#define USER_STACK_TOP    0x1F000000u
+#define USER_STACK_SIZE   0x10000u                       // 64 KB
+#define USER_STACK_BOTTOM (USER_STACK_TOP - USER_STACK_SIZE)
+#define USER_STACK_PAGES  (USER_STACK_SIZE / 4096)
+
 // Allocate a new page directory for a process
 uint32_t vmm_create_address_space(void);
+
+// Map a fresh, zeroed Ring 3 stack into page_dir.
+// Returns the initial ESP (top of stack), or 0 on failure.
+uint32_t vmm_setup_user_stack(uint32_t page_dir);
 
 // Free a page directory (for task cleanup)
 void vmm_free_address_space(uint32_t page_dir);

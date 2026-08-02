@@ -38,11 +38,20 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     if (num_tables == 0) num_tables = 8;
     if (num_tables > 64) num_tables = 64;
 
+    // KERNEL-ONLY: no PAGE_USER here. This map covers kernel .text, .data,
+    // .bss (including the task table), the kmalloc heap and the page tables
+    // themselves. Marking it user-accessible — as this did until v35 — let any
+    // Ring 3 program read and write all of it with a plain store, no syscall
+    // involved, which meant there was no Ring 0/Ring 3 boundary at all.
+    //
+    // Pages a process is genuinely allowed to touch get PAGE_USER individually
+    // from vmm_map_page(): its image and heap at 0x08000000, its stack at
+    // USER_STACK_TOP, and the framebuffer tables built below.
     for(uint32_t t = 0; t < num_tables; t++) {
         for(unsigned int j = 0; j < 1024; j++) {
-            page_tables[t][j] = ((t * 1024 + j) * 4096) | 7; // Present, R/W, User
+            page_tables[t][j] = ((t * 1024 + j) * 4096) | PAGE_PRESENT | PAGE_RW;
         }
-        page_directory[t] = ((uint32_t)page_tables[t]) | 7;
+        page_directory[t] = ((uint32_t)page_tables[t]) | PAGE_PRESENT | PAGE_RW;
     }
 
     // Map Framebuffer separately if it's above our identity mapped RAM
@@ -70,7 +79,11 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     __asm__ __volatile__("mov %0, %%cr3": : "r"(page_directory));
     uint32_t cr0;
     __asm__ __volatile__("mov %%cr0, %0": "=r"(cr0));
-    cr0 |= 0x80000000;
+    cr0 |= 0x80000000;  // PG  — enable paging
+    cr0 |= 0x00010000;  // WP  — honour read-only pages in supervisor mode too.
+                        // Without this a Ring 0 write silently succeeds on a
+                        // read-only page, which would skip the COW handler in
+                        // idt.c whenever the kernel is the one writing.
     __asm__ __volatile__("mov %0, %%cr0": : "r"(cr0));
 }
 
@@ -84,7 +97,11 @@ void page_map(uint32_t vaddr, uint32_t paddr, uint32_t flags) {
     // update the static table entries.
     if (pd_idx < 32) {
         page_tables[pd_idx][pt_idx] = (paddr & 0xFFFFF000) | flags;
-        page_directory[pd_idx] = ((uint32_t)page_tables[pd_idx]) | 7;
+        // Keep the PDE kernel-only unless this mapping explicitly asked to be
+        // user-reachable — see the note in paging_init().
+        uint32_t pde_flags = PAGE_PRESENT | PAGE_RW;
+        if (flags & PAGE_USER) pde_flags |= PAGE_USER;
+        page_directory[pd_idx] = ((uint32_t)page_tables[pd_idx]) | pde_flags;
     }
 }
 
@@ -112,7 +129,7 @@ static block_meta *find_free_block(block_meta **last, uint32_t size) {
 static block_meta *request_space(block_meta* last, uint32_t size) {
     uint32_t max_heap = 24 * 1024 * 1024; // 24MB max heap (heap base=24MB, so grows to 48MB — matching KERNEL_RESERVED_PAGES)
     
-    if (heap_used + size + META_SIZE > max_heap) return NULL;
+    if (size > max_heap || size + META_SIZE < size || heap_used + size + META_SIZE > max_heap) return NULL;
     
     block_meta *block = (block_meta*)((uint8_t*)0x1800000 + heap_used);
     heap_used += size + META_SIZE;
@@ -216,6 +233,7 @@ void* krealloc(void* ptr, uint32_t new_size) {
 }
 
 void* kcalloc(uint32_t num, uint32_t size) {
+    if (num != 0 && size > 0xFFFFFFFF / num) return NULL;  // overflow guard
     uint32_t total = num * size;
     void* ptr = kmalloc(total);
     if (ptr) memset(ptr, 0, total);

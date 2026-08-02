@@ -1171,15 +1171,14 @@ static void run_cmd_internal() {
     }
     // --- TUNGGU (sleep) ---
     else if (strncmp(cmd_b, "tunggu ", 7) == 0) {
-        int ms = atoi(cmd_b + 7);
-        if (ms > 0 && ms < 60000) {
-            // Must NOT busy-wait on get_ticks(): ex_cmd()'s live entry point is
-            // SYS_EXEC_CMD, and int 0x80 is an interrupt gate (IF=0), so IRQ0
-            // never fires and the tick count can never reach the target — the
-            // box wedges with no way to kill the task. task_sleep() re-enables
-            // interrupts and hands us to the scheduler, which is what actually
-            // makes time pass here. PIT runs at 1000 Hz, so 1 tick == 1 ms.
-            task_sleep(ms);
+        int seconds = atoi(cmd_b + 7);
+        if (seconds > 0 && seconds < 60000) {
+            // task_sleep() consumes PIT ticks, while the command contract says
+            // "tunggu [detik]". Convert here so user-facing behavior matches
+            // the help text and stays scheduler-driven.
+            uint64_t ticks64 = (uint64_t)seconds * 1000u;
+            if (ticks64 > 0x7FFFFFFF) ticks64 = 0x7FFFFFFF;
+            task_sleep((int)ticks64);
         }
     }
     // --- NADA (beep frequency) ---

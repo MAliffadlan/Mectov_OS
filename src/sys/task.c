@@ -4,12 +4,14 @@
 #include "../include/io.h"
 #include "../include/spinlock.h"
 #include "../include/apic.h"
+#include "../include/vmm.h"   // vmm_setup_user_stack(), USER_STACK_* layout
 
 static spinlock_t task_lock = SPINLOCK_INIT;
 
 #define MAX_TASKS 64
 #define KERNEL_STACK_SIZE 16384
-#define USER_STACK_SIZE   65536
+// USER_STACK_SIZE now lives in vmm.h — the Ring 3 stack is mapped into the
+// task's own address space, not carved out of this struct.
 
 // Task states
 #define TASK_STATE_FREE    0
@@ -20,7 +22,6 @@ static spinlock_t task_lock = SPINLOCK_INIT;
 typedef struct {
     uint32_t esp;          // Saved stack pointer (points to register frame)
     uint8_t  kernel_stack[KERNEL_STACK_SIZE] __attribute__((aligned(16)));
-    uint8_t  user_stack[USER_STACK_SIZE] __attribute__((aligned(16)));
     int      state;        // 0=free, 1=running, 2=ready, 3=sleep
     uint8_t  ring;         // 0 = kernel task, 3 = user task
     // === NEW FIELDS (add-on, safe defaults) ===
@@ -37,6 +38,7 @@ static task_t tasks[MAX_TASKS];
 static int current_task[16] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 static inline int get_cid() { extern uint32_t smp_lapic_addr; return smp_lapic_addr ? (apic_get_id() & 15) : 0; }
 static int num_tasks = 0;
+static int boot_current_dir = 0;
 
 void init_tasking() {
     int cid = get_cid();
@@ -112,57 +114,19 @@ int create_task(void (*entry)()) {
     return -1;
 }
 
-// Create a Ring 3 (user) task
+// Create a Ring 3 (user) task.
+//
+// UNSUPPORTED — always fails. This used to hand a Ring 3 task the kernel's own
+// page directory and a stack inside task_t, which only worked because the
+// identity map was user-accessible. Now that it is not, a Ring 3 task needs a
+// private address space with its code mapped user-readable and a stack from
+// vmm_setup_user_stack(). Use load_mct_app() (which builds exactly that) or
+// thread_create() with a page directory from vmm_create_address_space().
+//
+// It has no callers in the tree; kept so the declaration in task.h stays valid.
 int create_user_task(void (*entry)()) {
-    int cid = get_cid();
-    write_serial_string("[TASK] create_user_task\n");
-    
-    __asm__ volatile("cli");
-    spin_lock(&task_lock);
-    for (int i = 0; i < MAX_TASKS; i++) {
-        if (tasks[i].state == 0) {
-            
-            tasks[i].ring = 3;
-            tasks[i].heap_ptr = 0x08000000;
-            tasks[i].current_dir = (current_task[cid] >= 0) ? tasks[current_task[cid]].current_dir : 0;
-            task_set_launch_arg(i, "sys_user");
-            for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
-            
-            uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
-            uint32_t user_esp = (uint32_t)&tasks[i].user_stack[USER_STACK_SIZE];
-            
-            // Ring 3 interrupt frame (iret pops: EIP, CS, EFLAGS, ESP, SS)
-            *(--stack) = 0x23;       // SS  (user data 0x20 | RPL 3)
-            *(--stack) = user_esp;   // ESP (user stack pointer)
-            *(--stack) = 0x202;      // EFLAGS (IF=1, IOPL=0)
-            *(--stack) = 0x1B;       // CS  (user code 0x18 | RPL 3)
-            *(--stack) = (uint32_t)(uintptr_t)entry; // EIP
-            *(--stack) = 0;          // err_code
-            *(--stack) = 0;          // int_no
-            *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; // eax,ecx,edx,ebx
-            *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; // esp,ebp,esi,edi
-            *(--stack) = 0x23;       // DS (user data)
-            
-            tasks[i].esp = (uint32_t)stack;
-            tasks[i].page_dir = tasks[0].page_dir; // Default to kernel page dir
-            num_tasks++;
-            
-            write_serial_string("User ESP: ");
-            write_serial_hex(user_esp);
-            write_serial_string("\n");
-            
-            // Set state LAST — only now is it safe for the scheduler
-            tasks[i].state = 2;
-            
-            __asm__ volatile("sti");
-            
-            write_serial_string("[TASK] Ring 3 task created OK\n");
-            spin_unlock(&task_lock);
-            return i;
-        }
-    }
-    write_serial_string("[TASK] No free slots!\n");
-    spin_unlock(&task_lock);
+    (void)entry;
+    write_serial_string("[TASK] create_user_task: unsupported, use load_mct_app()\n");
     return -1;
 }
 
@@ -170,7 +134,6 @@ extern void tss_set_kernel_stack(uint32_t stack);
 
 // Shared cleanup for task termination (exit or kill)
 static void task_cleanup(int tid) {
-    int cid = get_cid();
     if (tid <= 0 || tid >= MAX_TASKS) return;
     
     // 1. Clean up windows owned by this task
@@ -296,7 +259,6 @@ int get_current_dir(void) {
     if (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS) {
         return tasks[current_task[cid]].current_dir;
     }
-    static int boot_current_dir = 0;
     return boot_current_dir;
 }
 
@@ -305,7 +267,6 @@ void set_current_dir(int dir) {
     if (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS) {
         tasks[current_task[cid]].current_dir = dir;
     } else {
-        static int boot_current_dir = 0;
         boot_current_dir = dir;
     }
 }
@@ -313,6 +274,16 @@ void set_current_dir(int dir) {
 // === NEW: Thread creation with priority + page_dir ===
 int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
     int cid = get_cid();
+
+    // Map the Ring 3 stack into the task's own address space. Done BEFORE
+    // taking task_lock so we are not allocating physical frames (which takes
+    // vmm_lock) while holding the scheduler lock.
+    uint32_t user_esp = vmm_setup_user_stack(page_dir);
+    if (user_esp == 0) {
+        write_serial_string("[TASK] thread_create: could not map user stack\n");
+        return -1;
+    }
+
     __asm__ volatile("cli");
     spin_lock(&task_lock);
     for (int i = 0; i < MAX_TASKS; i++) {
@@ -327,8 +298,7 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
-            uint32_t user_esp = (uint32_t)&tasks[i].user_stack[USER_STACK_SIZE];
-            
+
             // Ring 3 interrupt frame
             *(--stack) = 0x23;       // SS
             *(--stack) = user_esp;   // ESP
@@ -348,12 +318,10 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             // NOTE: Interrupts stay DISABLED. Caller must call sti after
             // finishing any post-create setup
             spin_unlock(&task_lock);
-            __asm__ volatile("sti");
             return i;
         }
     }
     spin_unlock(&task_lock);
-    __asm__ volatile("sti");
     return -1;
 }
 
@@ -403,6 +371,16 @@ int task_get_priority(int tid) {
 uint32_t task_get_page_dir(int tid) {
     if (tid < 0 || tid >= MAX_TASKS) return 0;
     return tasks[tid].page_dir;
+}
+
+// Does this task run in the kernel's global address space rather than a private
+// one? Beware: task 0 stores the boot CR3, NOT 0, so a bare `page_dir == 0`
+// test does not recognise the kernel task. Anything deciding "is this caller
+// Ring 3 with its own address space?" must go through here.
+int task_in_kernel_space(int tid) {
+    uint32_t pd = task_get_page_dir(tid);
+    if (pd == 0) return 1;
+    return (pd & 0xFFFFF000) == (tasks[0].page_dir & 0xFFFFF000);
 }
 
 void task_set_page_dir(int tid, uint32_t page_dir) {

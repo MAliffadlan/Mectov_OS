@@ -75,5 +75,6 @@ void wm_handle_scroll(int mx, int my, int delta);
 void wm_handle_key(char c, uint8_t sc);
 void wm_tick_all();
 void wm_cleanup_task(int tid);  // Close all windows owned by task tid
+void wm_reset_session(void);     // Close every window and reset WM state
 
 #endif

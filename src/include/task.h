@@ -29,6 +29,9 @@ int task_get_priority(int tid);
 
 // Get/set page directory for a task
 uint32_t task_get_page_dir(int tid);
+// 1 if the task runs on the kernel's global address space. Task 0 holds the
+// boot CR3 rather than 0, so never test page_dir == 0 directly.
+int task_in_kernel_space(int tid);
 void task_set_page_dir(int tid, uint32_t page_dir);
 
 // Wake up a sleeping task (used by timer)

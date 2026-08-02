@@ -16,6 +16,8 @@ static int page_len = 0;
 static int loading = 0;
 static int browser_state = 0; // 0=Idle, 1=DNS, 2=TCP connect, 3=Connected
 static int scroll_offset = 0; // Scroll offset (number of lines to skip)
+static uint32_t request_started_at = 0;
+static const uint32_t REQUEST_TIMEOUT_MS = 15000;
 
 
 static int my_strlen(const char* s) {
@@ -99,6 +101,23 @@ static void draw_browser(int wid) {
     sys_update_window(wid);
 }
 
+static void start_request(void) {
+    page_len = 0;
+    scroll_offset = 0;
+    loading = 1;
+    browser_state = 1;
+    request_started_at = sys_get_ticks();
+}
+
+static void abort_request(const char* message, int wid) {
+    my_strcpy(page_text, message);
+    page_len = my_strlen(page_text);
+    loading = 0;
+    browser_state = 0;
+    focused_url = 1;
+    draw_browser(wid);
+}
+
 void _start() {
     sys_print("[B] 1\n", 0x00FFFFFF);
     url_len = my_strlen(url_buf);
@@ -135,14 +154,10 @@ void _start() {
                         }
                     } else if (ev.key == '\n') {
                         if (url_len > 0) {
-                            // Start DNS resolution
-                            page_len = 0;
-                            scroll_offset = 0; // Reset scroll on new request
                             my_strcpy(page_text, "Resolving DNS...\n");
                             page_len = my_strlen(page_text);
-                            loading = 1;
                             focused_url = 0;
-                            browser_state = 1;
+                            start_request();
                             sys_dns_resolve(url_buf);
                             draw_browser(wid);
                         }
@@ -206,6 +221,9 @@ void _start() {
         // Poll network state machine
         if (browser_state > 0) {
             tick++;
+            if (sys_get_ticks() - request_started_at > REQUEST_TIMEOUT_MS) {
+                abort_request("Request timed out.\n", wid);
+            }
             if (tick % 100 == 0) {
                 net_status_t ns;
                 sys_net_status(&ns);
@@ -217,6 +235,7 @@ void _start() {
                         my_strcpy(page_text, "DNS Resolved. Connecting...\n");
                         page_len = my_strlen(page_text);
                         browser_state = 2;
+                        request_started_at = sys_get_ticks();
                         sys_tcp_connect(ns.dns_ip, 80);
                         draw_browser(wid);
                     }
@@ -224,6 +243,7 @@ void _start() {
                     // Waiting for TCP connect
                     if (ns.tcp_state == 2) { // TCP_ESTABLISHED
                         browser_state = 3;
+                        request_started_at = sys_get_ticks();
                         // Send HTTP GET
                         char req[256];
                         my_strcpy(req, "GET / HTTP/1.1\r\nHost: ");

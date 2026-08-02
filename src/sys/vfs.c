@@ -23,7 +23,6 @@ static uint32_t gcalc_mct_size() { return (uint32_t)(_binary_gcalc_mct_end - _bi
 // Embedded binary for terminal.mct
 extern uint8_t _binary_terminal_mct_start[];
 extern uint8_t _binary_terminal_mct_end[];
-static uint32_t terminal_mct_size() { return (uint32_t)(_binary_terminal_mct_end - _binary_terminal_mct_start); }
 
 extern uint8_t _binary_taskmgr_mct_start[];
 extern uint8_t _binary_taskmgr_mct_end[];
@@ -52,6 +51,18 @@ static void strtolower(char* dst, const char* src) {
     *dst = '\0';
 }
 
+static int copy_node_name(char* dst, const char* src) {
+    int i = 0;
+    if (!src || src[0] == '\0') return 0;
+    while (src[i]) {
+        if (src[i] == '/' || i >= MAX_FILENAME - 1) return 0;
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+    return 1;
+}
+
 // Split path into components. Return number of components.
 // Contoh: "/home/user/file.txt" → {"home","user","file.txt"}
 static int split_path(const char* path, char components[MAX_PATH/2][MAX_FILENAME]) {
@@ -68,9 +79,11 @@ static int split_path(const char* path, char components[MAX_PATH/2][MAX_FILENAME
             if (j > 0) {
                 components[count][j] = '\0';
                 count++;
+                if (count >= MAX_PATH / 2) return -1;
                 j = 0;
             }
-        } else if (j < MAX_FILENAME - 1) {
+        } else {
+            if (j >= MAX_FILENAME - 1) return -1;
             components[count][j++] = path[i];
         }
         i++;
@@ -78,6 +91,7 @@ static int split_path(const char* path, char components[MAX_PATH/2][MAX_FILENAME
     if (j > 0) {
         components[count][j] = '\0';
         count++;
+        if (count >= MAX_PATH / 2) return -1;
     }
     return count;
 }
@@ -264,8 +278,10 @@ void vfs_init() {
     set_current_dir(0);
     
     // Buat home directory default
-    vfs_create_node("home", FS_DIR, 0);
-    vfs_create_node("home/user", FS_DIR, 1);
+    int home_node = vfs_create_node("home", FS_DIR, 0);
+    if (home_node >= 0) {
+        vfs_create_node("user", FS_DIR, home_node);
+    }
     
     // Populate dengan beberapa file demo
     vfs_create_file("readme.txt");
@@ -559,6 +575,7 @@ int vfs_get_node(const char* path) {
     // Parse resolved path into components
     char comps[MAX_PATH/2][MAX_FILENAME];
     int ncomp = split_path(resolved, comps);
+    if (ncomp < 0) return -1;
     if (ncomp == 0) return 0;
     
     // Walk from root
@@ -613,6 +630,7 @@ int vfs_create_node(const char* name, fs_type_t type, int parent) {
     // Validate parent
     if (parent < 0 || parent >= MAX_NODES) return -1;
     if (!fs_nodes[parent].in_use || (fs_nodes[parent].type != FS_DIR && fs_nodes[parent].type != FS_EXT2_DIR)) return -1;
+    if (!name || name[0] == '\0') return -1;
     
     // Check name exists in parent
     if (vfs_find_in_dir(name, parent) >= 0) return -2;
@@ -620,7 +638,7 @@ int vfs_create_node(const char* name, fs_type_t type, int parent) {
     // Find free slot
     for (int i = 0; i < MAX_NODES; i++) {
         if (!fs_nodes[i].in_use) {
-            strcpy(fs_nodes[i].name, name);
+            if (!copy_node_name(fs_nodes[i].name, name)) return -1;
             fs_nodes[i].type = type;
             fs_nodes[i].parent = parent;
             fs_nodes[i].size = 0;
@@ -696,7 +714,7 @@ int vfs_delete_node(const char* path) {
     if (node == 0) return -3; // Cannot delete root
     
     // Recursively delete children if directory (handle nested dirs)
-    if (fs_nodes[node].type == FS_DIR) {
+    if (fs_nodes[node].type == FS_DIR || fs_nodes[node].type == FS_EXT2_DIR) {
         // Delete deepest children first (multiple passes needed for nesting)
         int deleted;
         do {
@@ -935,6 +953,10 @@ int vfs_find_path(const char* path, int* parent_dir) {
     // Parse into components, find parent
     char comps[MAX_PATH/2][MAX_FILENAME];
     int ncomp = split_path(resolved, comps);
+    if (ncomp < 0) {
+        if (parent_dir) *parent_dir = -1;
+        return -1;
+    }
     if (ncomp == 0) {
         if (parent_dir) *parent_dir = -1;
         return 0;

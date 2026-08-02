@@ -163,8 +163,11 @@ void isr_handler(registers_t *r) {
                     // Duplicate page
                     uint32_t new_paddr = frame_alloc();
                     if (new_paddr == 0) {
-                        write_serial_string("[COW] OUT OF PHYSICAL FRAMES during Page Fault!\n");
-                        // Fall through to crash
+                        write_serial_string("[COW] OOM during COW fault at ");
+                        write_serial_hex(faulting_address);
+                        write_serial_string(" — falling through to kill task\n");
+                        // Falls through to the unhandled-exception path below,
+                        // which calls task_exit() for Ring 3 or panics for Ring 0.
                     } else {
                         memcpy((void*)(uintptr_t)new_paddr, (void*)(uintptr_t)old_paddr, 4096);
                         

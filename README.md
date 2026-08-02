@@ -1,4 +1,4 @@
-# Mectov OS v34.1 — The Kernel Ownership Hardening Update
+# Mectov OS v34.2 — The Memory and Syscall Hardening Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,13 +6,12 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v34.1 release is a kernel hardening pass over ownership boundaries, parser safety, and startup resilience. The recent fixes are:
+The v34.2 release is a critical kernel pass focused on memory manager robustness and syscall privilege boundaries. The recent fixes are:
 
-1. **Centralized Session Reset:** logout now resets window/session state through a single WM path instead of letting the taskbar, kernel, and app launcher each clean up different parts of the desktop on their own.
-2. **Safer Syscall Array Validation:** pointer+length syscalls now validate the full span before touching user buffers, preventing wraparound bugs in window, PCI, and clipboard queries.
-3. **Hardened VFS Bootstrap:** path splitting and node creation now reject malformed/overlong input, and the initial `home/user` tree is created as nested directories instead of a literal slash-containing name.
-4. **Bounded Shell/App Waits:** shell sleep semantics now match the documented seconds-based behavior, and browser requests time out instead of hanging forever on network stalls.
-5. **Safer ACPI Discovery:** EBDA lookup and MADT parsing now have explicit bounds checks, avoiding bad reads during early hardware discovery.
+1. **`kmalloc` & `kcalloc` Integer Overflow Guards:** Enforced strict bounds checks to prevent wrapped large allocations from corrupting heap metadata or causing out-of-bounds writes.
+2. **COW Reference Count Saturation:** Prevented physical frame reference counters from wrapping at 256, protecting against premature page freeing and use-after-free bugs.
+3. **Syscall Privilege Enforcements:** Hardened `SYS_EXEC_CMD` and `SYS_KILL_TASK` by restricting their usage to kernel tasks and trusted system apps (`terminal.mct`, `explorer.mct`, `taskmgr.mct`). Ring 3 user apps can no longer issue arbitrary shell commands or terminate other processes without authorization.
+4. **Task Teardown Log Clarification:** Fixed misleading "crash" comments in the COW exception path to accurately reflect normal user task termination under OOM.
 
 Created by M Alif Fadlan.
 
@@ -387,6 +386,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v34.2 | **Memory & Syscall Hardening Update:** Enforced integer overflow checks on `kmalloc` and `kcalloc` sizes; protected `frame_ref_count` from uint8_t overflow via saturation capping; and secured `SYS_EXEC_CMD` and `SYS_KILL_TASK` syscalls to restrict shell access and task termination to authorized binaries (`terminal.mct`, `explorer.mct`, `taskmgr.mct`). |
 | v34.1 | **Kernel Ownership Hardening Update:** Centralized logout/session cleanup through `wm_reset_session()` so the taskbar and kernel no longer duplicate teardown; hardened syscall array validation for window/PCI/clipboard buffers; fixed VFS path splitting and bootstrap directory creation; aligned shell sleep with its documented seconds-based behavior; added browser request timeouts; and tightened ACPI EBDA/MADT discovery bounds. |
 | v34.0 | **Input Integrity & Compositor Correctness Update:** Made `vga_set_clip()` real — the clip rectangle was previously four globals that no drawing primitive ever read, so the WM's content-area clip silently did nothing; all primitives now gate on shared `clip_test()`/`clip_box()` helpers with 64-bit edge arithmetic, and `vga_set_render_target()` resets the clip between targets. Consolidated minimize/restore into `wm_minimize()`/`wm_restore()` so the state change and its dirty-region marking can no longer be separated, fixing windows minimized from the taskbar staying painted on screen. Unified all port `0x60` access behind a single `ps2_drain()` that dispatches on the 8042 AUX status bit, ending the keyboard/mouse byte theft behind stuck modifier keys and cursor teleporting, and added mouse packet overflow-bit rejection. Removed every unkillable spin from the shell: `tunggu` now uses `task_sleep()` and the ARP/ping/DNS waits use the doubly-bounded `net_wait_for()`, since `int 0x80` is an interrupt gate and `get_ticks()` cannot advance during a syscall. Fixed `vfs_read_file()` writing its NUL terminator one byte past the caller's buffer on exact-fit reads. Marked `timer_ticks` `volatile`. |
 | v33.1 | **Start Menu Ghosting Fix:** Reordered `full_redraw` to call `taskbar_pre_draw()` before `desktop_draw()` so dirty rectangles are applied before the background is painted, ensuring closed popups are erased from the screen. |

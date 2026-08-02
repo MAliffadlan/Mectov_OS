@@ -21,6 +21,7 @@
 #include "src/include/login.h"
 #include "src/include/task.h"
 #include "src/include/pci.h"
+#include "src/include/serial.h"
 
 // Forward declaration
 extern void init_double_buffer(void);
@@ -373,14 +374,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         // Logout: kembali ke login screen
         if (pending_logout) {
             pending_logout = 0;
-            // Close all windows
-            for (int i = 0; i < MAX_WINDOWS; i++) {
-                wm_wins[i].visible = 0;
-            }
-            wm_focused = -1;
-            wm_zcount = 0;
             start_menu_open = 0;
             calendar_open = 0;
+            extern void wm_reset_session(void);
+            wm_reset_session();
             gui_login();
             mark_dirty(0, 0, fb_width, fb_height);
             full_redraw();
