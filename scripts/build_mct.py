@@ -36,7 +36,7 @@ SECTIONS {
     # -fno-asynchronous-unwind-tables: prevent eh_frame generation
     # -fno-pie -fno-pic: prevent GOT/PLT generation which breaks flat binaries
     try:
-        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic", "-static", "-O0", "-g", "-c", c_file, "-o", o_file], check=True)
+        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic", "-static", "-O0", "-g", "-I.", "-c", c_file, "-o", o_file], check=True)
     except subprocess.CalledProcessError:
         print("[!] Compilation failed!")
         return
