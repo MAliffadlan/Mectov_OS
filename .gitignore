@@ -37,5 +37,24 @@ serial_debug.txt
 xbin/
 *.deb
 xorriso_bin/
-# Added by code-review-graph
+
+# IDE & Editor Configs
+.vscode/
+.idea/
+.junie/
+.cursorrules
+.windsurfrules
+
+# AI Agent & LLM Tooling Metadata
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+QODER.md
+.claude/
+.gemini/
+.qoder/
+.kiro/
 .code-review-graph/
+.opencode.json
+.mcp.json
+
