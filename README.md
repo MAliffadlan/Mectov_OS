@@ -1,4 +1,4 @@
-# Mectov OS v34.2 — The Memory and Syscall Hardening Update
+# Mectov OS v34.3 — The Scheduler, VFS Reclamation, and TCP Buffer Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,12 +6,11 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v34.2 release is a critical kernel pass focused on memory manager robustness and syscall privilege boundaries. The recent fixes are:
+The v34.3 release is a major kernel pass enhancing multitasking fairness, resolving filesystem space leaks, and upgrading network stream safety. The recent changes are:
 
-1. **`kmalloc` & `kcalloc` Integer Overflow Guards:** Enforced strict bounds checks to prevent wrapped large allocations from corrupting heap metadata or causing out-of-bounds writes.
-2. **COW Reference Count Saturation:** Prevented physical frame reference counters from wrapping at 256, protecting against premature page freeing and use-after-free bugs.
-3. **Syscall Privilege Enforcements:** Hardened `SYS_EXEC_CMD` and `SYS_KILL_TASK` by restricting their usage to kernel tasks and trusted system apps (`terminal.mct`, `explorer.mct`, `taskmgr.mct`). Ring 3 user apps can no longer issue arbitrary shell commands or terminate other processes without authorization.
-4. **Task Teardown Log Clarification:** Fixed misleading "crash" comments in the COW exception path to accurately reflect normal user task termination under OOM.
+1. **Preemptive Priority Scheduler with Aging:** Overhauled the CPU scheduler from simple round-robin to a priority-based scheduler with aging. Tracks ticks spent in the `READY` state (`wait_ticks`) to prevent background tasks from starving while ensuring real-time tasks run first.
+2. **VFS Sector Reclamation:** Implemented a dynamic First-Fit sector allocator. It constructs a dynamic in-memory sector allocation map from active VFS nodes, completely reclaiming and reusing sectors from deleted files on the 1MB ATA disk.
+3. **Stream-Safe TCP & Dynamic Window Advertising:** Expanded the TCP receive buffer to 64KB and modified `SYS_TCP_RECV` to shift unread bytes using `memmove`, preventing data loss on partial reads. Dynamically advertises the available buffer window to prevent packet drops.
 
 Created by M Alif Fadlan.
 
@@ -386,6 +385,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v34.3 | **Scheduler, VFS Reclamation, and TCP Buffer Update:** Overhauled the scheduler with a starvation-proof priority aging algorithm; implemented dynamic first-fit VFS sector reclamation to resolve file deletion leaks; and upgraded TCP receive path to a 64KB buffer with dynamic window advertising and partial read shifting. |
 | v34.2 | **Memory & Syscall Hardening Update:** Enforced integer overflow checks on `kmalloc` and `kcalloc` sizes; protected `frame_ref_count` from uint8_t overflow via saturation capping; and secured `SYS_EXEC_CMD` and `SYS_KILL_TASK` syscalls to restrict shell access and task termination to authorized binaries (`terminal.mct`, `explorer.mct`, `taskmgr.mct`). |
 | v34.1 | **Kernel Ownership Hardening Update:** Centralized logout/session cleanup through `wm_reset_session()` so the taskbar and kernel no longer duplicate teardown; hardened syscall array validation for window/PCI/clipboard buffers; fixed VFS path splitting and bootstrap directory creation; aligned shell sleep with its documented seconds-based behavior; added browser request timeouts; and tightened ACPI EBDA/MADT discovery bounds. |
 | v34.0 | **Input Integrity & Compositor Correctness Update:** Made `vga_set_clip()` real — the clip rectangle was previously four globals that no drawing primitive ever read, so the WM's content-area clip silently did nothing; all primitives now gate on shared `clip_test()`/`clip_box()` helpers with 64-bit edge arithmetic, and `vga_set_render_target()` resets the clip between targets. Consolidated minimize/restore into `wm_minimize()`/`wm_restore()` so the state change and its dirty-region marking can no longer be separated, fixing windows minimized from the taskbar staying painted on screen. Unified all port `0x60` access behind a single `ps2_drain()` that dispatches on the 8042 AUX status bit, ending the keyboard/mouse byte theft behind stuck modifier keys and cursor teleporting, and added mouse packet overflow-bit rejection. Removed every unkillable spin from the shell: `tunggu` now uses `task_sleep()` and the ARP/ping/DNS waits use the doubly-bounded `net_wait_for()`, since `int 0x80` is an interrupt gate and `get_ticks()` cannot advance during a syscall. Fixed `vfs_read_file()` writing its NUL terminator one byte past the caller's buffer on exact-fit reads. Marked `timer_ticks` `volatile`. |
