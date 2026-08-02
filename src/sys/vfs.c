@@ -740,6 +740,8 @@ int vfs_delete_node(const char* path) {
                     }
                     if (!has_children) {
                         fs_nodes[i].in_use = 0;
+                        fs_nodes[i].size = 0;
+                        fs_nodes[i].data_sector = 0;
                         deleted = 1;
                     }
                 }
@@ -748,6 +750,8 @@ int vfs_delete_node(const char* path) {
     }
     
     fs_nodes[node].in_use = 0;
+    fs_nodes[node].size = 0;
+    fs_nodes[node].data_sector = 0;
     vfs_save();
     return 0;
 }
@@ -862,6 +866,47 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
     return size;
 }
 
+static int vfs_alloc_sectors(int sectors_needed, int exclude_node) {
+    // 2048 sectors total. VFS_DATA_START begins at 65.
+    uint8_t sector_map[2048];
+    memset(sector_map, 0, sizeof(sector_map));
+    
+    // Mark VFS metadata and node sectors (0 to 64) as allocated.
+    for (int i = 0; i < VFS_DATA_START; i++) {
+        sector_map[i] = 1;
+    }
+    
+    // Scan all active files to populate the allocation map.
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (fs_nodes[i].in_use && fs_nodes[i].type == FS_FILE && fs_nodes[i].data_sector > 0 && i != exclude_node) {
+            int node_sectors = (fs_nodes[i].size + 511) / 512;
+            if (node_sectors < 1) node_sectors = 1; // min 1 sector allocated
+            for (int s = 0; s < node_sectors; s++) {
+                int sector = fs_nodes[i].data_sector + s;
+                if (sector < 2048) {
+                    sector_map[sector] = 1;
+                }
+            }
+        }
+    }
+    
+    // Find first contiguous block of free sectors
+    for (int i = VFS_DATA_START; i <= 2048 - sectors_needed; i++) {
+        int found = 1;
+        for (int s = 0; s < sectors_needed; s++) {
+            if (sector_map[i + s]) {
+                found = 0;
+                break;
+            }
+        }
+        if (found) {
+            return i;
+        }
+    }
+    
+    return -1; // Disk Full / Out of contiguous space
+}
+
 int vfs_write_file(const char* path, const char* data, int size) {
     extern void write_serial_string(const char*);
     write_serial_string("[VFS] write: ");
@@ -885,34 +930,21 @@ int vfs_write_file(const char* path, const char* data, int size) {
     int sectors_needed = (size + 511) / 512;
     if (sectors_needed < 1) sectors_needed = 1;
     
-    // Find contiguous free sectors in data area
-    // Simple strategy: just use the first available slot
-    // For now, allocate from end of node table
-    static int next_data_sector = 0;
-    if (next_data_sector == 0) {
-        int max_sector = VFS_DATA_START;
-        for (int i = 0; i < MAX_NODES; i++) {
-            if (fs_nodes[i].in_use && fs_nodes[i].data_sector > 0) {
-                int node_end = fs_nodes[i].data_sector + ((fs_nodes[i].size + 511) / 512);
-                if (node_end > max_sector) {
-                    max_sector = node_end;
-                }
-            }
-        }
-        next_data_sector = max_sector;
-        if (next_data_sector < VFS_DATA_START) next_data_sector = VFS_DATA_START;
-    }
-    
-    // If node already has data sectors, reuse or expand.
-    // If it needs more sectors than before, allocate at the end to prevent overwriting adjacent files.
+    // Reuse existing data sector if it fits, otherwise allocate new contiguous space
     int start_sector = fs_nodes[node].data_sector;
     int old_sectors = (fs_nodes[node].size + 511) / 512;
+    if (old_sectors < 1) old_sectors = 1;
+    
     if (start_sector > 0 && sectors_needed > old_sectors) {
-        start_sector = 0;
+        start_sector = 0; // relocation needed
     }
+    
     if (start_sector == 0) {
-        start_sector = next_data_sector;
-        next_data_sector += sectors_needed;
+        start_sector = vfs_alloc_sectors(sectors_needed, node);
+        if (start_sector < 0) {
+            write_serial_string("[VFS] write failed: Disk Full / Out of contiguous space\n");
+            return -3; // Disk Full
+        }
         fs_nodes[node].data_sector = start_sector;
     }
     

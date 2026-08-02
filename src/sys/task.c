@@ -27,6 +27,7 @@ typedef struct {
     // === NEW FIELDS (add-on, safe defaults) ===
     int      priority;     // 0=background, 1=interactive, 2=realtime
     int      sleep_ticks;  // remaining ticks until wake (0 = not sleeping)
+    int      wait_ticks;   // consecutive ticks waiting in READY state
     uint32_t page_dir;     // per-process page directory (0 = global identity)
     int      fd_table[16]; // local file descriptors mapped to global FDs
     char     launch_arg[128]; // command-line argument passed at launch
@@ -47,6 +48,7 @@ void init_tasking() {
         tasks[i].ring = 0;
         tasks[i].priority = PRIORITY_INTERACTIVE;
         tasks[i].sleep_ticks = 0;
+        tasks[i].wait_ticks = 0;
         tasks[i].page_dir = 0;
         tasks[i].heap_ptr = 0x08000000;
         tasks[i].launch_arg[0] = '\0';
@@ -56,6 +58,7 @@ void init_tasking() {
     tasks[0].state = TASK_STATE_RUNNING;
     tasks[0].ring = 0;
     tasks[0].priority = PRIORITY_INTERACTIVE;
+    tasks[0].wait_ticks = 0;
     tasks[0].esp = 0; // Will be filled by scheduler on first preemption
     
     // Save boot CR3 to task 0
@@ -82,6 +85,8 @@ int create_task(void (*entry)()) {
         if (tasks[i].state == 0) {
             
             tasks[i].ring = 0;
+            tasks[i].priority = PRIORITY_INTERACTIVE;
+            tasks[i].wait_ticks = 0;
             tasks[i].current_dir = (current_task[cid] >= 0) ? tasks[current_task[cid]].current_dir : 0;
             task_set_launch_arg(i, "sys_kernel");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
@@ -189,24 +194,39 @@ uint32_t schedule(uint32_t esp) {
         tasks[current_task[cid]].state = TASK_STATE_READY;
     }
     
-    // Find next ready task (round-robin)
-    int next = current_task[cid];
-    int found = 0;
+    // Increment wait_ticks for all READY tasks to prevent starvation (aging)
     for (int i = 0; i < MAX_TASKS; i++) {
-        next = (next + 1) % MAX_TASKS;
-        if (tasks[next].state == TASK_STATE_READY) {
-            found = 1;
-            break;
+        if (tasks[i].state == TASK_STATE_READY) {
+            tasks[i].wait_ticks++;
         }
     }
     
-    if (!found) {
+    // Find next ready task using priority + aging score
+    int next = -1;
+    int max_score = -1;
+    int start = (current_task[cid] + 1) % MAX_TASKS;
+    for (int i = 0; i < MAX_TASKS; i++) {
+        int idx = (start + i) % MAX_TASKS;
+        if (tasks[idx].state == TASK_STATE_READY) {
+            int score = (tasks[idx].priority * 10) + tasks[idx].wait_ticks;
+            if (score > max_score) {
+                max_score = score;
+                next = idx;
+            }
+        }
+    }
+    
+    if (next >= 0) {
+        tasks[next].wait_ticks = 0;
+    } else {
         // If no other task is ready, keep running current (if it's not free/sleeping)
         if (tasks[current_task[cid]].state == TASK_STATE_READY || tasks[current_task[cid]].state == TASK_STATE_RUNNING) {
             next = current_task[cid];
+            tasks[next].wait_ticks = 0;
         } else {
             // Fallback to task 0 (kernel/idle)
             next = 0;
+            tasks[next].wait_ticks = 0;
         }
     }
     
@@ -295,6 +315,7 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             tasks[i].priority = priority;
             tasks[i].page_dir = page_dir;
             tasks[i].sleep_ticks = 0;
+            tasks[i].wait_ticks = 0;
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];

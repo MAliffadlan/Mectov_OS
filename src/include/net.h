@@ -81,7 +81,8 @@ extern uint16_t tcp_remote_port;
 extern uint32_t tcp_seq_num;
 extern uint32_t tcp_ack_num;
 
-extern char tcp_rx_buf[4096];
+#define TCP_RX_BUF_SIZE 65536
+extern char tcp_rx_buf[TCP_RX_BUF_SIZE];
 extern int tcp_rx_len;
 
 void net_tcp_connect(uint8_t* target_ip, uint16_t port);

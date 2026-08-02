@@ -98,7 +98,12 @@ uint32_t handle_syscall_net(registers_t* regs) {
             if (copy > max_len) copy = max_len;
             if (copy > 0) {
                 memcpy(buf, tcp_rx_buf, copy);
-                tcp_rx_len = 0; // consumed
+                if (copy < tcp_rx_len) {
+                    memmove(tcp_rx_buf, tcp_rx_buf + copy, tcp_rx_len - copy);
+                    tcp_rx_len -= copy;
+                } else {
+                    tcp_rx_len = 0;
+                }
             }
             regs->eax = copy;
             break;

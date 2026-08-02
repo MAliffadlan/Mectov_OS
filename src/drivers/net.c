@@ -264,7 +264,9 @@ static void net_send_tcp_segment(uint8_t flags, uint8_t* payload, uint32_t paylo
     tcp->ack      = htonl(tcp_ack_num);
     tcp->data_offset_res = (sizeof(tcp_header_t) / 4) << 4;
     tcp->flags    = flags;
-    tcp->window_size = htons(8192);
+    uint32_t free_win = TCP_RX_BUF_SIZE - tcp_rx_len;
+    if (free_win > 65535) free_win = 65535;
+    tcp->window_size = htons((uint16_t)free_win);
     tcp->checksum = 0;
     tcp->urgent_ptr = 0;
 
@@ -470,7 +472,7 @@ static void net_handle_dns(uint8_t* data, uint32_t len) {
 }
 
 
-char tcp_rx_buf[4096];
+char tcp_rx_buf[TCP_RX_BUF_SIZE];
 int tcp_rx_len = 0;
 
 // Handle incoming TCP
