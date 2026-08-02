@@ -1,20 +1,47 @@
-// hello.c — Mectov OS Ring 3 Hello World
-// Compiled with -fno-pic, no GOT issues.
+#include "src/include/syscall.h"
 
-static inline int syscall3(int num, int a, int b, int c) {
-    int ret;
-    __asm__ volatile("int $0x80"
-        : "=a"(ret)
-        : "a"(num), "b"(a), "c"(b), "d"(c)
-    );
-    return ret;
-}
-
-#define SYS_PRINT  1
-#define SYS_EXIT   10
+// Define gui_event_t locally for the app
+typedef struct {
+    int type; // 1 = paint, 2 = key, 3 = mouse
+    int x, y;
+    int key;
+} gui_event_t;
 
 void _start() {
-    syscall3(SYS_PRINT, (int)"Hello from Ring 3!\n", 0x0A, 0);
-    syscall3(SYS_EXIT, 0, 0, 0);
-    for(;;);
+    sys_print("[App] Hello App starting in Ring 3...\n", 0x0A);
+    
+    int wid = sys_create_window(100, 100, 300, 200, "Hello Ring 3");
+    if (wid < 0) sys_exit();
+    
+    gui_event_t ev;
+    int tick = 0;
+    
+    while (1) {
+        // Process all pending events
+        while (sys_get_event(wid, &ev)) {
+            if (ev.type == 1) { // Paint event
+                uint32_t bg = (tick & 1) ? 0x222222 : 0x333333;
+                sys_draw_rect(wid, 0, 0, 300, 200, bg);
+                sys_draw_text(wid, 50, 80, "Hello from User Space!", 0x00FF00);
+                sys_draw_text(wid, 50, 100, "Memory is isolated.", 0xFFFFFF);
+                sys_update_window(wid);
+            } else if (ev.type == 2) { // Key event
+                if (ev.key == 0x01) { // ESC key (scancode 1)
+                    sys_exit();
+                }
+            }
+        }
+        
+        tick++;
+        if (tick % 100000 == 0) {
+            // Force repaint every now and then
+            uint32_t bg = ((tick/100000) & 1) ? 0x222222 : 0x333333;
+            sys_draw_rect(wid, 0, 0, 300, 200, bg);
+            sys_draw_text(wid, 50, 80, "Hello from User Space!", 0x00FF00);
+            sys_draw_text(wid, 50, 100, "Memory is isolated.", 0xFFFFFF);
+            sys_update_window(wid);
+        }
+        
+        sys_yield();
+    }
 }

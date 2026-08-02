@@ -83,52 +83,52 @@ $(OBJ_DIR)/hello_mct.o: hello.mct | $(OBJ_DIR)
 MCT_LIBC_H = apps/lib/libc.h
 
 gcalc.mct: apps/gcalc.c $(MCT_LIBC_H)
-	python3 build_mct.py apps/gcalc.c gcalc.mct
+	python3 scripts/build_mct.py apps/gcalc.c gcalc.mct
 
-hello.mct: hello.c $(MCT_LIBC_H)
-	python3 build_mct.py hello.c hello.mct
+hello.mct: apps/hello.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/hello.c hello.mct
 
-clock.mct: clock.c $(MCT_LIBC_H)
-	python3 build_mct.py clock.c clock.mct
+clock.mct: apps/clock.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/clock.c clock.mct
 
-snake.mct: snake_ring3.c $(MCT_LIBC_H)
-	python3 build_mct.py snake_ring3.c snake.mct
+snake.mct: apps/snake.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/snake.c snake.mct
 
-sysinfo.mct: sysinfo.c $(MCT_LIBC_H)
-	python3 build_mct.py sysinfo.c sysinfo.mct
+sysinfo.mct: apps/sysinfo.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/sysinfo.c sysinfo.mct
 
-explorer.mct: explorer.c $(MCT_LIBC_H)
-	python3 build_mct.py explorer.c explorer.mct
+explorer.mct: apps/explorer.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/explorer.c explorer.mct
 
-pci.mct: pci.c $(MCT_LIBC_H)
-	python3 build_mct.py pci.c pci.mct
+pci.mct: apps/pci.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/pci.c pci.mct
 
-browser.mct: browser.c $(MCT_LIBC_H)
-	python3 build_mct.py browser.c browser.mct
+browser.mct: apps/browser.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/browser.c browser.mct
 
-terminal.mct: terminal.c $(MCT_LIBC_H)
-	python3 build_mct.py terminal.c terminal.mct
+terminal.mct: apps/terminal.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/terminal.c terminal.mct
 
-taskmgr.mct: taskmgr.c $(MCT_LIBC_H)
-	python3 build_mct.py taskmgr.c taskmgr.mct
+taskmgr.mct: apps/taskmgr.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/taskmgr.c taskmgr.mct
 
 notepad.mct: apps/notepad.c $(MCT_LIBC_H)
-	python3 build_mct.py apps/notepad.c notepad.mct
+	python3 scripts/build_mct.py apps/notepad.c notepad.mct
 
-flappy.mct: flappy_ring3.c $(MCT_LIBC_H)
-	python3 build_mct.py flappy_ring3.c flappy.mct
+flappy.mct: apps/flappy.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/flappy.c flappy.mct
 
 libc.mct: apps/lib/libc.c $(MCT_LIBC_H)
-	python3 build_lib.py apps/lib/libc.c libc.mct
+	python3 scripts/build_lib.py apps/lib/libc.c libc.mct
 
 calc.mct: apps/calc.c $(MCT_LIBC_H)
-	python3 build_mct.py apps/calc.c calc.mct
+	python3 scripts/build_mct.py apps/calc.c calc.mct
 
-volume.mct: volume.c $(MCT_LIBC_H)
-	python3 build_mct.py volume.c volume.mct
+volume.mct: apps/volume.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/volume.c volume.mct
 
 mplayer.mct: apps/mplayer.c $(MCT_LIBC_H)
-	python3 build_mct.py apps/mplayer.c mplayer.mct
+	python3 scripts/build_mct.py apps/mplayer.c mplayer.mct
 
 $(OBJ_DIR)/clock_mct.o: clock.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@

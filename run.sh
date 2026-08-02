@@ -31,7 +31,7 @@ pkill -f gateway.py 2>/dev/null
 sleep 0.5
 
 echo "[*] Menjalankan Mectov Web Gateway Proxy di background..."
-python3 gateway.py > gateway.log 2>&1 &
+python3 scripts/gateway.py > gateway.log 2>&1 &
 GATEWAY_PID=$!
 
 # Bersihkan log serial lama

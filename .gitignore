@@ -5,18 +5,20 @@
 *.mct
 myos.bin
 mectov.iso
-disk.img
-core.img
-ext2.img
+
+# Disk images
+*.img
 memdisk.tar
 
-# Temporary/Scratch Binaries
+# Object directory
+obj/
+
+# Temporary/Scratch files
 offset
+offset.c
 run
 test_task
 test_task_layout
-
-# Temporary/Scratch Source & Config Files
 test.c
 test.s
 terminal.s
@@ -24,28 +26,38 @@ test.ld
 test_sprintf.c
 test_task.c
 test_task_layout.c
+gcalc.asm
+metadata.json
+early_grub.cfg
+doomgeneric_src
+test_qemu_audio.sh
+scratch/
 
-# ISO directory
-iso/
-
-# Logs & Dumps
+# Logs & Debug output
 *.log
 *.txt
-serial_debug.txt
+!README.md
+!docs/**/*.md
 
 # Dependencies and external binaries
 xbin/
 *.deb
 xorriso_bin/
+grub.bin
+iso/
 
-# IDE & Editor Configs
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE & Editor configs
 .vscode/
 .idea/
 .junie/
 .cursorrules
 .windsurfrules
 
-# AI Agent & LLM Tooling Metadata
+# AI Agent & LLM tooling
 AGENTS.md
 CLAUDE.md
 GEMINI.md
@@ -58,3 +70,9 @@ QODER.md
 .opencode.json
 .mcp.json
 
+# One-off utility scripts
+refactor.py
+rewrite.py
+run_headless
+run_headless.sh
+build.sh
