@@ -71,10 +71,22 @@ void full_redraw() {
     fps_buf[fi] = '\0';
 
     int fx = (int)fb_width - (fi * 8) - 8;
-    // Clear a fixed width area (e.g. 200 pixels) to prevent old characters from remaining
-    // when the string shrinks in length
-    draw_rect(fb_width - 200, 22, 200, 18, 0x00000000);
-    draw_string_px(fx, 23, fps_buf, 0x0000FF00, 0x00000000);
+    // Redraw the FPS/render-time HUD only when the value changed (200ms
+    // cadence) or the region was damaged this frame (window dragged over it,
+    // etc.). Otherwise the copy on VRAM is still valid — skipping the glyph
+    // re-render avoids ~2000 put_pixel calls and dirty-rect pollution per frame.
+    extern int d_min_x, d_min_y, d_max_x, d_max_y;
+    static int last_fps_val = -1;
+    int hud_x0 = (int)fb_width - 200;
+    int hud_damaged = (d_max_x >= hud_x0 && d_min_x < (int)fb_width &&
+                       d_max_y >= 22 && d_min_y < 40);
+    if (hud_damaged || last_fps_val != fps_val) {
+        last_fps_val = fps_val;
+        // Clear a fixed width area (e.g. 200 pixels) to prevent old characters
+        // from remaining when the string shrinks in length
+        draw_rect(hud_x0, 22, 200, 18, 0x00000000);
+        draw_string_px(fx, 23, fps_buf, 0x0000FF00, 0x00000000);
+    }
 
     extern int cursor_draw_x, cursor_draw_y;
     cursor_draw_x = mouse_x;

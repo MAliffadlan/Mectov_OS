@@ -63,23 +63,34 @@ void vmm_init(void) {
 }
 
 // Allocate one physical frame. Returns physical address or 0.
+// Interrupt-safe: callers include load_mct_app (normal task context, IF=1)
+// as well as the page fault handler and syscalls (IF=0 via interrupt gates).
+// Disabling interrupts while holding the lock prevents the scheduler from
+// preempting the holder (task.c convention), and restoring eflags keeps the
+// caller's original IF state intact when this is nested in a cli section.
 uint32_t frame_alloc(void) {
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
     spin_lock(&vmm_lock);
     for (int i = KERNEL_RESERVED_PAGES; i < TOTAL_PHYSICAL_PAGES; i++) {
         if (!bitmap_test(i)) {
             bitmap_set(i);
             frame_ref_count[i] = 1;
             spin_unlock(&vmm_lock);
+            __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
             return (uint32_t)i * 4096;
         }
     }
     spin_unlock(&vmm_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
     write_serial_string("[VMM] OUT OF PHYSICAL FRAMES!\n");
     return 0;
 }
 
 void frame_free(uint32_t paddr) {
     if (paddr == 0) return;
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
     spin_lock(&vmm_lock);
     int idx = paddr / 4096;
     if (idx >= KERNEL_RESERVED_PAGES && idx < TOTAL_PHYSICAL_PAGES) {
@@ -91,6 +102,7 @@ void frame_free(uint32_t paddr) {
         }
     }
     spin_unlock(&vmm_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
 }
 
 // ============================================================

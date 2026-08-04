@@ -19,6 +19,23 @@ static int next_id = 1;
 #define SNAP_RIGHT  2
 #define SNAP_TOP    3   // same as maximized
 
+// Deferred window-buffer frees. Window buffers are freed ONLY from the main
+// loop (task 0) context: close paths (wm_close kernel branch, wm_cleanup_task)
+// can run from other preemptable tasks while draw_one() is mid-render on the
+// very buffer, so they NULL the field and park the pointer here.
+static void* wm_free_list[16];
+static int wm_free_count = 0;
+
+void wm_defer_free(void* p) {
+    if (p && wm_free_count < 16) wm_free_list[wm_free_count++] = p;
+}
+
+void wm_flush_frees(void) {
+    extern void kfree(void*);
+    for (int i = 0; i < wm_free_count; i++) kfree(wm_free_list[i]);
+    wm_free_count = 0;
+}
+
 void wm_init() {
     for (int i = 0; i < MAX_WINDOWS; i++) {
         wm_wins[i].visible = 0;
@@ -384,8 +401,9 @@ void wm_close(int id) {
                 // Kernel window fallback
                 wm_wins[i].visible = 0;
                 if (wm_wins[i].content_buffer) {
-                    extern void kfree(void*);
-                    kfree(wm_wins[i].content_buffer);
+                    // Defer free — see wm_cleanup_task(); wm_close() can be called
+                    // from kernel-task apps (taskmgr, power, nano) that preempt task 0.
+                    wm_defer_free(wm_wins[i].content_buffer);
                     wm_wins[i].content_buffer = NULL;
                 }
                 z_remove(i);
@@ -563,6 +581,13 @@ static void draw_one(int idx) {
             if (nb == NULL) {
                 return; // Out of memory: keep last good buffer, skip this frame
             }
+            if (!w->visible) {
+                // Window closed (wm_cleanup_task/wm_close ran, deferred the old
+                // buffer) while we were preempted mid-draw. Don't allocate a
+                // zombie buffer that nothing will ever free.
+                kfree(nb);
+                return;
+            }
             if (w->resizing && w->content_buffer) {
                 // Growing mid-drag: preserve the old content so the rubber-band
                 // preview keeps showing it (kmalloc does not zero memory).
@@ -631,6 +656,7 @@ static void draw_one(int idx) {
 }
 
 void wm_draw_all() {
+    wm_flush_frees(); // release closed-window buffers (main-loop context only)
     for (int z = 0; z < wm_zcount; z++) draw_one(wm_zorder[z]);
     wm_draw_alt_tab_hud();
 }
@@ -907,8 +933,11 @@ void wm_cleanup_task(int tid) {
             mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // Mark bounds dirty before hiding
             wm_wins[i].visible = 0;
             if (wm_wins[i].content_buffer) {
-                extern void kfree(void*);
-                kfree(wm_wins[i].content_buffer);
+                // Defer the free: task_kill() can run while the main-loop thread
+                // (task 0) is inside draw_one() for this very buffer. Freeing it
+                // here would let draw_one() blit/render a freed pointer. Null the
+                // field now; wm_flush_frees() (main-loop context) releases it.
+                wm_defer_free(wm_wins[i].content_buffer);
                 wm_wins[i].content_buffer = NULL;
             }
             z_remove(i);
