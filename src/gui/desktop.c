@@ -48,11 +48,14 @@ static void save_desktop_icons() {
 }
 
 static void init_icons() {
-    // Grid layout: auto-arrange in a grid
-    int grid_cols = (fb_width - 40) / (ICON_W + ICON_PAD);
+    // Grid layout: auto-arrange in a grid with ONE pitch for both axes, so the
+    // horizontal and vertical spacing are identical (GRID_PITCH == hit-test
+    // height ICON_H + 16, keeping click areas of adjacent rows non-overlapping).
+    int grid_pitch = ICON_H + 16;
+    int grid_cols = (fb_width - 40) / grid_pitch;
     if (grid_cols < 1) grid_cols = 1;
-    int grid_gap_x = ICON_W + ICON_PAD;
-    int grid_gap_y = ICON_H + 16;
+    int grid_gap_x = grid_pitch;
+    int grid_gap_y = grid_pitch;
     int start_x = 24;
     int start_y = 24;
 
@@ -216,11 +219,22 @@ static void draw_icon(int i) {
     // White text centered under icon
     int tx = lx + (lw - llen * 8) / 2;
     int ty = ly + (lh - 8) / 2;
-    
-    // Draw text shadow for readability
-    draw_string_px(tx + 1, ty + 1, ic->label, 0x00000000, 0xFFFFFFFF);
-    // Draw white text (0xFFFFFFFF background is transparent in vga.c)
-    draw_string_px(tx, ty, ic->label, 0x00FFFFFF, 0xFFFFFFFF);
+
+    // Clip the label to the icon cell width ONLY when it overflows the cell,
+    // so a long label never paints over the neighbouring icon.
+    if (lw > ICON_W) {
+        vga_set_clip(ic->x, ly, ICON_W, lh);
+        // Draw text shadow for readability
+        draw_string_px(tx + 1, ty + 1, ic->label, 0x00000000, 0xFFFFFFFF);
+        // Draw white text (0xFFFFFFFF background is transparent in vga.c)
+        draw_string_px(tx, ty, ic->label, 0x00FFFFFF, 0xFFFFFFFF);
+        vga_reset_clip();
+    } else {
+        // Draw text shadow for readability
+        draw_string_px(tx + 1, ty + 1, ic->label, 0x00000000, 0xFFFFFFFF);
+        // Draw white text (0xFFFFFFFF background is transparent in vga.c)
+        draw_string_px(tx, ty, ic->label, 0x00FFFFFF, 0xFFFFFFFF);
+    }
 }
 
 extern uint32_t _binary_obj_wallpaper_bin_start[];

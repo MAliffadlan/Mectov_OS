@@ -500,14 +500,8 @@ static void draw_one(int idx) {
     uint32_t body_color = focused ? GUI_BG : GUI_BORDER2;
     draw_rounded_rect(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, use_radius, body_color);
 
-    // ========== Titlebar (rounded top corners + gradient) ==========
-    if (focused) {
-        draw_gradient_v(x, y, ww, TITLEBAR_H, GUI_TITLE_A, GUI_TITLE_B);
-        // Subtle top highlight for depth
-        draw_rect(x + use_radius, y, ww - 2 * use_radius, 1, 0x55FFFFFF);
-    } else {
-        draw_rounded_rect(x, y, ww, TITLEBAR_H, use_radius, GUI_TITLE_I);
-    }
+    // ========== Titlebar (single consistent style for every window) ==========
+    draw_rounded_rect(x, y, ww, TITLEBAR_H, use_radius, GUI_TITLE_A);
     // Bottom separator
     draw_rect(x, y + TITLEBAR_H - 1, ww, 1, 0x0011111B);
 
@@ -524,42 +518,37 @@ static void draw_one(int idx) {
     int tty = y + (TITLEBAR_H - 16) / 2;
     draw_string_px(tx, tty, w->title, GUI_TEXT, 0xFFFFFFFF);
 
-    // ========== Titlebar buttons (left side): macOS style traffic lights ==========
+    // ========== Titlebar buttons (right side, consistent for every window) ==========
     int btn_r = 6;           // circle radius
     int btn_y = y + TITLEBAR_H / 2;
-    int btn_start_x = x + 12;
 
-    int is_power_dialog = (strcmp(w->title, "Power Options") == 0);
+    // Right-aligned: close rightmost, maximize next, minimize leftmost
+    int close_cx = x + ww - 12;
+    int max_cx   = close_cx - 18;
+    int min_cx   = max_cx - 18;
 
     // Close button (Red)
-    fill_circle(btn_start_x, btn_y, btn_r, focused ? GUI_CLOSE : GUI_DIM);
+    fill_circle(close_cx, btn_y, btn_r, focused ? GUI_CLOSE : GUI_DIM);
     if (focused) {
-        draw_line(btn_start_x - 2, btn_y - 2, btn_start_x + 2, btn_y + 2, 0x00500000);
-        draw_line(btn_start_x - 2, btn_y + 2, btn_start_x + 2, btn_y - 2, 0x00500000);
+        draw_line(close_cx - 2, btn_y - 2, close_cx + 2, btn_y + 2, 0x00500000);
+        draw_line(close_cx - 2, btn_y + 2, close_cx + 2, btn_y - 2, 0x00500000);
     }
-    w->close_cx = btn_start_x; w->close_cy = btn_y; w->close_r = btn_r;
+    w->close_cx = close_cx; w->close_cy = btn_y; w->close_r = btn_r;
 
-    if (!is_power_dialog) {
-        // Minimize button (Yellow)
-        int min_cx = btn_start_x + 18;
-        fill_circle(min_cx, btn_y, btn_r, focused ? GUI_YELLOW : GUI_DIM);
-        if (focused) {
-            draw_rect(min_cx - 2, btn_y, 5, 1, 0x00593B00);
-        }
-        w->min_cx = min_cx; w->min_cy = btn_y; w->min_r = btn_r;
-
-        // Maximize button (Green)
-        int m_cx = min_cx + 18;
-        fill_circle(m_cx, btn_y, btn_r, focused ? GUI_GREEN : GUI_DIM);
-        if (focused) {
-            draw_rect(m_cx - 2, btn_y, 5, 1, 0x00004000);
-            draw_rect(m_cx, btn_y - 2, 1, 5, 0x00004000);
-        }
-        w->max_cx = m_cx; w->max_cy = btn_y; w->max_r = btn_r;
-    } else {
-        w->min_cx = -1; w->min_cy = -1; w->min_r = 0;
-        w->max_cx = -1; w->max_cy = -1; w->max_r = 0;
+    // Minimize button (Yellow)
+    fill_circle(min_cx, btn_y, btn_r, focused ? GUI_YELLOW : GUI_DIM);
+    if (focused) {
+        draw_rect(min_cx - 2, btn_y, 5, 1, 0x00593B00);
     }
+    w->min_cx = min_cx; w->min_cy = btn_y; w->min_r = btn_r;
+
+    // Maximize button (Green)
+    fill_circle(max_cx, btn_y, btn_r, focused ? GUI_GREEN : GUI_DIM);
+    if (focused) {
+        draw_rect(max_cx - 2, btn_y, 5, 1, 0x00004000);
+        draw_rect(max_cx, btn_y - 2, 1, 5, 0x00004000);
+    }
+    w->max_cx = max_cx; w->max_cy = btn_y; w->max_r = btn_r;
 
     // ========== Content area ==========
     // Subtle inner border
