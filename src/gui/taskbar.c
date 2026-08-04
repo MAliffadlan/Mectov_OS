@@ -60,10 +60,9 @@ void taskbar_track_mouse(int mx, int my, int px, int py) {
     int tray_right = (int)fb_width - 200; // rough tray left edge
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!wm_wins[i].visible) continue;
-        int btn_w = 34;
         int tlen = strlen(wm_wins[i].title);
         int text_px = tlen * 8;
-        btn_w = 16 + text_px + 12; // icon + text + padding
+        int btn_w = 34 + text_px; // 8px padding + 14px icon + 4px gap + text + 8px padding
         if (btn_w < TASKBAR_BTN_MIN_W) btn_w = TASKBAR_BTN_MIN_W;
         if (btn_w > TASKBAR_BTN_MAX_W) btn_w = TASKBAR_BTN_MAX_W;
         if (wx + btn_w + 2 > tray_right) break;
@@ -237,7 +236,7 @@ void taskbar_draw() {
         // Calculate button width based on title text length
         int tlen = strlen(wm_wins[i].title);
         int text_px = tlen * 8;
-        int btn_w = 16 + text_px + 12; // 16 icon + text + 12 padding
+        int btn_w = 34 + text_px; // 8px padding + 14px icon + 4px gap + text + 8px padding
         if (btn_w < TASKBAR_BTN_MIN_W) btn_w = TASKBAR_BTN_MIN_W;
         if (btn_w > TASKBAR_BTN_MAX_W) btn_w = TASKBAR_BTN_MAX_W;
         
@@ -259,16 +258,16 @@ void taskbar_draw() {
         // Rounded window button
         draw_rounded_rect(wx, ty + 3, btn_w, TASKBAR_H_PX - 6, BTN_RADIUS, bg2);
         if (focused) {
-            // Active indicator: thin accent line on top
-            draw_rounded_rect_border(wx, ty + 3, btn_w, TASKBAR_H_PX - 6, BTN_RADIUS, GUI_BORDER);
-            // Accent top line
-            draw_rect(wx + 4, ty + 4, btn_w - 8, 2, GUI_BLUE);
+            // Active indicator: left accent bar using existing accent color
+            // (no border for focused — left accent bar provides distinction)
+            // Left accent bar
+            draw_rect(wx, ty + 4, 3, TASKBAR_H_PX - 8, GUI_BLUE);
         } else if (hovered) {
             draw_rounded_rect_border(wx, ty + 3, btn_w, TASKBAR_H_PX - 6, BTN_RADIUS, GUI_BORDER2);
         }
 
         // Icon (14x14 small)
-        draw_app_icon(wx + 5, ty + 7, wm_wins[i].title, 14);
+        draw_app_icon(wx + 8, ty + 9, wm_wins[i].title, 14);
         
         // Title text (truncated if too long)
         char title_buf[24];
@@ -288,7 +287,7 @@ void taskbar_draw() {
             }
         }
         
-        draw_string_px(wx + 22, ty + 8, title_buf, focused ? GUI_WHITE : GUI_TEXT, bg2);
+        draw_string_px(wx + 26, ty + 12, title_buf, focused ? GUI_WHITE : GUI_TEXT, bg2);
         
         wx += btn_w + 4;
     }
@@ -330,7 +329,7 @@ void taskbar_draw() {
     int time_w_actual = 8 * 8;
     int time_x = tray_x - time_w_actual;
     uint32_t clk_bg = calendar_open ? GUI_BTN_HOV : GUI_TASKBAR;
-    draw_string_px(time_x, ty + 6, time_str, GUI_TEXT, clk_bg);
+    draw_string_px(time_x, ty + 12, time_str, GUI_TEXT, clk_bg);
     tray_x = time_x - 10;
 
     // 4. Separator
@@ -358,15 +357,15 @@ void taskbar_draw() {
 
     int date_w = di2 * 8;
     int date_x = tray_x - date_w;
-    draw_string_px(date_x, ty + 6, date_str2, GUI_DIM, clk_bg);
+    draw_string_px(date_x, ty + 12, date_str2, GUI_DIM, clk_bg);
     int clk_x = date_x - 4;
     tray_x = date_x - 10;
 
     // 6. Caps Lock indicator (compact)
     if (caps_a) {
         int caps_x = tray_x - 26;
-        draw_rounded_rect(caps_x, ty + 6, 22, 16, 3, GUI_CLOSE);
-        draw_string_px(caps_x + 2, ty + 8, "CAP", 0x00FFFFFF, GUI_CLOSE);
+        draw_rounded_rect(caps_x, ty + 8, 22, 16, 3, GUI_CLOSE);
+        draw_string_px(caps_x + 2, ty + 10, "CAP", 0x00FFFFFF, GUI_CLOSE);
         tray_x = caps_x - 6;
     }
 
@@ -380,7 +379,7 @@ void taskbar_draw() {
     int vol_icon_x = tray_x - 18;
     vol_icon_x_s = vol_icon_x;  // save for click handler
     vol_icon_ty_s = ty;
-    int vol_icon_y = ty + 6;
+    int vol_icon_y = ty + 8;
     int vol = sb16_get_volume();
     // Speaker body
     draw_rect(vol_icon_x + 2, vol_icon_y + 4, 5, 8, 0x00AAAACC);
@@ -719,7 +718,7 @@ void taskbar_handle_click(int mx, int my) {
         if (!wm_wins[i].visible) continue;
         int tlen = strlen(wm_wins[i].title);
         int text_px = tlen * 8;
-        int btn_w = 16 + text_px + 12;
+        int btn_w = 34 + text_px; // 8px padding + 14px icon + 4px gap + text + 8px padding
         if (btn_w < TASKBAR_BTN_MIN_W) btn_w = TASKBAR_BTN_MIN_W;
         if (btn_w > TASKBAR_BTN_MAX_W) btn_w = TASKBAR_BTN_MAX_W;
         if (wx + btn_w + 2 > tray_left_edge) break;
