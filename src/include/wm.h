@@ -32,10 +32,11 @@ typedef struct {
     int resize_mx, resize_my;
     int resize_ww, resize_wh;
     int resize_edge; // 1:top, 2:bottom, 4:left, 8:right, and combinations
-    // Titlebar button hit-test positions (set by draw_one)
-    int close_cx, close_cy, close_r;
-    int max_cx,   max_cy,   max_r;
-    int min_cx,   min_cy,   min_r;
+    // Titlebar button hit-test top-left corners (set by draw_one; button size
+    // is the shared WM_BTN_W/WM_BTN_H constants in wm.c)
+    int close_cx, close_cy;
+    int max_cx,   max_cy;
+    int min_cx,   min_cy;
     int owner_ring; // 0 for kernel, 3 for user mode apps
     int owner_task; // task ID that created this window (-1 = kernel)
     
@@ -72,6 +73,7 @@ void wm_close(int id);
 int  wm_is_open(int id);
 void wm_invalidate(int id);
 void wm_draw_all();
+void wm_track_mouse(int mx, int my); // Pure-move hover tracking (titlebar buttons)
 int wm_handle_mouse(int mx, int my, int btn, int pbtn);
 void wm_handle_scroll(int mx, int my, int delta);
 void wm_handle_key(char c, uint8_t sc);

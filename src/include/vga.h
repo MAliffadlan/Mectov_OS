@@ -64,6 +64,10 @@ void draw_rounded_rect_border(int x, int y, int w, int h, int r, uint32_t col);
 void draw_gradient_v(int x, int y, int w, int h, uint32_t color_top, uint32_t color_bot);
 void draw_soft_shadow(int x, int y, int w, int h, int radius, uint32_t intensity);
 
+// ---- Retro 3D bevel chrome (SerenityOS/Win95 style) ----
+void vga_bevel_raised(int x, int y, int w, int h);
+void vga_bevel_sunken(int x, int y, int w, int h);
+
 // ---- Text rendering ----
 void d_char(int x, int y, char c, unsigned char col);
 void draw_char_px(int px, int py, char c, uint32_t fg, uint32_t bg);

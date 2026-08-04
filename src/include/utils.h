@@ -17,6 +17,7 @@ void reboot();
 int strlen(const char* s);
 int strcmp(const char* s1, const char* s2);
 int strncmp(const char* s1, const char* s2, int n);
+const char* stristr(const char* haystack, const char* needle); // case-insensitive substring
 void strcpy(char* d, const char* s);
 void strncpy(char* d, const char* s, int n);
 void memset(void* dest, uint8_t val, uint32_t len);

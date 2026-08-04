@@ -20,6 +20,15 @@ make
 # Setup ISO directory
 mkdir -p iso/boot/grub
 cp myos.bin iso/boot/
+# grub.cfg is REQUIRED — without it GRUB falls to its rescue shell.
+cat << 'EOF' > iso/boot/grub/grub.cfg
+set timeout=0
+set default=0
+menuentry "Mectov OS" {
+    multiboot /boot/myos.bin
+    boot
+}
+EOF
 
 # Gunakan xorriso yang sudah didownload lokal untuk bikin ISO bootable Mectov
 export PATH=/home/mectov/my-os/xbin/usr/bin:$PATH

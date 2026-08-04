@@ -361,6 +361,35 @@ void draw_rounded_rect_border(int x, int y, int w, int h, int r, uint32_t col) {
     }
 }
 
+// ============================================================
+// Retro 3D bevel chrome (SerenityOS/Win95 style)
+// ============================================================
+// Classic 1990s chrome: black outline, white highlight on top/left, gray
+// shadow on bottom/right for a raised look. bevel_sunken flips highlight and
+// shadow so the widget looks pressed into the screen. These draw only the
+// 1px edges; the caller fills the face.
+void vga_bevel_raised(int x, int y, int w, int h) {
+    draw_rect(x, y, w, 1, RETRO_DKSHADOW);
+    draw_rect(x, y + h - 1, w, 1, RETRO_DKSHADOW);
+    draw_rect(x, y, 1, h, RETRO_DKSHADOW);
+    draw_rect(x + w - 1, y, 1, h, RETRO_DKSHADOW);
+    draw_rect(x + 1, y + 1, w - 2, 1, RETRO_HILIGHT);
+    draw_rect(x + 1, y + 1, 1, h - 2, RETRO_HILIGHT);
+    draw_rect(x + 1, y + h - 2, w - 2, 1, RETRO_SHADOW);
+    draw_rect(x + w - 2, y + 1, 1, h - 2, RETRO_SHADOW);
+}
+
+void vga_bevel_sunken(int x, int y, int w, int h) {
+    draw_rect(x, y, w, 1, RETRO_DKSHADOW);
+    draw_rect(x, y + h - 1, w, 1, RETRO_DKSHADOW);
+    draw_rect(x, y, 1, h, RETRO_DKSHADOW);
+    draw_rect(x + w - 1, y, 1, h, RETRO_DKSHADOW);
+    draw_rect(x + 1, y + 1, w - 2, 1, RETRO_SHADOW);
+    draw_rect(x + 1, y + 1, 1, h - 2, RETRO_SHADOW);
+    draw_rect(x + 1, y + h - 2, w - 2, 1, RETRO_HILIGHT);
+    draw_rect(x + w - 2, y + 1, 1, h - 2, RETRO_HILIGHT);
+}
+
 // Vertical gradient fill
 void draw_gradient_v(int x, int y, int w, int h, uint32_t color_top, uint32_t color_bot) {
     if (h <= 0) return;

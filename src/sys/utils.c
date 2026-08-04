@@ -63,6 +63,26 @@ int strlen(const char* s) {
 int strcmp(const char* s1, const char* s2) {
  while (*s1 && (*s1 == *s2)) { s1++; s2++; } return *(const unsigned char*)s1 - *(const unsigned char*)s2; }
 int strncmp(const char* s1, const char* s2, int n) { while (n && *s1 && (*s1 == *s2)) { ++s1; ++s2; --n; } if (n == 0) return 0; return (*(unsigned char *)s1 - *(unsigned char *)s2); }
+
+// Case-insensitive substring search (no libc available). Returns a pointer to
+// the first occurrence of needle in haystack, or NULL. Used by app-icon
+// matching so window titles like "Clock (Ring 3)" resolve to the right icon.
+const char* stristr(const char* haystack, const char* needle) {
+    if (!haystack || !needle || !*needle) return haystack;
+    for (const char* p = haystack; *p; p++) {
+        const char* h = p;
+        const char* n = needle;
+        while (*n && *h) {
+            char hc = *h, nc = *n;
+            if (hc >= 'A' && hc <= 'Z') hc += 'a' - 'A';
+            if (nc >= 'A' && nc <= 'Z') nc += 'a' - 'A';
+            if (hc != nc) break;
+            h++; n++;
+        }
+        if (!*n) return p;
+    }
+    return 0;
+}
 void strcpy(char* d, const char* s) { while ((*d++ = *s++)); }
 void strncpy(char* d, const char* s, int n) {
     int i;

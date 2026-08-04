@@ -74,65 +74,85 @@ void taskbar_track_mouse(int mx, int my, int px, int py) {
     }
 }
 
-// ---------- Icon drawing (same as before but static helper) ----------
-static void draw_app_icon(int ix, int iy, const char* title, int size) {
+// ---------- Icon drawing (shared; also used by wm.c titlebar icon) ----------
+// App icon color + glyph selection. Matching is case-insensitive SUBSTRING so
+// window titles like "Clock (Ring 3)", "Flappy Mectov", "Manajer Tugas" and
+// "PCI Manager (Ring 3)" all resolve to the right icon. Colors are muted and
+// desaturated so the icon harmonizes with the dark ToaruOS window chrome and
+// the gray retro taskbar (no loud yellow/orange).
+void draw_app_icon(int ix, int iy, const char* title, int size) {
     int cx = ix + size/2;
     int cy = iy + size/2;
     
-    uint32_t bg_col = 0x00FFFFFF;
-    if (strncmp(title, "Terminal", 8) == 0) bg_col = 0x002D3748;
-    else if (strncmp(title, "File Expl", 9) == 0) bg_col = 0x003182CE;
-    else if (strncmp(title, "System In", 9) == 0) bg_col = 0x00E2E8F0;
-    else if (strncmp(title, "Clock", 5) == 0) bg_col = 0x00FFFFFF;
-    else if (strncmp(title, "PCI", 3) == 0) bg_col = 0x00DD6B20;
-    else if (strncmp(title, "Mini Brow", 9) == 0 || strncmp(title, "Browser", 7) == 0) bg_col = 0x00319795;
-    else if (strncmp(title, "Snake", 5) == 0) bg_col = 0x0038A169;
-    else if (strncmp(title, "Calc", 4) == 0) bg_col = 0x00718096;
-    else if (strncmp(title, "Editor", 6) == 0) bg_col = 0x00718096;
-    else if (strncmp(title, "Task Mgr", 8) == 0) bg_col = 0x004A5568;
-    else if (strncmp(title, "Flappy", 6) == 0) bg_col = 0x00ECC94B;
-    else if (strncmp(title, "Media", 5) == 0) bg_col = 0x00D53F8C; // Pinkish red for media player
-    else bg_col = 0x00718096;
+    uint32_t bg_col = 0x00556677;  // default: slate
+    if      (stristr(title, "Terminal"))          bg_col = 0x002D3748;
+    else if (stristr(title, "Explorer"))         bg_col = 0x002D5E8C;
+    else if (stristr(title, "Browser"))          bg_col = 0x00285E5C;
+    else if (stristr(title, "SysInfo"))          bg_col = 0x00A9A9B0;
+    else if (stristr(title, "Clock"))            bg_col = 0x00F0F0F0;
+    else if (stristr(title, "PCI"))              bg_col = 0x00805A3C;  // muted rust (was orange)
+    else if (stristr(title, "Snake"))            bg_col = 0x00376B4E;
+    else if (stristr(title, "Calc"))             bg_col = 0x00556677;
+    else if (stristr(title, "Editor") || stristr(title, "Notepad")) bg_col = 0x00556677;
+    else if (stristr(title, "Task") || stristr(title, "Tugas"))     bg_col = 0x00405060;
+    else if (stristr(title, "Flappy"))           bg_col = 0x00A88A3C;  // muted gold (was bright yellow)
+    else if (stristr(title, "Media") || stristr(title, "Mplayer"))  bg_col = 0x00744A63; // muted plum
+    else if (stristr(title, "Volume"))           bg_col = 0x004B5A6A;
+    else if (stristr(title, "Hello"))            bg_col = 0x00556677;
+    else if (stristr(title, "Power"))            bg_col = 0x00553333;
+    else if (stristr(title, "Mectov"))           bg_col = 0x00405A80;
+    else if (stristr(title, "Doom"))             bg_col = 0x00333333;
 
     draw_rounded_rect(ix, iy, size, size, size/4, bg_col);
 
-    if (strncmp(title, "Terminal", 8) == 0) {
-        draw_string_px(ix + 4, iy + 4, ">_", 0x0048BB78, bg_col);
-    } else if (strncmp(title, "File Expl", 9) == 0) {
+    if      (stristr(title, "Terminal")) {
+        draw_string_px(ix + size/4, iy + size/4, ">_", 0x0048BB78, bg_col);
+    } else if (stristr(title, "Explorer")) {
         draw_rect(cx - size/3, cy - size/3, size*2/3, size/2, 0x00FFFFFF);
         draw_rect(cx - size/3, cy - size/3 - 1, size/4, 2, 0x00EBF8FF);
-    } else if (strncmp(title, "System In", 9) == 0) {
-        draw_rect(cx - size/3, cy - size/3, size*2/3, size/2, 0x002D3748);
-        draw_rect(cx - size/4, cy - size/4, size/2, size/3, 0x00A0AEC0);
-    } else if (strncmp(title, "Clock", 5) == 0) {
-        draw_circle(cx, cy, size/2 - 1, 0x002D3748);
-        draw_line(cx, cy, cx, cy - size/3, 0x00E53E3E);
-        draw_line(cx, cy, cx + size/4, cy + size/4, 0x002D3748);
-    } else if (strncmp(title, "PCI", 3) == 0) {
-        draw_rect(cx - size/3, cy - size/3, size*2/3, size*2/3, 0x00FFFFFF);
-    } else if (strncmp(title, "Mini Brow", 9) == 0 || strncmp(title, "Browser", 7) == 0) {
+    } else if (stristr(title, "Browser")) {
         draw_circle(cx, cy, size/2 - 1, 0x00FFFFFF);
         draw_line(cx - size/2, cy, cx + size/2, cy, 0x00FFFFFF);
         draw_line(cx, cy - size/2, cx, cy + size/2, 0x00FFFFFF);
-    } else if (strncmp(title, "Task Mgr", 8) == 0) {
-        draw_rect(ix + 2, iy + 2, 10, 10, 0x00FFFFFF);
-        draw_rect(ix + 4, iy + 4, 6, 2, 0x00CBD5E0);
-        draw_rect(ix + 4, iy + 8, 6, 2, 0x00CBD5E0);
-    } else if (strncmp(title, "Flappy", 6) == 0) {
-        draw_rect(ix + 4, iy + 4, 6, 6, 0x00FFFFFF);
-        draw_rect(ix + 10, iy + 6, 2, 2, 0x00E53E3E);
-    } else if (strncmp(title, "Snake", 5) == 0) {
+    } else if (stristr(title, "SysInfo")) {
+        draw_rect(cx - size/3, cy - size/3, size*2/3, size/2, 0x002D3748);
+        draw_rect(cx - size/4, cy - size/4, size/2, size/3, 0x00A0AEC0);
+    } else if (stristr(title, "Clock")) {
+        draw_circle(cx, cy, size/2 - 1, 0x002D3748);
+        draw_line(cx, cy, cx, cy - size/3, 0x00E53E3E);
+        draw_line(cx, cy, cx + size/4, cy + size/4, 0x002D3748);
+    } else if (stristr(title, "PCI")) {
+        draw_rect(cx - size/3, cy - size/3, size*2/3, size*2/3, 0x00FFFFFF);
+    } else if (stristr(title, "Snake")) {
         draw_rect(cx - size/3, cy - 2, size/2, 4, 0x00FFFFFF);
         draw_rect(cx + 2, cy - size/3, 4, size/3, 0x00FFFFFF);
-    } else if (strncmp(title, "Calc", 4) == 0 || strncmp(title, "Editor", 6) == 0) {
+    } else if (stristr(title, "Task") || stristr(title, "Tugas")) {
+        draw_rect(ix + size/8, iy + size/8, size*3/4, size*3/4, 0x00FFFFFF);
+        draw_rect(ix + size/4, iy + size/4, size/2, size/8, 0x00CBD5E0);
+        draw_rect(ix + size/4, iy + size/2, size/2, size/8, 0x00CBD5E0);
+    } else if (stristr(title, "Flappy")) {
+        draw_rect(ix + size/4, iy + size/4, size/2, size/2, 0x00FFFFFF);
+        draw_rect(ix + size*5/8, iy + size*3/8, size/8, size/8, 0x00E53E3E);
+    } else if (stristr(title, "Calc")) {
         draw_rect(cx - size/3, cy - size/3, size*2/3, size*2/3, 0x00FFFFFF);
-    } else if (strncmp(title, "Media", 5) == 0) {
-        // Play button triangle
+    } else if (stristr(title, "Editor") || stristr(title, "Notepad")) {
+        draw_rect(cx - size/3, cy - size/3, size*2/3, size*2/3, 0x00FFFFFF);
+        draw_line(cx - size/4, cy - 2, cx + size/4, cy - 2, 0x00999999);
+        draw_line(cx - size/4, cy + 2, cx + size/4, cy + 2, 0x00999999);
+    } else if (stristr(title, "Media") || stristr(title, "Mplayer")) {
         draw_line(cx - size/4, cy - size/4, cx - size/4, cy + size/4, 0x00FFFFFF);
         draw_line(cx - size/4, cy - size/4, cx + size/4, cy, 0x00FFFFFF);
         draw_line(cx - size/4, cy + size/4, cx + size/4, cy, 0x00FFFFFF);
+    } else if (stristr(title, "Volume")) {
+        draw_rect(cx - size/4, cy - size/3, size/4, size*2/3, 0x00FFFFFF);
+        draw_rect(cx, cy - size/4, size/3, size/2, 0x00FFFFFF);
     } else {
-        draw_rect(cx - size/4, cy - size/4, size/2, size/2, 0x00FFFFFF);
+        // Fallback: centered letter (matches retro icon aesthetic)
+        char letter[2];
+        letter[0] = title[0] ? title[0] : '?';
+        letter[1] = '\0';
+        uint32_t text_col = (bg_col == 0x00F0F0F0 || bg_col == 0x00A9A9B0) ? 0x00202020 : 0x00FFFFFF;
+        draw_string_px(ix + size/4, iy + size/4 - 1, letter, text_col, bg_col);
     }
 }
 
@@ -178,6 +198,12 @@ void taskbar_pre_draw() {
     }
 }
 
+// Groove separator: a 2px vertical channel (dark + light)
+static void groove_v(int x, int y, int h) {
+    draw_rect(x, y, 1, h, RETRO_DKSHADOW);
+    draw_rect(x + 1, y, 1, h, RETRO_HILIGHT);
+}
+
 void taskbar_draw() {
     if (!is_vbe) return;
 
@@ -192,30 +218,40 @@ void taskbar_draw() {
 
     int tray_right = (int)fb_width; // right edge
 
-    // ---------- Taskbar background (clean dark, slightly transparent feel) ----------
-    draw_rect(0, ty, fb_width, TASKBAR_H_PX, GUI_TASKBAR);
-    draw_rect(0, ty, fb_width, 1, GUI_BORDER);
+    // ---------- Taskbar background (retro gray face) ----------
+    draw_rect(0, ty, fb_width, TASKBAR_H_PX, RETRO_FACE);
+    // Classic recessed top edge: black line, then white groove line
+    draw_rect(0, ty, fb_width, 1, RETRO_DKSHADOW);
+    draw_rect(0, ty + 1, fb_width, 1, RETRO_HILIGHT);
 
-    // ---------- Start button (modern pill, "Mectov OS") ----------
+    // ---------- Start button (raised bevel, "Mectov") ----------
     int start_x = 4;
     int start_w = 86;
     int start_h = TASKBAR_H_PX - 8;
     int start_y = ty + 4;
+    int start_pressed = start_menu_open;
     
-    uint32_t start_bg = (start_menu_open || hover_start_x) ? 0x003B3B4F : 0x002B2B3C;
-    draw_rounded_rect(start_x, start_y, start_w, start_h, 6, start_bg);
-    if (hover_start_x) {
-        draw_rounded_rect_border(start_x, start_y, start_w, start_h, 6, GUI_BORDER);
+    if (start_pressed) {
+        vga_bevel_sunken(start_x, start_y, start_w, start_h);
+    } else {
+        vga_bevel_raised(start_x, start_y, start_w, start_h);
+        if (hover_start_x) {
+            // Hover: lighter face so the button reads as interactive
+            draw_rect(start_x + 2, start_y + 2, start_w - 4, start_h - 4, RETRO_FACE_LT);
+        }
     }
-    // Draw Mectov logo (small square icon before text)
-    draw_rounded_rect(start_x + 6, start_y + 4, 14, 14, 3, GUI_BLUE);
-    draw_string_px(start_x + 24, start_y + 3, "Mectov", 0x00FFFFFF, start_bg);
+    // Pressed content shifts 1px for the physical feel
+    int start_txt_off = start_pressed ? 1 : 0;
+    // Mectov logo (small blue square before text)
+    draw_rounded_rect(start_x + 6 + start_txt_off, start_y + 4 + start_txt_off, 14, 14, 2, GUI_BLUE);
+    draw_string_px(start_x + 6 + start_txt_off, start_y + 4 + start_txt_off, "M", RETRO_SELTXT, GUI_BLUE);
+    draw_string_px(start_x + 24 + start_txt_off, start_y + 3 + start_txt_off, "Mectov", RETRO_TEXT, RETRO_FACE);
     
-    // ---------- Separator ----------
+    // ---------- Separator (groove) ----------
     int sep_x = 4 + 86 + 6;
-    draw_rect(sep_x, ty + 8, 1, TASKBAR_H_PX - 16, GUI_BORDER2);
+    groove_v(sep_x, ty + 8, TASKBAR_H_PX - 16);
 
-    // ---------- Window buttons (toaruOS style: icon + title + background fill) ----------
+    // ---------- Window buttons (raised bevel, sunken when focused) ----------
     int wx = sep_x + 6;
     // Calculate tray left edge
     int tray_x_right = tray_right - 6; // power button reference
@@ -244,30 +280,22 @@ void taskbar_draw() {
         
         int focused = (wm_focused == wm_wins[i].id) && !wm_wins[i].minimized;
         int hovered = (hover_win_idx == i);
-        uint32_t bg2;
-        if (wm_wins[i].minimized) {
-            bg2 = GUI_TASKBAR;
-        } else if (focused) {
-            bg2 = 0x003B3B4F; // brighter bg for active
-        } else if (hovered) {
-            bg2 = 0x002E2E42; // hover highlight
-        } else {
-            bg2 = 0x00222233; // inactive bg
-        }
-
-        // Rounded window button
-        draw_rounded_rect(wx, ty + 3, btn_w, TASKBAR_H_PX - 6, BTN_RADIUS, bg2);
+        
+        // Bevel: sunken when focused (pressed in), raised otherwise.
         if (focused) {
-            // Active indicator: left accent bar using existing accent color
-            // (no border for focused — left accent bar provides distinction)
-            // Left accent bar
-            draw_rect(wx, ty + 4, 3, TASKBAR_H_PX - 8, GUI_BLUE);
-        } else if (hovered) {
-            draw_rounded_rect_border(wx, ty + 3, btn_w, TASKBAR_H_PX - 6, BTN_RADIUS, GUI_BORDER2);
+            vga_bevel_sunken(wx, ty + 3, btn_w, TASKBAR_H_PX - 6);
+        } else {
+            vga_bevel_raised(wx, ty + 3, btn_w, TASKBAR_H_PX - 6);
         }
+        // Hover: lighter face so the button reads as interactive
+        if (!focused && hovered) {
+            draw_rect(wx + 2, ty + 5, btn_w - 4, TASKBAR_H_PX - 10, RETRO_FACE_LT);
+        }
+        // Pressed content shifts 1px down/right for the physical feel
+        int txt_off = focused ? 1 : 0;
 
         // Icon (14x14 small)
-        draw_app_icon(wx + 8, ty + 9, wm_wins[i].title, 14);
+        draw_app_icon(wx + 8 + txt_off, ty + 9 + txt_off, wm_wins[i].title, 14);
         
         // Title text (truncated if too long)
         char title_buf[24];
@@ -287,23 +315,21 @@ void taskbar_draw() {
             }
         }
         
-        draw_string_px(wx + 26, ty + 12, title_buf, focused ? GUI_WHITE : GUI_TEXT, bg2);
+        draw_string_px(wx + 26 + txt_off, ty + 12 + txt_off, title_buf, RETRO_TEXT, RETRO_FACE);
         
         wx += btn_w + 4;
-    }
-
-    // ---------- System Tray (right side) ----------
+    }    // ---------- System Tray (sunken panel, right side) ----------
     int tray_x = tray_right - 6;
 
-    // 1. Power button icon (rightmost)
-    draw_circle(pwr_x, ty + TASKBAR_H_PX / 2, pwr_r, 0x00FF5555);
-    draw_circle(pwr_x, ty + TASKBAR_H_PX / 2, pwr_r - 1, 0x00FF5555);
-    draw_rect(pwr_x - 3, ty + TASKBAR_H_PX / 2 - pwr_r - 2, 7, 6, GUI_TASKBAR);
-    draw_rect(pwr_x - 1, ty + TASKBAR_H_PX / 2 - pwr_r - 2, 3, pwr_r + 2, 0x00FF5555);
+    // 1. Power button icon (rightmost, red on gray)
+    draw_circle(pwr_x, ty + TASKBAR_H_PX / 2, pwr_r, 0x00CC0000);
+    draw_circle(pwr_x, ty + TASKBAR_H_PX / 2, pwr_r - 1, 0x00CC0000);
+    draw_rect(pwr_x - 3, ty + TASKBAR_H_PX / 2 - pwr_r - 2, 7, 6, RETRO_FACE);
+    draw_rect(pwr_x - 1, ty + TASKBAR_H_PX / 2 - pwr_r - 2, 3, pwr_r + 2, 0x00CC0000);
     tray_x = pwr_x - pwr_r - 8;
 
-    // 2. Separator
-    draw_rect(tray_x, ty + 8, 1, TASKBAR_H_PX - 16, GUI_BORDER2);
+    // 2. Separator (groove)
+    groove_v(tray_x, ty + 8, TASKBAR_H_PX - 16);
     tray_x -= 8;
 
     // 3. Clock: HH:MM:SS
@@ -320,20 +346,18 @@ void taskbar_draw() {
 
     char time_str[9];
     time_str[0] = '0' + hour / 10; time_str[1] = '0' + hour % 10;
-    time_str[2] = ':';
-    time_str[3] = '0' + min / 10; time_str[4] = '0' + min % 10;
-    time_str[5] = ':';
-    time_str[6] = '0' + sec / 10; time_str[7] = '0' + sec % 10;
+    time_str[2] = ':';   time_str[3] = '0' + min / 10; time_str[4] = '0' + min % 10;
+    time_str[5] = ':';   time_str[6] = '0' + sec / 10; time_str[7] = '0' + sec % 10;
     time_str[8] = '\0';
 
     int time_w_actual = 8 * 8;
     int time_x = tray_x - time_w_actual;
-    uint32_t clk_bg = calendar_open ? GUI_BTN_HOV : GUI_TASKBAR;
-    draw_string_px(time_x, ty + 12, time_str, GUI_TEXT, clk_bg);
+    uint32_t clk_bg = calendar_open ? RETRO_SEL : RETRO_FACE;
+    draw_string_px(time_x, ty + 12, time_str, calendar_open ? RETRO_SELTXT : RETRO_TEXT, clk_bg);
     tray_x = time_x - 10;
 
-    // 4. Separator
-    draw_rect(tray_x, ty + 8, 1, TASKBAR_H_PX - 16, GUI_BORDER2);
+    // 4. Separator (groove)
+    groove_v(tray_x, ty + 8, TASKBAR_H_PX - 16);
     tray_x -= 8;
 
     // 5. Date: "Wed  Apr 29"
@@ -357,67 +381,76 @@ void taskbar_draw() {
 
     int date_w = di2 * 8;
     int date_x = tray_x - date_w;
-    draw_string_px(date_x, ty + 12, date_str2, GUI_DIM, clk_bg);
+    draw_string_px(date_x, ty + 12, date_str2, RETRO_SHADOW, clk_bg);
     int clk_x = date_x - 4;
     tray_x = date_x - 10;
 
-    // 6. Caps Lock indicator (compact)
+    // 6. Caps Lock indicator (compact, red on gray)
     if (caps_a) {
         int caps_x = tray_x - 26;
-        draw_rounded_rect(caps_x, ty + 8, 22, 16, 3, GUI_CLOSE);
-        draw_string_px(caps_x + 2, ty + 10, "CAP", 0x00FFFFFF, GUI_CLOSE);
+        vga_bevel_sunken(caps_x, ty + 8, 22, 16);
+        draw_string_px(caps_x + 2, ty + 10, "CAP", 0x00CC0000, RETRO_FACE);
         tray_x = caps_x - 6;
     }
 
     // 7. HDD activity dot
     int hdd_x = tray_x - 12;
-    fill_circle(hdd_x + 5, ty + TASKBAR_H_PX / 2, 4, hdd_activity > 0 ? 0x00FF4444 : GUI_BORDER2);
+    fill_circle(hdd_x + 5, ty + TASKBAR_H_PX / 2, 4, hdd_activity > 0 ? 0x00CC0000 : RETRO_SHADOW);
     if (hdd_activity > 0) hdd_activity--;
     tray_x = hdd_x - 6;
 
-    // 8. Volume icon (speaker glyph)
+    // 8. Volume icon (speaker glyph, black on gray)
     int vol_icon_x = tray_x - 18;
     vol_icon_x_s = vol_icon_x;  // save for click handler
     vol_icon_ty_s = ty;
     int vol_icon_y = ty + 8;
     int vol = sb16_get_volume();
     // Speaker body
-    draw_rect(vol_icon_x + 2, vol_icon_y + 4, 5, 8, 0x00AAAACC);
-    draw_rect(vol_icon_x, vol_icon_y + 6, 2, 4, 0x00AAAACC);
+    draw_rect(vol_icon_x + 2, vol_icon_y + 4, 5, 8, RETRO_TEXT);
+    draw_rect(vol_icon_x, vol_icon_y + 6, 2, 4, RETRO_TEXT);
     // Sound waves based on volume
     if (vol > 0) {
-        draw_rect(vol_icon_x + 9, vol_icon_y + 3, 1, 10, 0x0027C93F);
+        draw_rect(vol_icon_x + 9, vol_icon_y + 3, 1, 10, 0x0000A000);
     }
     if (vol > 33) {
-        draw_rect(vol_icon_x + 12, vol_icon_y + 1, 1, 14, 0x001B9A2F);
+        draw_rect(vol_icon_x + 12, vol_icon_y + 1, 1, 14, 0x00008000);
     }
     if (vol > 66) {
-        draw_rect(vol_icon_x + 15, vol_icon_y, 1, 16, 0x00145F1E);
+        draw_rect(vol_icon_x + 15, vol_icon_y, 1, 16, 0x00006000);
     }
     if (vol == 0) {
         // Muted: X mark
-        draw_rect(vol_icon_x + 10, vol_icon_y + 5, 6, 2, 0x00FF5555);
+        draw_rect(vol_icon_x + 10, vol_icon_y + 5, 6, 2, 0x00CC0000);
     }
     tray_x = vol_icon_x - 6;
 
-    // ========== Draw Start Menu (toaruOS style) ==========
+    // Sunken inset panel behind the whole tray. Drawn LAST so its left edge
+    // is derived from the actual leftmost icon: the content shifts left when
+    // the Caps Lock indicator appears, and a fixed edge would leave the
+    // volume icon floating outside the panel.
+    int tray_panel_x = tray_x + 4; // tray_x now sits just left of the volume icon
+    if (tray_panel_x < sep_x + 12) tray_panel_x = sep_x + 12;
+    vga_bevel_sunken(tray_panel_x, ty + 3, (tray_right - 4) - tray_panel_x, TASKBAR_H_PX - 6);
+
+    // ========== Draw Start Menu (retro bevel, Win95 selection) ==========
     if (start_menu_open) {
         int sm_h = 348;
         int sm_w = 200;
         int sm_y = ty - sm_h;
         
-        // Main menu background
-        draw_rounded_rect(2, sm_y, sm_w, sm_h, WIN_RADIUS, GUI_BG);
-        draw_rounded_rect_border(2, sm_y, sm_w, sm_h, WIN_RADIUS, GUI_BORDER);
+        // Main menu: raised bevel panel on gray
+        draw_rect(2, sm_y, sm_w, sm_h, RETRO_FACE);
+        vga_bevel_raised(2, sm_y, sm_w, sm_h);
         
-        // Header with avatar area (toaruOS style: user info)
-        draw_gradient_v(2, sm_y, sm_w, 36, GUI_TITLE_A, GUI_TITLE_B);
+        // Header with avatar area (raised header strip)
+        draw_rect(2, sm_y, sm_w, 36, RETRO_FACE);
+        draw_rect(2, sm_y + 35, sm_w, 1, RETRO_SHADOW);
         // Avatar circle placeholder
         fill_circle(20, sm_y + 18, 14, GUI_BLUE);
-        draw_string_px(8, sm_y + 14, "M", GUI_WHITE, GUI_BLUE);
+        draw_string_px(8, sm_y + 14, "M", RETRO_SELTXT, GUI_BLUE);
         // User name
-        draw_string_px(38, sm_y + 10, "Mectov User", GUI_TEXT, GUI_TITLE_A);
-        draw_string_px(38, sm_y + 22, "Professional Edition", GUI_DIM, GUI_TITLE_B);
+        draw_string_px(38, sm_y + 10, "Mectov User", RETRO_TEXT, RETRO_FACE);
+        draw_string_px(38, sm_y + 22, "Professional Edition", RETRO_SHADOW, RETRO_FACE);
         
         // Menu items with icons (icon on left, label on right)
         struct { const char* label; int len; uint32_t icon_bg; } items[] = {
@@ -438,45 +471,38 @@ void taskbar_draw() {
         for (int n = 0; n < 11; n++) {
             int item_y = oy;
             int item_h = 28;
-            uint32_t item_bg = GUI_BG;
-            uint32_t text_col = GUI_TEXT;
+            int hovered = (hover_menu_idx == n);
             
-            if (hover_menu_idx == n) {
-                item_bg = 0x002E2E42;
-            }
-            
-            // Draw item background (highlighted row)
-            if (hover_menu_idx == n) {
-                draw_rounded_rect(4, item_y, sm_w - 8, item_h - 2, 4, item_bg);
+            // Win95 selection: flat blue bar with white text
+            if (hovered) {
+                draw_rect(3, item_y, sm_w - 6, item_h - 2, RETRO_SEL);
             }
             
             if (n == 10) {
                 // Power off: red accent
-                if (hover_menu_idx == n) {
-                    draw_rounded_rect(4, item_y, sm_w - 8, item_h - 2, 4, 0x00330000);
-                }
                 // Icon: power symbol
                 int ic_x = 10;
                 int ic_y = item_y + 6;
-                fill_circle(ic_x + 8, ic_y + 7, 7, GUI_CLOSE);
-                fill_circle(ic_x + 8, ic_y + 7, 5, 0x00330000);
-                draw_rect(ic_x + 6, ic_y + 2, 4, 7, GUI_CLOSE);
-                text_col = GUI_CLOSE;
-                draw_string_px(ic_x + 18, item_y + 6, items[n].label, text_col, hover_menu_idx == n ? 0x00330000 : GUI_BG);
+                fill_circle(ic_x + 8, ic_y + 7, 7, 0x00CC0000);
+                fill_circle(ic_x + 8, ic_y + 7, 5, hovered ? RETRO_SEL : RETRO_FACE);
+                draw_rect(ic_x + 6, ic_y + 2, 4, 7, 0x00CC0000);
+                draw_string_px(ic_x + 18, item_y + 6, items[n].label,
+                               hovered ? RETRO_SELTXT : 0x00CC0000,
+                               hovered ? RETRO_SEL : RETRO_FACE);
             } else if (n == 9) {
-                // Restart: yellow accent
-                if (hover_menu_idx == n) {
-                    draw_rounded_rect(4, item_y, sm_w - 8, item_h - 2, 4, 0x00332200);
-                }
+                // Logout: muted amber accent (was bright mustard)
                 int ic_x = 10;
-                draw_string_px(ic_x + 18, item_y + 6, items[n].label, GUI_YELLOW, hover_menu_idx == n ? 0x00332200 : GUI_BG);
-                text_col = GUI_YELLOW;
+                draw_string_px(ic_x + 18, item_y + 6, items[n].label,
+                               hovered ? RETRO_SELTXT : 0x00856B30,
+                               hovered ? RETRO_SEL : RETRO_FACE);
             } else {
                 // Normal item with icon
                 int ic_x = 10;
                 int ic_y = item_y + 5;
                 draw_app_icon(ic_x, ic_y, items[n].label, 16);
-                draw_string_px(ic_x + 20, item_y + 6, items[n].label, text_col, item_bg);
+                draw_string_px(ic_x + 20, item_y + 6, items[n].label,
+                               hovered ? RETRO_SELTXT : RETRO_TEXT,
+                               hovered ? RETRO_SEL : RETRO_FACE);
             }
             
             oy += item_h;
@@ -497,10 +523,11 @@ void taskbar_draw() {
         if (cal_x + cal_w > (int)fb_width) cal_x = (int)fb_width - cal_w - 2;
         if (cal_x < 2) cal_x = 2;
 
-        draw_rounded_rect(cal_x, cal_y, cal_w, cal_h, WIN_RADIUS, GUI_BG);
-        draw_rounded_rect_border(cal_x, cal_y, cal_w, cal_h, WIN_RADIUS, GUI_BORDER);
+        draw_rect(cal_x, cal_y, cal_w, cal_h, RETRO_FACE);
+        vga_bevel_raised(cal_x, cal_y, cal_w, cal_h);
 
-        draw_gradient_v(cal_x, cal_y, cal_w, 26, GUI_TITLE_A, GUI_TITLE_B);
+        draw_rect(cal_x, cal_y, cal_w, 26, RETRO_FACE);
+        draw_rect(cal_x, cal_y + 25, cal_w, 1, RETRO_SHADOW);
         const char* months[] = {"Jan","Feb","Mar","Apr","May","Jun",
                                 "Jul","Aug","Sep","Oct","Nov","Dec"};
         char date_str[20];
@@ -516,11 +543,11 @@ void taskbar_draw() {
         date_str[di++] = '0' + ((c_yr / 10) % 10);
         date_str[di++] = '0' + (c_yr % 10);
         date_str[di] = '\0';
-        draw_string_px(cal_x + 55, cal_y + 5, date_str, GUI_TEXT, GUI_TITLE_A);
+        draw_string_px(cal_x + 55, cal_y + 5, date_str, RETRO_TEXT, RETRO_FACE);
 
         const char* d_labels[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
         for (int i = 0; i < 7; i++)
-            draw_string_px(cal_x + 10 + i * 26, cal_y + 30, d_labels[i], GUI_DIM, GUI_BG);
+            draw_string_px(cal_x + 10 + i * 26, cal_y + 30, d_labels[i], RETRO_SHADOW, RETRO_FACE);
 
         int start_dow = get_dow(1, mon_cmos, c_yr);
         int total = days_in_month(mon_cmos, c_yr);
@@ -531,12 +558,12 @@ void taskbar_draw() {
             if (d < 10) { nb[0] = ' '; nb[1] = '0' + d; }
             else { nb[0] = '0' + (d/10); nb[1] = '0' + (d%10); }
             nb[2] = '\0';
-            uint32_t cf = GUI_TEXT;
+            uint32_t cf = RETRO_TEXT;
             if (d == day_cmos) {
-                fill_circle(cal_x + 14 + col * 26, cal_y + 48 + row * 18, 7, GUI_BTN_HOV);
-                cf = GUI_WHITE;
+                fill_circle(cal_x + 14 + col * 26, cal_y + 48 + row * 18, 7, RETRO_SEL);
+                cf = RETRO_SELTXT;
             }
-            draw_string_px(cal_x + 10 + col * 26, cal_y + 45 + row * 18, nb, cf, (d == day_cmos) ? GUI_BTN_HOV : GUI_BG);
+            draw_string_px(cal_x + 10 + col * 26, cal_y + 45 + row * 18, nb, cf, (d == day_cmos) ? RETRO_SEL : RETRO_FACE);
             if (col == 6) row++;
         }
     }
@@ -550,26 +577,26 @@ void taskbar_draw() {
         if (vp_x + vp_w > (int)fb_width - 4) vp_x = (int)fb_width - vp_w - 4;
         if (vp_x < 4) vp_x = 4;
 
-        draw_rounded_rect(vp_x, vp_y, vp_w, vp_h, 8, GUI_BG);
-        draw_rounded_rect_border(vp_x, vp_y, vp_w, vp_h, 8, GUI_BORDER);
+        draw_rect(vp_x, vp_y, vp_w, vp_h, RETRO_FACE);
+        vga_bevel_raised(vp_x, vp_y, vp_w, vp_h);
 
         // Title
-        draw_string_px(vp_x + vp_w/2 - 24, vp_y + 6, "Volume", GUI_TEXT, GUI_BG);
+        draw_string_px(vp_x + vp_w/2 - 24, vp_y + 6, "Volume", RETRO_TEXT, RETRO_FACE);
 
-        // Slider track
+        // Slider track (sunken)
         int sl_x = vp_x + 12;
         int sl_y = vp_y + 28;
         int sl_w = vp_w - 24;
         int sl_h = 6;
-        draw_rounded_rect(sl_x, sl_y, sl_w, sl_h, 3, 0x00333344);
+        vga_bevel_sunken(sl_x, sl_y, sl_w, sl_h);
         int fill_w = (vol * sl_w) / 100;
         if (fill_w > 0) {
-            draw_rounded_rect(sl_x, sl_y, fill_w, sl_h, 3, 0x0027C93F);
+            draw_rect(sl_x + 1, sl_y + 1, fill_w, sl_h - 2, 0x0000A000);
         }
         // Knob
         int knob_x = sl_x + fill_w;
-        fill_circle(knob_x, sl_y + sl_h/2, 5, 0x00FFFFFF);
-        fill_circle(knob_x, sl_y + sl_h/2, 3, 0x0027C93F);
+        fill_circle(knob_x, sl_y + sl_h/2, 5, RETRO_DKSHADOW);
+        fill_circle(knob_x, sl_y + sl_h/2, 3, RETRO_HILIGHT);
 
         // Volume % text
         char vbuf[8];
@@ -578,13 +605,13 @@ void taskbar_draw() {
         else if (vol >= 10) { vbuf[vi++] = '0' + vol/10; vbuf[vi++] = '0' + vol%10; }
         else { vbuf[vi++] = '0' + vol; }
         vbuf[vi++] = '%'; vbuf[vi] = '\0';
-        draw_string_px(vp_x + vp_w/2 - vi*4, vp_y + 42, vbuf, GUI_TEXT, GUI_BG);
+        draw_string_px(vp_x + vp_w/2 - vi*4, vp_y + 42, vbuf, RETRO_TEXT, RETRO_FACE);
 
-        // Mute button
+        // Mute button (raised bevel)
         int mute_x = vp_x + vp_w/2 - 20;
         int mute_y = vp_y + 54;
-        draw_rounded_rect(mute_x, mute_y, 40, 14, 4, 0x00333344);
-        draw_string_px(mute_x + 4, mute_y + 1, vol == 0 ? "Unmte" : " Mute", vol == 0 ? 0x00FF5555 : GUI_DIM, 0x00333344);
+        vga_bevel_raised(mute_x, mute_y, 40, 14);
+        draw_string_px(mute_x + 4, mute_y + 1, vol == 0 ? "Unmte" : " Mute", vol == 0 ? 0x00CC0000 : RETRO_TEXT, RETRO_FACE);
     }
 }
 

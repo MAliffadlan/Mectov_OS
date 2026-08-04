@@ -7,6 +7,19 @@
 #define SNAP_THRESHOLD  10      // px from edge to trigger snap
 #define SNAP_AREA_W     (int)(fb_width / 2)  // half width for left/right snap
 
+// Titlebar button size (ToaruOS-style glyph buttons). Shared by draw_one
+// (rendering), wm_track_mouse (hover) and wm_handle_mouse (hit test) so they
+// can never drift apart. The 20px hit box is taller than the 16px visual so
+// clicks near the titlebar edge still register comfortably.
+#define WM_BTN_W 20
+#define WM_BTN_H 16
+#define WM_BTN_VIS_W 16  // rounded hover/pressed background visual width
+
+// Titlebar button hover state, tracked by wm_track_mouse() on pure mouse
+// moves and read by draw_one(). Indexed by window slot, then which button:
+// 0 = close, 1 = maximize, 2 = minimize.
+static int wm_btn_hover[MAX_WINDOWS][3];
+
 WmWin wm_wins[MAX_WINDOWS];
 int   wm_focused = -1;
 int   wm_zorder[MAX_WINDOWS];
@@ -174,74 +187,11 @@ void wm_alt_tab_end(void) {
     wm_restore(wm_wins[target_idx].id);
 }
 
+// Alt-tab HUD icon. Delegates to the shared draw_app_icon() (from taskbar.c)
+// so the HUD, taskbar and titlebar all show identical, correctly-matched
+// icons for the same window title.
 static void draw_hud_icon(int ix, int iy, const char* title) {
-    uint32_t bg_col = 0x00FFFFFF;
-    if (strncmp(title, "Terminal", 8) == 0) bg_col = 0x002D3748;
-    else if (strncmp(title, "File Expl", 9) == 0 || strncmp(title, "Explorer", 8) == 0) bg_col = 0x003182CE;
-    else if (strncmp(title, "System In", 9) == 0 || strncmp(title, "SysInfo", 7) == 0) bg_col = 0x00E2E8F0;
-    else if (strncmp(title, "Clock", 5) == 0) bg_col = 0x00FFFFFF;
-    else if (strncmp(title, "PCI", 3) == 0) bg_col = 0x00DD6B20;
-    else if (strncmp(title, "Mini Brow", 9) == 0 || strncmp(title, "Browser", 7) == 0) bg_col = 0x00319795;
-    else if (strncmp(title, "Snake", 5) == 0) bg_col = 0x0038A169;
-    else if (strncmp(title, "Calc", 4) == 0 || strncmp(title, "Calculator", 10) == 0) bg_col = 0x00718096;
-    else if (strncmp(title, "Editor", 6) == 0 || strncmp(title, "Notepad", 7) == 0) bg_col = 0x00718096;
-    else if (strncmp(title, "Task Mgr", 8) == 0 || strncmp(title, "Task Manager", 12) == 0) bg_col = 0x004A5568;
-    else if (strncmp(title, "Flappy", 6) == 0) bg_col = 0x00ECC94B;
-    else if (strncmp(title, "Media", 5) == 0 || strncmp(title, "Mplayer", 7) == 0) bg_col = 0x00D53F8C;
-    else bg_col = 0x00718096;
-
-    int size = 24;
-    int cx = ix + 12;
-    int cy = iy + 12;
-
-    draw_rounded_rect(ix, iy, size, size, 6, bg_col);
-
-    if (strncmp(title, "Terminal", 8) == 0) {
-        draw_string_px(ix + 4, iy + 4, ">_", 0x0048BB78, 0xFFFFFFFF);
-    } else if (strncmp(title, "File Expl", 9) == 0 || strncmp(title, "Explorer", 8) == 0) {
-        draw_rect(cx - size/3, cy - size/4, size*2/3, size/2, 0x00FFFFFF);
-        draw_rect(cx - size/3, cy - size/4 - 1, size/4, 2, 0x00EBF8FF);
-    } else if (strncmp(title, "System In", 9) == 0 || strncmp(title, "SysInfo", 7) == 0) {
-        draw_rect(cx - size/3, cy - size/4, size*2/3, size/2, 0x002D3748);
-        draw_rect(cx - size/4, cy - size/6, size/2, size/3, 0x00A0AEC0);
-    } else if (strncmp(title, "Clock", 5) == 0) {
-        draw_circle(cx, cy, size/2 - 2, 0x002D3748);
-        draw_line(cx, cy, cx, cy - size/4, 0x00E53E3E);
-        draw_line(cx, cy, cx + size/6, cy + size/6, 0x002D3748);
-    } else if (strncmp(title, "PCI", 3) == 0) {
-        draw_rect(cx - size/3, cy - size/3, size*2/3, size*2/3, 0x00FFFFFF);
-    } else if (strncmp(title, "Mini Brow", 9) == 0 || strncmp(title, "Browser", 7) == 0) {
-        draw_circle(cx, cy, size/2 - 2, 0x00FFFFFF);
-        draw_line(cx - size/2 + 2, cy, cx + size/2 - 2, cy, 0x00FFFFFF);
-        draw_line(cx, cy - size/2 + 2, cx, cy + size/2 - 2, 0x00FFFFFF);
-    } else if (strncmp(title, "Task Mgr", 8) == 0 || strncmp(title, "Task Manager", 12) == 0) {
-        draw_rect(ix + 4, iy + 4, 16, 16, 0x00FFFFFF);
-        draw_rect(ix + 7, iy + 7, 10, 3, 0x00CBD5E0);
-        draw_rect(ix + 7, iy + 13, 10, 3, 0x00CBD5E0);
-    } else if (strncmp(title, "Flappy", 6) == 0) {
-        draw_rect(ix + 6, iy + 6, 12, 12, 0x00FFFFFF);
-        draw_rect(ix + 14, iy + 10, 4, 4, 0x00E53E3E);
-    } else if (strncmp(title, "Snake", 5) == 0) {
-        draw_rect(cx - size/3, cy - 2, size/2, 4, 0x00FFFFFF);
-        draw_rect(cx + 2, cy - size/3, 4, size/3, 0x00FFFFFF);
-    } else if (strncmp(title, "Calc", 4) == 0 || strncmp(title, "Calculator", 10) == 0) {
-        draw_rect(cx - 6, cy - 6, 12, 12, 0x00FFFFFF);
-        draw_rect(cx - 4, cy - 4, 8, 2, 0x0011111B);
-    } else if (strncmp(title, "Editor", 6) == 0 || strncmp(title, "Notepad", 7) == 0) {
-        draw_rect(cx - 5, cy - 7, 10, 14, 0x00FFFFFF);
-        draw_rect(cx - 3, cy - 3, 6, 1, 0x00888888);
-        draw_rect(cx - 3, cy + 1, 6, 1, 0x00888888);
-    } else if (strncmp(title, "Media", 5) == 0 || strncmp(title, "Mplayer", 7) == 0) {
-        draw_line(cx - size/4, cy - size/4, cx - size/4, cy + size/4, 0x00FFFFFF);
-        draw_line(cx - size/4, cy - size/4, cx + size/4, cy, 0x00FFFFFF);
-        draw_line(cx - size/4, cy + size/4, cx + size/4, cy, 0x00FFFFFF);
-    } else {
-        char letter[2];
-        letter[0] = title[0];
-        letter[1] = '\0';
-        uint32_t text_col = (bg_col == 0x00FFFFFF || bg_col == 0x00E2E8F0) ? 0x0011111B : 0x00FFFFFF;
-        draw_string_px(ix + 8, iy + 5, letter, text_col, 0xFFFFFFFF);
-    }
+    draw_app_icon(ix, iy, title, 24);
 }
 
 static void wm_draw_alt_tab_hud(void) {
@@ -266,9 +216,9 @@ static void wm_draw_alt_tab_hud(void) {
     int hx = ((int)fb_width - hud_w) / 2;
     int hy = ((int)fb_height - hud_h) / 2;
     
-    // Background card (Catppuccin dark look)
-    draw_rounded_rect(hx, hy, hud_w, hud_h, 12, 0x00181825);
-    draw_rounded_rect_border(hx, hy, hud_w, hud_h, 12, 0x00313244);
+    // Background card (ToaruOS dark)
+    draw_rect(hx, hy, hud_w, hud_h, 0x00383838);
+    draw_rect_border(hx, hy, hud_w, hud_h, TOARU_BORDER);
     
     // Draw each visible window in switcher
     for (int i = 0; i < wm_zcount; i++) {
@@ -278,10 +228,9 @@ static void wm_draw_alt_tab_hud(void) {
         
         int selected = (i == alt_tab_selected_idx);
         
-        // Highlight box
+        // Highlight box (ToaruOS selection blue)
         if (selected) {
-            draw_rounded_rect(item_x - 4, item_y - 4, item_w + 8, item_w + 8, 8, 0x00313244);
-            draw_rounded_rect_border(item_x - 4, item_y - 4, item_w + 8, item_w + 8, 8, 0x0089B4FA);
+            draw_rect(item_x - 4, item_y - 4, item_w + 8, item_w + 8, 0x003C5C8E);
         }
         
         // Icon
@@ -300,7 +249,7 @@ static void wm_draw_alt_tab_hud(void) {
         }
         short_title[j] = '\0';
         
-        uint32_t text_col = selected ? 0x0089B4FA : 0x00A6ADC8;
+        uint32_t text_col = selected ? 0x00FFFFFF : 0x00999999;
         draw_string_px(item_x + (item_w - j*8)/2, item_y + 36, short_title, text_col, 0xFFFFFFFF);
     }
     
@@ -308,7 +257,7 @@ static void wm_draw_alt_tab_hud(void) {
     int active_idx = wm_zorder[wm_zcount - 1 - alt_tab_selected_idx];
     const char* full_title = wm_wins[active_idx].title;
     int title_len = strlen(full_title);
-    draw_string_px(hx + (hud_w - title_len*8)/2, hy + 76, full_title, 0x00F5C2E7, 0xFFFFFFFF);
+    draw_string_px(hx + (hud_w - title_len*8)/2, hy + 76, full_title, 0x00E2E2E2, 0xFFFFFFFF);
 }
 
 // ---- Open / Close ----
@@ -474,6 +423,46 @@ static void check_snap(int idx) {
     }
 }
 
+// Titlebar button geometry, single source of truth for draw_one(),
+// wm_track_mouse() and wm_handle_mouse(). Buttons are right-aligned in
+// ToaruOS fashion: minimize, maximize, close (left to right).
+static void wm_btn_geom(const WmWin* w, int* close_x, int* max_x, int* min_x, int* btn_y) {
+    *btn_y = w->y + (TITLEBAR_H - WM_BTN_H) / 2;
+    *close_x = w->x + w->w - WM_BTN_W - 3;
+    *max_x   = *close_x - WM_BTN_W - 2;
+    *min_x   = *max_x - WM_BTN_W - 2;
+}
+
+// Pure-mouse-move tracking for titlebar button hover states. Called from the
+// main loop on every mouse move (no button). Clears hover when the pointer is
+// not over any visible window's titlebar buttons.
+void wm_track_mouse(int mx, int my) {
+    // Hover states are fully recomputed on every move; anything not explicitly
+    // set below is already cleared here, so hovers can never go stale.
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        wm_btn_hover[i][0] = wm_btn_hover[i][1] = wm_btn_hover[i][2] = 0;
+    }
+    if (my < 0) return;
+    for (int z = wm_zcount - 1; z >= 0; z--) {
+        int idx = wm_zorder[z];
+        WmWin* w = &wm_wins[idx];
+        if (!w->visible || w->minimized) continue;
+        if (mx < w->x || mx >= w->x + w->w || my < w->y || my >= w->y + w->h) continue;
+        if (my >= w->y + TITLEBAR_H) break; // pointer in content area of top window
+        // Over the titlebar of the topmost window under the pointer
+        int cx, mx2, nx, by;
+        wm_btn_geom(w, &cx, &mx2, &nx, &by);
+        if (mx >= cx && mx < cx + WM_BTN_W && my >= by && my < by + WM_BTN_H) {
+            wm_btn_hover[idx][0] = 1;
+        } else if (mx >= mx2 && mx < mx2 + WM_BTN_W && my >= by && my < by + WM_BTN_H) {
+            wm_btn_hover[idx][1] = 1;
+        } else if (mx >= nx && mx < nx + WM_BTN_W && my >= by && my < by + WM_BTN_H) {
+            wm_btn_hover[idx][2] = 1;
+        }
+        break;
+    }
+}
+
 static void draw_one(int idx) {
     WmWin* w = &wm_wins[idx];
     if (!w->visible || w->minimized) return;
@@ -494,66 +483,83 @@ static void draw_one(int idx) {
 
     int x = w->x, y = w->y, ww = w->w, wh = w->h;
     int focused = (wm_focused == w->id);
-    int use_radius = (w->snap_state != SNAP_NONE || w->maximized) ? 4 : WIN_RADIUS;
 
-    // ========== Window Body (rounded rect) ==========
-    uint32_t body_color = focused ? GUI_BG : GUI_BORDER2;
-    draw_rounded_rect(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, use_radius, body_color);
+    // ========== Window Body (ToaruOS dark, flat) ==========
+    draw_rect(x, y + TITLEBAR_H, ww, wh - TITLEBAR_H, TOARU_TITLE_I);
+    // Subtle inner highlight where the body meets the titlebar
+    draw_rect(x, y + TITLEBAR_H, ww, 1, TOARU_BORDER);
 
-    // ========== Titlebar (single consistent style for every window) ==========
-    draw_rounded_rect(x, y, ww, TITLEBAR_H, use_radius, GUI_TITLE_A);
-    // Bottom separator
-    draw_rect(x, y + TITLEBAR_H - 1, ww, 1, 0x0011111B);
+    // ========== Titlebar (ToaruOS flat solid, no gradient) ==========
+    draw_rect(x, y, ww, TITLEBAR_H, focused ? TOARU_TITLE : TOARU_TITLE_I);
 
-    // ========== Window border (rounded) ==========
-    if (focused) {
-        draw_rounded_rect_border(x, y, ww, wh, use_radius, GUI_BORDER);
-    } else {
-        draw_rounded_rect_border(x, y, ww, wh, use_radius, GUI_BORDER2);
-    }
-
-    // ========== Title text (Centered) ==========
+    // ========== Title text (centered, clean monochrome titlebar) ==========
+    // NOTE: no app icon here on purpose — colored icons made the titlebar read
+    // as yellow/orange next to the dark chrome. Just the centered title.
+    int close_x, max_x, min_x, btn_y;
+    wm_btn_geom(w, &close_x, &max_x, &min_x, &btn_y);
+    int btn_left = min_x - 2;
     int tlen = strlen(w->title);
-    int tx = x + (ww - tlen * 8) / 2;
-    int tty = y + (TITLEBAR_H - 16) / 2;
-    draw_string_px(tx, tty, w->title, GUI_TEXT, 0xFFFFFFFF);
-
-    // ========== Titlebar buttons (right side, consistent for every window) ==========
-    int btn_r = 6;           // circle radius
-    int btn_y = y + TITLEBAR_H / 2;
-
-    // Right-aligned: close rightmost, maximize next, minimize leftmost
-    int close_cx = x + ww - 12;
-    int max_cx   = close_cx - 18;
-    int min_cx   = max_cx - 18;
-
-    // Close button (Red)
-    fill_circle(close_cx, btn_y, btn_r, focused ? GUI_CLOSE : GUI_DIM);
-    if (focused) {
-        draw_line(close_cx - 2, btn_y - 2, close_cx + 2, btn_y + 2, 0x00500000);
-        draw_line(close_cx - 2, btn_y + 2, close_cx + 2, btn_y - 2, 0x00500000);
+    int title_w = tlen * 8;
+    int center_l = x + 6;
+    int center_r = btn_left;
+    if (center_r - center_l < title_w + 8) {
+        // Narrow window: center in the whole titlebar and let it clip
+        center_l = x;
+        center_r = x + ww;
     }
-    w->close_cx = close_cx; w->close_cy = btn_y; w->close_r = btn_r;
+    int tx = center_l + (center_r - center_l - title_w) / 2;
+    if (tx < center_l) tx = center_l;
+    int tty = y + (TITLEBAR_H - 8) / 2;
+    uint32_t title_col = focused ? TOARU_TEXT : TOARU_TEXT_I;
+    draw_string_px(tx, tty, w->title, title_col, 0xFFFFFFFF);
 
-    // Minimize button (Yellow)
-    fill_circle(min_cx, btn_y, btn_r, focused ? GUI_YELLOW : GUI_DIM);
-    if (focused) {
-        draw_rect(min_cx - 2, btn_y, 5, 1, 0x00593B00);
-    }
-    w->min_cx = min_cx; w->min_cy = btn_y; w->min_r = btn_r;
+    // ========== Titlebar buttons (ToaruOS glyph buttons, right side) ==========
+    // Each button: 20x16 hit box, 16x16 rounded hover/pressed visual, small
+    // light-gray glyph. Close gets a red hover to signal destructiveness.
+    int gx = 5;          // glyph half-width for X
+    int gmx = 6;         // glyph inset for square/line
 
-    // Maximize button (Green)
-    fill_circle(max_cx, btn_y, btn_r, focused ? GUI_GREEN : GUI_DIM);
-    if (focused) {
-        draw_rect(max_cx - 2, btn_y, 5, 1, 0x00004000);
-        draw_rect(max_cx, btn_y - 2, 1, 5, 0x00004000);
+    // Close button (X) — flat gray hover, same as the other buttons
+    if (wm_btn_hover[idx][0]) {
+        draw_rounded_rect(close_x + (WM_BTN_W - WM_BTN_VIS_W) / 2, btn_y + (WM_BTN_H - WM_BTN_VIS_W) / 2,
+                          WM_BTN_VIS_W, WM_BTN_VIS_W, 3, TOARU_BTN_HOV);
     }
-    w->max_cx = max_cx; w->max_cy = btn_y; w->max_r = btn_r;
+    draw_line(close_x + WM_BTN_W/2 - gx, btn_y + WM_BTN_H/2 - gx,
+              close_x + WM_BTN_W/2 + gx, btn_y + WM_BTN_H/2 + gx, TOARU_BTN_GLYPH);
+    draw_line(close_x + WM_BTN_W/2 + gx, btn_y + WM_BTN_H/2 - gx,
+              close_x + WM_BTN_W/2 - gx, btn_y + WM_BTN_H/2 + gx, TOARU_BTN_GLYPH);
+    w->close_cx = close_x; w->close_cy = btn_y;
+
+    // Minimize button (bottom bar)
+    if (wm_btn_hover[idx][2]) {
+        draw_rounded_rect(min_x + (WM_BTN_W - WM_BTN_VIS_W) / 2, btn_y + (WM_BTN_H - WM_BTN_VIS_W) / 2,
+                          WM_BTN_VIS_W, WM_BTN_VIS_W, 3, TOARU_BTN_HOV);
+    }
+    draw_rect(min_x + WM_BTN_W/2 - gmx, btn_y + WM_BTN_H/2, gmx * 2, 1, TOARU_BTN_GLYPH);
+    w->min_cx = min_x; w->min_cy = btn_y;
+
+    // Maximize button (square outline; restore glyph when maximized)
+    if (wm_btn_hover[idx][1]) {
+        draw_rounded_rect(max_x + (WM_BTN_W - WM_BTN_VIS_W) / 2, btn_y + (WM_BTN_H - WM_BTN_VIS_W) / 2,
+                          WM_BTN_VIS_W, WM_BTN_VIS_W, 3, TOARU_BTN_HOV);
+    }
+    if (w->maximized || w->snap_state != SNAP_NONE) {
+        // Restore glyph: two overlapping squares
+        draw_rect_border(max_x + WM_BTN_W/2 - gmx + 1, btn_y + WM_BTN_H/2 - gmx + 1, gmx, gmx, TOARU_BTN_GLYPH);
+        draw_rect_border(max_x + WM_BTN_W/2 - gmx - 2, btn_y + WM_BTN_H/2 - gmx - 2, gmx, gmx, TOARU_BTN_GLYPH);
+    } else {
+        draw_rect_border(max_x + WM_BTN_W/2 - gmx, btn_y + WM_BTN_H/2 - gmx, gmx * 2, gmx * 2, TOARU_BTN_GLYPH);
+    }
+    w->max_cx = max_x; w->max_cy = btn_y;
+
+    // ========== 1px solid frame (ToaruOS) ==========
+    // Drawn LAST so it sits on top of the titlebar gradient. Stays INSIDE the
+    // window's own bounds (x,y,w,h): draw_one()'s dirty-rect cull check and
+    // mark_dirty use the interior rect, so painting the frame at x-1/y-1 could
+    // leave a 1px stale ring on screen when the cull skips it.
+    draw_rect_border(x, y, ww, wh, focused ? TOARU_BORDER : TOARU_BORDER_I);
 
     // ========== Content area ==========
-    // Subtle inner border
-    draw_rect(x + 1, y + TITLEBAR_H + use_radius - 2, ww - 2, 1, 0x00252535);
-
     int cx2 = x + 1;
     int cy2 = y + TITLEBAR_H + 1;
     int cw2 = ww - 2;
@@ -563,7 +569,14 @@ static void draw_one(int idx) {
         // 1. Grow-only content buffer. Reusing the capacity means live resize
         //    doesn't kmalloc/kfree a fresh cw2*ch2*4 buffer on every mouse move
         //    (that churn is what made resizing feel janky/stiff).
-        if (w->content_buffer == NULL || w->content_cap < cw2 * ch2) {
+        //    While the mouse button is held (resizing) we NEVER (re)allocate:
+        //    the buffer keeps its last committed size, so the rubber-band
+        //    preview below blits only the valid old-content region and clears
+        //    the growth strips. Allocating mid-drag was also corrupting the
+        //    preserved copy: last_cw/last_ch stay stale during a drag, so a
+        //    second growth realloc copied rows with the wrong source stride
+        //    and skewed the content on screen.
+        if (!w->resizing && (w->content_buffer == NULL || w->content_cap < cw2 * ch2)) {
             extern void* kmalloc(uint32_t);
             extern void kfree(void*);
             uint32_t* nb = kmalloc(cw2 * ch2 * 4);
@@ -577,18 +590,7 @@ static void draw_one(int idx) {
                 kfree(nb);
                 return;
             }
-            if (w->resizing && w->content_buffer) {
-                // Growing mid-drag: preserve the old content so the rubber-band
-                // preview keeps showing it (kmalloc does not zero memory).
-                int cpw = (w->last_cw < cw2) ? w->last_cw : cw2;
-                int cph = (w->last_ch < ch2) ? w->last_ch : ch2;
-                for (int y = 0; y < cph; y++) {
-                    memcpy(&nb[y * cw2], &w->content_buffer[y * w->last_cw], cpw * 4);
-                }
-                kfree(w->content_buffer);
-            } else {
-                if (w->content_buffer) kfree(w->content_buffer);
-            }
+            if (w->content_buffer) kfree(w->content_buffer);
             w->content_buffer = nb;
             w->content_cap = cw2 * ch2;
             w->buffer_dirty = 1;
@@ -612,8 +614,12 @@ static void draw_one(int idx) {
             w->buffer_dirty = 1;
         }
 
-        // 3. Render to off-screen buffer if dirty
-        if (w->content_buffer && w->buffer_dirty) {
+        // 3. Render to off-screen buffer if dirty. Never render while the
+        //    mouse button is held: the buffer is intentionally kept at its last
+        //    committed size during a drag, so drawing into it with the live
+        //    (larger) cw2/ch2 would overflow the allocation. Renders are
+        //    deferred until release, where buffer_dirty is forced back on.
+        if (w->content_buffer && w->buffer_dirty && !w->resizing) {
             vga_set_render_target(w->content_buffer, cw2, ch2, cw2 * 4);
             vga_set_clip(0, 0, cw2, ch2);
             
@@ -754,6 +760,12 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
         }
         for (int i = 0; i < MAX_WINDOWS; i++) {
             if (wm_wins[i].visible) {
+                if (wm_wins[i].resizing) {
+                    // The drag deferred every render; force one final clean
+                    // render now so the rubber-band preview always resolves,
+                    // even when the drag ends back at the original size.
+                    wm_wins[i].buffer_dirty = 1;
+                }
                 wm_wins[i].dragging = 0;
                 wm_wins[i].resizing = 0;
                 wm_wins[i].resize_edge = 0;
@@ -777,22 +789,19 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
 
             // 1. Titlebar buttons & dragging (highest priority so corners don't overlap)
             if (my < w->y + TITLEBAR_H) {
-                // ---- Circle button hit test ----
-                int dx, dy, dist2;
+                // ---- ToaruOS glyph button hit test (shared WM_BTN_W x WM_BTN_H) ----
+                int cx, mx2, nx, by;
+                wm_btn_geom(w, &cx, &mx2, &nx, &by);
 
                 // Close button
-                dx = mx - w->close_cx; dy = my - w->close_cy;
-                dist2 = dx*dx + dy*dy;
-                if (dist2 <= w->close_r * w->close_r + 4) {
+                if (mx >= cx && mx < cx + WM_BTN_W && my >= by && my < by + WM_BTN_H) {
                     write_serial_string("WM_CLOSE via MOUSE!\n");
                     wm_close(w->id);
                     return 1;
                 }
 
                 // Maximize button
-                dx = mx - w->max_cx; dy = my - w->max_cy;
-                dist2 = dx*dx + dy*dy;
-                if (dist2 <= w->max_r * w->max_r + 4) {
+                if (mx >= mx2 && mx < mx2 + WM_BTN_W && my >= by && my < by + WM_BTN_H) {
                     extern void mark_dirty(int, int, int, int);
                     mark_dirty(0, 0, fb_width, fb_height); // Mark fullscreen dirty for state transition
                     if (w->maximized || w->snap_state != SNAP_NONE) {
@@ -816,9 +825,7 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                 }
 
                 // Minimize button
-                dx = mx - w->min_cx; dy = my - w->min_cy;
-                dist2 = dx*dx + dy*dy;
-                if (dist2 <= w->min_r * w->min_r + 4) {
+                if (mx >= nx && mx < nx + WM_BTN_W && my >= by && my < by + WM_BTN_H) {
                     wm_minimize(w->id);
                     return 1;
                 }

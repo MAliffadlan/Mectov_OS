@@ -240,6 +240,11 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             if (mx != prev_mx || my != prev_my) {
                 mark_dirty(prev_mx, prev_my, 24, 24);
                 mark_dirty(mx, my, 24, 24);
+                // Track titlebar button hover on pure mouse moves (no button)
+                if (!(btn & 1)) {
+                    extern void wm_track_mouse(int, int);
+                    wm_track_mouse(mx, my);
+                }
             }
 
             int in_taskbar = (my >= (int)fb_height - TASKBAR_H_PX);
