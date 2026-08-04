@@ -74,6 +74,16 @@
 #define TOARU_BTN_HOV     0x00555555  // Titlebar button hover (subtle flat)
 #define TOARU_BTN_GLYPH   0x00E6E6E6  // Titlebar button glyph
 
+// ---- Flat dark taskbar (matches ToaruOS window chrome) ----
+#define TB_BG        0x002D2D2D  // Taskbar background      RGB(45,45,45)
+#define TB_BORDER    0x00505050  // Top border / 1px borders RGB(80,80,80)
+#define TB_BTN       0x00373737  // Normal task button       RGB(55,55,55)
+#define TB_BTN_HOV   0x00404040  // Hovered button (subtle)
+#define TB_BTN_ACT   0x00464646  // Active task button       RGB(70,70,70)
+#define TB_TEXT      0x00E6E6E6  // Primary text             RGB(230,230,230)
+#define TB_TEXT_DIM  0x00A0A0A0  // Secondary text           RGB(160,160,160)
+#define TB_ACTIVE    0x0000FFFF  // Active task indicator (cyan)
+
 // Icon backgrounds
 #define GUI_ICON_BG  0x00222233
 
