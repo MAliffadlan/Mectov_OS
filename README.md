@@ -421,8 +421,13 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 ## License
 
-MIT License
+GNU General Public License v2.0 (GPLv2)
 
-Created by M Alif Fadlan. 
+Created by M Alif Fadlan.
+
+Kamu bebas menggunakan, memodifikasi, dan mendistribusikan project ini
+selama turunan yang kamu distribusikan juga dilisensikan GPLv2 dan
+menyertakan source code-nya. Karena kernel ini terhubung langsung dengan
+source code DOOM (juga GPLv2), seluruh work gabungan dilisensikan GPLv2. 
 
 Salah satu proyek OS hobi buatan Indonesia yang paling lengkap dan terdokumentasi dengan baik di GitHub saat ini
