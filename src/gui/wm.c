@@ -338,8 +338,8 @@ int wm_open(int x, int y, int w, int h, const char* title,
             wm_wins[i].snap_state = SNAP_NONE;
             wm_wins[i].content_buffer = NULL;
             wm_wins[i].buffer_dirty = 1;
-            wm_wins[i].last_cw = 0;
-            wm_wins[i].last_ch = 0;
+            wm_wins[i].last_cw = w - 2;
+            wm_wins[i].last_ch = h - TITLEBAR_H - 2;
             int k = 0;
             while (title[k] && k < 47) { wm_wins[i].title[k] = title[k]; k++; }
             wm_wins[i].title[k] = '\0';
