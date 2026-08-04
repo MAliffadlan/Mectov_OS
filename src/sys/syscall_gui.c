@@ -10,6 +10,11 @@
 #include "../include/keyboard.h"
 #include "../include/mouse.h"
 #include "../include/fd.h"
+#include "../include/spinlock.h"
+
+extern spinlock_t gui_canvas_lock;
+extern void gui_lock(void);
+extern void gui_unlock(void);
 
 extern int validate_user_ptr(const void* ptr, uint32_t size);
 extern int safe_strlen(const char* s, int max);
@@ -176,9 +181,11 @@ uint32_t handle_syscall_gui(registers_t* regs) {
                 }
                 int h = win_queues[idx].head;
                 if (h != win_queues[idx].tail) {
+                    gui_lock();
                     gui_event_t* ev_ptr = (gui_event_t*)regs->ecx;
                     *ev_ptr = win_queues[idx].events[h];
                     win_queues[idx].head = (h + 1) % MAX_EVENTS;
+                    gui_unlock();
                     regs->eax = 1;
                 } else {
                     regs->eax = 0;
@@ -195,11 +202,14 @@ uint32_t handle_syscall_gui(registers_t* regs) {
             int idx = get_win_index(wid);
             if (idx >= 0) {
                 // Swap pending display list to active display list!
+                // Locked against win_draw_cb() replay on the BSP (SMP).
+                gui_lock();
                 for (int i = 0; i < win_canvases[idx].pending_count; i++) {
                     win_canvases[idx].cmds[i] = win_canvases[idx].pending_cmds[i];
                 }
                 win_canvases[idx].count = win_canvases[idx].pending_count;
                 win_canvases[idx].pending_count = 0; // Reset for next frame
+                gui_unlock();
                 
                 // Composite WM: trigger a redraw for this window's buffer
                 wm_wins[idx].buffer_dirty = 1;

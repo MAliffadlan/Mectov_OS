@@ -151,6 +151,9 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     detect_cpu();
     write_serial_string("[K] pci\n");
     pci_scan();
+    write_serial_string("[K] sb16\n");
+    extern void sb16_init(void);
+    sb16_init();
     write_serial_string("[K] rtl\n");
     extern void init_rtl8139();
     init_rtl8139();

@@ -17,6 +17,7 @@ extern void isr128();
 extern void isr_default();
 extern void irq0();
 extern void irq1();
+extern void irq5();
 extern void irq12();
 extern void idt_flush(uint32_t);
 
@@ -57,8 +58,8 @@ void idt_init() {
         outb(0x21, 0x20); outb(0xA1, 0x28);
         outb(0x21, 0x04); outb(0xA1, 0x02);
         outb(0x21, 0x01); outb(0xA1, 0x01);
-        // Unmask: IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade), IRQ12 (mouse)
-        outb(0x21, 0xF8);
+        // Unmask: IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade), IRQ5 (SB16), IRQ12 (mouse)
+        outb(0x21, 0xE8);
         outb(0xA1, 0xEF);
     }
 
@@ -71,6 +72,7 @@ void idt_init() {
     // Hardware IRQs
     idt_set_gate(32, (uint32_t)irq0,  0x08, 0x8E);  // Timer
     idt_set_gate(33, (uint32_t)irq1,  0x08, 0x8E);  // Keyboard
+    idt_set_gate(37, (uint32_t)irq5,  0x08, 0x8E);  // Sound (SB16, IRQ5)
     idt_set_gate(44, (uint32_t)irq12, 0x08, 0x8E);  // Mouse
 
     // Syscall gate: int 0x80, DPL=3 (Ring 3 can call this)

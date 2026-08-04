@@ -297,6 +297,11 @@ static void wm_draw_alt_tab_hud(void) {
 // ---- Open / Close ----
 int wm_open(int x, int y, int w, int h, const char* title,
             WinDrawFn draw_fn, WinKeyFn key_fn, WinTickFn tick_fn, WinMouseFn mouse_fn) {
+    // Reject absurd geometry: content_buffer is kmalloc(cw2*ch2*4) in draw_one,
+    // so an int overflow here (e.g. w=h=65539) turned a tiny allocation into a
+    // heap overflow and a multi-hundred-MB OOB read. Cap to 4x the framebuffer.
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return -1;
+    if (w > (int)fb_width * 4 || h > (int)fb_height * 4) return -1;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!wm_wins[i].visible) {
             wm_wins[i].id        = next_id++;
@@ -548,18 +553,52 @@ static void draw_one(int idx) {
     int ch2 = wh - TITLEBAR_H - 2;
 
     if (cw2 > 0 && ch2 > 0) {
-        // 1. Dynamic allocation of content buffer if size changed or not allocated
-        if (w->content_buffer == NULL || w->last_cw != cw2 || w->last_ch != ch2) {
+        // 1. Grow-only content buffer. Reusing the capacity means live resize
+        //    doesn't kmalloc/kfree a fresh cw2*ch2*4 buffer on every mouse move
+        //    (that churn is what made resizing feel janky/stiff).
+        if (w->content_buffer == NULL || w->content_cap < cw2 * ch2) {
             extern void* kmalloc(uint32_t);
             extern void kfree(void*);
-            if (w->content_buffer) kfree(w->content_buffer);
-            w->content_buffer = kmalloc(cw2 * ch2 * 4);
+            uint32_t* nb = kmalloc(cw2 * ch2 * 4);
+            if (nb == NULL) {
+                return; // Out of memory: keep last good buffer, skip this frame
+            }
+            if (w->resizing && w->content_buffer) {
+                // Growing mid-drag: preserve the old content so the rubber-band
+                // preview keeps showing it (kmalloc does not zero memory).
+                int cpw = (w->last_cw < cw2) ? w->last_cw : cw2;
+                int cph = (w->last_ch < ch2) ? w->last_ch : ch2;
+                for (int y = 0; y < cph; y++) {
+                    memcpy(&nb[y * cw2], &w->content_buffer[y * w->last_cw], cpw * 4);
+                }
+                kfree(w->content_buffer);
+            } else {
+                if (w->content_buffer) kfree(w->content_buffer);
+            }
+            w->content_buffer = nb;
+            w->content_cap = cw2 * ch2;
+            w->buffer_dirty = 1;
+        }
+
+        // 2. Size changed. While the mouse button is held (resizing) we defer:
+        //    no event, no re-render — the frame only blits the old content and
+        //    clears the growth strips (rubber-band). last_cw/last_ch stay stale
+        //    so the first frame after mouse release detects the change and does
+        //    ONE clean re-render + notifies the app (event type 5, client w/h).
+        int size_changed = (w->last_cw != cw2 || w->last_ch != ch2);
+        if (size_changed && w->resizing) {
+            w->buffer_dirty = 0; // cancel grow-triggered render; skip event
+        } else if (size_changed) {
+            if (w->owner_ring == 3) {
+                extern void push_event(int, int, int, int, int);
+                push_event(w->id, 5, cw2, ch2, 0);
+            }
             w->last_cw = cw2;
             w->last_ch = ch2;
             w->buffer_dirty = 1;
         }
 
-        // 2. Render to off-screen buffer if dirty
+        // 3. Render to off-screen buffer if dirty
         if (w->content_buffer && w->buffer_dirty) {
             vga_set_render_target(w->content_buffer, cw2, ch2, cw2 * 4);
             vga_set_clip(0, 0, cw2, ch2);
@@ -578,9 +617,15 @@ static void draw_one(int idx) {
             w->buffer_dirty = 0; // Clear dirty flag
         }
 
-        // 3. Composite (blit) the off-screen buffer to the global back buffer
+        // 3. Composite (blit) the off-screen buffer to the global back buffer.
+        //    During a resize drag last_cw/last_ch are stale, so blit only the
+        //    old-content region and clear the exposed growth strips cleanly.
         if (w->content_buffer) {
-            vga_blit_buffer(w->content_buffer, cw2, ch2, cx2, cy2);
+            int blit_w = (w->last_cw < cw2) ? w->last_cw : cw2;
+            int blit_h = (w->last_ch < ch2) ? w->last_ch : ch2;
+            vga_blit_buffer(w->content_buffer, blit_w, blit_h, cx2, cy2);
+            if (blit_w < cw2) draw_rect(cx2 + blit_w, cy2, cw2 - blit_w, ch2, 0x001E1E2E);
+            if (blit_h < ch2) draw_rect(cx2, cy2 + blit_h, cw2, ch2 - blit_h, 0x001E1E2E);
         }
     }
 }
@@ -631,6 +676,13 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                         new_h = 150;
                         if (wm_wins[i].resize_edge & 1) new_y = wm_wins[i].drag_wy + (wm_wins[i].resize_wh - 150);
                     }
+
+                    // Clamp to screen: an unbounded window grew cw2*ch2*4
+                    // allocations beyond any sane size on every resize frame.
+                    if (new_x + new_w > (int)fb_width) new_w = (int)fb_width - new_x;
+                    if (new_y + new_h > (int)fb_height) new_h = (int)fb_height - new_y;
+                    if (new_w < 220) new_w = 220;
+                    if (new_h < 150) new_h = 150;
 
                     wm_wins[i].x = new_x;
                     wm_wins[i].y = new_y;

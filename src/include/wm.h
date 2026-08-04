@@ -41,6 +41,8 @@ typedef struct {
     
     // Composite WM state
     uint32_t* content_buffer; // Off-screen canvas for window content
+    int       content_cap;    // Allocated canvas size (pixels) — grow-only, so
+                              // live resize doesn't kmalloc/kfree per mouse move
     int       buffer_dirty;   // 1 = Needs redraw by app
     int       last_cw;        // Track buffer width
     int       last_ch;        // Track buffer height

@@ -83,7 +83,11 @@ uint32_t handle_syscall_net(registers_t* regs) {
         case SYS_TCP_SEND: {
             uint8_t* data = (uint8_t*)regs->ebx;
             int len = (int)regs->ecx;
-            if (!validate_user_ptr(data, len)) { regs->eax = (uint32_t)-1; break; }
+            if (len <= 0 || !validate_user_ptr(data, len)) { regs->eax = (uint32_t)-1; break; }
+            // Cap the payload to fit the stack send buffers in net.c (1500-byte
+            // pkt/pseudo_buf: 1500 - 20 IP - 20 TCP = 1460 max). Larger lengths
+            // previously overflowed the kernel stack from Ring 3.
+            if (len > 1400) len = 1400;
             net_tcp_send(data, len);
             regs->eax = 0;
             break;

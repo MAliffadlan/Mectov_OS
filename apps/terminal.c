@@ -26,13 +26,19 @@ static void term_scroll(void);
 static uint32_t vga_to_rgb(uint8_t c);
 static void drain_ipc(void);
 
-#define TERM_COLS 74
-#define TERM_ROWS 24
+// Max cell grid — buffers are fixed at boot, the VISIBLE grid (cols/rows)
+// below is dynamic so the terminal can relayout on WM resize events (type 5).
+#define MAX_TERM_COLS 128
+#define MAX_TERM_ROWS 48
 #define SCROLLBACK_ROWS 128
 
-static char  buf[SCROLLBACK_ROWS][TERM_COLS];
-static uint8_t col[SCROLLBACK_ROWS][TERM_COLS];
+static char  buf[SCROLLBACK_ROWS][MAX_TERM_COLS];
+static uint8_t col[SCROLLBACK_ROWS][MAX_TERM_COLS];
 static int cx = 0, cy = 0;
+
+// Current grid + client area, updated by resize events (client = w-2, h-22)
+static int cols = 74, rows = 23;
+static int term_cw = 598, term_ch = 378;
 
 static char cmd[256];
 static int cmd_len = 0;
@@ -111,8 +117,8 @@ static int my_strncmp(const char* a, const char* b, int n) {
 }
 
 static int get_max_scroll(void) {
-    if (cy < TERM_ROWS) return 0;
-    return cy - (TERM_ROWS - 1);
+    if (cy < rows) return 0;
+    return cy - (rows - 1);
 }
 
 static void add_default_aliases(void) {
@@ -288,7 +294,7 @@ static void redraw_input_line(void) {
     term_dirty = 1;
     cx = cmd_start_cx;
     cy = cmd_start_cy;
-    for (int c = cmd_start_cx; c < TERM_COLS; c++) {
+    for (int c = cmd_start_cx; c < cols; c++) {
         buf[cy][c] = ' ';
         col[cy][c] = 0;
     }
@@ -364,7 +370,7 @@ static void redraw_input_line(void) {
         if (suggest_len > cmd_len) {
             int vis_cx = cx;
             int sug_idx = cmd_len;
-            while (sug_idx < suggest_len && vis_cx < TERM_COLS) {
+            while (sug_idx < suggest_len && vis_cx < cols) {
                 buf[cy][vis_cx] = suggest_buf[sug_idx];
                 col[cy][vis_cx] = 0x08; // Dark gray suggestion
                 vis_cx++;
@@ -458,11 +464,11 @@ static void do_tab_completion(int wid) {
 
 static void term_scroll(void) {
     for (int r = 0; r < SCROLLBACK_ROWS - 1; r++)
-        for (int c = 0; c < TERM_COLS; c++) {
+        for (int c = 0; c < cols; c++) {
             buf[r][c] = buf[r+1][c];
             col[r][c] = col[r+1][c];
         }
-    for (int c = 0; c < TERM_COLS; c++) {
+    for (int c = 0; c < cols; c++) {
         buf[SCROLLBACK_ROWS-1][c] = ' ';
         col[SCROLLBACK_ROWS-1][c] = 0;
     }
@@ -477,7 +483,7 @@ static void term_putchar(char c2, uint8_t color) {
     else if (c2 == '\b') {
         if (cx > 0) { cx--; buf[cy][cx] = ' '; col[cy][cx] = 0; }
     } else {
-        if (cx >= TERM_COLS) { cx = 0; cy++; }
+        if (cx >= cols) { cx = 0; cy++; }
         buf[cy][cx] = c2;
         col[cy][cx] = color;
         cx++;
@@ -512,22 +518,22 @@ static uint32_t vga_to_rgb(uint8_t c) {
 }
 
 static void draw_terminal(int wid) {
-    int cw = 600, ch = 400;
+    int cw = term_cw, ch = term_ch;
     sys_draw_rect(wid, 0, 0, cw, ch, 0x0011111B);
     
     int start_row = 0;
-    if (cy >= TERM_ROWS) {
-        start_row = cy - (TERM_ROWS - 1) - scroll_offset;
+    if (cy >= rows) {
+        start_row = cy - (rows - 1) - scroll_offset;
     }
     
-    for (int r_vis = 0; r_vis < TERM_ROWS; r_vis++) {
+    for (int r_vis = 0; r_vis < rows; r_vis++) {
         int r = start_row + r_vis;
-        char line_buf[TERM_COLS + 1];
+        char line_buf[MAX_TERM_COLS + 1];
         int len = 0;
         int start_c = -1;
         uint8_t current_col = 0;
 
-        for (int c = 0; c < TERM_COLS; c++) {
+        for (int c = 0; c < cols; c++) {
             char ch2 = buf[r][c];
             uint8_t vc = col[r][c];
             if (ch2 && vc) {
@@ -556,20 +562,20 @@ static void draw_terminal(int wid) {
     }
     
     int cursor_vis_y = cy - start_row;
-    if (cursor_vis_y >= 0 && cursor_vis_y < TERM_ROWS) {
+    if (cursor_vis_y >= 0 && cursor_vis_y < rows) {
         sys_draw_rect(wid, cx*8, cursor_vis_y*16 + 14, 8, 2, 0x0000FF88);
     }
     
     int max_scroll = get_max_scroll();
     if (max_scroll > 0) {
-        int track_h = 380;
-        int bar_h = (TERM_ROWS * track_h) / (cy + 1);
+        int track_h = ch - 20;
+        int bar_h = (rows * track_h) / (cy + 1);
         if (bar_h < 20) bar_h = 20;
         
         int scroll_y = 10 + ((max_scroll - scroll_offset) * (track_h - bar_h)) / max_scroll;
         
-        sys_draw_rect(wid, 594, 10, 4, track_h, 0x001E1E2E);
-        sys_draw_rect(wid, 594, scroll_y, 4, bar_h, 0x0089B4FA);
+        sys_draw_rect(wid, cw - 6, 10, 4, track_h, 0x001E1E2E);
+        sys_draw_rect(wid, cw - 6, scroll_y, 4, bar_h, 0x0089B4FA);
     }
     
     sys_update_window(wid);
@@ -608,7 +614,7 @@ void _start(void) {
     }
     
     for (int r = 0; r < SCROLLBACK_ROWS; r++)
-        for (int c = 0; c < TERM_COLS; c++) {
+        for (int c = 0; c < MAX_TERM_COLS; c++) {
             buf[r][c] = 0; col[r][c] = 0;
         }
     
@@ -675,7 +681,7 @@ void _start(void) {
                             }
                         } else if (my_strcmp(expanded, "clear") == 0) {
                             for (int r = 0; r < SCROLLBACK_ROWS; r++)
-                                for (int c = 0; c < TERM_COLS; c++) {
+                                for (int c = 0; c < MAX_TERM_COLS; c++) {
                                     buf[r][c] = 0; col[r][c] = 0;
                                 }
                             cx = 0; cy = 0;
@@ -826,12 +832,12 @@ void _start(void) {
                     int click_cx = ev.x / 8;
                     int click_cy = ev.y / 16;
                     int start_row = 0;
-                    if (cy >= TERM_ROWS) {
-                        start_row = cy - (TERM_ROWS - 1) - scroll_offset;
+                    if (cy >= rows) {
+                        start_row = cy - (rows - 1) - scroll_offset;
                     }
                     int click_r = start_row + click_cy;
                     
-                    int last_char_r = cmd_start_cy + (cmd_start_cx + cmd_len) / TERM_COLS;
+                    int last_char_r = cmd_start_cy + (cmd_start_cx + cmd_len) / cols;
                     if (click_r >= cmd_start_cy && click_r <= last_char_r) {
                         if (click_r == cmd_start_cy) {
                             if (click_r == last_char_r) {
@@ -842,21 +848,21 @@ void _start(void) {
                             } else {
                                 int relative = click_cx - cmd_start_cx;
                                 if (relative < 0) edit_cursor = 0;
-                                else if (relative >= TERM_COLS - cmd_start_cx) edit_cursor = TERM_COLS - cmd_start_cx - 1;
+                                else if (relative >= cols - cmd_start_cx) edit_cursor = cols - cmd_start_cx - 1;
                                 else edit_cursor = relative;
                             }
                         } else if (click_r == last_char_r) {
-                            int row_start_idx = (TERM_COLS - cmd_start_cx) + (click_r - cmd_start_cy - 1) * TERM_COLS;
+                            int row_start_idx = (cols - cmd_start_cx) + (click_r - cmd_start_cy - 1) * cols;
                             int relative = click_cx;
-                            int last_row_chars = (cmd_start_cx + cmd_len) % TERM_COLS;
+                            int last_row_chars = (cmd_start_cx + cmd_len) % cols;
                             if (relative < 0) edit_cursor = row_start_idx;
                             else if (relative > last_row_chars) edit_cursor = cmd_len;
                             else edit_cursor = row_start_idx + relative;
                         } else {
-                            int row_start_idx = (TERM_COLS - cmd_start_cx) + (click_r - cmd_start_cy - 1) * TERM_COLS;
+                            int row_start_idx = (cols - cmd_start_cx) + (click_r - cmd_start_cy - 1) * cols;
                             int relative = click_cx;
                             if (relative < 0) edit_cursor = row_start_idx;
-                            else if (relative >= TERM_COLS) edit_cursor = row_start_idx + TERM_COLS - 1;
+                            else if (relative >= cols) edit_cursor = row_start_idx + cols - 1;
                             else edit_cursor = row_start_idx + relative;
                         }
                         redraw_input_line();
@@ -872,6 +878,21 @@ void _start(void) {
                     scroll_offset -= 3;
                     if (scroll_offset < 0) scroll_offset = 0;
                 }
+            } else if (ev.type == 5) { // Window Resize: ev.x = client w, ev.y = client h
+                term_dirty = 1;
+                scroll_offset = 0; // Snap to bottom
+                term_cw = ev.x;
+                term_ch = ev.y;
+                cols = ev.x / 8;
+                rows = ev.y / 16;
+                if (cols < 8) cols = 8;
+                if (rows < 3) rows = 3;
+                if (cols > MAX_TERM_COLS) cols = MAX_TERM_COLS;
+                if (rows > MAX_TERM_ROWS) rows = MAX_TERM_ROWS;
+                // Keep cursor and prompt within the new grid
+                if (cx >= cols) { cx = 0; cy++; }
+                if (cy >= SCROLLBACK_ROWS) cy = SCROLLBACK_ROWS - 1;
+                redraw_input_line();
             }
         }
         

@@ -23,21 +23,6 @@ extern void win_draw_cb(int id, int cx, int cy, int cw, int ch);
 extern void win_key_cb(int id, char c, uint8_t sc);
 extern void win_mouse_cb(int id, int cx, int cy, int btn);
 
-static int str_contains(const char* haystack, const char* needle) {
-    if (!haystack || !needle) return 0;
-    for (int i = 0; haystack[i]; i++) {
-        int match = 1;
-        for (int j = 0; needle[j]; j++) {
-            if (haystack[i + j] != needle[j]) {
-                match = 0;
-                break;
-            }
-        }
-        if (match) return 1;
-    }
-    return 0;
-}
-
 #define MAX_EVENTS 64
 typedef struct {
     int type; // 1 = paint, 2 = key, 3 = mouse
@@ -68,6 +53,17 @@ typedef struct {
 
 extern win_event_queue_t win_queues[];
 extern win_canvas_t win_canvases[];
+
+// Basename comparison for the privileged-app whitelist. The old substring check
+// let ANY app whose path merely CONTAINED "terminal.mct" (e.g. faketerminal.mct)
+// run SYS_KILL_TASK / SYS_EXEC_CMD. Only the exact filename component matches.
+static int launch_arg_is(const char* arg, const char* name) {
+    const char* base = arg;
+    for (const char* p = arg; *p; p++) {
+        if (*p == '/') base = p + 1;
+    }
+    return strcmp(base, name) == 0;
+}
 
 uint32_t handle_syscall_proc(registers_t* regs) {
     switch (regs->eax) {
@@ -158,9 +154,9 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             int caller_tid = get_current_task();
             if (!task_in_kernel_space(caller_tid)) {
                 const char* launch_arg = task_get_launch_arg(caller_tid);
-                if (!str_contains(launch_arg, "terminal.mct") && 
-                    !str_contains(launch_arg, "explorer.mct") && 
-                    !str_contains(launch_arg, "taskmgr.mct")) {
+                if (!launch_arg_is(launch_arg, "terminal.mct") && 
+                    !launch_arg_is(launch_arg, "explorer.mct") && 
+                    !launch_arg_is(launch_arg, "taskmgr.mct")) {
                     write_serial_string("[SYS] Access denied for SYS_KILL_TASK from TID=");
                     write_serial_hex(caller_tid);
                     write_serial_string(" (");
@@ -206,8 +202,8 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             int caller_tid = get_current_task();
             if (!task_in_kernel_space(caller_tid)) {
                 const char* launch_arg = task_get_launch_arg(caller_tid);
-                if (!str_contains(launch_arg, "terminal.mct") && 
-                    !str_contains(launch_arg, "explorer.mct")) {
+                if (!launch_arg_is(launch_arg, "terminal.mct") && 
+                    !launch_arg_is(launch_arg, "explorer.mct")) {
                     write_serial_string("[SYS] Access denied for SYS_EXEC_CMD from TID=");
                     write_serial_hex(caller_tid);
                     write_serial_string(" (");

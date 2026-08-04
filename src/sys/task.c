@@ -145,16 +145,26 @@ static void task_cleanup(int tid) {
     extern void wm_cleanup_task(int tid);
     wm_cleanup_task(tid);
     
-    // 2. Free address space (if it's not the kernel's)
+    // 2. Free address space (if it's not the kernel's) — but only when this is
+    //    the LAST task still using it. Sibling threads of one process share the
+    //    same page_dir; freeing it when one of them exits would yank the memory
+    //    out from under the others.
     if (tasks[tid].page_dir != 0 && tasks[tid].page_dir != tasks[0].page_dir) {
-        uint32_t active_cr3;
-        __asm__ volatile("mov %%cr3, %0" : "=r"(active_cr3));
-        if ((active_cr3 & 0xFFFFF000) == (tasks[tid].page_dir & 0xFFFFF000)) {
-            extern void vmm_switch_page_dir(uint32_t);
-            vmm_switch_page_dir(tasks[0].page_dir);
+        int sharers = 0;
+        for (int k = 1; k < MAX_TASKS; k++) {
+            if (k != tid && tasks[k].state != TASK_STATE_FREE &&
+                tasks[k].page_dir == tasks[tid].page_dir) sharers++;
         }
-        extern void vmm_free_address_space(uint32_t);
-        vmm_free_address_space(tasks[tid].page_dir);
+        if (sharers == 0) {
+            uint32_t active_cr3;
+            __asm__ volatile("mov %%cr3, %0" : "=r"(active_cr3));
+            if ((active_cr3 & 0xFFFFF000) == (tasks[tid].page_dir & 0xFFFFF000)) {
+                extern void vmm_switch_page_dir(uint32_t);
+                vmm_switch_page_dir(tasks[0].page_dir);
+            }
+            extern void vmm_free_address_space(uint32_t);
+            vmm_free_address_space(tasks[tid].page_dir);
+        }
         tasks[tid].page_dir = 0;
     }
 }
@@ -167,9 +177,10 @@ uint32_t schedule(uint32_t esp) {
     // Using a spinlock would cause self-deadlock if any other code path
     // (e.g. create_task) holds task_lock when the timer interrupt fires.
     
-    // Auto-poll network on every schedule tick to process ARP/DNS/TCP packets in the background
-    extern void net_poll(void);
-    net_poll();
+    // NOTE: net_poll() is deliberately NOT called here. The BSP main loop
+    // (kernel.c) drains the NIC once per loop iteration; polling it from the
+    // 1000Hz timer IRQ as well made RX/TX state mutate from two contexts at
+    // once (double-processing, descriptor desync).
     
     // If we're the only task AND we're active, no need to switch
     if (num_tasks <= 1 && tasks[current_task[cid]].state != 0) {
@@ -294,21 +305,32 @@ void set_current_dir(int dir) {
 // === NEW: Thread creation with priority + page_dir ===
 int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
     int cid = get_cid();
-
-    // Map the Ring 3 stack into the task's own address space. Done BEFORE
-    // taking task_lock so we are not allocating physical frames (which takes
-    // vmm_lock) while holding the scheduler lock.
-    uint32_t user_esp = vmm_setup_user_stack(page_dir);
-    if (user_esp == 0) {
-        write_serial_string("[TASK] thread_create: could not map user stack\n");
-        return -1;
-    }
+    // Clamp priority like task_set_priority does: an out-of-range value from
+    // Ring 3 (e.g. INT_MAX) would overflow the scheduler's priority*10 + aging
+    // score and let the thread monopolize the CPU.
+    if (priority < PRIORITY_BACKGROUND || priority > PRIORITY_REALTIME) priority = PRIORITY_INTERACTIVE;
 
     __asm__ volatile("cli");
     spin_lock(&task_lock);
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == TASK_STATE_FREE) {
             
+            // Each task slot owns a private 64KB stack region below USER_STACK_TOP
+            // in this address space: USER_STACK_TOP - (i+1)*USER_STACK_SIZE.
+            // The stack is mapped while holding task_lock (slot i is only claimed
+            // after a successful map), so two tasks can never pick the same VA —
+            // the old fixed USER_STACK_BOTTOM..USER_STACK_TOP mapping let sibling
+            // threads overwrite each other's stacks.
+            // Lock order task_lock -> vmm_lock (via frame_alloc) is safe: no path
+            // ever acquires them in reverse.
+            uint32_t stack_top = USER_STACK_TOP - ((uint32_t)(i + 1) * USER_STACK_SIZE);
+            uint32_t user_esp = vmm_setup_user_stack(page_dir, stack_top);
+            if (user_esp == 0) {
+                write_serial_string("[TASK] thread_create: could not map user stack\n");
+                spin_unlock(&task_lock);
+                return -1;
+            }
+
             tasks[i].ring = 3;  // Threads are user tasks by default
             tasks[i].heap_ptr = 0x08000000;
             tasks[i].current_dir = (current_task[cid] >= 0) ? tasks[current_task[cid]].current_dir : 0;

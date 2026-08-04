@@ -138,11 +138,20 @@ int do_sys_close(int fd) {
     global_fds[gfd].ref_count--;
     
     if (global_fds[gfd].ref_count == 0) {
+        int p = global_fds[gfd].pipe_id;
         if (global_fds[gfd].type == FD_TYPE_PIPE_WRITE) {
-            pipes[global_fds[gfd].pipe_id].closed_write = 1;
-        }
-        if (global_fds[gfd].type == FD_TYPE_PIPE_READ && pipes[global_fds[gfd].pipe_id].closed_write) {
-            pipes[global_fds[gfd].pipe_id].in_use = 0; // free pipe completely
+            pipes[p].closed_write = 1;
+            // If no read end remains open (the read side was closed first),
+            // free the pipe NOW — the old code only freed it when the read end
+            // closed after the write end, leaking the slot forever.
+            int read_open = 0;
+            for (int i = 0; i < MAX_GLOBAL_FDS; i++) {
+                if (global_fds[i].in_use && global_fds[i].type == FD_TYPE_PIPE_READ &&
+                    global_fds[i].pipe_id == p) { read_open = 1; break; }
+            }
+            if (!read_open) pipes[p].in_use = 0;
+        } else if (global_fds[gfd].type == FD_TYPE_PIPE_READ && pipes[p].closed_write) {
+            pipes[p].in_use = 0; // free pipe completely
         }
         global_fds[gfd].in_use = 0;
     }
@@ -177,9 +186,14 @@ int do_sys_pipe(int pipefd[2]) {
     pipefd[1] = task_map_fd(g_write);
     
     if (pipefd[0] < 0 || pipefd[1] < 0) {
-        // cleanup on error
-        do_sys_close(pipefd[0]);
-        do_sys_close(pipefd[1]);
+        // Cleanup on error. do_sys_close() with a negative lfd is a silent no-op,
+        // so the global fds and pipe slot must be released explicitly for the
+        // fd(s) whose local mapping failed.
+        if (pipefd[0] >= 0) do_sys_close(pipefd[0]);
+        else global_fds[g_read].in_use = 0;
+        if (pipefd[1] >= 0) do_sys_close(pipefd[1]);
+        else global_fds[g_write].in_use = 0;
+        pipes[p].in_use = 0;
         return -1;
     }
     return 0;

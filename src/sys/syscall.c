@@ -26,6 +26,27 @@
 #include "../include/rtc.h"
 #include "../include/net.h"
 #include "../include/shell.h"
+#include "../include/spinlock.h"
+
+// SMP: Ring-3 apps run on APs while the BSP GUI loop replays their display
+// lists. The struct copies in SYS_UPDATE_WINDOW and the replay in
+// win_draw_cb() are NOT atomic — without this lock, a torn copy mid-replay
+// drew text with mixed coordinates/content (overlapping "ghost" glyphs).
+spinlock_t gui_canvas_lock = SPINLOCK_INIT;
+
+// Interrupt-safe GUI lock helpers. This OS's scheduler can preempt a task
+// between lock-take and unlock (see task.c:81 — "Disable interrupts BEFORE
+// taking the lock to prevent scheduler deadlocks!"). A lock holder must be
+// non-preemptible, or the main loop can spin forever on a lock whose holder
+// will only run again when the main loop itself schedules it.
+void gui_lock(void) {
+    __asm__ volatile("cli");
+    spin_lock(&gui_canvas_lock);
+}
+void gui_unlock(void) {
+    spin_unlock(&gui_canvas_lock);
+    __asm__ volatile("sti");
+}
 
 extern int validate_user_ptr(const void* ptr, uint32_t size);
 
@@ -91,6 +112,7 @@ int get_win_index(int wid) {
 void push_event(int wid, int type, int x, int y, int key) {
     int idx = get_win_index(wid);
     if (idx < 0) return;
+    gui_lock();
     int t = win_queues[idx].tail;
     int next = (t + 1) % MAX_EVENTS;
     if (next != win_queues[idx].head) {
@@ -100,6 +122,7 @@ void push_event(int wid, int type, int x, int y, int key) {
         win_queues[idx].events[t].key = key;
         win_queues[idx].tail = next;
     }
+    gui_unlock();
 }
 
 void win_draw_cb(int id, int cx, int cy, int cw, int ch) {
@@ -107,6 +130,7 @@ void win_draw_cb(int id, int cx, int cy, int cw, int ch) {
     // Replay Display List
     int idx = get_win_index(id);
     if (idx < 0) return;
+    gui_lock();
     for (int i = 0; i < win_canvases[idx].count; i++) {
         draw_cmd_t* cmd = &win_canvases[idx].cmds[i];
         if (cmd->type == 1) { // rect
@@ -115,6 +139,7 @@ void win_draw_cb(int id, int cx, int cy, int cw, int ch) {
             draw_string_px(cx + cmd->x, cy + cmd->y, cmd->text, cmd->color, 0xFFFFFFFF);
         }
     }
+    gui_unlock();
     // We don't push a Paint event every frame, we let the app decide when to update.
 }
 void win_key_cb(int id, char c, uint8_t sc) {
@@ -244,7 +269,10 @@ int safe_strlen(const char* s, int max) {
         }
         if (s[i] == '\0') return i;
     }
-    return max;
+    // No NUL byte found inside the validated range: never hand an unterminated
+    // pointer to kernel string code, or the caller would walk off the user's
+    // mapped pages at CPL0 and panic the kernel. Signal failure instead.
+    return -1;
 }
 
 // ============================================================
@@ -509,6 +537,34 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
         case SYS_PLAY_WAV: {
+            // Play a user-supplied PCM buffer through the SB16. The DMA IRQ
+            // (fill_buffer) runs in interrupt context and reads the sample data
+            // while ANY task may be active, so the app's user-space pointer is
+            // copied into a kernel heap buffer first — reading it from the IRQ
+            // under a different CR3 would fault or play garbage.
+            const uint8_t* pcm = (const uint8_t*)regs->ebx;
+            uint32_t len = (uint32_t)regs->ecx;
+            uint16_t rate = (uint16_t)regs->edx;
+            if (len == 0 || len > 2 * 1024 * 1024 || !validate_user_ptr(pcm, len)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern void sb16_set_audio_buffer(uint8_t*, uint32_t);
+            extern void sb16_start_playback(uint16_t);
+            static uint8_t* play_buf = NULL;
+            extern void* kmalloc(uint32_t);
+            extern void kfree(void*);
+            uint8_t* new_buf = (uint8_t*)kmalloc(len);
+            if (!new_buf) { regs->eax = (uint32_t)-1; break; }
+            memcpy(new_buf, pcm, len);
+            // Point the IRQ at the new copy FIRST, then free the old one: an
+            // SB16 IRQ can fire between these statements, and fill_buffer must
+            // never see a freed buffer.
+            sb16_set_audio_buffer(new_buf, len);
+            kfree(play_buf);          // free previous copy (NULL-safe)
+            play_buf = new_buf;
+            sb16_set_audio_buffer(play_buf, len);
+            sb16_start_playback(rate);
             regs->eax = 0;
             break;
         }
@@ -553,7 +609,20 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
-            regs->eax = (uint32_t)vmm_unmap_page(task_get_page_dir(tid), vaddr);
+            uint32_t pd = task_get_page_dir(tid);
+            // vmm_unmap_page() frees the PTE but NOT the frame — release the
+            // frame first so unmap+free doesn't leak a physical page per call.
+            uint32_t pd_idx = vaddr >> 22;
+            uint32_t pt_idx = (vaddr >> 12) & 0x3FF;
+            uint32_t* pd_ent = (uint32_t*)(uintptr_t)pd;
+            if (pd_ent[pd_idx] & PAGE_PRESENT) {
+                uint32_t* pt = (uint32_t*)(uintptr_t)(pd_ent[pd_idx] & 0xFFFFF000);
+                if (pt[pt_idx] & PAGE_PRESENT) {
+                    extern void frame_free(uint32_t);
+                    frame_free(pt[pt_idx] & 0xFFFFF000);
+                }
+            }
+            regs->eax = (uint32_t)vmm_unmap_page(pd, vaddr);
             break;
         }
 

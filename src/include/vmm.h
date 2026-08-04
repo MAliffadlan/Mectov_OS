@@ -27,9 +27,10 @@
 // Allocate a new page directory for a process
 uint32_t vmm_create_address_space(void);
 
-// Map a fresh, zeroed Ring 3 stack into page_dir.
-// Returns the initial ESP (top of stack), or 0 on failure.
-uint32_t vmm_setup_user_stack(uint32_t page_dir);
+// Map a fresh, zeroed Ring 3 stack into page_dir, ending at stack_top
+// (stack occupies [stack_top - USER_STACK_SIZE, stack_top)).
+// Returns the initial ESP (stack_top), or 0 on failure.
+uint32_t vmm_setup_user_stack(uint32_t page_dir, uint32_t stack_top);
 
 // Free a page directory (for task cleanup)
 void vmm_free_address_space(uint32_t page_dir);

@@ -92,13 +92,13 @@ int ipc_send(int qid, uint32_t type, const void* data, uint32_t len) {
     
     // Try push
     while (queue_push(idx, &msg) != 0) {
-        // Queue full — block until someone receives
+        // Queue full — block until someone receives. Put the task to sleep for a
+        // tick instead of spinning: a spinning task never leaves the BSP CPU and
+        // livelocks the machine if its peer never drains the queue.
         queues[idx].waiting_send = get_current_task();
-        // This task will be re-awakened by the receiver
-        // For now, we busy-wait (simple approach)
-        // In a real implementation, we'd yield/schedule
-        __asm__ volatile("sti");
-        __asm__ volatile("pause");
+        task_sleep(1);
+        // Peer may have destroyed the queue while we slept — bail out.
+        if (queues[idx].key == 0) return -1;
     }
     
     // If someone is waiting to receive, wake them up
@@ -119,11 +119,11 @@ int ipc_receive(int qid, uint32_t* sender_tid, uint32_t* type, void* data, uint3
     
     // Try pop
     while (queue_pop(idx, &msg) != 0) {
-        // Queue empty — block until someone sends
+        // Queue empty — block until someone sends. Same sleep-per-tick approach
+        // as ipc_send: never spin on an empty queue.
         queues[idx].waiting_recv = get_current_task();
-        // Busy-wait
-        __asm__ volatile("sti");
-        __asm__ volatile("pause");
+        task_sleep(1);
+        if (queues[idx].key == 0) return -1;
     }
     
     // If someone is waiting to send, wake them up

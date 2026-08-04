@@ -154,6 +154,8 @@ static int get_dow(int d, int m, int y) {
 
 static int days_in_month(int m, int y) {
     int days[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    // Clamp: a dead CMOS battery can report month 0, which would index days[-1].
+    if (m < 1 || m > 12) return 31;
     if (m == 2) {
         if (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) return 29;
         return 28;

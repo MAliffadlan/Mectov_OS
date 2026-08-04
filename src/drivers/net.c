@@ -504,6 +504,7 @@ static void net_handle_tcp(ip_header_t* ip, uint8_t* tcp_data, uint32_t tcp_len)
     } else if (tcp_state == TCP_ESTABLISHED) {
         // Handle incoming data if any
         uint8_t header_len = (tcp->data_offset_res >> 4) * 4;
+        if (header_len < sizeof(tcp_header_t) || header_len > tcp_len) return;
         uint32_t payload_len = tcp_len - header_len;
         if (payload_len > 0) {
             // Append to tcp_rx_buf
@@ -532,7 +533,9 @@ static void net_handle_udp(ip_header_t* ip, uint8_t* udp_data, uint32_t udp_len)
     write_serial_hex(dst_port);
     write_serial_string("\n");
     
-    uint32_t payload_len = ntohs(udp->len) - sizeof(udp_header_t);
+    uint16_t udp_frame_len = ntohs(udp->len);
+    if (udp_frame_len < sizeof(udp_header_t) || udp_frame_len > udp_len) return;
+    uint32_t payload_len = udp_frame_len - sizeof(udp_header_t);
     
     if (src_port == 53) {
         net_handle_dns(udp_data + sizeof(udp_header_t), payload_len);
@@ -554,6 +557,9 @@ static void net_handle_ip(uint8_t* data, uint32_t len) {
     uint32_t ihl = (ip->ver_ihl & 0x0F) * 4;
     uint32_t total = ntohs(ip->total_len);
     if (total > len) return;
+    // IHL < 20 is malformed and IHL > total means total - ihl underflows,
+    // which previously fed a ~4GB memcpy in net_handle_icmp.
+    if (ihl < sizeof(ip_header_t) || ihl > total) return;
 
     // Check if it's for us
     if (ip->dst_ip[0] != my_ip[0] || ip->dst_ip[1] != my_ip[1] ||

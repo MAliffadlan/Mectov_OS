@@ -278,16 +278,23 @@ int vmm_map_page(uint32_t page_dir, uint32_t vaddr, uint32_t paddr, uint32_t fla
     return 0;
 }
 
-// Map a fresh Ring 3 stack into page_dir. Returns the initial ESP, or 0.
+// Map a fresh Ring 3 stack into page_dir, ending at stack_top. Returns the
+// initial ESP (stack_top), or 0.
+//
+// stack_top is per-task (thread_create picks a unique top below USER_STACK_TOP
+// for every task slot), so sibling threads in one process never stomp each
+// other's stacks like the old fixed USER_STACK_BOTTOM..USER_STACK_TOP mapping
+// did. The page below the mapped range stays unmapped as a guard page.
 //
 // On partial failure the frames already mapped are left in place; every caller
 // abandons the whole address space on failure, and vmm_free_address_space()
 // reclaims them.
-uint32_t vmm_setup_user_stack(uint32_t page_dir) {
+uint32_t vmm_setup_user_stack(uint32_t page_dir, uint32_t stack_top) {
     if (page_dir == 0) return 0;  // a Ring 3 task needs a private address space
 
+    uint32_t stack_bottom = stack_top - USER_STACK_SIZE;
     for (uint32_t i = 0; i < USER_STACK_PAGES; i++) {
-        uint32_t va = USER_STACK_BOTTOM + i * 4096;
+        uint32_t va = stack_bottom + i * 4096;
         uint32_t paddr = frame_alloc();
         if (paddr == 0) {
             write_serial_string("[VMM] user stack: out of frames\n");
@@ -302,7 +309,7 @@ uint32_t vmm_setup_user_stack(uint32_t page_dir) {
             return 0;
         }
     }
-    return USER_STACK_TOP;
+    return stack_top;
 }
 
 int vmm_unmap_page(uint32_t page_dir, uint32_t vaddr) {

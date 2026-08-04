@@ -51,9 +51,11 @@ uint32_t get_ticks() { return timer_ticks; }
 uint32_t timer_get_us() {
     uint32_t ticks;
     uint16_t count;
+    uint32_t eflags;
     
-    // Disable interrupts to ensure atomic read of ticks + hardware counter
-    __asm__ __volatile__("cli");
+    // Disable interrupts to ensure atomic read of ticks + hardware counter,
+    // and restore the caller's IF afterwards — never blindly re-enable.
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
     
     // Latch counter 0 (Command 0x00)
     outb(0x43, 0x00);
@@ -63,7 +65,7 @@ uint32_t timer_get_us() {
     
     ticks = timer_ticks;
     
-    __asm__ __volatile__("sti");
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
     
     // PIT runs at 1193180 Hz. At 1000 Hz, divisor is 1193.
     // Counter counts down from 1193 to 0.

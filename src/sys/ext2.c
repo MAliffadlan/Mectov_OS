@@ -9,6 +9,7 @@ static ext2_superblock_t sb;
 static uint32_t block_size = 1024;
 static uint32_t bgd_block = 2; // Usually block 2 for 1024-byte blocks
 static ext2_bg_descriptor_t* bgd_table = NULL;
+static uint32_t ext2_max_groups = 0; // capped at MAX below; read_inode bounds-checks against it
 
 static void ext2_read_block(uint32_t block, unsigned char* buf) {
     uint32_t sectors_per_block = block_size / 512;
@@ -43,6 +44,18 @@ int ext2_init(int drive) {
     
     write_serial_string("[EXT2] Superblock found!\n");
     
+    // Superblock fields come from a disk image the user controls: sanitize them
+    // before using them in arithmetic or indexes.
+    // - block_size up to 4096 is what the driver's fixed 4KB buffers support;
+    //   anything larger (log_block_size >= 3) overflows them via ext2_read_block.
+    // - zero block/inode counts would divide by zero below.
+    if (sb.s_log_block_size > 2) { write_serial_string("[EXT2] block size too large\n"); return -1; }
+    if (sb.s_blocks_per_group == 0 || sb.s_inodes_per_group == 0) {
+        write_serial_string("[EXT2] corrupt group counts\n");
+        return -1;
+    }
+    if (sb.s_inode_size < sizeof(ext2_inode_t)) { write_serial_string("[EXT2] inode size too small\n"); return -1; }
+
     block_size = 1024 << sb.s_log_block_size;
     bgd_block = (block_size == 1024) ? 2 : 1;
     
@@ -53,7 +66,11 @@ int ext2_init(int drive) {
     // Allocate memory for BGD table (static array for simplicity, up to 32 groups)
     static ext2_bg_descriptor_t bgds[32];
     uint32_t num_groups = (sb.s_blocks_count + sb.s_blocks_per_group - 1) / sb.s_blocks_per_group;
-    if (num_groups > 32) num_groups = 32;
+    if (num_groups > 32) {
+        write_serial_string("[EXT2] More than 32 block groups, truncating (files beyond group 32 unreachable)\n");
+        num_groups = 32;
+    }
+    ext2_max_groups = num_groups;
     
     memcpy(bgds, bgd_buf, num_groups * sizeof(ext2_bg_descriptor_t));
     bgd_table = bgds;
@@ -62,10 +79,16 @@ int ext2_init(int drive) {
 }
 
 int ext2_read_inode(uint32_t inode_num, ext2_inode_t* inode) {
+    if (!bgd_table) return -1;
     if (inode_num < 1 || inode_num > sb.s_inodes_count) return -1;
+    if (sb.s_inodes_per_group == 0) return -1;
     
     uint32_t bg = (inode_num - 1) / sb.s_inodes_per_group;
     uint32_t index = (inode_num - 1) % sb.s_inodes_per_group;
+    
+    // bgd_table only holds the first ext2_max_groups descriptors; a larger
+    // filesystem would index out of the static array and read garbage.
+    if (bg >= ext2_max_groups || bg >= 32) return -1;
     
     uint32_t inode_table_block = bgd_table[bg].bg_inode_table;
     uint32_t inode_size = (sb.s_rev_level == 0) ? 128 : sb.s_inode_size;
@@ -81,7 +104,15 @@ int ext2_read_inode(uint32_t inode_num, ext2_inode_t* inode) {
 }
 
 // Traverse Ext2 directory and map to VFS recursively
+static void ext2_populate_vfs_depth(uint32_t inode_num, int vfs_parent_node, int depth);
 void ext2_populate_vfs(uint32_t inode_num, int vfs_parent_node) {
+    ext2_populate_vfs_depth(inode_num, vfs_parent_node, 0);
+}
+
+static void ext2_populate_vfs_depth(uint32_t inode_num, int vfs_parent_node, int depth) {
+    // A crafted image can create directory cycles (".."-by-inode tricks) that
+    // would recurse until the kernel stack overflows at boot.
+    if (depth > 16) return;
     ext2_inode_t inode;
     if (ext2_read_inode(inode_num, &inode) != 0) return;
     
@@ -97,20 +128,27 @@ void ext2_populate_vfs(uint32_t inode_num, int vfs_parent_node) {
         ext2_read_block(block, buf);
         
         uint32_t offset = 0;
-        while (offset < block_size) {
+        while (offset < block_size && offset + 8 <= block_size) {
             ext2_dir_entry_t* entry = (ext2_dir_entry_t*)(buf + offset);
             if (entry->inode == 0 || entry->rec_len == 0) break;
             
+            // name_len is a byte on disk but can be forged up to 255; never read
+            // past the end of this block's directory data.
+            uint32_t name_len = entry->name_len;
+            uint32_t avail = block_size - (offset + 8);
+            if (name_len > avail) name_len = avail;
+            if (name_len > 255) name_len = 255;
+            
             char name[256];
-            memcpy(name, entry->name, entry->name_len);
-            name[entry->name_len] = '\0';
+            memcpy(name, entry->name, name_len);
+            name[name_len] = '\0';
             
             if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0 && strcmp(name, "lost+found") != 0) {
                 if (entry->file_type == EXT2_FT_DIR) {
                     int new_dir = vfs_create_node(name, FS_EXT2_DIR, vfs_parent_node);
                     if (new_dir >= 0) {
                         fs_nodes[new_dir].ext2_inode = entry->inode;
-                        ext2_populate_vfs(entry->inode, new_dir);
+                        ext2_populate_vfs_depth(entry->inode, new_dir, depth + 1);
                     }
                 } else if (entry->file_type == EXT2_FT_REG_FILE) {
                     int new_file = vfs_create_node(name, FS_EXT2_FILE, vfs_parent_node);

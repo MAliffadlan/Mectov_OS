@@ -789,6 +789,14 @@ int vfs_rename(const char* old_path, const char* new_path) {
     int new_parent = vfs_get_node(new_parent_path);
     if (new_parent < 0) return -1;
     
+    // Prevent directory cycles: moving a node under itself or under one of its
+    // own descendants would make it unreachable and duplicate the whole subtree
+    // in listings. Walk the parent chain of new_parent.
+    if (new_parent == node) return -4;
+    for (int p = new_parent; p > 0; p = fs_nodes[p].parent) {
+        if (p == node) return -4;
+    }
+    
     // Delete existing target if any
     int existing = vfs_find_in_dir(new_filename, new_parent);
     if (existing >= 0) {
@@ -1096,14 +1104,18 @@ void vfs_list_dir(int dir_node, void (*print_fn)(const char*, unsigned char)) {
             
             // Print size
             print_fn("  (", 0x07);
-            char size_str[12];
+            char size_str[24];
             int n = fs_nodes[i].size;
             int si = 0;
             if (n == 0) { size_str[si++] = '0'; }
             while (n > 0) { size_str[si++] = '0' + (n % 10); n /= 10; }
-            size_str[si] = '\0';
             for (int j = 0; j < si/2; j++) { char t = size_str[j]; size_str[j] = size_str[si-1-j]; size_str[si-1-j] = t; }
-            size_str[si] = ' '; size_str[si+1] = 'B'; size_str[si+2] = ')'; size_str[si+3] = '\n'; size_str[si+4] = '\0';
+            // Tail: up to 10 digits + " B)\n\0" needs ≥ 15 bytes
+            size_str[si++] = ' ';
+            size_str[si++] = 'B';
+            size_str[si++] = ')';
+            size_str[si++] = '\n';
+            size_str[si] = '\0';
             print_fn(size_str, 0x07);
         }
     }

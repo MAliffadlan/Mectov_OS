@@ -149,6 +149,10 @@ void* load_mct_library(const char* filename) {
     
     uint32_t total_size = header->code_size + header->data_size;
     if (total_size == 0 || total_size > 1024 * 1024) { kfree(lib_buf); return 0; }
+    // The file only contains the header and the code — a forged header with a
+    // huge code_size would make the memcpy below read way past the small
+    // kmalloc'd buffer, leaking kernel heap into the caller's address space.
+    if ((int)(sizeof(mct_header_t) + header->code_size) > sz) { kfree(lib_buf); return 0; }
     
     uint32_t lib_base = 0x09000000;
     uint32_t num_pages = (total_size + 4095) / 4096;
