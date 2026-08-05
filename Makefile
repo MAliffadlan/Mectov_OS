@@ -205,7 +205,7 @@ $(OBJ_DIR)/wallpaper.o: $(OBJ_DIR)/wallpaper.bin | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
 $(OBJ_DIR)/wallpaper.bin: assets/wallpaper.png
-	python3 scratch/build_wallpaper.py assets/wallpaper.png $@
+	python3 scripts/build_wallpaper.py assets/wallpaper.png $@
 
 # DOOM WAD file embedded as object
 $(OBJ_DIR)/doom1_wad.o: doom1.wad | $(OBJ_DIR)
