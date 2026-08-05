@@ -100,9 +100,29 @@ typedef struct {
 #define EXT2_FT_REG_FILE 1
 #define EXT2_FT_DIR      2
 
-// API
+// File types
+#define EXT2_FT_UNKNOWN  0
+#define EXT2_FT_REG_FILE 1
+#define EXT2_FT_DIR      2
+
+// API — read
 int ext2_init(int drive);
 int ext2_read_inode(uint32_t inode_num, ext2_inode_t* inode);
 int ext2_read_file_data(uint32_t inode_num, char* buf, int max_size);
+
+// API — write (persistence)
+// Overwrite (or truncate-and-grow) a regular file's data. Returns bytes written
+// or negative on failure. Allocates blocks from the group bitmaps as needed.
+int ext2_write_file_data(uint32_t inode_num, const char* buf, int size);
+// Create a new file or directory under parent_inode. Returns the new inode
+// number, or 0 on failure. Directories get a data block with "." and "..".
+uint32_t ext2_create_entry(uint32_t parent_inode, const char* name, uint8_t file_type);
+// Remove a file/dir entry (frees the inode and all its blocks). Returns 0 ok.
+int ext2_remove_entry(uint32_t parent_inode, const char* name);
+// Rename an entry in place (keeps the same inode, does not touch data).
+int ext2_rename_entry(uint32_t parent_inode, const char* old_name,
+                      const char* new_name, uint32_t inode_num);
+// Query an inode's current file size (used by the VFS layer after create).
+uint32_t ext2_inode_size(uint32_t inode_num);
 
 #endif

@@ -11,6 +11,7 @@
 #include "../include/ata.h"
 #include "../include/utils.h"
 #include "../include/mem.h"
+#include "../include/ext2.h"
 
 extern void write_serial_string(const char*);
 extern void write_serial_hex(uint32_t);
@@ -270,8 +271,18 @@ void vfs_init() {
         if (ext2_init(1) == 0) {
             write_serial_string("[VFS] ext2 ok\n");
             int ext2_node = vfs_get_node("ext2");
-            if (ext2_node < 0) ext2_node = vfs_create_node("ext2", FS_DIR, 0);
+            if (ext2_node < 0) {
+                ext2_node = vfs_create_node("ext2", FS_EXT2_DIR, 0);
+            } else {
+                // The mount point must be ext2-backed: create/write/delete
+                // hooks only fire under an FS_EXT2_DIR parent, and older
+                // versions saved the node as a plain FS_DIR.
+                fs_nodes[ext2_node].type = FS_EXT2_DIR;
+            }
             if (ext2_node >= 0) {
+                // Mount point must point at the ext2 root directory inode (2),
+                // otherwise create/write hooks would pass inode 0.
+                fs_nodes[ext2_node].ext2_inode = 2;
                 ext2_populate_vfs(2, ext2_node); // Inode 2 is the root directory
             }
         }
@@ -410,9 +421,15 @@ void vfs_init() {
     extern int ext2_init(int drive);
     extern void ext2_populate_vfs(uint32_t inode_num, int vfs_parent_node);
     if (ext2_init(1) == 0) {
-        int ext2_node = vfs_create_node("ext2", FS_DIR, 0);
+        int ext2_node = vfs_get_node("ext2");
+        if (ext2_node < 0) {
+            ext2_node = vfs_create_node("ext2", FS_EXT2_DIR, 0);
+        } else {
+            fs_nodes[ext2_node].type = FS_EXT2_DIR;
+        }
         if (ext2_node >= 0) {
-            ext2_populate_vfs(2, ext2_node); // Inode 2 is the root directory
+            fs_nodes[ext2_node].ext2_inode = 2; // mount point = root dir inode
+            ext2_populate_vfs(2, ext2_node);    // Inode 2 is the root directory
         }
     }
     
@@ -677,6 +694,22 @@ int vfs_create_node(const char* name, fs_type_t type, int parent) {
             fs_nodes[i].size = 0;
             fs_nodes[i].data_sector = 0;
             fs_nodes[i].in_use = 1;
+            // New object under an ext2 directory: create it on the real
+            // filesystem. Populate passes FS_EXT2_* types for objects that
+            // already exist on disk, so those bypass this hook.
+            if (fs_nodes[parent].type == FS_EXT2_DIR &&
+                (type == FS_DIR || type == FS_FILE)) {
+                uint8_t ft = (type == FS_DIR) ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
+                uint32_t einode = ext2_create_entry(fs_nodes[parent].ext2_inode, name, ft);
+                if (!einode) {
+                    write_serial_string("VFS: ext2 create entry failed\n");
+                    fs_nodes[i].in_use = 0;
+                    return -1;
+                }
+                fs_nodes[i].type = (type == FS_DIR) ? FS_EXT2_DIR : FS_EXT2_FILE;
+                fs_nodes[i].ext2_inode = einode;
+                fs_nodes[i].size = (int)ext2_inode_size(einode);
+            }
             vfs_save();
             return i;
         }
@@ -741,6 +774,18 @@ int vfs_create_file(const char* path) {
     return vfs_create_node(filename, FS_FILE, parent);
 }
 
+// Remove the on-disk ext2 object behind a VFS node (if any). Must run while
+// the node is still in_use so parent/name lookups stay valid.
+static void vfs_remove_ext2_entry(int node) {
+    if (node < 0 || node >= MAX_NODES) return;
+    if (fs_nodes[node].type != FS_EXT2_FILE && fs_nodes[node].type != FS_EXT2_DIR) return;
+    if (!fs_nodes[node].ext2_inode) return;
+    int p = fs_nodes[node].parent;
+    if (p < 0 || p >= MAX_NODES) return;
+    if (fs_nodes[p].type != FS_EXT2_DIR) return;
+    ext2_remove_entry(fs_nodes[p].ext2_inode, fs_nodes[node].name);
+}
+
 int vfs_delete_node(const char* path) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
@@ -772,6 +817,7 @@ int vfs_delete_node(const char* path) {
                         }
                     }
                     if (!has_children) {
+                        vfs_remove_ext2_entry(i);
                         fs_nodes[i].in_use = 0;
                         fs_nodes[i].size = 0;
                         fs_nodes[i].data_sector = 0;
@@ -782,6 +828,7 @@ int vfs_delete_node(const char* path) {
         } while (deleted);
     }
     
+    vfs_remove_ext2_entry(node);
     fs_nodes[node].in_use = 0;
     fs_nodes[node].size = 0;
     fs_nodes[node].data_sector = 0;
@@ -834,6 +881,21 @@ int vfs_rename(const char* old_path, const char* new_path) {
     int existing = vfs_find_in_dir(new_filename, new_parent);
     if (existing >= 0) {
         vfs_delete_node(new_path);
+    }
+    
+    // Ext2-backed node: rename the on-disk entry too. Only same-directory
+    // renames are supported (ext2_rename_entry unlinks + re-adds in one dir);
+    // cross-dir moves or ext2<->native moves are rejected.
+    int is_ext2 = (fs_nodes[node].type == FS_EXT2_FILE || fs_nodes[node].type == FS_EXT2_DIR);
+    if (is_ext2) {
+        int old_p = fs_nodes[node].parent;
+        if (old_p != new_parent || fs_nodes[old_p].type != FS_EXT2_DIR) {
+            return -5; // cross-directory / cross-filesystem rename not supported
+        }
+        if (ext2_rename_entry(fs_nodes[old_p].ext2_inode, fs_nodes[node].name,
+                              new_filename, fs_nodes[node].ext2_inode) != 0) {
+            return -5;
+        }
     }
     
     // Move node
@@ -963,6 +1025,15 @@ int vfs_write_file(const char* path, const char* data, int size) {
             return size; // Writes to /dev/random are ignored (or could add entropy)
         }
         return -2;
+    }
+
+    if (fs_nodes[node].type == FS_EXT2_FILE) {
+        int r = ext2_write_file_data(fs_nodes[node].ext2_inode, data, size);
+        if (r >= 0) {
+            fs_nodes[node].size = r;
+            vfs_save();
+        }
+        return r;
     }
 
     if (fs_nodes[node].type != FS_FILE) return -2;

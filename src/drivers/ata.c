@@ -39,11 +39,17 @@ int ata_read_sector_drive(int drive, unsigned int lba, unsigned char* b) {
 void ata_read_sector(unsigned int lba, unsigned char* b) {
     ata_read_sector_drive(0, lba, b);
 }
-void ata_write_sector(unsigned int lba, unsigned char* b) {
+int ata_write_sector_drive(int drive, unsigned int lba, unsigned char* b) {
     hdd_activity = 10; // set activity frames
-    ata_wait_bsy(); outb(0x1F6, 0xE0 | ((lba >> 24) & 0x0F)); outb(0x1F2, 1); outb(0x1F3, (unsigned char)lba);
+    if (ata_wait_bsy() < 0) return -1;
+    outb(0x1F6, (drive ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F)); outb(0x1F2, 1); outb(0x1F3, (unsigned char)lba);
     outb(0x1F4, (unsigned char)(lba >> 8)); outb(0x1F5, (unsigned char)(lba >> 16)); outb(0x1F7, 0x30);
-    ata_wait_bsy(); ata_wait_drq();
+    if (ata_wait_bsy() < 0) return -1;
+    if (ata_wait_drq() < 0) return -1;
     for (int i = 0; i < 256; i++) { unsigned short word = b[i * 2] | (b[i * 2 + 1] << 8); outw(0x1F0, word); }
     outb(0x1F7, 0xE7); ata_wait_bsy();
+    return 0;
+}
+void ata_write_sector(unsigned int lba, unsigned char* b) {
+    ata_write_sector_drive(0, lba, b);
 }

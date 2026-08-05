@@ -1,4 +1,4 @@
-# Mectov OS v35.0 — SMP, In-Kernel GDB, ELF Loader & Synchronization Update
+# Mectov OS v35.1 — Ext2 Write Support Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,7 +6,7 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v35.0 release is a major kernel pass that finally turns on multi-core SMP, adds a real in-kernel debugger, drops a standard ELF loader, and brings true synchronization primitives to user space. The recent changes are:
+The v35.1 release turns the secondary ext2 partition from read-only into a fully writable, persistent filesystem — the last big gap between this hobby OS and a "real" one. The recent changes are:
 
 1. **SMP Fix — MADT/XSDT Parsing:** Fixed the ACPI table walker that silently skipped every table (a bad bounds check compared table addresses against the RSDT region), so the MADT was never found and SMP fell back to a single core. The kernel now parses RSDT *and* XSDT, finds the MADT, boots all APs, and runs multitasking across 4 real CPU cores.
 2. **In-Kernel GDB Stub:** A GDB Remote Serial Protocol stub on COM2 lets you attach a real `gdb` to the running kernel — F12 breaks in, registers/memory reads, software breakpoints (Z0/z0), and single-stepping all work, with DWARF symbols (`-g`) resolving `kernel_main` and friends.
@@ -15,6 +15,7 @@ The v35.0 release is a major kernel pass that finally turns on multi-core SMP, a
 5. **IRQ-Driven Networking + UDP API:** The RTL8139 now fires IRQ 11 (routed through the I/O APIC) instead of relying on polling; `net_irq_handler()` drains the RX ring in interrupt context. New `SYS_UDP_BIND` / `SYS_UDP_SEND` / `SYS_UDP_RECV` expose datagram sockets to user space.
 6. **CI Boot Test:** A GitHub Actions workflow builds the kernel, boots it in QEMU (no KVM), logs in, and verifies `BOOTED KERNEL LOOP` — every commit is proven to boot.
 7. **Self-Contained Build:** The wallpaper source is now bundled (`assets/wallpaper.png`) instead of a hardcoded absolute path, so `make` works on any machine.
+8. **Ext2 Write Support:** The secondary ext2 partition is now fully writable — block/inode bitmaps, directory entry creation with slack-splitting, file grow/truncate (direct + singly-indirect blocks), rename and delete. Every VFS create/write/delete under `/ext2` routes to the real filesystem and survives reboot (verified with `fsck.ext2` and `debugfs` on the host, plus a two-boot persistence test on both 1024- and 4096-byte block images).
 
 Created by M Alif Fadlan.
 
@@ -273,6 +274,14 @@ Created by M Alif Fadlan.
 - **IRQ-Driven RX:** `net_irq_handler()` (registered for INT 43) drains the RX ring directly in interrupt context — packets are processed the instant they arrive, no more waiting for the main loop. `net_poll()` remains as a bounded, `cli`-wrapped fallback for the shell's busy-waits.
 - **UDP Datagram API:** `SYS_UDP_BIND` / `SYS_UDP_SEND` / `SYS_UDP_RECV` give Ring 3 apps a real UDP socket: bind a local port, send to any IP, and receive queued datagrams (single-socket design, DNS traffic stays separate). Verified by `apps/udptest.elf`.
 
+### 32. Ext2 Write Support — Full Persistence (src/sys/ext2.c + src/sys/vfs.c)
+- **Real On-Disk Writes:** The secondary ext2 partition is no longer read-only. A new write layer persists every change: `ext2_write_inode` (read-modify-write of the inode slot), `ext2_sync_super` (superblock + BGD table), block/inode bitmap allocators with free-count tracking, and `ata_write_sector_drive` (the ATA driver's missing slave-drive write path).
+- **File Grow & Truncate:** `ext2_write_file_data` allocates blocks on demand across direct (0–11) and singly-indirect pointers, frees blocks past the new end on shrink, and zeroes the tail of the last partial block so stale bytes never survive a truncate. `i_blocks` is recomputed, so `fsck` sees consistent sizes.
+- **Directory Entry Management:** `ext2_create_entry` builds files and directories (`.`, `..`, parent link-count bump); directory entries are inserted by splitting slack entries (e.g. the big `lost+found` tail record) or reusing deleted-entry holes, with a fallback to appending a fresh data block. `ext2_remove_entry` and `ext2_rename_entry` (same-directory) free inodes/blocks and compact the directory.
+- **VFS Routing:** `vfs_create_node`, `vfs_write_file`, `vfs_delete_node` and `vfs_rename` now detect `FS_EXT2_FILE` / `FS_EXT2_DIR` nodes and call the real filesystem — so `mkdir`, `touch`, `nano`, `cat` and `rm` all work under `/ext2` and survive reboot.
+- **Two Pre-Existing Mount Bugs Fixed:** `/ext2` was created as a plain `FS_DIR` instead of `FS_EXT2_DIR`, silently routing every "ext2" write into the MECTOVFS disk, and the mount node carried `ext2_inode = 0` instead of the root-dir inode 2. Both are corrected (with in-place migration for existing disk images).
+- **Hardened:** allocators refuse metadata blocks (boot/superblock/BGD/bitmaps/inode tables) even if a corrupt bitmap marks them free; all bitmap/sync buffers are heap-allocated to keep the 16KB kernel stack safe; cross-directory ext2 renames are rejected rather than corrupting the tree. Validated end-to-end: write → reboot → read-back, plus `fsck.ext2` clean and `debugfs` reading the files straight from the image, on both 1024- and 4096-byte-block filesystems.
+
 ---
 
 ## Syscall API Reference
@@ -462,6 +471,7 @@ The `.github/workflows/build-boot-test.yml` workflow runs this on every push —
 
 | Version | Highlights |
 |---|---|
+| v35.1 | **Ext2 Write Support Update:** Made the secondary ext2 partition fully writable — block/inode bitmap allocators with superblock sync, file grow/truncate across direct + singly-indirect blocks, directory entry creation via slack-splitting and hole reuse, remove and same-dir rename. All VFS create/write/delete/rename ops under `/ext2` now hit the real filesystem. Added `ata_write_sector_drive` (slave-drive ATA writes). Fixed two pre-existing mount bugs that silently routed `/ext2` writes into the MECTOVFS disk (`/ext2` is now `FS_EXT2_DIR` with `ext2_inode = 2`). Hardened allocators against metadata-block allocation and kept stack usage under 16KB. Validated: write → reboot → read-back persistence, host `fsck.ext2` clean, `debugfs` reads files straight from the image (1024- and 4096-byte block filesystems). |
 | v35.0 | **SMP, In-Kernel GDB, ELF Loader & Synchronization Update:** Fixed the ACPI table walker (RSDT/XSDT + MADT) so SMP actually boots all 4 cores; added a GDB Remote Serial Protocol stub on COM2 (F12 break, breakpoints, single-step, DWARF symbols); added a hardened ELF32 ET_EXEC loader alongside `.mct`; added kernel semaphores and address-space-keyed futexes (`TASK_STATE_BLOCKED`, zero CPU while parked); switched the RTL8139 to IRQ-driven RX (I/O APIC route, INT 43) and exposed a UDP bind/send/recv syscall API; bundled the wallpaper into the repo; and added a GitHub Actions CI boot test (build + QEMU login + smoke). |
 | v34.3 | **Scheduler, VFS Reclamation, and TCP Buffer Update:** Overhauled the scheduler with a starvation-proof priority aging algorithm; implemented dynamic first-fit VFS sector reclamation to resolve file deletion leaks; and upgraded TCP receive path to a 64KB buffer with dynamic window advertising and partial read shifting. |
 | v34.2 | **Memory & Syscall Hardening Update:** Enforced integer overflow checks on `kmalloc` and `kcalloc` sizes; protected `frame_ref_count` from uint8_t overflow via saturation capping; and secured `SYS_EXEC_CMD` and `SYS_KILL_TASK` syscalls to restrict shell access and task termination to authorized binaries (`terminal.mct`, `explorer.mct`, `taskmgr.mct`). |

@@ -119,6 +119,15 @@ void memcpy(void* dest, const void* src, uint32_t len) {
     );
 }
 
+int memcmp(const void* a, const void* b, uint32_t n) {
+    const unsigned char* pa = (const unsigned char*)a;
+    const unsigned char* pb = (const unsigned char*)b;
+    for (uint32_t i = 0; i < n; i++) {
+        if (pa[i] != pb[i]) return (int)pa[i] - (int)pb[i];
+    }
+    return 0;
+}
+
 void* memmove(void* dest, const void* src, uint32_t len) {
     uint8_t* d = (uint8_t*)dest;
     const uint8_t* s = (const uint8_t*)src;
