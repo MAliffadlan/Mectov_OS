@@ -202,6 +202,57 @@ static void net_handle_icmp(ip_header_t* ip, uint8_t* icmp_data, uint32_t icmp_l
     }
 }
 
+// ---- UDP API (Ring 3 accessible) ----
+#define UDP_RX_BUF_SIZE 65536
+static void net_send_udp(uint8_t* target_ip, uint16_t src_port, uint16_t dst_port, void* payload, uint32_t payload_len);
+static uint8_t  udp_rx_buf[UDP_RX_BUF_SIZE];
+static int      udp_rx_len = 0;
+static uint16_t udp_bind_port = 0;      // 0 = unbound
+static uint8_t  udp_last_src_ip[4] = {0,0,0,0};
+static uint16_t udp_last_src_port = 0;
+
+// Bind a local UDP port for receiving. Returns 0 on success, -1 if busy.
+int net_udp_bind(uint16_t port) {
+    if (port == 0) return -1;
+    __asm__ volatile("cli");
+    if (udp_bind_port != 0 && udp_bind_port != port) {
+        __asm__ volatile("sti");
+        return -1; // another port already bound (single-socket design)
+    }
+    udp_bind_port = port;
+    udp_rx_len = 0;
+    __asm__ volatile("sti");
+    return 0;
+}
+
+// Send a UDP datagram from the bound port (or ephemeral if unbound).
+int net_udp_send(uint8_t* target_ip, uint16_t dst_port, void* payload, uint32_t payload_len) {
+    if (!rtl_present) return -1;
+    if (payload_len > 1400) payload_len = 1400; // fits 1500-byte frame
+    uint16_t src = udp_bind_port;
+    if (src == 0) src = (uint16_t)(50000 + (get_ticks() % 1000));
+    net_send_udp(target_ip, src, dst_port, payload, payload_len);
+    return 0;
+}
+
+// Copy received datagram into caller buffer. Returns bytes copied, 0 if none.
+int net_udp_recv(uint8_t* out, uint32_t max_len) {
+    if (udp_rx_len <= 0) return 0;
+    __asm__ volatile("cli");
+    int copy = udp_rx_len;
+    if (copy > (int)max_len) copy = (int)max_len;
+    if (copy > 0) memcpy(out, udp_rx_buf, copy);
+    udp_rx_len = 0; // single datagram per recv (datagram semantics)
+    __asm__ volatile("sti");
+    return copy;
+}
+
+// Sender info for the last received datagram (IP+port).
+void net_udp_peer(uint8_t* ip_out, uint16_t* port_out) {
+    memcpy(ip_out, udp_last_src_ip, 4);
+    *port_out = udp_last_src_port;
+}
+
 // UDP send
 static void net_send_udp(uint8_t* target_ip, uint16_t src_port, uint16_t dst_port, void* payload, uint32_t payload_len) {
     if (!net_ready) return;
@@ -539,6 +590,23 @@ static void net_handle_udp(ip_header_t* ip, uint8_t* udp_data, uint32_t udp_len)
     
     if (src_port == 53) {
         net_handle_dns(udp_data + sizeof(udp_header_t), payload_len);
+        return;
+    }
+
+    // Application datagram: deliver to the bound UDP socket, if any.
+    // NOTE: no cli/sti here — this runs inside net_irq_handler (IF already
+    // cleared by the interrupt gate) or net_poll (which we wrap in cli/sti).
+    // Re-enabling IF mid-IRQ would allow nested re-entrant net processing.
+    if (dst_port == udp_bind_port && udp_bind_port != 0) {
+        if ((int)payload_len <= UDP_RX_BUF_SIZE) {
+            memcpy(udp_rx_buf, udp_data + sizeof(udp_header_t), payload_len);
+            udp_rx_len = (int)payload_len;
+            memcpy(udp_last_src_ip, ip->src_ip, 4);
+            udp_last_src_port = src_port;
+        }
+        write_serial_string("[NET] UDP datagram queued for app (port ");
+        write_serial_hex(dst_port);
+        write_serial_string(")\n");
     }
 }
 
@@ -606,11 +674,15 @@ void net_init(void) {
     net_send_arp_request(gateway_ip);
 }
 
-// Poll for incoming packets (call from main loop)
+// Poll for incoming packets (call from main loop — fallback for the shell's
+// busy-waits; the IRQ path is the primary driver now).
+// Interrupts are disabled around the drain so the IRQ handler (same CPU) can
+// never interleave its rtl_rx_offset/CAPR updates with ours.
 void net_poll(void) {
     if (!rtl_present) return;
     uint8_t buf[1520];
     int len;
+    __asm__ volatile("cli");
     // Process up to 4 packets per poll
     for (int i = 0; i < 4; i++) {
         len = rtl8139_poll_rx(buf, sizeof(buf));
@@ -619,6 +691,27 @@ void net_poll(void) {
         write_serial_hex(len);
         write_serial_string("\n");
         net_handle_frame(buf, (uint32_t)len);
+    }
+    __asm__ volatile("sti");
+}
+
+// IRQ-driven RX: called from the IRQ 11 handler. Interrupts are already
+// disabled, so no re-entrancy against net_poll() is possible.
+void net_irq_handler(registers_t* r) {
+    (void)r;
+    if (!rtl_present) return;
+    uint16_t isr = rtl8139_irq_clear();
+    if (isr & 0x01) { // ROK — packets available
+        uint8_t buf[1520];
+        int len;
+        for (int i = 0; i < 8; i++) { // drain up to 8 frames per IRQ
+            len = rtl8139_poll_rx(buf, sizeof(buf));
+            if (len <= 0) break;
+            write_serial_string("[NET] IRQ rx, len=");
+            write_serial_hex(len);
+            write_serial_string("\n");
+            net_handle_frame(buf, (uint32_t)len);
+        }
     }
 }
 

@@ -125,6 +125,38 @@ uint32_t handle_syscall_net(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_UDP_BIND (67) -----
+        case SYS_UDP_BIND: {
+            uint16_t port = (uint16_t)regs->ebx;
+            extern int net_udp_bind(uint16_t);
+            regs->eax = (uint32_t)net_udp_bind(port);
+            break;
+        }
+
+        // ----- SYS_UDP_SEND (68) -----
+        case SYS_UDP_SEND: {
+            uint8_t* ip = (uint8_t*)regs->ebx;
+            uint16_t port = (uint16_t)regs->ecx;
+            uint8_t* data = (uint8_t*)regs->edx;
+            int len = (int)regs->esi;
+            if (!validate_user_ptr(ip, 4) || len <= 0 ||
+                !validate_user_ptr(data, len)) { regs->eax = (uint32_t)-1; break; }
+            if (len > 1400) len = 1400;
+            extern int net_udp_send(uint8_t*, uint16_t, void*, uint32_t);
+            regs->eax = (uint32_t)net_udp_send(ip, port, data, (uint32_t)len);
+            break;
+        }
+
+        // ----- SYS_UDP_RECV (69) -----
+        case SYS_UDP_RECV: {
+            uint8_t* buf = (uint8_t*)regs->ebx;
+            int max_len = (int)regs->ecx;
+            if (max_len <= 0 || !validate_user_ptr(buf, max_len)) { regs->eax = (uint32_t)-1; break; }
+            extern int net_udp_recv(uint8_t*, uint32_t);
+            regs->eax = (uint32_t)net_udp_recv(buf, (uint32_t)max_len);
+            break;
+        }
+
     }
     return regs->eax;
 }

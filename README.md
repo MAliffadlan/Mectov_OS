@@ -1,4 +1,4 @@
-# Mectov OS v34.3 — The Scheduler, VFS Reclamation, and TCP Buffer Update
+# Mectov OS v35.0 — SMP, In-Kernel GDB, ELF Loader & Synchronization Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,11 +6,15 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v34.3 release is a major kernel pass enhancing multitasking fairness, resolving filesystem space leaks, and upgrading network stream safety. The recent changes are:
+The v35.0 release is a major kernel pass that finally turns on multi-core SMP, adds a real in-kernel debugger, drops a standard ELF loader, and brings true synchronization primitives to user space. The recent changes are:
 
-1. **Preemptive Priority Scheduler with Aging:** Overhauled the CPU scheduler from simple round-robin to a priority-based scheduler with aging. Tracks ticks spent in the `READY` state (`wait_ticks`) to prevent background tasks from starving while ensuring real-time tasks run first.
-2. **VFS Sector Reclamation:** Implemented a dynamic First-Fit sector allocator. It constructs a dynamic in-memory sector allocation map from active VFS nodes, completely reclaiming and reusing sectors from deleted files on the 1MB ATA disk.
-3. **Stream-Safe TCP & Dynamic Window Advertising:** Expanded the TCP receive buffer to 64KB and modified `SYS_TCP_RECV` to shift unread bytes using `memmove`, preventing data loss on partial reads. Dynamically advertises the available buffer window to prevent packet drops.
+1. **SMP Fix — MADT/XSDT Parsing:** Fixed the ACPI table walker that silently skipped every table (a bad bounds check compared table addresses against the RSDT region), so the MADT was never found and SMP fell back to a single core. The kernel now parses RSDT *and* XSDT, finds the MADT, boots all APs, and runs multitasking across 4 real CPU cores.
+2. **In-Kernel GDB Stub:** A GDB Remote Serial Protocol stub on COM2 lets you attach a real `gdb` to the running kernel — F12 breaks in, registers/memory reads, software breakpoints (Z0/z0), and single-stepping all work, with DWARF symbols (`-g`) resolving `kernel_main` and friends.
+3. **Standard ELF32 Loader:** The proprietary `.mct` format is now joined by a full ELF32 ET_EXEC loader that maps PT_LOAD segments at their `p_vaddr`, zero-fills BSS, and jumps to `e_entry`. `apps/elfdemo.elf` proves real ELF binaries run in Ring 3.
+4. **Semaphores & Futexes:** Kernel semaphores (id-based, FIFO wait queues) and address-space-keyed futexes give Ring 3 apps proper blocking synchronization — a task parks in `TASK_STATE_BLOCKED` and burns zero CPU until woken.
+5. **IRQ-Driven Networking + UDP API:** The RTL8139 now fires IRQ 11 (routed through the I/O APIC) instead of relying on polling; `net_irq_handler()` drains the RX ring in interrupt context. New `SYS_UDP_BIND` / `SYS_UDP_SEND` / `SYS_UDP_RECV` expose datagram sockets to user space.
+6. **CI Boot Test:** A GitHub Actions workflow builds the kernel, boots it in QEMU (no KVM), logs in, and verifies `BOOTED KERNEL LOOP` — every commit is proven to boot.
+7. **Self-Contained Build:** The wallpaper source is now bundled (`assets/wallpaper.png`) instead of a hardcoded absolute path, so `make` works on any machine.
 
 Created by M Alif Fadlan.
 
@@ -30,13 +34,15 @@ Created by M Alif Fadlan.
 +--------------------------------------------------------------------+
 |  Memory Manager   |  VMM (Virtual Mem)|  IPC Message Queues        |
 +--------------------------------------------------------------------+
-|  Priority Thread   |  VFS + ATA PIO   |  PCI Scanner               |
+|  ACPI (RSDT/XSDT/MADT)  |  SMP (APIC/IOAPIC, 4 cores)             |
 +--------------------------------------------------------------------+
-|  VGA/VESA Driver   |  Window Manager   |  RTL8139 NIC              |
+|  Priority Thread   |  Semaphores & Futexes |  VFS + ATA PIO        |
++--------------------------------------------------------------------+
+|  VGA/VESA Driver   |  Window Manager   |  RTL8139 NIC (IRQ-driven)  |
 +--------------------------------------------------------------------+
 |  Network Stack (Ethernet/ARP/IPv4/ICMP/UDP/DNS)                    |
 +--------------------------------------------------------------------+
-|  MCT App Loader   |  Ring 3 User Tasks|  Display List Renderer     |
+|  MCT + ELF32 Loaders |  Ring 3 User Tasks |  GDB Stub (COM2)        |
 +--------------------------------------------------------------------+
 |  Desktop (Squircle Icons) |  Taskbar (Glossy) |  Start Menu        |
 +--------------------------------------------------------------------+
@@ -238,6 +244,35 @@ Created by M Alif Fadlan.
 - **VFS Sector Growth Guard:** Rebuilt the ATA VFS sector allocator to prevent contiguous file overwrite bugs. Files that grow past their original sector limits are dynamically moved to the end of the disk (`next_data_sector`), ensuring robust data safety.
 - **Build Isolation:** Links independent `.ld` script targets named after target binaries to eliminate parallel linker race conditions during concurrent builds (`make -j`).
 
+### 27. SMP — ACPI MADT/XSDT Parsing & Multi-Core (src/sys/acpi.c + src/sys/smp.c)
+- **Fixed Table Walker:** The RSDT scan compared every table's address against the RSDT's own memory region (`addr + len`), so *every* entry was skipped and the MADT never surfaced — SMP silently fell back to one core. The walker now validates pointers against the whole physical map and follows both the 32-bit RSDT and 64-bit XSDT (ACPI 2.0).
+- **Verified MADT Parsing:** Local APIC base, all 4 CPU cores (APIC IDs 0–3), the I/O APIC, and PIT Interrupt Source Overrides are now read correctly.
+- **Real Multi-Core:** `smp_init()` boots Application Processors via INIT-SIPI-SIPI with per-core GDT/TSS/IDT; log shows `[SMP] CPU 0x01 is awake!` / `Active APs: 0x03`. The scheduler spreads tasks across all 4 cores (`current_task[16]` is per-CPU).
+
+### 28. In-Kernel GDB Stub (src/drivers/gdb_stub.c + src/drivers/gdb_stub.h)
+- **GDB Remote Serial Protocol on COM2:** COM1 keeps the debug log; COM2 speaks RSP so a real `gdb` can attach over TCP (`-serial tcp:127.0.0.1:2345,server=on,wait=off`).
+- **F12 Break-In:** Pressing F12 in the guest traps into the stub (int3, DPL=3 gate). `gdb_stub_poll()` answers GDB's connect handshake while the OS is running, so you can attach at any time.
+- **Full Command Set:** register read/write (`g`/`G`/`p`/`P`, little-endian byte order), memory (`m`/`M`), software breakpoints (`Z0`/`z0`, 0xCC-based with original-byte restore), single-step (TF flag), continue, detach, and thread queries.
+- **Crash-Safe:** all I/O is bounded-polling; a stray int3 with no debugger attached resumes after a timeout instead of hanging. Memory access is clamped to identity-mapped RAM, and breakpoint addresses pass the same clamp.
+- **Debug Symbols:** `CFLAGS` now include `-g`, so `gdb myos.bin` resolves `kernel_main`, `gdb_stub_break`, and friends — verified: `0x00101991 in gdb_stub_break () at src/drivers/gdb_stub.c`.
+
+### 29. ELF32 Application Loader (src/sys/loader.c + scripts/build_elf.py)
+- **Auto-Detecting Loader:** `load_mct_app_with_arg()` sniffs the magic — `\x7fELF` routes to the ELF path, `MCT1` to the legacy path. Every existing launcher (desktop icons, `jalankan`, taskbar) supports ELF with no changes.
+- **Program-Header Based Mapping:** Parses the ELF header (full 16-byte `e_ident`, so field alignment is correct), validates the PHDR table with 64-bit math, and maps each `PT_LOAD` segment at its own `p_vaddr`, zero-filling the BSS remainder. Entry point comes from `e_entry`.
+- **Hardened Against Malformed Inputs:** segments are clamped to 16MB and kept below the shared-library region, PHDR-table overflow can't slip a crafted binary past the bounds check, and every segment is verified to lie inside the read file.
+- **Build Tooling:** `scripts/build_elf.py` produces a freestanding ELF32 ET_EXEC linked at `0x08000000` (entry `_start`) — the same layout as `.mct`, so existing apps build unchanged. Verified end-to-end: `apps/elfdemo.elf` boots, prints from Ring 3, and opens a window.
+
+### 30. Semaphores & Futexes (src/sys/sync.c + src/include/sync.h)
+- **Counting Semaphores:** id-based (`sys_sem_create` / `wait` / `post` / `destroy`) with FIFO wait queues. `wait` on count 0 parks the task in `TASK_STATE_BLOCKED`; `post` hands the token directly to the first waiter. Queue-full refuses to block instead of hanging the task forever.
+- **Futexes:** keyed by (address-space, address) — `sys_futex_wait(addr, expected)` sleeps only while `*addr == expected`, with the classic double-check under lock against missed wakeups; `sys_futex_wake` wakes up to N waiters and reclaims the slot when empty.
+- **Scheduler Integration:** a BLOCKED task is invisible to the scheduler's READY scan, so it burns zero CPU until woken — verified by `apps/syncdemo.elf` (two worker threads, semaphore + futex, clean exit).
+- **User Pointer Validation:** futex addresses pass `validate_user_ptr` before being dereferenced — an unmapped Ring 3 address can't page-fault the kernel.
+
+### 31. IRQ-Driven Networking & UDP API (src/drivers/net.c + src/drivers/rtl8139.c)
+- **RTL8139 Interrupts Enabled:** `RTL_IMR` now unmasks ROK/RER/TOK/TER, and IRQ 11 is routed through the I/O APIC to INT 43 (with a legacy-PIC fallback unmask).
+- **IRQ-Driven RX:** `net_irq_handler()` (registered for INT 43) drains the RX ring directly in interrupt context — packets are processed the instant they arrive, no more waiting for the main loop. `net_poll()` remains as a bounded, `cli`-wrapped fallback for the shell's busy-waits.
+- **UDP Datagram API:** `SYS_UDP_BIND` / `SYS_UDP_SEND` / `SYS_UDP_RECV` give Ring 3 apps a real UDP socket: bind a local port, send to any IP, and receive queued datagrams (single-socket design, DNS traffic stays separate). Verified by `apps/udptest.elf`.
+
 ---
 
 ## Syscall API Reference
@@ -327,6 +362,23 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 | 50 | SYS_CREATE_FILE | Directly create an empty file in VFS. EBX=filename |
 | 51 | SYS_LOAD_LIBRARY | Dynamically load a shared library base. EBX=lib_name_ptr → base address |
 
+### Synchronization — Semaphores & Futexes (61–66)
+| # | Name | Description |
+|---|------|-------------|
+| 61 | SYS_SEM_CREATE | Create counting semaphore. EBX=initial_count → sem_id |
+| 62 | SYS_SEM_WAIT | Block on semaphore. EBX=sem_id → 0/-1 (parks task when count==0) |
+| 63 | SYS_SEM_POST | Release semaphore. EBX=sem_id → 0/-1 (wakes one waiter) |
+| 64 | SYS_SEM_DESTROY | Destroy semaphore, wake all waiters. EBX=sem_id |
+| 65 | SYS_FUTEX_WAIT | Sleep while *addr==expected. EBX=addr, ECX=expected → 0 slept / -1 changed / -2 invalid |
+| 66 | SYS_FUTEX_WAKE | Wake waiters on addr. EBX=addr, ECX=max_waiters → woken count |
+
+### UDP Networking (67–69)
+| # | Name | Description |
+|---|------|-------------|
+| 67 | SYS_UDP_BIND | Bind local UDP port. EBX=port → 0/-1 |
+| 68 | SYS_UDP_SEND | Send UDP datagram. EBX=ip_ptr, ECX=dst_port, EDX=data, ESI=len → 0/-1 |
+| 69 | SYS_UDP_RECV | Receive queued UDP datagram. EBX=buf, ECX=max_len → bytes |
+
 ---
 
 ## Applications
@@ -346,6 +398,7 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 | Snake | Ring 3 (.mct) | Modern grid-based snake game in WM window with gradient body, score, speed scaling |
 | Mini Browser | Ring 3 (.mct) | Text-mode web browser navigating via host proxy gateway with scroll support |
 | Hello Ring 3 | Ring 3 (.mct) | Demo user-space app with isolated memory and GUI window |
+| ELF Demo | Ring 3 (.elf) | Proves the ELF loader — a real ELF32 binary with its own PT_LOAD segments running in Ring 3 |
 | GUI Calculator | Ring 3 (.mct) | Standalone external GUI calculator |
 | Power Options | Ring 0 | Shut Down, Restart, and Log Out dialog with accurate button hit-zones |
 | DOOM Engine | Ring 0 (Port) | Full integration of the legendary 1993 DOOM engine with graceful exit to desktop |
@@ -377,6 +430,30 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 3. **Format**: `python3 build_mct.py app.elf app.mct`
 4. **Deploy**: The `Makefile` automatically handles this and uses `inject_vfs.py` to bake the `.mct` binaries into `disk.img`.
 
+### Building ELF Applications (.elf)
+The kernel also loads standard ELF32 executables (auto-detected by magic):
+```bash
+python3 scripts/build_elf.py apps/elfdemo.c elfdemo.elf
+```
+This produces a freestanding ET_EXEC linked at `0x08000000` with entry `_start`. Embed and inject it into the VFS the same way the Makefile handles `elfdemo.elf` / `syncdemo.elf` / `udptest.elf`.
+
+### Debugging the Kernel with GDB
+```bash
+# Terminal 1 — boot QEMU with COM2 as a TCP server
+qemu-system-i386 -cdrom mectov.iso -m 128 -smp 4 \
+  -serial file:serial.log -serial tcp:127.0.0.1:2345,server=on,wait=off \
+  -drive file=disk.img,format=raw,index=0,media=disk
+
+# Terminal 2 — attach GDB (press F12 inside the guest to break in)
+gdb myos.bin -ex "target remote :2345" -ex "c"
+```
+
+### CI Boot Test
+```bash
+python3 scripts/boot_test.py   # boots mectov.iso in QEMU, logs in, checks BOOTED KERNEL LOOP
+```
+The `.github/workflows/build-boot-test.yml` workflow runs this on every push — build, ISO, QEMU boot (no KVM), login, and smoke window, all in CI.
+
 ---
 
 ---
@@ -385,6 +462,7 @@ User mode applications are written in C, compiled with `gcc -m32`, and processed
 
 | Version | Highlights |
 |---|---|
+| v35.0 | **SMP, In-Kernel GDB, ELF Loader & Synchronization Update:** Fixed the ACPI table walker (RSDT/XSDT + MADT) so SMP actually boots all 4 cores; added a GDB Remote Serial Protocol stub on COM2 (F12 break, breakpoints, single-step, DWARF symbols); added a hardened ELF32 ET_EXEC loader alongside `.mct`; added kernel semaphores and address-space-keyed futexes (`TASK_STATE_BLOCKED`, zero CPU while parked); switched the RTL8139 to IRQ-driven RX (I/O APIC route, INT 43) and exposed a UDP bind/send/recv syscall API; bundled the wallpaper into the repo; and added a GitHub Actions CI boot test (build + QEMU login + smoke). |
 | v34.3 | **Scheduler, VFS Reclamation, and TCP Buffer Update:** Overhauled the scheduler with a starvation-proof priority aging algorithm; implemented dynamic first-fit VFS sector reclamation to resolve file deletion leaks; and upgraded TCP receive path to a 64KB buffer with dynamic window advertising and partial read shifting. |
 | v34.2 | **Memory & Syscall Hardening Update:** Enforced integer overflow checks on `kmalloc` and `kcalloc` sizes; protected `frame_ref_count` from uint8_t overflow via saturation capping; and secured `SYS_EXEC_CMD` and `SYS_KILL_TASK` syscalls to restrict shell access and task termination to authorized binaries (`terminal.mct`, `explorer.mct`, `taskmgr.mct`). |
 | v34.1 | **Kernel Ownership Hardening Update:** Centralized logout/session cleanup through `wm_reset_session()` so the taskbar and kernel no longer duplicate teardown; hardened syscall array validation for window/PCI/clipboard buffers; fixed VFS path splitting and bootstrap directory creation; aligned shell sleep with its documented seconds-based behavior; added browser request timeouts; and tightened ACPI EBDA/MADT discovery bounds. |

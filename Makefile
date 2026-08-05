@@ -2,7 +2,9 @@ CC = gcc
 AS = nasm
 LD = ld
 
-CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra
+CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g
+# -g keeps DWARF debug info in myos.bin so GDB can resolve kernel symbols
+# (break kernel_main, bt, list, etc.) when debugging via the in-kernel stub.
 LDFLAGS = -m elf_i386 -T linker.ld
 ASFLAGS = -f elf32
 
@@ -49,6 +51,9 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/volume_mct.o \
        $(OBJ_DIR)/mplayer_mct.o \
        $(OBJ_DIR)/music_wav.o \
+       $(OBJ_DIR)/elfdemo_elf.o \
+       $(OBJ_DIR)/syncdemo_elf.o \
+       $(OBJ_DIR)/udptest_elf.o \
        $(DOOM_OBJS) \
        $(OBJ_DIR)/doom1_wad.o
 
@@ -175,11 +180,32 @@ $(OBJ_DIR)/mplayer_mct.o: mplayer.mct | $(OBJ_DIR)
 $(OBJ_DIR)/music_wav.o: apps/music.wav | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 apps/music.wav $(OBJ_DIR)/music_wav.o
 
+# ELF demo app: built as a real ELF32 ET_EXEC and embedded for VFS injection
+elfdemo.elf: apps/elfdemo.c
+	python3 scripts/build_elf.py apps/elfdemo.c elfdemo.elf
+
+$(OBJ_DIR)/elfdemo_elf.o: elfdemo.elf | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 elfdemo.elf $(OBJ_DIR)/elfdemo_elf.o
+
+# Sync demo (semaphore + futex test, built as ELF)
+syncdemo.elf: apps/syncdemo.c
+	python3 scripts/build_elf.py apps/syncdemo.c syncdemo.elf
+
+$(OBJ_DIR)/syncdemo_elf.o: syncdemo.elf | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 syncdemo.elf $(OBJ_DIR)/syncdemo_elf.o
+
+# UDP test app (validates the UDP syscall API)
+udptest.elf: apps/udptest.c
+	python3 scripts/build_elf.py apps/udptest.c udptest.elf
+
+$(OBJ_DIR)/udptest_elf.o: udptest.elf | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 udptest.elf $(OBJ_DIR)/udptest_elf.o
+
 $(OBJ_DIR)/wallpaper.o: $(OBJ_DIR)/wallpaper.bin | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
-$(OBJ_DIR)/wallpaper.bin:
-	python3 scratch/build_wallpaper.py /home/mectov/.gemini/antigravity/brain/1701ced2-e485-4124-afac-9fa8400a902f/media__1777482843135.png $@
+$(OBJ_DIR)/wallpaper.bin: assets/wallpaper.png
+	python3 scratch/build_wallpaper.py assets/wallpaper.png $@
 
 # DOOM WAD file embedded as object
 $(OBJ_DIR)/doom1_wad.o: doom1.wad | $(OBJ_DIR)
@@ -200,6 +226,6 @@ clean:
 	rm -rf $(OBJ_DIR) myos.bin
 
 clean_all: clean
-	rm -f *.mct
+	rm -f *.mct *.elf
 
 .PHONY: all clean clean_all

@@ -74,15 +74,15 @@
 #define TOARU_BTN_HOV     0x00555555  // Titlebar button hover (subtle flat)
 #define TOARU_BTN_GLYPH   0x00E6E6E6  // Titlebar button glyph
 
-// ---- Flat dark taskbar (matches ToaruOS window chrome) ----
-#define TB_BG        0x002D2D2D  // Taskbar background      RGB(45,45,45)
-#define TB_BORDER    0x00505050  // Top border / 1px borders RGB(80,80,80)
-#define TB_BTN       0x00373737  // Normal task button       RGB(55,55,55)
-#define TB_BTN_HOV   0x00404040  // Hovered button (subtle)
-#define TB_BTN_ACT   0x00464646  // Active task button       RGB(70,70,70)
-#define TB_TEXT      0x00E6E6E6  // Primary text             RGB(230,230,230)
-#define TB_TEXT_DIM  0x00A0A0A0  // Secondary text           RGB(160,160,160)
-#define TB_ACTIVE    0x0000FFFF  // Active task indicator (cyan)
+// ---- Classic taskbar (ReactOS / Windows 2000 style) ----
+#define TB_BG        0x00C0C0C0  // Taskbar background      RGB(192,192,192)
+#define TB_BORDER    0x00808080  // 1px borders / shadow    dark gray
+#define TB_BTN       0x00C0C0C0  // Normal task button face (gray)
+#define TB_BTN_HOV   0x00D0D0D0  // Hovered button (slightly lighter)
+#define TB_BTN_ACT   0x00000080  // Selection blue (start menu / pressed)
+#define TB_TEXT      0x00000000  // Primary text             black
+#define TB_TEXT_DIM  0x00808080  // Secondary text           dark gray
+#define TB_ACTIVE    0x00000080  // Selection / today circle (classic blue)
 
 // Icon backgrounds
 #define GUI_ICON_BG  0x00222233
@@ -95,14 +95,13 @@
 
 // ---- Layout constants ----
 #define TITLEBAR_H   20          // Was 24 — more compact like toaruOS
-#define TASKBAR_H_PX 32          // Was 28 — more room for taskbar buttons
+#define TASKBAR_H_PX 28          // Classic ReactOS/Windows 2000 height
 #define WIN_RADIUS   8           // Window corner radius
 #define BTN_RADIUS   5           // Titlebar button radius (small circles)
 #define SHADOW_LAYERS 4          // Number of drop shadow layers
 
 // ---- Modern feature flags ----
 #define WINDOW_SNAP_THRESHOLD  20  // Pixels from edge to trigger snap
-#define TASKBAR_BTN_MAX_W     160  // Max width for taskbar window buttons
-#define TASKBAR_BTN_MIN_W      80  // Min width for taskbar window buttons
+#define TASKBAR_BTN_W         180  // Fixed task button width (classic)
 
 #endif

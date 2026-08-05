@@ -77,10 +77,22 @@ void init_rtl8139(void) {
     // 11. Clear all interrupt status
     outw(rtl_io_base + RTL_ISR, 0xFFFF);
 
-    // 12. Disable interrupts (we use polling)
-    outw(rtl_io_base + RTL_IMR, 0x0000);
+    // 12. Enable interrupts: ROK (rx ok), RER (rx err), TOK, TER, RXOVW.
+    // The NIC now drives the kernel via IRQ 11 instead of polling-only;
+    // net_poll() remains as a safety fallback for the shell's busy-waits.
+    outw(rtl_io_base + RTL_IMR, 0x000F);
 
     rtl_rx_offset = 0;
+}
+
+// IRQ entry: read + clear the NIC's interrupt status. Returns the raw ISR
+// value so the network layer can decide what to drain. Called from the
+// IRQ 11 handler with interrupts disabled.
+uint16_t rtl8139_irq_clear(void) {
+    if (!rtl_present) return 0;
+    uint16_t isr = inw(rtl_io_base + RTL_ISR);
+    if (isr) outw(rtl_io_base + RTL_ISR, isr); // write-1-to-clear
+    return isr;
 }
 
 void rtl8139_send_packet(void* data, uint32_t len) {

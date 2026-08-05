@@ -8,6 +8,13 @@
 #define PRIORITY_INTERACTIVE 1
 #define PRIORITY_BACKGROUND  0
 
+// Task states (shared with sync.c)
+#define TASK_STATE_FREE    0
+#define TASK_STATE_RUNNING 1
+#define TASK_STATE_READY   2
+#define TASK_STATE_SLEEP   3
+#define TASK_STATE_BLOCKED 4
+
 void init_tasking();
 int create_task(void (*entry)());
 int create_user_task(void (*entry)());
@@ -36,6 +43,10 @@ void task_set_page_dir(int tid, uint32_t page_dir);
 
 // Wake up a sleeping task (used by timer)
 void task_wake(int tid);
+
+// Blocked-state accessors for sync.c (semaphores/futexes)
+int task_get_state(int tid);
+void task_set_state(int tid, int state);
 
 // Check if a task is alive
 int task_is_alive(int tid);

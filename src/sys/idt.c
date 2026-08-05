@@ -10,6 +10,8 @@ isr_t       interrupt_handlers[256];
 
 // Assembly stubs (from interrupt_entry.asm)
 extern void isr0();
+extern void isr1();
+extern void isr3();
 extern void isr4();
 extern void isr13();
 extern void isr14();
@@ -18,6 +20,7 @@ extern void isr_default();
 extern void irq0();
 extern void irq1();
 extern void irq5();
+extern void irq11();
 extern void irq12();
 extern void idt_flush(uint32_t);
 
@@ -58,13 +61,16 @@ void idt_init() {
         outb(0x21, 0x20); outb(0xA1, 0x28);
         outb(0x21, 0x04); outb(0xA1, 0x02);
         outb(0x21, 0x01); outb(0xA1, 0x01);
-        // Unmask: IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade), IRQ5 (SB16), IRQ12 (mouse)
-        outb(0x21, 0xE8);
-        outb(0xA1, 0xEF);
+        // Unmask: IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade), IRQ5 (SB16),
+        // IRQ11 (RTL8139 NIC), IRQ12 (mouse)
+        outb(0x21, 0xE8);          // master: IRQ0,1,3,5,7
+        outb(0xA1, 0xEF ^ (1 << 3)); // slave: unmask IRQ11 (bit 3 = 0)
     }
 
     // CPU Exceptions
     idt_set_gate(0,  (uint32_t)isr0,  0x08, 0x8E);  // Division by Zero
+    idt_set_gate(1,  (uint32_t)isr1,  0x08, 0xEE);  // Debug/single-step (DPL=3 for GDB)
+    idt_set_gate(3,  (uint32_t)isr3,  0x08, 0xEE);  // Breakpoint (DPL=3 for GDB)
     idt_set_gate(4,  (uint32_t)isr4,  0x08, 0xEE);  // Overflow (DPL=3, INTO from Ring 3)
     idt_set_gate(13, (uint32_t)isr13, 0x08, 0x8E);  // General Protection Fault
     idt_set_gate(14, (uint32_t)isr14, 0x08, 0x8E);  // Page Fault
@@ -73,6 +79,7 @@ void idt_init() {
     idt_set_gate(32, (uint32_t)irq0,  0x08, 0x8E);  // Timer
     idt_set_gate(33, (uint32_t)irq1,  0x08, 0x8E);  // Keyboard
     idt_set_gate(37, (uint32_t)irq5,  0x08, 0x8E);  // Sound (SB16, IRQ5)
+    idt_set_gate(43, (uint32_t)irq11, 0x08, 0x8E);  // Network (RTL8139, IRQ11)
     idt_set_gate(44, (uint32_t)irq12, 0x08, 0x8E);  // Mouse
 
     // Syscall gate: int 0x80, DPL=3 (Ring 3 can call this)
@@ -129,6 +136,14 @@ uint32_t irq_handler(uint32_t esp) {
 #include "../include/mem.h"
 
 void isr_handler(registers_t *r) {
+    // GDB stub: single-step (int 1) and breakpoint (int 3) traps are
+    // consumed here when the debugger is active, so they never reach the
+    // normal exception path (which would kill the task / panic the kernel).
+    if (r->int_no == 1 || r->int_no == 3) {
+        extern int gdb_stub_handle_trap(registers_t*);
+        if (gdb_stub_handle_trap(r)) return;
+    }
+
     if (r->int_no == 14) {
         uint32_t faulting_address;
         __asm__ __volatile__("mov %%cr2, %0" : "=r"(faulting_address));

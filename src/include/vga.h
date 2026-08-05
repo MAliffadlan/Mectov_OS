@@ -47,7 +47,11 @@ extern uint32_t  active_rt_height;
 extern uint32_t  active_rt_pitch;
 
 void vga_set_render_target(uint32_t* buf, int w, int h, int pitch);
-void vga_blit_buffer(uint32_t* src, int sw, int sh, int dx, int dy);
+// Blit a [sw x sh] region from src to the back buffer at (dx,dy). src_pitch is
+// the source row stride IN PIXELS — it may be wider than sw when the source is
+// a sub-region of a larger buffer (WM resize preview blits a crop of a buffer
+// kept at its last committed size).
+void vga_blit_buffer(uint32_t* src, int sw, int sh, int src_pitch, int dx, int dy);
 
 // ---- Drawing primitives (all write to back_buffer) ----
 void put_pixel(int x, int y, uint32_t color);

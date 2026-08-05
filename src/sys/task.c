@@ -13,11 +13,7 @@ static spinlock_t task_lock = SPINLOCK_INIT;
 // USER_STACK_SIZE now lives in vmm.h — the Ring 3 stack is mapped into the
 // task's own address space, not carved out of this struct.
 
-// Task states
-#define TASK_STATE_FREE    0
-#define TASK_STATE_RUNNING 1
-#define TASK_STATE_READY   2
-#define TASK_STATE_SLEEP   3  // NEW: sleeping for N ticks
+// Task states come from task.h (TASK_STATE_FREE/RUNNING/READY/SLEEP/BLOCKED)
 
 typedef struct {
     uint32_t esp;          // Saved stack pointer (points to register frame)
@@ -393,6 +389,20 @@ void task_wake(int tid) {
         tasks[tid].sleep_ticks = 0;
         tasks[tid].state = TASK_STATE_READY;
     }
+}
+
+// Blocked-state accessors for sync.c (semaphores/futexes).
+// A BLOCKED task is invisible to the scheduler's READY scan, so it stops
+// consuming CPU until sync.c flips it back to READY.
+int task_get_state(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return TASK_STATE_FREE;
+    return tasks[tid].state;
+}
+
+void task_set_state(int tid, int state) {
+    if (tid < 0 || tid >= MAX_TASKS) return;
+    tasks[tid].state = state;
+    if (state == TASK_STATE_READY) tasks[tid].sleep_ticks = 0;
 }
 
 // Get/set priority

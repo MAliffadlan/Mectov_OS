@@ -107,6 +107,11 @@ void ioapic_init(void) {
     entry_sb16 |= ((uint64_t)smp_bsp_lapic_id) << 56;
     ioapic_set_entry(5, entry_sb16);
 
+    // Route IRQ11 (RTL8139 NIC) to APIC INT 43
+    uint64_t entry_net = 43 | (0 << 8) | (0 << 11) | (0 << 13) | (0 << 15) | (0 << 16);
+    entry_net |= ((uint64_t)smp_bsp_lapic_id) << 56;
+    ioapic_set_entry(11, entry_net);
+
     // Route Timer to GSI dynamically parsed from MADT (smp_pit_gsi)
     uint64_t entry_pit = 32 | (0 << 8) | (0 << 11) | (0 << 13) | (0 << 15) | (0 << 16);
     entry_pit |= ((uint64_t)smp_bsp_lapic_id) << 56;
@@ -114,7 +119,7 @@ void ioapic_init(void) {
     
     // Mask the rest
     for (uint32_t i = 0; i <= max_intr; i++) {
-        if (i != smp_pit_gsi && i != 1 && i != 5 && i != 12) {
+        if (i != smp_pit_gsi && i != 1 && i != 5 && i != 11 && i != 12) {
             ioapic_set_entry(i, 0x10000); // Set mask bit
         }
     }

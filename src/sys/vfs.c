@@ -242,6 +242,21 @@ void vfs_init() {
         extern uint8_t _binary_flappy_mct_end[];
         changed += vfs_update_file_if_needed("apps/flappy.mct", (const char*)_binary_flappy_mct_start, _binary_flappy_mct_end - _binary_flappy_mct_start);
 
+        // ELF demo app (real ELF32 binary, not MCT)
+        extern uint8_t _binary_elfdemo_elf_start[];
+        extern uint8_t _binary_elfdemo_elf_end[];
+        changed += vfs_update_file_if_needed("apps/elfdemo.elf", (const char*)_binary_elfdemo_elf_start, _binary_elfdemo_elf_end - _binary_elfdemo_elf_start);
+
+        // Sync demo app (semaphore + futex test, ELF)
+        extern uint8_t _binary_syncdemo_elf_start[];
+        extern uint8_t _binary_syncdemo_elf_end[];
+        changed += vfs_update_file_if_needed("apps/syncdemo.elf", (const char*)_binary_syncdemo_elf_start, _binary_syncdemo_elf_end - _binary_syncdemo_elf_start);
+
+        // UDP test app (validates UDP syscall API)
+        extern uint8_t _binary_udptest_elf_start[];
+        extern uint8_t _binary_udptest_elf_end[];
+        changed += vfs_update_file_if_needed("apps/udptest.elf", (const char*)_binary_udptest_elf_start, _binary_udptest_elf_end - _binary_udptest_elf_start);
+
         if (changed > 0) {
             write_serial_string("[VFS] saving...\n");
             vfs_save();
@@ -356,6 +371,24 @@ void vfs_init() {
     extern uint8_t _binary_libc_mct_end[];
     vfs_create_file("apps/libc.mct");
     vfs_write_file("apps/libc.mct", (const char*)_binary_libc_mct_start, _binary_libc_mct_end - _binary_libc_mct_start);
+
+    // ELF demo app (real ELF32 binary)
+    extern uint8_t _binary_elfdemo_elf_start[];
+    extern uint8_t _binary_elfdemo_elf_end[];
+    vfs_create_file("apps/elfdemo.elf");
+    vfs_write_file("apps/elfdemo.elf", (const char*)_binary_elfdemo_elf_start, _binary_elfdemo_elf_end - _binary_elfdemo_elf_start);
+
+    // Sync demo app (semaphore + futex test, ELF)
+    extern uint8_t _binary_syncdemo_elf_start[];
+    extern uint8_t _binary_syncdemo_elf_end[];
+    vfs_create_file("apps/syncdemo.elf");
+    vfs_write_file("apps/syncdemo.elf", (const char*)_binary_syncdemo_elf_start, _binary_syncdemo_elf_end - _binary_syncdemo_elf_start);
+
+    // UDP test app (validates UDP syscall API)
+    extern uint8_t _binary_udptest_elf_start[];
+    extern uint8_t _binary_udptest_elf_end[];
+    vfs_create_file("apps/udptest.elf");
+    vfs_write_file("apps/udptest.elf", (const char*)_binary_udptest_elf_start, _binary_udptest_elf_end - _binary_udptest_elf_start);
     
     // Calc
     extern uint8_t _binary_calc_mct_start[];

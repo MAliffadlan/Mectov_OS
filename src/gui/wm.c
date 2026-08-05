@@ -643,7 +643,13 @@ static void draw_one(int idx) {
         if (w->content_buffer) {
             int blit_w = (w->last_cw < cw2) ? w->last_cw : cw2;
             int blit_h = (w->last_ch < ch2) ? w->last_ch : ch2;
-            vga_blit_buffer(w->content_buffer, blit_w, blit_h, cx2, cy2);
+            // src_pitch = w->last_cw, NOT blit_w: the buffer keeps its last
+            // committed row width during a drag (grow-only, deferred realloc),
+            // so when the window is SHRUNK below the buffer width, blitting
+            // with stride==blit_w would read row n from the middle of row n-1
+            // and skew/garb the preserved content. This was the visible
+            // "resize glitch" while dragging smaller.
+            vga_blit_buffer(w->content_buffer, blit_w, blit_h, w->last_cw, cx2, cy2);
             if (blit_w < cw2) draw_rect(cx2 + blit_w, cy2, cw2 - blit_w, ch2, 0x001E1E2E);
             if (blit_h < ch2) draw_rect(cx2, cy2 + blit_h, cw2, ch2 - blit_h, 0x001E1E2E);
         }
@@ -700,6 +706,10 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
 
                     // Clamp to screen: an unbounded window grew cw2*ch2*4
                     // allocations beyond any sane size on every resize frame.
+                    // Left/top edges: dragging them off-screen would push the
+                    // window's x/y negative; pull the opposite edge back in.
+                    if (new_x < 0) { new_w += new_x; new_x = 0; }
+                    if (new_y < 0) { new_h += new_y; new_y = 0; }
                     if (new_x + new_w > (int)fb_width) new_w = (int)fb_width - new_x;
                     if (new_y + new_h > (int)fb_height) new_h = (int)fb_height - new_y;
                     if (new_w < 220) new_w = 220;

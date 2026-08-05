@@ -1,0 +1,58 @@
+name: Build & Boot Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            gcc-multilib \
+            nasm \
+            grub-pc-bin \
+            xorriso \
+            qemu-system-x86 \
+            python3-pil \
+            e2fsprogs
+
+      - name: Build kernel
+        run: |
+          make clean_all
+          make
+          test -f myos.bin && echo "myos.bin built OK"
+
+      - name: Build boot ISO
+        run: |
+          mkdir -p iso/boot/grub
+          cp myos.bin iso/boot/
+          cat > iso/boot/grub/grub.cfg << 'EOF'
+          set timeout=0
+          set default=0
+          menuentry "Mectov OS" {
+              multiboot /boot/myos.bin
+              boot
+          }
+          EOF
+          grub-mkrescue -o mectov.iso iso
+          test -f mectov.iso && echo "mectov.iso built OK"
+
+      - name: Create disk images
+        run: |
+          # Fresh, empty images — the same way run.sh creates them locally.
+          dd if=/dev/zero of=disk.img bs=512 count=2048 status=none
+          dd if=/dev/zero of=ext2.img bs=1M count=2 status=none
+          mkfs.ext2 -F ext2.img > /dev/null 2>&1
+
+      - name: Boot test in QEMU (no KVM)
+        run: |
+          python3 scripts/boot_test.py --timeout 240

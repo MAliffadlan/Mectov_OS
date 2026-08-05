@@ -121,6 +121,27 @@ isr0:
     jmp isr_common_stub
 
 ; ============================================================
+; ISR 1: Debug / single-step trap (no error code)
+; Routed to the GDB stub when active.
+; ============================================================
+global isr1
+isr1:
+    push byte 0
+    push byte 1
+    jmp isr_common_stub
+
+; ============================================================
+; ISR 3: Breakpoint (int3, no error code)
+; Routed to the GDB stub when active. DPL=3 gate lets Ring 3
+; apps trigger it too.
+; ============================================================
+global isr3
+isr3:
+    push byte 0
+    push byte 3
+    jmp isr_common_stub
+
+; ============================================================
 ; ISR 4: Overflow (INTO instruction, no error code)
 ; DPL=3 in IDT so Ring 3 apps can trigger this safely.
 ; ============================================================
@@ -162,6 +183,7 @@ isr14:
 IRQ 0, 32    ; Timer
 IRQ 1, 33    ; Keyboard
 IRQ 5, 37    ; Sound (SB16)
+IRQ 11, 43   ; Network (RTL8139)
 IRQ 12, 44   ; Mouse
 
 ; ============================================================

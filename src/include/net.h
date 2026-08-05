@@ -2,6 +2,7 @@
 #define NET_H
 
 #include "types.h"
+#include "idt.h"  // registers_t (for net_irq_handler)
 
 // Ethernet frame header (14 bytes)
 typedef struct __attribute__((packed)) {
@@ -136,6 +137,15 @@ void net_poll(void);
 void net_send_ping(uint8_t* target_ip);
 void net_send_arp_request(uint8_t* target_ip_addr);
 void net_send_dns_query(const char* domain);
+
+// IRQ-driven RX (called from IRQ 11 handler)
+void net_irq_handler(registers_t* r);
+
+// UDP API (Ring 3 accessible)
+int net_udp_bind(uint16_t port);
+int net_udp_send(uint8_t* target_ip, uint16_t dst_port, void* payload, uint32_t payload_len);
+int net_udp_recv(uint8_t* out, uint32_t max_len);
+void net_udp_peer(uint8_t* ip_out, uint16_t* port_out);
 
 // Utility
 uint16_t htons(uint16_t val);

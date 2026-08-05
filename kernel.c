@@ -141,6 +141,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     
     write_serial_string("[K] idt\n");
     idt_init();
+
+    write_serial_string("[K] gdbstub\n");
+    extern void gdb_stub_init(void);
+    gdb_stub_init();
     
     write_serial_string("[K] apic\n");
     extern void apic_init(void);
@@ -172,6 +176,11 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] net\n");
     extern void net_init();
     net_init();
+    // IRQ-driven RX: wire the RTL8139 IRQ (INT 43) to the network layer.
+    // net_poll() stays as a fallback for shell busy-waits.
+    extern void register_interrupt_handler(uint8_t n, isr_t handler);
+    extern void net_irq_handler(registers_t*);
+    register_interrupt_handler(43, net_irq_handler);
     // init_serial already called at top of kernel_main
     write_serial_string("[K] uptime\n");
     init_uptime();
@@ -322,6 +331,12 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         if (!doom_fullscreen) {
             uint8_t sc = k_get_scancode();
             if (sc != 0) {
+                // F12 = break into the in-kernel GDB stub (see gdb_stub.c)
+                if (sc == 0x58) {
+                    extern void gdb_stub_break(void);
+                    gdb_stub_break();
+                    needs_redraw = 1;
+                }
                 extern int keyboard_alt_held;
                 extern int alt_tab_active;
                 extern void wm_alt_tab_start(void);
@@ -356,6 +371,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                 }
             }
         }
+
+        // Answer GDB `target remote` handshake while the OS is running.
+        extern void gdb_stub_poll(void);
+        gdb_stub_poll();
 
         extern void net_poll();
         net_poll();

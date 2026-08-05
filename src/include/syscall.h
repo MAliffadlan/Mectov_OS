@@ -108,6 +108,19 @@ typedef struct {
 #define SYS_MKDIR          59  // EBX=path_ptr -> returns 0/-1
 #define SYS_RENAME_FILE    60  // EBX=old_path_ptr, ECX=new_path_ptr -> returns 0/-1
 
+// Synchronization (semaphores & futexes)
+#define SYS_SEM_CREATE     61  // EBX=initial_count -> returns sem_id or -1
+#define SYS_SEM_WAIT       62  // EBX=sem_id -> returns 0/-1 (blocks if count==0)
+#define SYS_SEM_POST       63  // EBX=sem_id -> returns 0/-1
+#define SYS_SEM_DESTROY    64  // EBX=sem_id -> returns 0/-1
+#define SYS_FUTEX_WAIT     65  // EBX=addr, ECX=expected -> 0 slept, -1 value changed
+#define SYS_FUTEX_WAKE     66  // EBX=addr, ECX=max_waiters -> returns woken count
+
+// UDP networking
+#define SYS_UDP_BIND       67  // EBX=port -> returns 0/-1
+#define SYS_UDP_SEND       68  // EBX=ip_ptr, ECX=dst_port, EDX=data_ptr, ESI=len -> 0/-1
+#define SYS_UDP_RECV       69  // EBX=buf_ptr, ECX=max_len -> bytes copied
+
 // Virtual Memory
 #define SYS_VMM_MAP        29  // EBX=vaddr, ECX=paddr, EDX=flags → return 0/-1
 #define SYS_VMM_ALLOC      30  // EBX=vaddr, ECX=flags → return vaddr or 0
@@ -189,6 +202,12 @@ static inline uint32_t sys_get_ticks(void) {
 
 static inline void sys_yield(void) {
     syscall(SYS_YIELD, 0, 0, 0);
+}
+
+static inline int sys_thread_create(void (*entry)(), int priority) {
+    // The kernel ignores EDX (page_dir) for security — a thread always shares
+    // its creator's address space.
+    return syscall(SYS_THREAD_CREATE, (int)entry, priority, 0);
 }
 
 static inline void sys_exit(void) {
@@ -366,6 +385,37 @@ static inline int sys_mkdir(const char* path) {
 
 static inline int sys_rename_file(const char* old_path, const char* new_path) {
     return syscall(SYS_RENAME_FILE, (int)old_path, (int)new_path, 0);
+}
+
+// Synchronization syscalls (semaphores & futexes)
+static inline int sys_sem_create(int initial) {
+    return syscall(SYS_SEM_CREATE, initial, 0, 0);
+}
+static inline int sys_sem_wait(int sem_id) {
+    return syscall(SYS_SEM_WAIT, sem_id, 0, 0);
+}
+static inline int sys_sem_post(int sem_id) {
+    return syscall(SYS_SEM_POST, sem_id, 0, 0);
+}
+static inline int sys_sem_destroy(int sem_id) {
+    return syscall(SYS_SEM_DESTROY, sem_id, 0, 0);
+}
+static inline int sys_futex_wait(void* addr, uint32_t expected) {
+    return syscall(SYS_FUTEX_WAIT, (int)addr, (int)expected, 0);
+}
+static inline int sys_futex_wake(void* addr, int max_waiters) {
+    return syscall(SYS_FUTEX_WAKE, (int)addr, max_waiters, 0);
+}
+
+// UDP syscalls
+static inline int sys_udp_bind(uint16_t port) {
+    return syscall(SYS_UDP_BIND, port, 0, 0);
+}
+static inline int sys_udp_send(uint8_t* ip, uint16_t dst_port, const void* data, int len) {
+    return syscall5(SYS_UDP_SEND, (int)ip, dst_port, (int)data, len, 0);
+}
+static inline int sys_udp_recv(void* buf, int max_len) {
+    return syscall(SYS_UDP_RECV, (int)buf, max_len, 0);
 }
 
 // IPC syscalls (stubs for Ring 3)

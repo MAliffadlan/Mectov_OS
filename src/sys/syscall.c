@@ -320,6 +320,9 @@ static void syscall_handler(registers_t* regs) {
         case SYS_TCP_SEND:
         case SYS_TCP_RECV:
         case SYS_NET_STATUS:
+        case SYS_UDP_BIND:
+        case SYS_UDP_SEND:
+        case SYS_UDP_RECV:
             regs->eax = handle_syscall_net(regs);
             break;
 
@@ -344,6 +347,38 @@ static void syscall_handler(registers_t* regs) {
         case SYS_SET_STDOUT_IPC:
             regs->eax = handle_syscall_ipc(regs);
             break;
+
+        // ----- Synchronization: semaphores & futexes (sync.c) -----
+        case SYS_SEM_CREATE: {
+            extern int sem_create(int);
+            regs->eax = (uint32_t)sem_create((int)regs->ebx);
+            break;
+        }
+        case SYS_SEM_WAIT: {
+            extern int sem_wait(int);
+            regs->eax = (uint32_t)sem_wait((int)regs->ebx);
+            break;
+        }
+        case SYS_SEM_POST: {
+            extern int sem_post(int);
+            regs->eax = (uint32_t)sem_post((int)regs->ebx);
+            break;
+        }
+        case SYS_SEM_DESTROY: {
+            extern int sem_destroy(int);
+            regs->eax = (uint32_t)sem_destroy((int)regs->ebx);
+            break;
+        }
+        case SYS_FUTEX_WAIT: {
+            extern int futex_wait(uint32_t, uint32_t);
+            regs->eax = (uint32_t)futex_wait((uint32_t)regs->ebx, (uint32_t)regs->ecx);
+            break;
+        }
+        case SYS_FUTEX_WAKE: {
+            extern int futex_wake(uint32_t, int);
+            regs->eax = (uint32_t)futex_wake((uint32_t)regs->ebx, (int)regs->ecx);
+            break;
+        }
 
         // ----- SYS_PRINT (1): Print string to terminal -----
         case SYS_PRINT: {
@@ -664,6 +699,8 @@ static void syscall_handler(registers_t* regs) {
 // ============================================================
 void init_syscalls(void) {
     fd_init();
+    extern void sync_init(void);
+    sync_init();
     register_interrupt_handler(0x80, syscall_handler);
 }
 

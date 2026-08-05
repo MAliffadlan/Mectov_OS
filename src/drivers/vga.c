@@ -46,8 +46,9 @@ void vga_set_render_target(uint32_t* buf, int w, int h, int pitch) {
 // rather than to the active render target, so the clip rect (which is in
 // render target coordinates) deliberately does not apply — only the screen
 // bounds do.
-void vga_blit_buffer(uint32_t* src, int sw, int sh, int dx, int dy) {
+void vga_blit_buffer(uint32_t* src, int sw, int sh, int src_pitch, int dx, int dy) {
     if (!src || !back_buffer) return;
+    if (src_pitch <= 0) src_pitch = sw; // defensive: never divide/step by 0
     int x0 = dx < 0 ? 0 : dx;
     int y0 = dy < 0 ? 0 : dy;
     int x1 = dx + sw > (int)fb_width  ? (int)fb_width  : dx + sw;
@@ -56,7 +57,7 @@ void vga_blit_buffer(uint32_t* src, int sw, int sh, int dx, int dy) {
     
     mark_dirty(x0, y0, x1 - x0, y1 - y0);
     
-    uint32_t src_stride = sw;
+    uint32_t src_stride = src_pitch; // real source row width (may be > sw)
     uint32_t dst_stride = bb_pitch / 4;
     
     for (int y = y0; y < y1; y++) {

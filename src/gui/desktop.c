@@ -28,6 +28,7 @@ static void open_browser_wrapper() { load_mct_app("/apps/browser.mct"); }
 static void open_taskmgr_wrapper() { load_mct_app("/apps/taskmgr.mct"); }
 static void open_flappy_wrapper() { load_mct_app("/apps/flappy.mct"); }
 static void open_notepad_wrapper() { load_mct_app("/apps/notepad.mct"); }
+static void open_elfdemo_wrapper() { load_mct_app("/apps/elfdemo.elf"); }
 
 #define ICON_W  72
 #define ICON_H  80
@@ -77,6 +78,9 @@ static void init_icons() {
     // Notepad
     icons[10] = (Icon){ start_x + 2 * grid_gap_x, start_y + 2 * grid_gap_y, "Notepad",  open_notepad_wrapper };
 
+    // ELF Demo (real ELF32 binary — proves the ELF loader)
+    icons[11] = (Icon){ start_x + 3 * grid_gap_x, start_y + 2 * grid_gap_y, "ELF Demo", open_elfdemo_wrapper };
+
     // Load saved positions (with validation to prevent corrupt data)
     int read_buf[ICON_COUNT * 2];
     int sz = vfs_read_file("icons.cfg", (char*)read_buf, sizeof(read_buf));
@@ -121,6 +125,7 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
     else if (strcmp(label, "Snake") == 0) bg_col = 0x0038A169; // Green
     else if (strcmp(label, "Flappy") == 0) bg_col = 0x00ECC94B; // Yellow
     else if (strcmp(label, "Notepad") == 0) bg_col = 0x00E2E8F0; // Light gray
+    else if (strcmp(label, "ELF Demo") == 0) bg_col = 0x00B83280; // Magenta-ish (ELF purple)
     else bg_col = 0x00718096; // Default Gray
 
     // Draw base rounded squircle
@@ -191,6 +196,10 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
         draw_rect(cx + 2, cy - 4, 2, 2, 0x00000000); // Eye
         draw_rect(cx + 6, cy, 4, 4, 0x00E53E3E); // Beak (Reddish)
         draw_rect(cx - 10, cy, 4, 4, 0x00FFFFFF); // Wing
+    } else if (strcmp(label, "ELF Demo") == 0) {
+        // "ELF" text glyph — proves this app is a real ELF binary
+        draw_string_px(cx - 14, cy - 8, "ELF", 0x00FFFFFF, 0x00B83280);
+        draw_rect(cx - 10, cy + 4, 20, 2, 0x00FFFFFF);
     } else {
         // Generic App glyph
         draw_rect(cx - 8, cy - 10, 16, 20, 0x002D3748);

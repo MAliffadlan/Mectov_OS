@@ -3,13 +3,17 @@
 
 #include "types.h"
 
-// Root System Description Pointer
+// Root System Description Pointer (ACPI 1.0 + 2.0 extension)
 typedef struct {
     char signature[8];
     uint8_t checksum;
     char oemid[6];
     uint8_t revision;
     uint32_t rsdt_address;
+    uint32_t length;         // ACPI 2.0+: total RSDP length (36)
+    uint64_t xsdt_address;   // ACPI 2.0+: 64-bit XSDT pointer
+    uint8_t extended_checksum;
+    uint8_t reserved[3];
 } __attribute__((packed)) rsdp_t;
 
 // Standard ACPI Table Header

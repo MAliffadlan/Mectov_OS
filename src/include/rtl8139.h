@@ -28,6 +28,7 @@
 void init_rtl8139(void);
 void rtl8139_send_packet(void* data, uint32_t len);
 int  rtl8139_poll_rx(uint8_t* out_buf, uint32_t max_len);
+uint16_t rtl8139_irq_clear(void);  // IRQ entry: read+clear ISR, return raw value
 
 extern uint8_t rtl_mac[6];
 extern int rtl_present;
