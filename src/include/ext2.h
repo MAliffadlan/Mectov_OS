@@ -124,5 +124,10 @@ int ext2_rename_entry(uint32_t parent_inode, const char* old_name,
                       const char* new_name, uint32_t inode_num);
 // Query an inode's current file size (used by the VFS layer after create).
 uint32_t ext2_inode_size(uint32_t inode_num);
+// Query superblock capacity counters (used by the shell's `df`). Returns 0 on
+// success, -1 if the filesystem is not initialized.
+int ext2_get_stats(uint32_t* total_blocks, uint32_t* free_blocks,
+                   uint32_t* total_inodes, uint32_t* free_inodes,
+                   uint32_t* block_size);
 
 #endif

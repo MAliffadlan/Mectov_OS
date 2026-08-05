@@ -18,6 +18,7 @@
 #include "../include/loader.h"
 #include "../include/rtc.h"
 #include "../include/task.h"
+#include "../include/ext2.h"
 
 // --- Command buffer & state ---
 char cmd_b[CMD_BUF_SIZE]; int b_idx = 0;
@@ -160,7 +161,7 @@ void expand_alias(char* out, const char* in, int max_len) {
 
 const char* cmd_list[] = {
     "help","clear","mfetch","mem","memstat","kmemstats","uptime","vfsinfo",
-    "ls","cd","pwd","mkdir","touch","cat","tree","rm",
+    "ls","cd","pwd","mkdir","touch","cat","tree","rm","rmdir","cp","mv","df",
     "buat","tulis","edit","nano","baca","hapus",
     "sh","source","export","alias","unalias","history","ps","kill",
     "echo","beep","nada","tunggu","waktu","warna","kunci",
@@ -478,7 +479,7 @@ static void run_cmd_internal() {
         print("                ⚡ MECTOV OS v27.0 - COMMAND CENTER ⚡                \n", 0x0F);
         print("======================================================================\n", 0x0B);
         print(" SYSTEM  : ", 0x0B); print("mfetch, waktu, warna, clear, mem, memstat, kmemstats, uptime, kunci, ps, kill\n", 0x0F);
-        print(" FILE VFS: ", 0x0B); print("ls, cd, pwd, mkdir, touch, cat, tree, rm, buat, hapus\n", 0x0F);
+        print(" FILE VFS: ", 0x0B); print("ls, cd, pwd, mkdir, touch, cat, tree, rm, rmdir, cp, mv, df, buat, hapus\n", 0x0F);
         print(" EDITOR  : ", 0x0B); print("nano, edit, tulis, baca\n", 0x0F);
         print(" SHELL   : ", 0x0B); print("export [NAME=VAL], alias [NAME=VAL], unalias, history, sh\n", 0x0F);
         print(" APPS GUI: ", 0x0B); print("flappy, doom, taskmgr, ular, jalankan [app.mct]\n", 0x0A);
@@ -741,6 +742,189 @@ static void run_cmd_internal() {
         int res = vfs_delete_node(fpath);
         if (res < 0) {
             print("rm: failed\n", 0x0C);
+        }
+    }
+    // --- RMDIR (remove empty directory) ---
+    else if (strncmp(cmd_b, "rmdir ", 6) == 0) {
+        char* dpath = cmd_b + 6;
+        sanitize_path(dpath);
+        int node = vfs_get_node(dpath);
+        if (node < 0 || !vfs_is_dir(node)) {
+            print("rmdir: not a directory: ", 0x0C);
+            print(dpath, 0x0C);
+            print("\n", 0x0C);
+        } else {
+            // Refuse non-empty directories (vfs_delete_node would recurse).
+            int has_child = 0;
+            for (int i = 0; i < MAX_NODES; i++) {
+                if (fs_nodes[i].in_use && fs_nodes[i].parent == node) {
+                    has_child = 1;
+                    break;
+                }
+            }
+            if (has_child) {
+                print("rmdir: directory not empty: ", 0x0C);
+                print(dpath, 0x0C);
+                print("\n", 0x0C);
+            } else if (vfs_delete_node(dpath) < 0) {
+                print("rmdir: failed\n", 0x0C);
+            }
+        }
+    }
+    // --- CP (copy file) ---
+    else if (strncmp(cmd_b, "cp ", 3) == 0) {
+        // Parse "cp src dst"
+        char src[MAX_PATH], dst[MAX_PATH];
+        char* rest = cmd_b + 3;
+        while (*rest == ' ') rest++;
+        int si = 0;
+        while (*rest && *rest != ' ' && si < MAX_PATH - 1) src[si++] = *rest++;
+        src[si] = '\0';
+        while (*rest == ' ') rest++;
+        int di = 0;
+        while (*rest && *rest != ' ' && di < MAX_PATH - 1) dst[di++] = *rest++;
+        dst[di] = '\0';
+        sanitize_path(src);
+        sanitize_path(dst);
+        
+        if (src[0] == '\0' || dst[0] == '\0') {
+            print("cp: usage: cp [source] [destination]\n", 0x0C);
+        } else {
+            int snode = vfs_get_node(src);
+            if (snode < 0 || !vfs_is_file(snode)) {
+                print("cp: source not found or not a file: ", 0x0C);
+                print(src, 0x0C);
+                print("\n", 0x0C);
+            } else if (vfs_get_node(dst) >= 0) {
+                print("cp: destination already exists: ", 0x0C);
+                print(dst, 0x0C);
+                print("\n", 0x0C);
+            } else {
+                int size = fs_nodes[snode].size;
+                if (size < 0 || size > 4 * 1024 * 1024) {
+                    print("cp: file too large\n", 0x0C);
+                } else {
+                    char* buf = (char*)kmalloc(size + 1);
+                    if (!buf) {
+                        print("cp: out of memory\n", 0x0C);
+                    } else {
+                        int rd = vfs_read_file(src, buf, size);
+                        if (rd < 0) {
+                            print("cp: read failed\n", 0x0C);
+                        } else if (vfs_create_file(dst) < 0) {
+                            print("cp: cannot create destination\n", 0x0C);
+                        } else {
+                            // Check the written count, not just the sign: on a
+                            // full disk ext2_write_file_data returns the bytes
+                            // written so far (positive but < rd), which would
+                            // otherwise be reported as a successful copy.
+                            int wr = vfs_write_file(dst, buf, rd);
+                            if (wr != rd) {
+                                print("cp: write failed (disk full? wrote ", 0x0C);
+                                p_int(wr, 0x0C);
+                                print(" of ", 0x0C);
+                                p_int(rd, 0x0C);
+                                print(" bytes)\n", 0x0C);
+                            } else {
+                                print("cp: copied ", 0x0A);
+                                print(src, 0x0F);
+                                print(" -> ", 0x07);
+                                print(dst, 0x0F);
+                                print(" (", 0x07);
+                                p_int(rd, 0x0A);
+                                print(" bytes)\n", 0x07);
+                            }
+                        }
+                        kfree(buf);
+                    }
+                }
+            }
+        }
+    }
+    // --- MV (move / rename) ---
+    else if (strncmp(cmd_b, "mv ", 3) == 0) {
+        // Parse "mv src dst"
+        char src[MAX_PATH], dst[MAX_PATH];
+        char* rest = cmd_b + 3;
+        while (*rest == ' ') rest++;
+        int si = 0;
+        while (*rest && *rest != ' ' && si < MAX_PATH - 1) src[si++] = *rest++;
+        src[si] = '\0';
+        while (*rest == ' ') rest++;
+        int di = 0;
+        while (*rest && *rest != ' ' && di < MAX_PATH - 1) dst[di++] = *rest++;
+        dst[di] = '\0';
+        sanitize_path(src);
+        sanitize_path(dst);
+        
+        if (src[0] == '\0' || dst[0] == '\0') {
+            print("mv: usage: mv [source] [destination]\n", 0x0C);
+        } else {
+            // vfs_rename silently deletes an existing destination before
+            // moving, so refuse when the destination is a directory — moving a
+            // file onto one would erase it (and the VFS has no "move into
+            // dir" semantics).
+            int dst_node = vfs_get_node(dst);
+            if (dst_node >= 0 && vfs_is_dir(dst_node)) {
+                print("mv: cannot overwrite a directory: ", 0x0C);
+                print(dst, 0x0C);
+                print("\n", 0x0C);
+            } else {
+                int res = vfs_rename(src, dst);
+                if (res < 0) {
+                    if (res == -4) print("mv: cannot move a directory into itself\n", 0x0C);
+                    else if (res == -5) print("mv: cross-directory move not supported on ext2\n", 0x0C);
+                    else if (res == -3) print("mv: cannot rename root\n", 0x0C);
+                    else print("mv: failed\n", 0x0C);
+                } else {
+                    print("mv: ", 0x0A);
+                    print(src, 0x0F);
+                    print(" -> ", 0x07);
+                    print(dst, 0x0F);
+                    print("\n", 0x0A);
+                }
+            }
+        }
+    }
+    // --- DF (disk free) ---
+    else if (strcmp(cmd_b, "df") == 0) {
+        print("Filesystem   1K-blocks   Used   Free   Use%  Mounted on\n", 0x0E);
+        // MECTOVFS (drive 0): 1MB disk = 2048 sectors, 65 metadata + node table
+        int used_sectors = 65;
+        for (int i = 0; i < MAX_NODES; i++) {
+            if (fs_nodes[i].in_use && fs_nodes[i].type == FS_FILE) {
+                int secs = (fs_nodes[i].size + 511) / 512;
+                if (secs < 1) secs = 1;
+                used_sectors += secs;
+            }
+        }
+        if (used_sectors > 2048) used_sectors = 2048;
+        int free_sectors = 2048 - used_sectors;
+        print("mectovfs       ", 0x0B);
+        p_int(1024, 0x0F); print("      ", 0x07);
+        p_int(used_sectors / 2, 0x0F); print("    ", 0x07);
+        p_int(free_sectors / 2, 0x0F); print("    ", 0x07);
+        p_int(used_sectors * 100 / 2048, 0x0F); print("%  /", 0x0F);
+        print("\n", 0x0F);
+        
+        // ext2 (drive 1)
+        uint32_t tblocks = 0, fblocks = 0, tinodes = 0, finodes = 0, bsize = 1024;
+        if (ext2_get_stats(&tblocks, &fblocks, &tinodes, &finodes, &bsize) == 0 && tblocks > 0) {
+            uint32_t total_kb = tblocks * bsize / 1024;
+            uint32_t free_kb = fblocks * bsize / 1024;
+            uint32_t used_kb = total_kb - free_kb;
+            uint32_t pct = used_kb * 100 / total_kb;
+            print("ext2           ", 0x0B);
+            p_int(total_kb, 0x0F); print("      ", 0x07);
+            p_int(used_kb, 0x0F); print("    ", 0x07);
+            p_int(free_kb, 0x0F); print("    ", 0x07);
+            p_int(pct, 0x0F); print("%  /ext2", 0x0F);
+            print("\n", 0x0F);
+            print("  Inodes: ", 0x07);
+            p_int(tinodes - finodes, 0x0F); print(" used / ", 0x07);
+            p_int(tinodes, 0x0F); print(" total\n", 0x07);
+        } else {
+            print("ext2           not mounted\n", 0x07);
         }
     }
     // --- SHUTDOWN / REBOOT ---
@@ -1208,6 +1392,14 @@ static void run_cmd_internal() {
             print("touch [path] — Create empty file\n", 0x0B);
         } else if (strcmp(topic, "cat") == 0) {
             print("cat [path] — Display file contents\n", 0x0B);
+        } else if (strcmp(topic, "cp") == 0) {
+            print("cp [src] [dst] — Copy a file (VFS or /ext2)\n", 0x0B);
+        } else if (strcmp(topic, "mv") == 0) {
+            print("mv [src] [dst] — Move/rename a file\n", 0x0B);
+        } else if (strcmp(topic, "rmdir") == 0) {
+            print("rmdir [path] — Remove an empty directory\n", 0x0B);
+        } else if (strcmp(topic, "df") == 0) {
+            print("df — Show disk usage for mectovfs and /ext2\n", 0x0B);
         } else {
             print("man: no manual entry for '", 0x0C);
             print(topic, 0x0C);

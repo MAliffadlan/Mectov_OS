@@ -533,6 +533,18 @@ uint32_t ext2_inode_size(uint32_t inode_num) {
     return inode.i_size;
 }
 
+int ext2_get_stats(uint32_t* total_blocks, uint32_t* free_blocks,
+                   uint32_t* total_inodes, uint32_t* free_inodes,
+                   uint32_t* block_size_out) {
+    if (!bgd_table) return -1;
+    if (total_blocks)  *total_blocks  = sb.s_blocks_count;
+    if (free_blocks)   *free_blocks   = sb.s_free_blocks_count;
+    if (total_inodes)  *total_inodes  = sb.s_inodes_count;
+    if (free_inodes)   *free_inodes   = sb.s_free_inodes_count;
+    if (block_size_out) *block_size_out = block_size;
+    return 0;
+}
+
 // --- File data write ---
 
 int ext2_write_file_data(uint32_t inode_num, const char* buf, int size) {
@@ -780,6 +792,10 @@ static void ext2_rm_inode(uint32_t inode_num) {
     }
     ext2_write_inode(inode_num, &inode);
     ext2_free_inode(inode_num);
+    // Zero the whole inode slot so a freed inode carries no stale mode/size/
+    // blocks on disk — otherwise fsck reports "i_blocks is N, should be 0" and
+    // "zero-length directory" for the orphaned slot.
+    ext2_zero_inode_slot(inode_num);
 }
 
 // Remove a directory entry without freeing the inode (used by rename).
@@ -840,9 +856,13 @@ static int ext2_unlink_entry(uint32_t parent_inode, const char* name, uint32_t* 
     uint32_t rec = e->rec_len;
     if (found_off + rec >= block_size && prev_off != 0xFFFFFFFF) {
         // Last entry in the block: absorb it into the previous entry so the
-        // directory stays compact.
+        // directory stays compact. The previous entry must extend all the way
+        // to the END of the block, not just by the removed entry's rec_len:
+        // holes (deleted entries) may sit between prev and the removed entry,
+        // and summing rec_lens would leave the tail unaccounted and corrupt
+        // the directory (fsck: "directory corrupted").
         ext2_dir_entry_t* prev = (ext2_dir_entry_t*)(buf + prev_off);
-        prev->rec_len += (uint16_t)rec;
+        prev->rec_len = (uint16_t)(block_size - prev_off);
         e->inode = 0;
         e->name_len = 0;
         e->file_type = 0;
