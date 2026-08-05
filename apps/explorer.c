@@ -431,7 +431,7 @@ void _start() {
                         int dh = 58;
                         if (click_x >= dx && click_x < dx + dw && click_y >= dy && click_y < dy + dh) {
                             int item = (click_y - dy - 2) / 18;
-                            if (item == 0) { // Buka
+                            if (item == 0) { // Open
                                 if (selected >= 0 && entries[selected].type == 0) {
                                     char full_path[256];
                                     build_full_path(full_path, entries[selected].name);
@@ -441,23 +441,23 @@ void _start() {
                                         entries[selected].name[nlen-3] == 'm' && 
                                         entries[selected].name[nlen-2] == 'c' && 
                                         entries[selected].name[nlen-1] == 't') {
-                                        my_strcpy(cmd, "jalankan ");
-                                        my_strcpy(cmd + 9, full_path);
+                                        my_strcpy(cmd, "run ");
+                                        my_strcpy(cmd + 4, full_path);
                                     } else if (nlen > 4 && entries[selected].name[nlen-4] == '.' && 
                                                (entries[selected].name[nlen-3] == 'w' || entries[selected].name[nlen-3] == 'W') && 
                                                (entries[selected].name[nlen-2] == 'a' || entries[selected].name[nlen-2] == 'A') && 
                                                (entries[selected].name[nlen-1] == 'v' || entries[selected].name[nlen-1] == 'V')) {
-                                        my_strcpy(cmd, "jalankan /apps/mplayer.mct ");
-                                        my_strcpy(cmd + 27, full_path);
+                                        my_strcpy(cmd, "run /apps/mplayer.mct ");
+                                        my_strcpy(cmd + 22, full_path);
                                     } else {
-                                        my_strcpy(cmd, "jalankan /apps/notepad.mct ");
-                                        my_strcpy(cmd + 27, full_path);
+                                        my_strcpy(cmd, "run /apps/notepad.mct ");
+                                        my_strcpy(cmd + 22, full_path);
                                     }
                                     sys_exec_cmd(cmd);
                                 } else if (selected >= 0 && entries[selected].type == 1) { // Directory
                                     navigate_into(entries[selected].node_idx, entries[selected].name);
                                 }
-                            } else if (item == 1) { // Hapus
+                            } else if (item == 1) { // Delete
                                 if (selected >= 0) {
                                     char full_path[256];
                                     build_full_path(full_path, entries[selected].name);
@@ -465,7 +465,7 @@ void _start() {
                                     selected = -1;
                                     refresh_entries();
                                 }
-                            } else if (item == 2) { // Ubah Nama
+                            } else if (item == 2) { // Rename
                                 if (selected >= 0) {
                                     dialog_mode = 3; // Rename modal
                                     my_strcpy(dialog_input, entries[selected].name);
@@ -539,19 +539,19 @@ void _start() {
                                         entries[row].name[nlen-2] == 'c' && 
                                         entries[row].name[nlen-1] == 't') {
                                         // Run executable directly
-                                        my_strcpy(cmd, "jalankan ");
-                                        my_strcpy(cmd + 9, full_path);
+                                        my_strcpy(cmd, "run ");
+                                        my_strcpy(cmd + 4, full_path);
                                     } else if (nlen > 4 && entries[row].name[nlen-4] == '.' && 
                                                (entries[row].name[nlen-3] == 'w' || entries[row].name[nlen-3] == 'W') && 
                                                (entries[row].name[nlen-2] == 'a' || entries[row].name[nlen-2] == 'A') && 
                                                (entries[row].name[nlen-1] == 'v' || entries[row].name[nlen-1] == 'V')) {
                                         // Play WAV file in mplayer
-                                        my_strcpy(cmd, "jalankan /apps/mplayer.mct ");
-                                        my_strcpy(cmd + 27, full_path);
+                                        my_strcpy(cmd, "run /apps/mplayer.mct ");
+                                        my_strcpy(cmd + 22, full_path);
                                     } else {
                                         // Open standard files in Notepad
-                                        my_strcpy(cmd, "jalankan /apps/notepad.mct ");
-                                        my_strcpy(cmd + 27, full_path);
+                                        my_strcpy(cmd, "run /apps/notepad.mct ");
+                                        my_strcpy(cmd + 22, full_path);
                                     }
                                     sys_exec_cmd(cmd);
                                 }

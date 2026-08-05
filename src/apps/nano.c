@@ -41,7 +41,7 @@ static void nano_draw(int id, int cx, int cy, int cw, int ch) {
     draw_line(cx + 1, footer_y - 1, cx + cw - 2, footer_y - 1, GUI_BORDER2); // Top divider line
 
     // Draw shortcut info
-    draw_string_px(cx + 8, footer_y + 3, "ESC: Simpan & Keluar", GUI_TEAL, 0);
+    draw_string_px(cx + 8, footer_y + 3, "ESC: Save & Exit", GUI_TEAL, 0);
 
     // Draw character count
     char count_buf[32];

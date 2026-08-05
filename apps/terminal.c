@@ -91,11 +91,12 @@ static void history_add(const char* c) {
 // --- Built-in commands list for tab completion ---
 static const char* builtins[] = {
     "help", "clear", "mfetch", "mem", "memstat", "kmemstats", "uptime", "vfsinfo",
-    "ls", "cd", "pwd", "mkdir", "touch", "cat", "tree", "rm",
-    "buat", "tulis", "edit", "baca", "hapus",
-    "echo", "beep", "nada", "tunggu", "waktu", "warna", "kunci",
-    "jalankan", "ular", "taskmgr", "lspci", "man",
-    "ping", "host", "shutdown", "reboot", "alias", "history", 0
+    "ls", "cd", "pwd", "mkdir", "touch", "cat", "tree", "rm", "rmdir", "cp", "mv", "df",
+    "edit", "nano",
+    "sh", "source", "export", "unalias", "ps", "kill",
+    "echo", "beep", "tone", "sleep", "date", "color", "lock",
+    "run", "snake", "taskmgr", "flappy", "doom", "lspci", "man",
+    "ping", "host", "grep", "shutdown", "reboot", "alias", "history", 0
 };
 
 static int my_strlen(const char* s) {
@@ -126,8 +127,8 @@ static void add_default_aliases(void) {
     my_strcpy(aliases[0].value, "ls -la");
     my_strcpy(aliases[1].name, "..");
     my_strcpy(aliases[1].value, "cd ..");
-    my_strcpy(aliases[2].name, "ular");
-    my_strcpy(aliases[2].value, "jalankan /apps/snake.mct");
+    my_strcpy(aliases[2].name, "snake");
+    my_strcpy(aliases[2].value, "run /apps/snake.mct");
     alias_count = 3;
 }
 

@@ -1,5 +1,5 @@
 // ============================================================
-// shell.c — Mectov OS Shell dengan Tab Completion & History
+// shell.c — Mectov OS Shell with Tab Completion & History
 // ============================================================
 
 #include "../include/shell.h"
@@ -78,7 +78,22 @@ void init_env_vars_and_aliases() {
     strcpy(aliases[3].name, "neofetch");
     strcpy(aliases[3].value, "mfetch");
     
-    alias_count = 4;
+    // Legacy Indonesian command names → English equivalents (still work)
+    strcpy(aliases[4].name, "buat");      strcpy(aliases[4].value, "touch");
+    strcpy(aliases[5].name, "tulis");     strcpy(aliases[5].value, "nano");
+    strcpy(aliases[6].name, "baca");      strcpy(aliases[6].value, "cat");
+    strcpy(aliases[7].name, "hapus");     strcpy(aliases[7].value, "rm");
+    strcpy(aliases[8].name, "ular");      strcpy(aliases[8].value, "snake");
+    strcpy(aliases[9].name, "nada");      strcpy(aliases[9].value, "tone");
+    strcpy(aliases[10].name, "tunggu");   strcpy(aliases[10].value, "sleep");
+    strcpy(aliases[11].name, "waktu");    strcpy(aliases[11].value, "date");
+    strcpy(aliases[12].name, "warna");    strcpy(aliases[12].value, "color");
+    strcpy(aliases[13].name, "kunci");    strcpy(aliases[13].value, "lock");
+    strcpy(aliases[14].name, "jalankan"); strcpy(aliases[14].value, "run");
+    strcpy(aliases[15].name, "matikan");  strcpy(aliases[15].value, "shutdown");
+    strcpy(aliases[16].name, "mulaiulang"); strcpy(aliases[16].value, "reboot");
+    
+    alias_count = 17;
 }
 
 void expand_env_vars(char* out, const char* in, int max_len) {
@@ -162,12 +177,12 @@ void expand_alias(char* out, const char* in, int max_len) {
 const char* cmd_list[] = {
     "help","clear","mfetch","mem","memstat","kmemstats","uptime","vfsinfo",
     "ls","cd","pwd","mkdir","touch","cat","tree","rm","rmdir","cp","mv","df",
-    "buat","tulis","edit","nano","baca","hapus",
+    "edit","nano",
     "sh","source","export","alias","unalias","history","ps","kill",
-    "echo","beep","nada","tunggu","waktu","warna","kunci",
-    "jalankan","ular","taskmgr","flappy","doom","lspci","man",
+    "echo","beep","tone","sleep","date","color","lock",
+    "run","snake","taskmgr","flappy","doom","lspci","man",
     "ping","host","grep",
-    "matikan","mulaiulang","shutdown","reboot", NULL
+    "shutdown","reboot", NULL
 };
 
 // --- History circular buffer ---
@@ -476,18 +491,19 @@ static void run_cmd_internal() {
     // --- HELP ---
     if (strcmp(cmd_b, "help") == 0) {
         print("======================================================================\n", 0x0B);
-        print("                ⚡ MECTOV OS v27.0 - COMMAND CENTER ⚡                \n", 0x0F);
+        print("                ⚡ MECTOV OS v35.2 - COMMAND CENTER ⚡                \n", 0x0F);
         print("======================================================================\n", 0x0B);
-        print(" SYSTEM  : ", 0x0B); print("mfetch, waktu, warna, clear, mem, memstat, kmemstats, uptime, kunci, ps, kill\n", 0x0F);
-        print(" FILE VFS: ", 0x0B); print("ls, cd, pwd, mkdir, touch, cat, tree, rm, rmdir, cp, mv, df, buat, hapus\n", 0x0F);
-        print(" EDITOR  : ", 0x0B); print("nano, edit, tulis, baca\n", 0x0F);
+        print(" SYSTEM  : ", 0x0B); print("mfetch, date, color, clear, mem, memstat, kmemstats, uptime, lock, ps, kill\n", 0x0F);
+        print(" FILE VFS: ", 0x0B); print("ls, cd, pwd, mkdir, touch, cat, tree, rm, rmdir, cp, mv, df\n", 0x0F);
+        print(" EDITOR  : ", 0x0B); print("nano, edit\n", 0x0F);
         print(" SHELL   : ", 0x0B); print("export [NAME=VAL], alias [NAME=VAL], unalias, history, sh\n", 0x0F);
-        print(" APPS GUI: ", 0x0B); print("flappy, doom, taskmgr, ular, jalankan [app.mct]\n", 0x0A);
+        print(" APPS GUI: ", 0x0B); print("flappy, doom, taskmgr, snake, run [app.mct]\n", 0x0A);
         print(" NET & HW: ", 0x0B); print("ping [ip], host [domain], lspci\n", 0x0F);
-        print(" UTILS   : ", 0x0B); print("echo [msg], tunggu [detik], nada [freq], beep, man [cmd]\n", 0x0F);
-        print(" POWER   : ", 0x0B); print("reboot, shutdown (mulaiulang, matikan)\n", 0x0C);
+        print(" UTILS   : ", 0x0B); print("echo [msg], sleep [sec], tone [freq], beep, man [cmd]\n", 0x0F);
+        print(" POWER   : ", 0x0B); print("reboot, shutdown\n", 0x0C);
         print("----------------------------------------------------------------------\n", 0x07);
         print(" SHORTCUT: ", 0x0E); print("Tab=Autocomplete  |  Up/Down=History  |  Pipes: cmd1 | cmd2\n", 0x0F);
+        print(" LANG    : ", 0x0E); print("English UI; legacy Indonesian aliases (buat, hapus, ular) still work\n", 0x0F);
         print("======================================================================\n", 0x0B);
     }
     // --- CLEAR ---
@@ -509,11 +525,11 @@ static void run_cmd_internal() {
         // Row 3: color blocks + OS
         print("  ", 0x00);
         print("## ## ## ## ", 0x0D); print("## ## ## ## ", 0x05);
-        print("  OS: ", 0x0B); print("Mectov OS v27.0\n", 0x0F);
+        print("  OS: ", 0x0B); print("Mectov OS v35.2\n", 0x0F);
         // Row 4: color blocks + Kernel
         print("  ", 0x00);
         print("## ## ## ## ", 0x0E); print("## ## ## ## ", 0x06);
-        print("  Kernel: ", 0x0B); print("Mectov 27.0.0\n", 0x0F);
+        print("  Kernel: ", 0x0B); print("Mectov 35.2.0\n", 0x0F);
         // Row 5: color blocks + Uptime
         print("  ", 0x00);
         print("## ## ## ## ", 0x0C); print("## ## ## ## ", 0x04);
@@ -713,7 +729,7 @@ static void run_cmd_internal() {
                     line[line_len] = '\0';
                     if (line_len > 0) {
                         if (strstr_custom(line, pattern) >= 0) {
-                            print(line, 0x0A); // Tampilkan yang cocok dengan warna hijau
+                            print(line, 0x0A); // Print matching lines in green
                             print("\n", 0x0F);
                         }
                     }
@@ -928,6 +944,10 @@ static void run_cmd_internal() {
         }
     }
     // --- SHUTDOWN / REBOOT ---
+    // Note: the Indonesian names below (and in the other legacy handlers) are
+    // fallbacks — in the normal flow expand_alias() already mapped them to the
+    // English commands. They stay reachable after `unalias <id-name>` or when a
+    // script runs before the alias table is initialized, so don't delete them.
     else if (strcmp(cmd_b, "matikan") == 0 || strcmp(cmd_b, "shutdown") == 0) shutdown();
     else if (strcmp(cmd_b, "mulaiulang") == 0 || strcmp(cmd_b, "reboot") == 0) reboot();
     // --- LSPCI ---
@@ -942,8 +962,8 @@ static void run_cmd_internal() {
             print("\n", 0x0F);
         }
     }
-    // --- ULAR ---
-    else if (strcmp(cmd_b, "ular") == 0) start_ular();
+    // --- SNAKE (ular) ---
+    else if (strcmp(cmd_b, "snake") == 0 || strcmp(cmd_b, "ular") == 0) start_ular();
     // --- FLAPPY ---
     else if (strcmp(cmd_b, "flappy") == 0) load_mct_app("/apps/flappy.mct");
     // --- DOOM ---
@@ -954,26 +974,26 @@ static void run_cmd_internal() {
     }
     // --- TASKMGR ---
     else if (strcmp(cmd_b, "taskmgr") == 0) load_mct_app("/apps/taskmgr.mct");
-    // --- KUNCI ---
-    else if (strcmp(cmd_b, "kunci") == 0) lock_screen();
-    // --- WAKTU ---
-    else if (strcmp(cmd_b, "waktu") == 0) {
+    // --- LOCK (kunci) ---
+    else if (strcmp(cmd_b, "lock") == 0 || strcmp(cmd_b, "kunci") == 0) lock_screen();
+    // --- DATE (waktu) ---
+    else if (strcmp(cmd_b, "date") == 0 || strcmp(cmd_b, "waktu") == 0) {
         rtc_time_t tm = rtc_read_time();
         unsigned char h = (tm.hour + 7) % 24;
-        print("Waktu sekarang (WIB): ", 0x0B);
+        print("Current time (WIB): ", 0x0B);
         p_int(h, 0x0F); print(":", 0x0F);
         if (tm.minute < 10) { print("0", 0x0F); }
         p_int(tm.minute, 0x0F); print(":", 0x0F);
         if (tm.second < 10) { print("0", 0x0F); }
         p_int(tm.second, 0x0F); print("\n", 0x0F);
     }
-    // --- WARNA ---
-    else if (strcmp(cmd_b, "warna") == 0) {
-        print("Fitur warna hanya untuk TTY (Text Mode).\n", 0x0E);
+    // --- COLOR (warna) ---
+    else if (strcmp(cmd_b, "color") == 0 || strcmp(cmd_b, "warna") == 0) {
+        print("Color output is only available on TTY (Text Mode).\n", 0x0E);
     }
-    // --- JALANKAN (run .mct app) ---
-    else if (strncmp(cmd_b, "jalankan ", 9) == 0) {
-        char* fname = cmd_b + 9;
+    // --- RUN / JALANKAN (run .mct app) ---
+    else if (strncmp(cmd_b, "run ", 4) == 0 || strncmp(cmd_b, "jalankan ", 9) == 0) {
+        char* fname = (strncmp(cmd_b, "run ", 4) == 0) ? cmd_b + 4 : cmd_b + 9;
         sanitize_path(fname);
         
         // Split program name and arguments
@@ -1353,20 +1373,20 @@ static void run_cmd_internal() {
         print(cmd_b + 5, 0x0F);
         print("\n", 0x0F);
     }
-    // --- TUNGGU (sleep) ---
-    else if (strncmp(cmd_b, "tunggu ", 7) == 0) {
-        int seconds = atoi(cmd_b + 7);
+    // --- SLEEP (tunggu) ---
+    else if (strncmp(cmd_b, "sleep ", 6) == 0 || strncmp(cmd_b, "tunggu ", 7) == 0) {
+        int seconds = atoi((strncmp(cmd_b, "sleep ", 6) == 0) ? cmd_b + 6 : cmd_b + 7);
         if (seconds > 0 && seconds < 60000) {
             // task_sleep() consumes PIT ticks, while the command contract says
-            // "tunggu [detik]". Convert here so user-facing behavior matches
+            // "sleep [sec]". Convert here so user-facing behavior matches
             // the help text and stays scheduler-driven.
             uint64_t ticks64 = (uint64_t)seconds * 1000u;
             if (ticks64 > 0x7FFFFFFF) ticks64 = 0x7FFFFFFF;
             task_sleep((int)ticks64);
         }
     }
-    // --- NADA (beep frequency) ---
-    else if (strncmp(cmd_b, "nada ", 5) == 0) {
+    // --- TONE (nada, beep frequency) ---
+    else if (strncmp(cmd_b, "tone ", 5) == 0 || strncmp(cmd_b, "nada ", 5) == 0) {
         int freq = atoi(cmd_b + 5);
         if (freq > 20 && freq < 20000) beep(freq, 300);
     }

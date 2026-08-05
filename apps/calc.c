@@ -72,14 +72,14 @@ void _start() {
     print("====================================\n", 0x0E);
     print("   Mectov Calculator v1.0 (Ring 3)\n", 0x0A);
     print("====================================\n", 0x0E);
-    print("  Operasi: + - * /\n", 0x07);
-    print("  Ketik 'q' untuk keluar.\n\n", 0x07);
+    print("  Operators: + - * /\n", 0x07);
+    print("  Type 'q' to exit.\n\n", 0x07);
     
     char buf1[16], buf2[16], op_buf[4], again_buf[4];
     
     while (1) {
         // --- Input angka pertama ---
-        print("[>] Angka pertama : ", 0x0F);
+        print("[>] First number : ", 0x0F);
         int n1 = readline(buf1, 16);
         if (n1 == 0) continue;
         if (buf1[0] == 'q') break;
@@ -92,12 +92,12 @@ void _start() {
         char op = op_buf[0];
         
         if (op != '+' && op != '-' && op != '*' && op != '/') {
-            print("[!] Operator tidak valid!\n\n", 0x0C);
+            print("[!] Invalid operator!\n\n", 0x0C);
             continue;
         }
         
         // --- Input angka kedua ---
-        print("[>] Angka kedua   : ", 0x0F);
+        print("[>] Second number : ", 0x0F);
         int n3 = readline(buf2, 16);
         if (n3 == 0) continue;
         int b = atoi(buf2);
@@ -112,7 +112,7 @@ void _start() {
             case '*': result = a * b; break;
             case '/':
                 if (b == 0) {
-                    print("[!] ERROR: Pembagian dengan nol!\n\n", 0x0C);
+                    print("[!] ERROR: Division by zero!\n\n", 0x0C);
                     error = 1;
                 } else {
                     result = a / b;
@@ -130,7 +130,7 @@ void _start() {
         
         char op_str[4] = { ' ', op, ' ', '\0' };
         
-        print("\n  Hasil: ", 0x0E);
+        print("\n  Result: ", 0x0E);
         print(str_a, 0x0B);
         print(op_str, 0x0F);
         print(str_b, 0x0B);
@@ -138,7 +138,7 @@ void _start() {
         print(str_r, 0x0A);
         print("\n\n", 0x0F);
         
-        // --- Lanjut? ---
+        // --- Again? ---
         print("[?] Hitung lagi? (y/n): ", 0x0F);
         readline(again_buf, 4);
         if (again_buf[0] != 'y' && again_buf[0] != 'Y') break;
