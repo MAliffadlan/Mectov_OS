@@ -14,6 +14,7 @@ int     net_ready       = 0;
 static char pending_dns_domain[128] = {0};
 static uint8_t pending_tcp_ip[4] = {0, 0, 0, 0};
 static uint16_t pending_tcp_port = 0;
+static int pending_tcp_id = -1;
 int     ping_replied    = 0;
 uint32_t ping_rtt       = 0;
 static uint32_t ping_sent_tick = 0;
@@ -36,13 +37,21 @@ uint32_t htonl(uint32_t val) {
 }
 uint32_t ntohl(uint32_t val) { return htonl(val); }
 
-// TCP Globals
-int tcp_state = 0; // TCP_CLOSED
-uint8_t tcp_target_ip[4] = {0};
-uint16_t tcp_local_port = 54321;
-uint16_t tcp_remote_port = 80;
-uint32_t tcp_seq_num = 0x11223344;
-uint32_t tcp_ack_num = 0;
+// TCP connections: a small fixed table (one slot per concurrent connection).
+// Each connection keeps its own ports, sequence numbers, receive buffer and
+// retransmit state, so the browser, the shell and future apps can all have
+// sockets open at once without stomping on each other.
+static tcp_conn_t tcp_conns[TCP_MAX_CONNS];
+static int tcp_latest = -1;          // most recently created conn (SYS_NET_STATUS)
+static uint16_t tcp_port_counter = 49152;
+
+#define TCP_RETRANS_MS   6000
+#define TCP_RETRANS_MAX  5
+#define TCP_CONNECT_TIMEOUT_MS 10000
+
+// Forward: kicks off the handshake on a reserved slot (also used by the
+// queued-connect dispatch in net_handle_arp, which appears earlier in the file).
+static void tcp_start_conn(tcp_conn_t* c, uint8_t* target_ip, uint16_t port);
 
 // TCP Pseudo-header for checksum
 typedef struct __attribute__((packed)) {
@@ -148,10 +157,11 @@ static void net_handle_arp(arp_packet_t* arp) {
             }
             
             // Dispatch pending TCP connection if queued
-            if (pending_tcp_port != 0) {
+            if (pending_tcp_port != 0 && pending_tcp_id >= 0 && pending_tcp_id < TCP_MAX_CONNS) {
                 write_serial_string("[NET] Dispatching pending TCP connection from queue...\n");
-                net_tcp_connect(pending_tcp_ip, pending_tcp_port);
+                tcp_start_conn(&tcp_conns[pending_tcp_id], pending_tcp_ip, pending_tcp_port);
                 pending_tcp_port = 0;
+                pending_tcp_id = -1;
             }
         }
     }
@@ -286,8 +296,8 @@ static void net_send_udp(uint8_t* target_ip, uint16_t src_port, uint16_t dst_por
     net_send_eth(gateway_mac, ETH_TYPE_IP, pkt, total);
 }
 
-// TCP segment send helper
-static void net_send_tcp_segment(uint8_t flags, uint8_t* payload, uint32_t payload_len) {
+// TCP segment send helper (per-connection)
+static void net_send_tcp_segment(tcp_conn_t* c, uint8_t flags, uint8_t* payload, uint32_t payload_len) {
     if (!net_ready) return;
 
     uint8_t pkt[1500];
@@ -306,16 +316,16 @@ static void net_send_tcp_segment(uint8_t flags, uint8_t* payload, uint32_t paylo
     ip->protocol   = IP_PROTO_TCP;
     ip->checksum   = 0;
     memcpy(ip->src_ip, my_ip, 4);
-    memcpy(ip->dst_ip, tcp_target_ip, 4);
+    memcpy(ip->dst_ip, c->remote_ip, 4);
     ip->checksum   = ip_checksum(ip, sizeof(ip_header_t));
 
-    tcp->src_port = htons(tcp_local_port);
-    tcp->dst_port = htons(tcp_remote_port);
-    tcp->seq      = htonl(tcp_seq_num);
-    tcp->ack      = htonl(tcp_ack_num);
+    tcp->src_port = htons(c->local_port);
+    tcp->dst_port = htons(c->remote_port);
+    tcp->seq      = htonl(c->seq);
+    tcp->ack      = htonl(c->ack);
     tcp->data_offset_res = (sizeof(tcp_header_t) / 4) << 4;
     tcp->flags    = flags;
-    uint32_t free_win = TCP_RX_BUF_SIZE - tcp_rx_len;
+    uint32_t free_win = TCP_CONN_BUF - c->rx_len;
     if (free_win > 65535) free_win = 65535;
     tcp->window_size = htons((uint16_t)free_win);
     tcp->checksum = 0;
@@ -329,50 +339,158 @@ static void net_send_tcp_segment(uint8_t flags, uint8_t* payload, uint32_t paylo
     uint8_t pseudo_buf[1500];
     tcp_pseudo_header_t* psh = (tcp_pseudo_header_t*)pseudo_buf;
     memcpy(psh->src_ip, my_ip, 4);
-    memcpy(psh->dst_ip, tcp_target_ip, 4);
+    memcpy(psh->dst_ip, c->remote_ip, 4);
     psh->zeros = 0;
     psh->protocol = IP_PROTO_TCP;
-    psh->tcp_len = htons(tcp_len);
+    psh->tcp_len = htons((uint16_t)tcp_len);
     
     memcpy(pseudo_buf + sizeof(tcp_pseudo_header_t), tcp, tcp_len);
     tcp->checksum = ip_checksum(pseudo_buf, sizeof(tcp_pseudo_header_t) + tcp_len);
     // Write back computed checksum
     memcpy(pkt + sizeof(ip_header_t), tcp, sizeof(tcp_header_t));
 
+    // Stamp the retransmit base ONLY on new-data segments (and SYN). Pure ACKs
+    // must not reset it: otherwise inbound traffic that triggers an ACK keeps
+    // postponing the retransmit of genuinely-lost data indefinitely.
+    if (payload_len > 0 || (flags & (TCP_SYN | TCP_FIN))) {
+        c->last_tx_tick = get_ticks();
+    }
     net_send_eth(gateway_mac, ETH_TYPE_IP, pkt, total);
 }
 
-void net_tcp_connect(uint8_t* target_ip, uint16_t port) {
-    if (!net_ready) {
-        memcpy(pending_tcp_ip, target_ip, 4);
-        pending_tcp_port = port;
-        net_send_arp_request(gateway_ip);
-        return;
-    }
-    // Dynamic local port allocation to prevent port reuse collision / TIME_WAIT hang on host
-    tcp_local_port = 49152 + (get_ticks() % 16384);
-
+// Kick off the handshake on an already-reserved slot. Used directly when the
+// network is ready, and from the ARP-reply dispatch for the queued connect.
+static void tcp_start_conn(tcp_conn_t* c, uint8_t* target_ip, uint16_t port) {
     // Redirect HTTP port 80 to Mectov Web Gateway Proxy on host (10.0.2.2:8888)
     if (port == 80) {
-        memcpy(tcp_target_ip, gateway_ip, 4);
-        tcp_remote_port = 8888;
+        memcpy(c->remote_ip, gateway_ip, 4);
+        c->remote_port = 8888;
         write_serial_string("[TCP] Redirecting HTTP port 80 to Web Gateway Proxy at 10.0.2.2:8888\n");
     } else {
-        memcpy(tcp_target_ip, target_ip, 4);
-        tcp_remote_port = port;
+        memcpy(c->remote_ip, target_ip, 4);
+        c->remote_port = port;
     }
-    tcp_seq_num = get_ticks() * 12345; // random ISN
-    tcp_ack_num = 0;
-    tcp_state = TCP_SYN_SENT;
-    
-    net_send_tcp_segment(TCP_SYN, 0, 0);
-    tcp_seq_num++; // SYN consumes one sequence number
+    c->seq = get_ticks() * 12345 + c->local_port; // random-ish ISN per connection
+    c->ack = 0;
+    c->rx_len = 0;
+    c->eof = 0;
+    c->unacked_len = 0;
+    c->retrans_count = 0;
+    c->conn_start_tick = get_ticks();
+    c->state = TCP_SYN_SENT;
+
+    write_serial_string("[TCP] connecting, src port=");
+    write_serial_hex(c->local_port);
+    write_serial_string("\n");
+    net_send_tcp_segment(c, TCP_SYN, 0, 0);
+    c->seq++; // SYN consumes one sequence number
 }
 
-void net_tcp_send(uint8_t* payload, uint32_t len) {
-    if (tcp_state != TCP_ESTABLISHED) return;
-    net_send_tcp_segment(TCP_ACK | TCP_PSH, payload, len);
-    tcp_seq_num += len;
+// Reserve a connection slot and start (or queue) the handshake.
+// Returns the connection id (0..TCP_MAX_CONNS-1) or -1 on failure.
+int net_tcp_connect(uint8_t* target_ip, uint16_t port) {
+    int id = -1;
+    for (int i = 0; i < TCP_MAX_CONNS; i++) {
+        if (!tcp_conns[i].in_use) { id = i; break; }
+    }
+    if (id < 0) {
+        write_serial_string("[TCP] no free connection slot\n");
+        return -1;
+    }
+
+    tcp_conn_t* c = &tcp_conns[id];
+    memset(c, 0, sizeof(tcp_conn_t));
+    c->in_use = 1;
+    c->state = TCP_CLOSED;
+    c->local_port = tcp_port_counter++;
+    if (tcp_port_counter > 60000) tcp_port_counter = 49152; // dynamic range
+    tcp_latest = id;
+
+    if (!net_ready) {
+        // Queue until the gateway MAC is resolved
+        memcpy(pending_tcp_ip, target_ip, 4);
+        pending_tcp_port = port;
+        pending_tcp_id = id;
+        net_send_arp_request(gateway_ip);
+        return id;
+    }
+    tcp_start_conn(c, target_ip, port);
+    return id;
+}
+
+// Send app data over an established connection. Tracks the segment for
+// retransmission until the peer ACKs it.
+int net_tcp_send(int id, uint8_t* payload, uint32_t len) {
+    if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return -2;
+    tcp_conn_t* c = &tcp_conns[id];
+    if (c->state != TCP_ESTABLISHED) return -1;
+    if (len > 1400) len = 1400;
+
+    c->unacked_seq = c->seq;
+    c->unacked_len = len;
+    c->retrans_count = 0;
+    if (len > 0) {
+        memcpy(c->tx_pending, payload, len);
+        c->tx_pending_len = (int)len;
+    }
+    net_send_tcp_segment(c, TCP_ACK | TCP_PSH, payload, len);
+    c->seq += len;
+    return (int)len;
+}
+
+// Copy received bytes into the caller's buffer. Returns bytes copied, 0 if
+// nothing new yet, -1 when the connection is closed/EOF, -2 for a bad id.
+int net_tcp_recv(int id, uint8_t* out, uint32_t max_len) {
+    if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return -2;
+    tcp_conn_t* c = &tcp_conns[id];
+    if (c->state == TCP_CLOSED) return -1;
+    if (c->rx_len <= 0) return c->eof ? -1 : 0;
+
+    int copy = c->rx_len;
+    if (copy > (int)max_len) copy = (int)max_len;
+    memcpy(out, c->rx, copy);
+    if (copy < c->rx_len) {
+        memmove(c->rx, c->rx + copy, c->rx_len - copy);
+        c->rx_len -= copy;
+    } else {
+        c->rx_len = 0;
+    }
+    return copy;
+}
+
+// Initiate a graceful close: FIN handshake, then the slot is freed when the
+// peer acknowledges. FIN_WAIT_1 -> (ACK) -> FIN_WAIT_2 -> (FIN) -> free.
+void net_tcp_close(int id) {
+    if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return;
+    tcp_conn_t* c = &tcp_conns[id];
+
+    if (c->state == TCP_ESTABLISHED) {
+        net_send_tcp_segment(c, TCP_ACK | TCP_FIN, 0, 0);
+        c->seq++;
+        c->state = TCP_FIN_WAIT_1;
+    } else if (c->state == TCP_CLOSE_WAIT) {
+        // Peer already closed; ACK + FIN and wait for the final ACK
+        net_send_tcp_segment(c, TCP_ACK | TCP_FIN, 0, 0);
+        c->seq++;
+        c->state = TCP_LAST_ACK;
+    } else {
+        c->state = TCP_CLOSED;
+        c->in_use = 0;
+    }
+}
+
+// State of one connection (for callers that need to poll a specific id).
+int net_tcp_state(int id) {
+    if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return TCP_CLOSED;
+    return tcp_conns[id].state;
+}
+
+// State of the most recently created connection (SYS_NET_STATUS compat).
+int net_tcp_latest_state(void) {
+    if (tcp_latest >= 0 && tcp_latest < TCP_MAX_CONNS && tcp_conns[tcp_latest].in_use) {
+        return tcp_conns[tcp_latest].state;
+    }
+    return TCP_CLOSED;
 }
 
 // Convert "google.com" to "\x06google\x03com\x00"
@@ -523,49 +641,131 @@ static void net_handle_dns(uint8_t* data, uint32_t len) {
 }
 
 
-char tcp_rx_buf[TCP_RX_BUF_SIZE];
-int tcp_rx_len = 0;
-
 // Handle incoming TCP
 static void net_handle_tcp(ip_header_t* ip, uint8_t* tcp_data, uint32_t tcp_len) {
-    (void)ip;
     if (tcp_len < sizeof(tcp_header_t)) return;
     tcp_header_t* tcp = (tcp_header_t*)tcp_data;
 
     uint16_t src_port = ntohs(tcp->src_port);
     uint16_t dst_port = ntohs(tcp->dst_port);
 
-    if (dst_port != tcp_local_port || src_port != tcp_remote_port) return;
-
-    // Handle remote connection reset or termination (FIN / RST)
-    if (tcp->flags & (TCP_FIN | TCP_RST)) {
-        tcp_state = TCP_CLOSED;
-        write_serial_string("[TCP] Connection closed by remote host (FIN/RST received)\n");
+    // Match the segment to a connection by the full 4-tuple
+    tcp_conn_t* c = NULL;
+    for (int i = 0; i < TCP_MAX_CONNS; i++) {
+        if (tcp_conns[i].in_use &&
+            tcp_conns[i].local_port == dst_port &&
+            tcp_conns[i].remote_port == src_port &&
+            memcmp(tcp_conns[i].remote_ip, ip->src_ip, 4) == 0) {
+            c = &tcp_conns[i];
+            break;
+        }
+    }
+    if (!c) {
+        write_serial_string("[TCP] segment for unknown connection, dropped\n");
         return;
     }
 
-    if (tcp_state == TCP_SYN_SENT) {
-        if ((tcp->flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {
-            // Received SYN-ACK!
-            tcp_ack_num = ntohl(tcp->seq) + 1;
-            tcp_state = TCP_ESTABLISHED;
-            // Send ACK
-            net_send_tcp_segment(TCP_ACK, 0, 0);
+    // Validate the TCP checksum (pseudo-header + segment). A valid segment
+    // re-checksums to zero; corrupted ones are dropped instead of polluting
+    // the receive buffer.
+    uint8_t pseudo_buf[1500];
+    if (tcp_len > sizeof(pseudo_buf) - sizeof(tcp_pseudo_header_t)) return;
+    tcp_pseudo_header_t* psh = (tcp_pseudo_header_t*)pseudo_buf;
+    memcpy(psh->src_ip, ip->src_ip, 4);
+    memcpy(psh->dst_ip, my_ip, 4);
+    psh->zeros = 0;
+    psh->protocol = IP_PROTO_TCP;
+    psh->tcp_len = htons((uint16_t)tcp_len);
+    memcpy(pseudo_buf + sizeof(tcp_pseudo_header_t), tcp, tcp_len);
+    if (ip_checksum(pseudo_buf, sizeof(tcp_pseudo_header_t) + tcp_len) != 0) {
+        write_serial_string("[TCP] bad checksum, dropped\n");
+        return;
+    }
+
+    // Remote reset: kill the connection immediately
+    if (tcp->flags & TCP_RST) {
+        write_serial_string("[TCP] connection reset by peer (RST)\n");
+        c->state = TCP_CLOSED;
+        c->in_use = 0;
+        return;
+    }
+
+    if (c->state == TCP_SYN_SENT) {
+        if ((tcp->flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK) &&
+            ntohl(tcp->ack) == c->seq) {
+            // Received SYN-ACK for our ISN
+            c->ack = ntohl(tcp->seq) + 1;
+            c->state = TCP_ESTABLISHED;
+            c->retrans_count = 0;
+            write_serial_string("[TCP] connection established\n");
+            net_send_tcp_segment(c, TCP_ACK, 0, 0);
         }
-    } else if (tcp_state == TCP_ESTABLISHED) {
-        // Handle incoming data if any
-        uint8_t header_len = (tcp->data_offset_res >> 4) * 4;
-        if (header_len < sizeof(tcp_header_t) || header_len > tcp_len) return;
-        uint32_t payload_len = tcp_len - header_len;
-        if (payload_len > 0) {
-            // Append to tcp_rx_buf
-            if (tcp_rx_len + payload_len < sizeof(tcp_rx_buf)) {
-                memcpy(tcp_rx_buf + tcp_rx_len, tcp_data + header_len, payload_len);
-                tcp_rx_len += payload_len;
+        return;
+    }
+
+    uint8_t header_len = (tcp->data_offset_res >> 4) * 4;
+    if (header_len < sizeof(tcp_header_t) || header_len > tcp_len) return;
+    uint32_t payload_len = tcp_len - header_len;
+    uint32_t seg_seq = ntohl(tcp->seq);
+    int fin = tcp->flags & TCP_FIN;
+    int ack_flag = tcp->flags & TCP_ACK;
+
+    // ACK of our sent data clears the retransmit state
+    if (ack_flag && c->unacked_len && ntohl(tcp->ack) >= c->unacked_seq + c->unacked_len) {
+        c->unacked_len = 0;
+        c->tx_pending_len = 0;
+        c->retrans_count = 0;
+    }
+
+    // In-order data append (duplicates / out-of-order get a re-ACK, never data)
+    if (payload_len > 0 && (c->state == TCP_ESTABLISHED || c->state == TCP_CLOSE_WAIT)) {
+        if (seg_seq == c->ack) {
+            if (c->rx_len + (int)payload_len <= TCP_CONN_BUF) {
+                memcpy(c->rx + c->rx_len, tcp_data + header_len, payload_len);
+                c->rx_len += (int)payload_len;
             }
-            // Send ACK
-            tcp_ack_num = ntohl(tcp->seq) + payload_len;
-            net_send_tcp_segment(TCP_ACK, 0, 0);
+            c->ack = seg_seq + payload_len;
+            net_send_tcp_segment(c, TCP_ACK, 0, 0);
+        } else {
+            net_send_tcp_segment(c, TCP_ACK, 0, 0); // stale/dup: refresh window
+        }
+    }
+
+    // Our FIN was acknowledged — require the ACK to actually cover the FIN's
+    // sequence number, not just be any ACK (a duplicate/stray ACK must not
+    // advance the close handshake early). c->seq was bumped when the FIN was
+    // sent, so FIN_WAIT_1 expects ack >= c->seq.
+    if (c->state == TCP_FIN_WAIT_1 && ack_flag && ntohl(tcp->ack) >= c->seq) {
+        if (fin) { // peer FIN came in the same segment: done
+            c->state = TCP_CLOSED;
+            c->in_use = 0;
+            write_serial_string("[TCP] closed (FIN|ACK)\n");
+            return;
+        }
+        c->state = TCP_FIN_WAIT_2;
+    } else if (c->state == TCP_LAST_ACK && ack_flag && ntohl(tcp->ack) >= c->seq) {
+        c->state = TCP_CLOSED;
+        c->in_use = 0;
+        write_serial_string("[TCP] closed (final ACK)\n");
+        return;
+    }
+
+    // Peer FIN: half-close from the remote side
+    if (fin && c->in_use) {
+        if (c->state == TCP_ESTABLISHED || c->state == TCP_CLOSE_WAIT) {
+            if (c->state == TCP_ESTABLISHED) {
+                c->state = TCP_CLOSE_WAIT;
+                write_serial_string("[TCP] peer closed connection (CLOSE_WAIT)\n");
+            }
+            c->ack = seg_seq + payload_len + 1;
+            c->eof = 1;
+            net_send_tcp_segment(c, TCP_ACK, 0, 0);
+        } else if (c->state == TCP_FIN_WAIT_2) {
+            c->ack = seg_seq + payload_len + 1;
+            net_send_tcp_segment(c, TCP_ACK, 0, 0);
+            c->state = TCP_CLOSED;
+            c->in_use = 0;
+            write_serial_string("[TCP] closed after peer FIN\n");
         }
     }
 }
@@ -691,6 +891,33 @@ void net_poll(void) {
         write_serial_hex(len);
         write_serial_string("\n");
         net_handle_frame(buf, (uint32_t)len);
+    }
+
+    // TCP retransmit + connect timeout sweep. Runs inside the same cli/sti
+    // window as the RX drain so the IRQ path can never interleave.
+    uint32_t now = get_ticks();
+    for (int i = 0; i < TCP_MAX_CONNS; i++) {
+        tcp_conn_t* c = &tcp_conns[i];
+        if (!c->in_use) continue;
+
+        if (c->state == TCP_SYN_SENT) {
+            if (now - c->conn_start_tick >= TCP_CONNECT_TIMEOUT_MS) {
+                write_serial_string("[TCP] connect timeout, aborting\n");
+                c->state = TCP_CLOSED;
+                c->in_use = 0;
+            }
+            // No SYN retransmit: on the local link a lost SYN is vanishingly
+            // rare, and a duplicate SYN after the peer's SYN-ACK is already
+            // queued poisons the connection with a spurious RST.
+        } else if (c->unacked_len > 0 &&
+                   c->retrans_count < TCP_RETRANS_MAX &&
+                   now - c->last_tx_tick >= TCP_RETRANS_MS) {
+            c->retrans_count++;
+            uint32_t saved = c->seq;
+            c->seq = c->unacked_seq; // resend the unacked data segment
+            net_send_tcp_segment(c, TCP_ACK | TCP_PSH, c->tx_pending, c->tx_pending_len);
+            c->seq = saved;
+        }
     }
     __asm__ volatile("sti");
 }

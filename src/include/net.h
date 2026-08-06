@@ -68,26 +68,50 @@ typedef struct __attribute__((packed)) {
 #define TCP_PSH 0x08
 #define TCP_ACK 0x10
 
-// Simple TCP State Machine (Single Socket for now)
+// TCP connection states
 enum {
     TCP_CLOSED = 0,
     TCP_SYN_SENT,
-    TCP_ESTABLISHED
+    TCP_ESTABLISHED,
+    TCP_FIN_WAIT_1,
+    TCP_FIN_WAIT_2,
+    TCP_CLOSE_WAIT,
+    TCP_LAST_ACK
 };
 
-extern int tcp_state;
-extern uint8_t tcp_target_ip[4];
-extern uint16_t tcp_local_port;
-extern uint16_t tcp_remote_port;
-extern uint32_t tcp_seq_num;
-extern uint32_t tcp_ack_num;
+#define TCP_MAX_CONNS 8
+#define TCP_CONN_BUF  16384
 
-#define TCP_RX_BUF_SIZE 65536
-extern char tcp_rx_buf[TCP_RX_BUF_SIZE];
-extern int tcp_rx_len;
+typedef struct {
+    int  in_use;                 // slot allocated
+    int  state;
+    uint8_t  remote_ip[4];
+    uint16_t remote_port;
+    uint16_t local_port;
+    uint32_t seq;                // next sequence number to send
+    uint32_t ack;                // next sequence number expected from peer
+    uint8_t  rx[TCP_CONN_BUF];   // received data, consumed by the app
+    int  rx_len;
+    int  eof;                    // peer sent FIN (recv returns -1 after drain)
+    uint32_t last_tx_tick;       // last time a segment was sent (retransmit timer)
+    uint32_t unacked_seq;        // sequence of the oldest unacked data segment
+    uint32_t unacked_len;        // payload length of that segment (0 = none)
+    uint8_t  tx_pending[1400];   // copy of the unacked data segment
+    int      tx_pending_len;
+    int  retrans_count;
+    uint32_t conn_start_tick;    // when the connect attempt began
+} tcp_conn_t;
 
-void net_tcp_connect(uint8_t* target_ip, uint16_t port);
-void net_tcp_send(uint8_t* payload, uint32_t len);
+// Returns the connection id (0..TCP_MAX_CONNS-1) or -1 if no free slot.
+int  net_tcp_connect(uint8_t* target_ip, uint16_t port);
+int  net_tcp_send(int id, uint8_t* payload, uint32_t len);
+// Returns bytes copied, 0 = nothing new, -1 = connection closed/EOF, -2 = bad id.
+int  net_tcp_recv(int id, uint8_t* out, uint32_t max_len);
+void net_tcp_close(int id);
+// State of one connection by id (TCP_CLOSED if the id is invalid).
+int  net_tcp_state(int id);
+// State of the most recently created connection (for SYS_NET_STATUS compat).
+int  net_tcp_latest_state(void);
 
 
 // UDP header (8 bytes)

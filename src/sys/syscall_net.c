@@ -73,9 +73,7 @@ uint32_t handle_syscall_net(registers_t* regs) {
             uint8_t* ip = (uint8_t*)regs->ebx;
             uint16_t port = (uint16_t)regs->ecx;
             if (!validate_user_ptr(ip, 4)) { regs->eax = (uint32_t)-1; break; }
-            tcp_rx_len = 0;
-            net_tcp_connect(ip, port);
-            regs->eax = 0;
+            regs->eax = (uint32_t)net_tcp_connect(ip, port);
             break;
         }
 
@@ -83,13 +81,15 @@ uint32_t handle_syscall_net(registers_t* regs) {
         case SYS_TCP_SEND: {
             uint8_t* data = (uint8_t*)regs->ebx;
             int len = (int)regs->ecx;
-            if (len <= 0 || !validate_user_ptr(data, len)) { regs->eax = (uint32_t)-1; break; }
+            int conn_id = (int)regs->edx;
             // Cap the payload to fit the stack send buffers in net.c (1500-byte
             // pkt/pseudo_buf: 1500 - 20 IP - 20 TCP = 1460 max). Larger lengths
-            // previously overflowed the kernel stack from Ring 3.
+            // previously overflowed the kernel stack from Ring 3. Cap FIRST so
+            // the user-pointer check below only walks the range actually read.
+            if (len <= 0) { regs->eax = (uint32_t)-1; break; }
             if (len > 1400) len = 1400;
-            net_tcp_send(data, len);
-            regs->eax = 0;
+            if (!validate_user_ptr(data, len)) { regs->eax = (uint32_t)-1; break; }
+            regs->eax = (uint32_t)net_tcp_send(conn_id, data, (uint32_t)len);
             break;
         }
 
@@ -97,19 +97,9 @@ uint32_t handle_syscall_net(registers_t* regs) {
         case SYS_TCP_RECV: {
             uint8_t* buf = (uint8_t*)regs->ebx;
             int max_len = (int)regs->ecx;
-            if (!validate_user_ptr(buf, max_len)) { regs->eax = (uint32_t)-1; break; }
-            int copy = tcp_rx_len;
-            if (copy > max_len) copy = max_len;
-            if (copy > 0) {
-                memcpy(buf, tcp_rx_buf, copy);
-                if (copy < tcp_rx_len) {
-                    memmove(tcp_rx_buf, tcp_rx_buf + copy, tcp_rx_len - copy);
-                    tcp_rx_len -= copy;
-                } else {
-                    tcp_rx_len = 0;
-                }
-            }
-            regs->eax = copy;
+            int conn_id = (int)regs->edx;
+            if (max_len <= 0 || !validate_user_ptr(buf, max_len)) { regs->eax = (uint32_t)-1; break; }
+            regs->eax = (uint32_t)net_tcp_recv(conn_id, buf, (uint32_t)max_len);
             break;
         }
 
@@ -119,8 +109,17 @@ uint32_t handle_syscall_net(registers_t* regs) {
             if (validate_user_ptr(out, sizeof(net_status_t))) {
                 out->dns_resolved = dns_resolved;
                 for (int i = 0; i < 4; i++) out->dns_ip[i] = dns_resolved_ip[i];
-                out->tcp_state = tcp_state;
+                out->tcp_state = net_tcp_latest_state();
             }
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_TCP_CLOSE (70) -----
+        case SYS_TCP_CLOSE: {
+            int conn_id = (int)regs->ebx;
+            if (conn_id < 0 || conn_id >= TCP_MAX_CONNS) { regs->eax = (uint32_t)-1; break; }
+            net_tcp_close(conn_id);
             regs->eax = 0;
             break;
         }

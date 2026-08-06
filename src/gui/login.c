@@ -128,9 +128,9 @@ int gui_login() {
         // Keyboard
         uint8_t sc = k_get_scancode();
         if (sc != 0 && sc < 0x80) {
+            char c = scancode_to_char(sc);
             if (sc == 0x3A) { cap_lock_active = !cap_lock_active; }
 
-            char c = scancode_to_char(sc);
             if (c == '\n') {
                 input[idx] = '\0';
                 if (strcmp(input, pass) == 0) { beep(); return 1; }

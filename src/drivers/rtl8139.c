@@ -3,6 +3,8 @@
 #include "../include/io.h"
 #include "../include/mem.h"
 #include "../include/utils.h"
+#include "../include/serial.h"
+#include "../include/spinlock.h"
 
 uint8_t rtl_mac[6];
 int rtl_present = 0;
@@ -19,6 +21,29 @@ static uint16_t rtl_rx_offset = 0;
 // TX: 4 descriptors, rotating
 static uint8_t  rtl_tx_buffers[4][RTL_TX_BUF_SIZE] __attribute__((aligned(4)));
 static int      rtl_tx_cur = 0;
+
+// Serializes the whole NIC register/buffer state against concurrent access
+// from the IRQ path (net_irq_handler, possibly on another CPU under SMP) and
+// the task path (net_poll / shell busy-waits). Without it, two CPUs can both
+// read rtl_tx_cur == N, copy into rtl_tx_buffers[N], and fire the same
+// descriptor — corrupting one frame (a lost SYN is the usual symptom: the
+// handshake never completes and the connect times out).
+static spinlock_t rtl_lock = SPINLOCK_INIT;
+
+// Save IF, disable interrupts, take the lock, and return the saved flags so
+// the caller can restore the exact IF state afterwards (safe to call from an
+// IRQ handler where IF is already 0 — restore leaves it 0).
+static uint32_t rtl_enter(void) {
+    uint32_t flags;
+    __asm__ __volatile__("pushfl; pop %0" : "=r"(flags));
+    __asm__ __volatile__("cli");
+    spin_lock(&rtl_lock);
+    return flags;
+}
+static void rtl_exit(uint32_t flags) {
+    spin_unlock(&rtl_lock);
+    if (flags & 0x200) __asm__ __volatile__("sti");
+}
 
 void init_rtl8139(void) {
     uint8_t bus = 0, slot = 0, func = 0;
@@ -98,6 +123,8 @@ uint16_t rtl8139_irq_clear(void) {
 void rtl8139_send_packet(void* data, uint32_t len) {
     if (!rtl_present || len > 1500) return;
 
+    uint32_t flags = rtl_enter();
+
     uint8_t* buf = rtl_tx_buffers[rtl_tx_cur];
 
     // Wait for the NIC to finish with this descriptor before copying into it:
@@ -128,6 +155,8 @@ void rtl8139_send_packet(void* data, uint32_t len) {
 
     // Advance to next descriptor
     rtl_tx_cur = (rtl_tx_cur + 1) % 4;
+
+    rtl_exit(flags);
 }
 
 // 16-bit read from the ring that may straddle the 8K boundary: with WRAP=1 the
@@ -143,10 +172,12 @@ static uint16_t rtl_rx_read16(uint32_t off) {
 int rtl8139_poll_rx(uint8_t* out_buf, uint32_t max_len) {
     if (!rtl_present) return 0;
 
+    uint32_t flags = rtl_enter();
+    int result = 0;
     for (int tries = 0; tries < 8; tries++) {
         // Check if buffer is empty
         uint8_t cmd = inb(rtl_io_base + RTL_CMD);
-        if (cmd & 0x01) return 0; // BUFE bit = buffer empty
+        if (cmd & 0x01) break; // BUFE bit = buffer empty (leaves result = 0)
 
         // Packet header is at current offset in ring buffer
         // Header format: [status:16] [length:16] [data...]
@@ -181,12 +212,14 @@ int rtl8139_poll_rx(uint8_t* out_buf, uint32_t max_len) {
         // Update CAPR (Current Address of Packet Read) = offset - 0x10
         outw(rtl_io_base + RTL_CAPR, rtl_rx_offset - 0x10);
 
-        return (int)copy_len;
+        result = (int)copy_len;
+        break;
 
 resync:
         rtl_rx_offset = (uint16_t)((rtl_rx_offset + length + 4 + 3) & ~3);
         rtl_rx_offset %= RTL_RING_SIZE;
         outw(rtl_io_base + RTL_CAPR, rtl_rx_offset - 0x10);
     }
-    return 0;
+    rtl_exit(flags);
+    return result;
 }

@@ -121,6 +121,9 @@ typedef struct {
 #define SYS_UDP_SEND       68  // EBX=ip_ptr, ECX=dst_port, EDX=data_ptr, ESI=len -> 0/-1
 #define SYS_UDP_RECV       69  // EBX=buf_ptr, ECX=max_len -> bytes copied
 
+// TCP connection management (multi-connection)
+#define SYS_TCP_CLOSE      70  // EBX=conn_id -> returns 0/-1
+
 // Virtual Memory
 #define SYS_VMM_MAP        29  // EBX=vaddr, ECX=paddr, EDX=flags → return 0/-1
 #define SYS_VMM_ALLOC      30  // EBX=vaddr, ECX=flags → return vaddr or 0
@@ -305,17 +308,25 @@ static inline int sys_stat_file(const char* path) {
 static inline void sys_dns_resolve(const char* domain) {
     __asm__ __volatile__ ("int $0x80" : : "a"(SYS_DNS_RESOLVE), "b"(domain));
 }
-static inline void sys_tcp_connect(uint8_t* ip, int port) {
-    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_TCP_CONNECT), "b"(ip), "c"(port));
-}
-static inline int sys_tcp_send(const void* data, int len) {
+// Returns the connection id (0..7) or -1 on failure.
+static inline int sys_tcp_connect(uint8_t* ip, int port) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_SEND), "b"(data), "c"(len));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_CONNECT), "b"(ip), "c"(port));
     return ret;
 }
-static inline int sys_tcp_recv(void* buf, int max_len) {
+static inline int sys_tcp_send(int conn_id, const void* data, int len) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_RECV), "b"(buf), "c"(max_len));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_SEND), "b"(data), "c"(len), "d"(conn_id));
+    return ret;
+}
+static inline int sys_tcp_recv(int conn_id, void* buf, int max_len) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_RECV), "b"(buf), "c"(max_len), "d"(conn_id));
+    return ret;
+}
+static inline int sys_tcp_close(int conn_id) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_CLOSE), "b"(conn_id));
     return ret;
 }
 

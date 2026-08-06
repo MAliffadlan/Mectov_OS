@@ -15,6 +15,7 @@ static char page_text[MAX_PAGE];
 static int page_len = 0;
 static int loading = 0;
 static int browser_state = 0; // 0=Idle, 1=DNS, 2=TCP connect, 3=Connected
+static int conn_id = -1;      // active TCP connection id
 static int scroll_offset = 0; // Scroll offset (number of lines to skip)
 static uint32_t request_started_at = 0;
 static const uint32_t REQUEST_TIMEOUT_MS = 15000;
@@ -106,10 +107,28 @@ static void start_request(void) {
     scroll_offset = 0;
     loading = 1;
     browser_state = 1;
+    conn_id = -1;
     request_started_at = sys_get_ticks();
 }
 
 static void abort_request(const char* message, int wid) {
+    if (conn_id >= 0) {
+        sys_tcp_close(conn_id);
+        conn_id = -1;
+    }
+    my_strcpy(page_text, message);
+    page_len = my_strlen(page_text);
+    loading = 0;
+    browser_state = 0;
+    focused_url = 1;
+    draw_browser(wid);
+}
+
+static void finish_request(const char* message, int wid) {
+    if (conn_id >= 0) {
+        sys_tcp_close(conn_id);
+        conn_id = -1;
+    }
     my_strcpy(page_text, message);
     page_len = my_strlen(page_text);
     loading = 0;
@@ -119,21 +138,14 @@ static void abort_request(const char* message, int wid) {
 }
 
 void _start() {
-    sys_print("[B] 1\n", 0x00FFFFFF);
     url_len = my_strlen(url_buf);
-    sys_print("[B] 2\n", 0x00FFFFFF);
     int wid = sys_create_window(50, 50, 520, 380, "Browser (Ring 3)");
-    sys_print("[B] 3\n", 0x00FFFFFF);
     if (wid < 0) sys_exit();
     
-    sys_print("[B] 4\n", 0x00FFFFFF);
     my_strcpy(page_text, "Mectov Mini-Browser v2.0 [Ring 3]\nType URL and press ENTER.");
-    sys_print("[B] 5\n", 0x00FFFFFF);
     page_len = my_strlen(page_text);
-    sys_print("[B] 6\n", 0x00FFFFFF);
     
     draw_browser(wid);
-    sys_print("[B] 7\n", 0x00FFFFFF);
     
     gui_event_t ev;
     int tick = 0;
@@ -143,7 +155,10 @@ void _start() {
             if (ev.type == 1) { // Paint
                 draw_browser(wid);
             } else if (ev.type == 2) { // Key
-                if (ev.key == 27) sys_exit(); // ESC
+                if (ev.key == 27) { // ESC
+                    if (conn_id >= 0) sys_tcp_close(conn_id);
+                    sys_exit();
+                }
                 
                 if (focused_url) {
                     if (ev.key == '\b') {
@@ -236,8 +251,12 @@ void _start() {
                         page_len = my_strlen(page_text);
                         browser_state = 2;
                         request_started_at = sys_get_ticks();
-                        sys_tcp_connect(ns.dns_ip, 80);
-                        draw_browser(wid);
+                        conn_id = sys_tcp_connect(ns.dns_ip, 80);
+                        if (conn_id < 0) {
+                            abort_request("No free TCP connection slots.\n", wid);
+                        } else {
+                            draw_browser(wid);
+                        }
                     }
                 } else if (browser_state == 2) {
                     // Waiting for TCP connect
@@ -249,7 +268,7 @@ void _start() {
                         my_strcpy(req, "GET / HTTP/1.1\r\nHost: ");
                         my_strcat(req, url_buf);
                         my_strcat(req, "\r\nConnection: close\r\n\r\n");
-                        sys_tcp_send(req, my_strlen(req));
+                        sys_tcp_send(conn_id, req, my_strlen(req));
                         
                         my_strcpy(page_text, "Connected! Waiting for response...\n");
                         page_len = my_strlen(page_text);
@@ -258,7 +277,7 @@ void _start() {
                 } else if (browser_state == 3) {
                     // Check for incoming data
                     char rx_buf[1024];
-                    int rx_len = sys_tcp_recv(rx_buf, 1024);
+                    int rx_len = sys_tcp_recv(conn_id, rx_buf, 1024);
                     if (rx_len > 0) {
                         loading = 0;
                         // Append to page text
@@ -272,6 +291,11 @@ void _start() {
                             page_text[page_len] = '\0';
                         }
                         draw_browser(wid);
+                    } else if (rx_len == -1) {
+                        // Peer closed the connection: page complete
+                        finish_request(page_text, wid);
+                    } else if (rx_len == -2) {
+                        abort_request("Connection lost.\n", wid);
                     }
                 }
             }

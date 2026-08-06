@@ -1,4 +1,4 @@
-# Mectov OS v35.4 — Security Hardening Update
+# Mectov OS v35.5 — Multi-Connection TCP Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
@@ -6,7 +6,16 @@ The Mectov Kernel — an operating system kernel written from scratch in C and A
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
 
-The v35.4 release is a security and stability pass over the whole kernel. A full audit of the trust boundaries — everything the OS accepts from untrusted input (disk images, ELF/.mct binaries, Ring 3 syscall arguments, shell commands) — closed every path found that could crash the kernel or corrupt memory:
+The v35.5 release upgrades the network stack from a single hard-coded TCP socket to a real **multi-connection TCP layer**: eight independent connection slots, per-connection sequence numbers / receive buffers / retransmit state, and a proper FIN handshake — all exposed to Ring 3 via conn-id syscalls. A new `fetch [domain]` shell command and the Ring 3 browser both use it end-to-end. Along the way, testing surfaced and fixed a **latent SMP race in the RTL8139 driver** that could silently drop a TCP frame:
+
+1. **Multi-Connection TCP (8 slots):** The kernel now tracks up to 8 simultaneous connections (`tcp_conn_t`), each with its own local/remote ports, ISN-derived sequence numbers, `ack`, a 16KB receive buffer, and retransmit state. `net_handle_tcp()` matches inbound segments by the full 4-tuple and drives a real state machine: SYN_SENT → ESTABLISHED → FIN_WAIT_1/2, CLOSE_WAIT, LAST_ACK → CLOSED. Duplicate/out-of-order segments get a re-ACK instead of polluting the buffer; corrupted checksums are dropped; RST kills the slot immediately.
+2. **Retransmit & Timeouts:** `net_poll()` sweeps all connections each tick — unacked data is retransmitted (up to 5 tries, 6s apart) and a connect that stalls in SYN_SENT is aborted after 10s. The retransmit base is stamped only when new data (or SYN/FIN) is sent, so pure ACKs can't keep postponing a genuine retransmit.
+3. **TCP API with Connection IDs:** `net_tcp_connect/send/recv/close/state/latest_state` plus syscalls `SYS_TCP_CONNECT` (40), `SYS_TCP_SEND` (41), `SYS_TCP_RECV` (42), `SYS_NET_STATUS` (43) — send/recv now take the conn id in `EDX` — and the new `SYS_TCP_CLOSE` (70) for graceful FIN shutdown. `sys_tcp_send/recv/close` wrappers expose the id-based API to Ring 3 apps.
+4. **Browser Upgrade:** The Ring 3 mini-browser tracks its active conn id, closes it on abort/ESC/EOF, and distinguishes a peer FIN (page complete) from a reset (`Connection lost`).
+5. **`fetch [domain]` Shell Command:** Resolves the gateway via ARP, the domain via DNS, connects to port 80 (redirected through the host Web Gateway Proxy), sends `GET /`, and streams the response until EOF — with bounded waits safe under the interrupt-gate syscall path.
+6. **RTL8139 SMP TX/RX Race Fix:** The NIC's TX descriptors and RX ring were shared state with no lock. With SMP active, the IRQ handler on one CPU and `net_poll()` on another could both read `rtl_tx_cur`, copy into the *same* TX buffer, and fire the same descriptor — the second SYN silently never left the NIC and the handshake timed out. A spinlock (`rtl_enter`/`rtl_exit`, save/restore IF so it is safe from IRQ context) now serializes every TX send and RX poll. Verified in QEMU: two parallel connections both complete the handshake, fetch the page through the gateway, and close cleanly.
+
+Previous release highlights (v35.4 security hardening, v35.3 English localization, v35.2 shell file management + ext2 fixes, v35.1 ext2 write support, v35.0 SMP/GDB/ELF/sync) remain below in the Version History.
 
 1. **ELF Loader Integer Wrap Fix:** The segment bounds check compared `p_offset + p_filesz` in 32-bit math; a crafted `p_offset` could wrap past the check and the follow-up `memcpy` read unmapped memory at CPL 0, panicking the kernel. The check now uses 64-bit math, and both loaders (`.mct` + ELF) abort cleanly instead of faulting when page allocation fails.
 2. **Unbounded Shell Script Recursion Fix:** A script containing `sh a.sh` (or two scripts sourcing each other) recursed until the kernel stack overflowed — `is_script` was set but never read. Nested script execution is now refused.
@@ -367,10 +376,15 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 | # | Name | Description |
 |---|------|-------------|
 | 39 | SYS_DNS_RESOLVE | Asynchronously resolve domain to IP. EBX=domain_ptr |
-| 40 | SYS_TCP_CONNECT | Open TCP socket connection. EBX=ip_ptr, ECX=port |
-| 41 | SYS_TCP_SEND | Send raw TCP packet payload. EBX=data_ptr, ECX=len |
-| 42 | SYS_TCP_RECV | Read TCP socket stream. EBX=buf_ptr, ECX=max_len → bytes read / state |
-| 43 | SYS_NET_STATUS | Get packed network state (DNS resolved, TCP state) |
+| 40 | SYS_TCP_CONNECT | Open TCP connection. EBX=ip_ptr, ECX=port → conn id (0–7) or -1 |
+| 41 | SYS_TCP_SEND | Send TCP payload. EBX=data, ECX=len, EDX=conn_id → bytes sent / -1 / -2 |
+| 42 | SYS_TCP_RECV | Read TCP stream. EBX=buf, ECX=max_len, EDX=conn_id → bytes / 0 / -1 EOF / -2 bad id |
+| 43 | SYS_NET_STATUS | Get packed network state (DNS resolved, latest TCP state) |
+
+### TCP Close (70)
+| # | Name | Description |
+|---|------|-------------|
+| 70 | SYS_TCP_CLOSE | Gracefully close a TCP connection (FIN handshake). EBX=conn_id → 0/-1 |
 
 ### Terminal & Extended Execution (44–51)
 | # | Name | Description |
@@ -484,6 +498,7 @@ The `.github/workflows/build-boot-test.yml` workflow runs this on every push —
 
 | Version | Highlights |
 |---|---|
+| v35.5 | **Multi-Connection TCP Update:** Replaced the single-socket TCP layer with an 8-slot connection table — per-connection seq/ack, 16KB receive buffers, retransmit (5×6s) and connect-timeout (10s) sweeps, and a full FIN handshake (FIN_WAIT_1/2, CLOSE_WAIT, LAST_ACK). Conn-id based API: `net_tcp_connect/send/recv/close/state/latest_state`, syscalls 40–43 now carry the conn id (`EDX`) and new `SYS_TCP_CLOSE` (70) does graceful shutdown; `sys_tcp_*` wrappers updated for Ring 3. Browser tracks/closed its conn on abort/ESC/EOF and handles peer-FIN vs reset; new `fetch [domain]` shell command streams an HTTP GET through the host gateway to EOF. Fixed a latent RTL8139 SMP race — TX descriptors/RX ring now under a spinlock (`rtl_enter`/`rtl_exit`), so the IRQ path and `net_poll()` can no longer both fire the same TX descriptor and silently drop a SYN. Validated in QEMU: two parallel connections establish, both fetch through the gateway, and close cleanly; CI boot test passes. |
 | v35.4 | **Security Hardening Update:** Audited every trust boundary the kernel accepts input from (disk images, ELF/.mct binaries, Ring 3 syscalls, shell commands). Fixed the ELF loader's 32-bit wrap in the segment bounds check (crafted `p_offset` → CPL0 panic) and made both loaders abort cleanly on OOM; refused nested `sh`/`source` recursion (kernel stack overflow via `is_script` that was set but never read); sanitized the on-disk VFS node table (missing NUL in 32-byte names, out-of-range `parent`); rejected ext2 superblocks whose `s_inode_size` doesn't divide `block_size` (memcpy past 4KB stack buffers) and bound every ext2 block read/write against the block count/drive sectors; released all 16 per-task fds on exit/kill (pipe+fd leak, hung pipe readers) and refused deleting files that open fds reference (stale-slot aliasing); replaced the 100k-`pause` busy-wait `task_sleep()` with an exact hlt-park; clamped window resize/open coordinates (uncloseable and zombie windows), grew the wm free-list to 64; snapshotted mouse state with interrupts off; clamped tab completion into `cmd_b[256]`, dead-CMOS month-0, and `vfs_read_file()` disk bounds. |
 | v35.3 | **English UI Localization Update:** Translated the last remaining Indonesian user-facing strings to English. Shell commands are now English-first — `snake`, `tone`, `sleep`, `date`, `color`, `lock`, `run` replace `ular`, `nada`, `tunggu`, `waktu`, `warna`, `kunci`, `jalankan` — while every legacy Indonesian name still works via built-in aliases (`buat`→`touch`, `tulis`→`nano`, `baca`→`cat`, `hapus`→`rm`, `matikan`→`shutdown`, `mulaiulang`→`reboot`). Translated shell help/mfetch text, the nano footer (`ESC: Save & Exit`), calculator prompts/results, updated explorer app launches to `run`, and synced the GUI terminal's tab-completion list with the shell's. Help now lists only English commands, with a note that legacy aliases remain functional. |
 | v35.2 | **Shell File Management & Ext2 Hardening Update:** Added `cp` (VFS/ext2 copy via heap buffer), `mv` (rename with cross-directory ext2 guard), `rmdir` (empty-directory check) and `df` (mectovfs + ext2 capacity/inode usage from superblock counters) to the shell with help/man/tab-completion entries. Fixed two latent ext2 on-disk bugs found while exercising delete/rename: directory-entry absorption now extends the previous entry to the exact block end (`rec_len = block_size - prev_off`) so deleted-entry holes can't leave the directory chain short, and freed inode slots are zeroed so fsck no longer sees stale `i_blocks`/orphaned directories. Validated end-to-end: cp/mv/rmdir/df all pass in-guest, host `fsck.ext2` clean across two boots on both 1024- and 4096-byte block filesystems. |

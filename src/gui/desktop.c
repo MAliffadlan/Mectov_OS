@@ -431,6 +431,7 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
         for (int i = 0; i < ICON_COUNT; i++) {
             Icon* ic = &icons[i];
             if (mx >= ic->x && mx < ic->x + ICON_W && my >= ic->y && my < ic->y + ICON_H + 16) {
+                uint32_t now = get_ticks();
                 dragged_icon = i;
                 drag_offset_x = mx - ic->x;
                 drag_offset_y = my - ic->y;
@@ -438,7 +439,6 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
                 drag_start_y = ic->y;
 
                 // Double click detection directly on mouse down to bypass drag coordinate jumps
-                uint32_t now = get_ticks();
                 if (i == last_clicked_icon && (now - last_click_tick) < 800) {
                     if (ic->action) {
                         ic->action();
