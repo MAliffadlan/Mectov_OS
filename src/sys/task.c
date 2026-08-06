@@ -644,7 +644,21 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         // syscall frame. The parent is inside the fork syscall with IF=0
         // (interrupt gate), so the stack cannot contain nested IRQ frames.
         memcpy(tasks[i].kernel_stack, tasks[parent].kernel_stack, KERNEL_STACK_SIZE);
-        uint32_t off = tasks[parent].esp - (uint32_t)&tasks[parent].kernel_stack[0];
+        // CRITICAL: locate the frame at the TOP of the kernel stack, not at
+        // tasks[parent].esp. The fork syscall (int 0x80) always pushes its
+        // registers_t frame at TSS.esp0 (= kernel stack top), and the parent
+        // is INSIDE that syscall right now — so the frame is deterministically
+        // at &kernel_stack[KERNEL_STACK_SIZE] - sizeof(registers_t).
+        //
+        // tasks[parent].esp is the LAST preemption frame, which is only
+        // guaranteed to sit at the stack top when the parent was interrupted
+        // in USER mode. If a timer fires while the parent is in kernel mode
+        // with IF=1 (e.g. right after gui_unlock()'s sti inside a GUI syscall),
+        // schedule() saves a DEEP stack address; copying from there yields a
+        // garbage frame whose ds field makes the child's first context-switch
+        // epilogue (mov %eax,%ds) take a #GP. KVM's speed makes that window
+        // reachable; TCG's slowness masked it.
+        uint32_t off = KERNEL_STACK_SIZE - sizeof(registers_t);
         tasks[i].esp = (uint32_t)&tasks[i].kernel_stack[0] + off;
 
         registers_t* fr = (registers_t*)tasks[i].esp;
