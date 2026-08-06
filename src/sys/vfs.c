@@ -246,6 +246,11 @@ void vfs_init() {
         extern uint8_t _binary_flappy_mct_end[];
         changed += vfs_update_file_if_needed("apps/flappy.mct", (const char*)_binary_flappy_mct_start, _binary_flappy_mct_end - _binary_flappy_mct_start);
 
+        // Fork demo (process model: fork/waitpid/signals)
+        extern uint8_t _binary_forkdemo_mct_start[];
+        extern uint8_t _binary_forkdemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/forkdemo.mct", (const char*)_binary_forkdemo_mct_start, _binary_forkdemo_mct_end - _binary_forkdemo_mct_start);
+
         // ELF demo app (real ELF32 binary, not MCT)
         extern uint8_t _binary_elfdemo_elf_start[];
         extern uint8_t _binary_elfdemo_elf_end[];

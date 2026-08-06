@@ -120,17 +120,37 @@ static inline void free(void* ptr) {
 }
 
 static inline void exit(int status) {
-    (void)status; // Mectov ignores exit status currently
-    sys_exit();
+    syscall(SYS_EXIT, status, 0, 0);
+    for(;;);
+}
+
+// --- Process model (fork / waitpid / signals) ---
+static inline int fork(void) {
+    return sys_fork();
+}
+
+static inline int waitpid(int pid, int* status, int options) {
+    return sys_waitpid(pid, status, options);
+}
+
+static inline int kill(int pid, int sig) {
+    return sys_kill(pid, sig);
+}
+
+static inline int getppid(void) {
+    return sys_getppid();
+}
+
+// handler: 0 = default, 1 = SIG_IGN, otherwise a function pointer
+static inline void* signal(int sig, void* handler) {
+    return sys_signal(sig, handler);
 }
 
 static inline void sleep(int seconds) {
-    // Mectov timer ticks (depends on PIT frequency, usually 1000Hz, let's assume get_ticks returns ms)
-    // Actually get_ticks returns ms or 10ms depending on PIT. Let's use sys_get_time or loop.
-    // For now just yield.
+    // PIT runs at 1000Hz, so get_ticks() counts milliseconds.
     uint32_t start = sys_get_ticks();
-    while (sys_get_ticks() < start + (seconds * 1000)) {
-        sys_yield();
+    while (sys_get_ticks() < start + (uint32_t)(seconds * 1000)) {
+        sys_sleep(100); // sleep in 100ms slices so signals stay deliverable
     }
 }
 

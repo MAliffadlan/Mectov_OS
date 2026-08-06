@@ -290,6 +290,7 @@ extern uint32_t handle_syscall_proc(registers_t* regs);
 extern uint32_t handle_syscall_ipc(registers_t* regs);
 
 static void syscall_handler(registers_t* regs) {
+        uint32_t call_no = regs->eax;   // captured before handlers overwrite eax
         switch (regs->eax) {
         case SYS_OPEN:
         case SYS_READ:
@@ -335,6 +336,12 @@ static void syscall_handler(registers_t* regs) {
         case SYS_KILL_TASK:
         case SYS_GET_LAUNCH_ARG:
         case SYS_EXEC_CMD:
+        case SYS_FORK:
+        case SYS_WAITPID:
+        case SYS_KILL:
+        case SYS_SIGNAL:
+        case SYS_SIGRETURN:
+        case SYS_GETPPID:
             regs->eax = handle_syscall_proc(regs);
             break;
 
@@ -457,14 +464,18 @@ static void syscall_handler(registers_t* regs) {
             regs->eax = 0;
             break;
         }
-        // ----- SYS_EXIT (10): Terminate current task -----
+        // ----- SYS_EXIT (10): Terminate current task with an exit status -----
         case SYS_EXIT: {
             int tid = get_current_task();
-            write_serial_string("[SYSCALL] SYS_EXIT from TID=");
+            int code = (int)regs->ebx;
+            write_serial_string("[SYSCALL] SYS_EXIT code=");
+            write_serial_hex(code);
+            write_serial_string(" from TID=");
             write_serial('0' + (tid / 10));
             write_serial('0' + (tid % 10));
             write_serial('\n');
-            task_exit();
+            extern void task_exit_with_code(int code);
+            task_exit_with_code(code);
             for(;;) __asm__("hlt");
             break;
         }
@@ -691,6 +702,14 @@ static void syscall_handler(registers_t* regs) {
             break;
     }
 
+    // Deliver pending signals before iret'ing back to Ring 3. The frame is
+    // rewritten in place (EIP/USERESP) so the handler runs; SYS_SIGRETURN
+    // restores it afterwards. SYS_SIGRETURN already did its own frame restore
+    // and SYS_EXIT never returns.
+    if (call_no != SYS_SIGRETURN && call_no != SYS_EXIT) {
+        extern int task_deliver_signals(void* frame);
+        task_deliver_signals(regs);
+    }
 }
 
 // ============================================================

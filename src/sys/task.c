@@ -5,6 +5,10 @@
 #include "../include/spinlock.h"
 #include "../include/apic.h"
 #include "../include/vmm.h"   // vmm_setup_user_stack(), USER_STACK_* layout
+#include "../include/idt.h"   // registers_t
+#include "../include/timer.h" // get_ticks()
+#include "../include/fd.h"    // global_fds[] for fork fd sharing
+#include "../include/utils.h" // memcpy/memset
 
 static spinlock_t task_lock = SPINLOCK_INIT;
 
@@ -13,12 +17,23 @@ static spinlock_t task_lock = SPINLOCK_INIT;
 // USER_STACK_SIZE now lives in vmm.h — the Ring 3 stack is mapped into the
 // task's own address space, not carved out of this struct.
 
-// Task states come from task.h (TASK_STATE_FREE/RUNNING/READY/SLEEP/BLOCKED)
+// Task states come from task.h (TASK_STATE_FREE/RUNNING/READY/SLEEP/BLOCKED/ZOMBIE)
+
+// Zombie tasks older than this (ms) are reaped even if their parent never
+// calls waitpid() — a safety net for fire-and-forget launchers like the
+// terminal's `run`, which would otherwise leak slots forever.
+#define ZOMBIE_REAP_MS 15000
+
+// Park loop for tasks killed by a default-action signal mid-return. The
+// scheduler switches away on the next tick and the zombie slot is reaped.
+static void task_dead_park(void) {
+    for (;;) __asm__ volatile("hlt");
+}
 
 typedef struct {
     uint32_t esp;          // Saved stack pointer (points to register frame)
     uint8_t  kernel_stack[KERNEL_STACK_SIZE] __attribute__((aligned(16)));
-    int      state;        // 0=free, 1=running, 2=ready, 3=sleep
+    int      state;        // 0=free, 1=running, 2=ready, 3=sleep, 4=blocked, 5=zombie
     uint8_t  ring;         // 0 = kernel task, 3 = user task
     // === NEW FIELDS (add-on, safe defaults) ===
     int      priority;     // 0=background, 1=interactive, 2=realtime
@@ -29,6 +44,14 @@ typedef struct {
     char     launch_arg[128]; // command-line argument passed at launch
     int      current_dir;  // per-task working directory
     uint32_t heap_ptr;     // current heap break (e.g. 0x08000000)
+    // === NEW: process model ===
+    int      parent;       // tid of the parent task (0 = kernel task)
+    int      exit_code;    // exit status (valid while ZOMBIE)
+    int      waiting;      // while blocked in waitpid: target pid (>0) or -1 (any)
+    uint32_t pending_signals;   // bitmap of pending signals (bit sig)
+    void*    signal_handlers[SIG_MAX]; // NULL=default, SIG_IGN_SENTINEL=ignore, else user fn
+    uint32_t sig_frame_esp;     // user-stack address of the sigframe awaiting SYS_SIGRETURN
+    uint32_t zombie_since;      // tick when the task became a zombie (reap timeout)
 } task_t;
 
 static task_t tasks[MAX_TASKS];
@@ -49,6 +72,13 @@ void init_tasking() {
         tasks[i].heap_ptr = 0x08000000;
         tasks[i].launch_arg[0] = '\0';
         tasks[i].current_dir = 0;
+        tasks[i].parent = 0;
+        tasks[i].exit_code = 0;
+        tasks[i].waiting = 0;
+        tasks[i].pending_signals = 0;
+        tasks[i].sig_frame_esp = 0;
+        tasks[i].zombie_since = 0;
+        for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
         for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
     }
     tasks[0].state = TASK_STATE_RUNNING;
@@ -56,6 +86,7 @@ void init_tasking() {
     tasks[0].priority = PRIORITY_INTERACTIVE;
     tasks[0].wait_ticks = 0;
     tasks[0].esp = 0; // Will be filled by scheduler on first preemption
+    tasks[0].parent = 0;
     
     // Save boot CR3 to task 0
     uint32_t boot_cr3;
@@ -84,6 +115,13 @@ int create_task(void (*entry)()) {
             tasks[i].priority = PRIORITY_INTERACTIVE;
             tasks[i].wait_ticks = 0;
             tasks[i].current_dir = (current_task[cid] >= 0) ? tasks[current_task[cid]].current_dir : 0;
+            tasks[i].parent = 0;
+            tasks[i].exit_code = 0;
+            tasks[i].waiting = 0;
+            tasks[i].pending_signals = 0;
+            tasks[i].sig_frame_esp = 0;
+            tasks[i].zombie_since = 0;
+            for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
             task_set_launch_arg(i, "sys_kernel");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
@@ -260,25 +298,121 @@ uint32_t schedule(uint32_t esp) {
         vmm_switch_page_dir(tasks[0].page_dir);
     }
     
+    // Deliver pending signals to the task about to return to Ring 3. Its CR3
+    // is already active (switched above), so the handler frame can be written
+    // straight into its user stack. If a default-action signal terminates the
+    // task, re-pick another ready task instead of iret'ing a dead frame.
+    if (tasks[next].ring == 3) {
+        while (tasks[next].state == TASK_STATE_RUNNING && tasks[next].pending_signals != 0) {
+            if (!task_deliver_signals((void*)tasks[next].esp)) break;
+            if (tasks[next].state == TASK_STATE_ZOMBIE) {
+                goto pick_next;
+            }
+        }
+    }
+    
     return tasks[next].esp;
+
+pick_next:
+    // The task we chose died from a signal; choose another READY task.
+    next = -1;
+    max_score = -1;
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (tasks[i].state == TASK_STATE_READY) {
+            int score = (tasks[i].priority * 10) + tasks[i].wait_ticks;
+            if (score > max_score) {
+                max_score = score;
+                next = i;
+            }
+        }
+    }
+    if (next < 0) {
+        // Nothing else runnable — fall back to the kernel idle task.
+        next = 0;
+    }
+    tasks[next].state = TASK_STATE_RUNNING;
+    current_task[cid] = next;
+    tss_set_kernel_stack((uint32_t)&tasks[next].kernel_stack[KERNEL_STACK_SIZE]);
+    if (tasks[next].page_dir != 0) {
+        vmm_switch_page_dir(tasks[next].page_dir);
+    } else {
+        vmm_switch_page_dir(tasks[0].page_dir);
+    }
+    return tasks[next].esp;
+}
+
+// Terminate a task (exit or default-action signal). Cleans up its resources,
+// reparents its children to the kernel task, turns it into a ZOMBIE when a
+// live parent exists (so waitpid can reap it and the exit code survives), and
+// wakes the parent if it is blocked in waitpid().
+//
+// Called with interrupts disabled by all callers (exit path holds cli;
+// task_signal holds its own cli/sti pair).
+static void terminate_task(int tid, int code) {
+    if (tid <= 0 || tid >= MAX_TASKS) return;
+    if (tasks[tid].state == TASK_STATE_FREE || tasks[tid].state == TASK_STATE_ZOMBIE) return;
+
+    task_cleanup(tid);
+
+    // Reparent this task's children to the kernel task. Zombie children get
+    // reaped immediately; live ones keep running and are reaped when they
+    // exit (parent == 0 never waits).
+    for (int k = 1; k < MAX_TASKS; k++) {
+        if (k != tid && tasks[k].state != TASK_STATE_FREE && tasks[k].parent == tid) {
+            if (tasks[k].state == TASK_STATE_ZOMBIE) {
+                tasks[k].state = TASK_STATE_FREE;
+                num_tasks--;
+            } else {
+                tasks[k].parent = 0;
+            }
+        }
+    }
+
+    int p = tasks[tid].parent;
+    if (p >= 1 && p < MAX_TASKS && p != tid && tasks[p].state != TASK_STATE_FREE &&
+        tasks[p].state != TASK_STATE_ZOMBIE) {
+        tasks[tid].state = TASK_STATE_ZOMBIE;
+        tasks[tid].exit_code = code & 0xFF;
+        tasks[tid].zombie_since = get_ticks();
+        // Wake the parent if it is parked in waitpid()
+        if (tasks[p].waiting != 0) {
+            tasks[p].waiting = 0;
+            tasks[p].state = TASK_STATE_READY;
+        }
+        // SIGCHLD is pending for the parent (default action: ignored)
+        tasks[p].pending_signals |= (1u << SIGCHLD);
+    } else {
+        // No one will ever reap it: release the slot immediately.
+        tasks[tid].state = TASK_STATE_FREE;
+        num_tasks--;
+    }
+}
+
+// Exit the current task with an exit status (SYS_EXIT / crash / bg child).
+// The task becomes a ZOMBIE until its parent waitpids it; the address space
+// and fds are released immediately so memory returns to the system promptly.
+void task_exit_with_code(int code) {
+    int cid = get_cid();
+    int tid = current_task[cid];
+    if (tid <= 0) return; // never kill the kernel task
+
+    __asm__ volatile("cli");
+    terminate_task(tid, code);
+    __asm__ volatile("sti");
+
+    // Never returns. The scheduler will not reschedule a ZOMBIE.
+    for (;;) __asm__ volatile("hlt");
 }
 
 // Terminate the current task — called from SYS_EXIT syscall
 void task_exit(void) {
+    task_exit_with_code(0);
+}
+
+int task_get_ppid(void) {
     int cid = get_cid();
-    if (current_task[cid] <= 0) return; // Never kill task 0 (kernel)
-    
-    write_serial_string("[TASK] task_exit tid=");
-    write_serial('0' + current_task[cid]);
-    write_serial('\n');
-    
-    __asm__ volatile("cli");
-    task_cleanup(current_task[cid]);
-    tasks[current_task[cid]].state = TASK_STATE_FREE;
-    num_tasks--;
-    
-    __asm__ volatile("sti");
-    for (;;) __asm__("hlt");
+    if (current_task[cid] < 0 || current_task[cid] >= MAX_TASKS) return 0;
+    return tasks[current_task[cid]].parent;
 }
 
 int get_current_task(void) {
@@ -339,6 +473,13 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             tasks[i].page_dir = page_dir;
             tasks[i].sleep_ticks = 0;
             tasks[i].wait_ticks = 0;
+            tasks[i].parent = (current_task[cid] >= 0) ? current_task[cid] : 0;
+            tasks[i].exit_code = 0;
+            tasks[i].waiting = 0;
+            tasks[i].pending_signals = 0;
+            tasks[i].sig_frame_esp = 0;
+            tasks[i].zombie_since = 0;
+            for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
@@ -448,10 +589,10 @@ void task_set_page_dir(int tid, uint32_t page_dir) {
     tasks[tid].page_dir = page_dir;
 }
 
-// Check if a task is alive
+// Check if a task is alive (a ZOMBIE is not alive)
 int task_is_alive(int tid) {
     if (tid < 0 || tid >= MAX_TASKS) return 0;
-    return (tasks[tid].state != TASK_STATE_FREE);
+    return (tasks[tid].state != TASK_STATE_FREE && tasks[tid].state != TASK_STATE_ZOMBIE);
 }
 
 int task_get_fd(int tid, int local_fd) {
@@ -466,21 +607,333 @@ void task_set_fd(int tid, int local_fd, int global_fd) {
     tasks[tid].fd_table[local_fd] = global_fd;
 }
 
-// Kill a specific task by ID (called from kernel or syscall)
+// Kill a specific task by ID (called from kernel or syscall). Now routes
+// through the signal framework: SIGKILL is uncatchable and terminates the
+// task (the parent is woken / the exit code is recorded for waitpid).
 int task_kill(int tid) {
+    return task_signal(tid, SIGKILL);
+}
+
+// ============================================================
+// fork()
+// ============================================================
+
+static int fork_common(void (*kern_entry)(void), const char* child_arg) {
+    int cid = get_cid();
+    if (current_task[cid] < 0) return -1;
+    int parent = current_task[cid];
+    if (parent == 0) return -1;                     // kernel idle task cannot fork
+    if (task_in_kernel_space(parent)) return -1;    // fork needs a private address space
+
+    __asm__ volatile("cli");
+    spin_lock(&task_lock);
+
+    // COW clone of the parent's address space. User writable pages are marked
+    // read-only + PAGE_COW in BOTH directories, so writes fault and duplicate.
+    uint32_t new_pd = vmm_clone_address_space(tasks[parent].page_dir);
+    if (new_pd == 0) {
+        spin_unlock(&task_lock);
+        __asm__ volatile("sti");
+        return -1;
+    }
+
+    for (int i = 1; i < MAX_TASKS; i++) {
+        if (tasks[i].state != TASK_STATE_FREE) continue;
+
+        // Byte-copy the parent's kernel stack, then patch the child's saved
+        // syscall frame. The parent is inside the fork syscall with IF=0
+        // (interrupt gate), so the stack cannot contain nested IRQ frames.
+        memcpy(tasks[i].kernel_stack, tasks[parent].kernel_stack, KERNEL_STACK_SIZE);
+        uint32_t off = tasks[parent].esp - (uint32_t)&tasks[parent].kernel_stack[0];
+        tasks[i].esp = (uint32_t)&tasks[i].kernel_stack[0] + off;
+
+        registers_t* fr = (registers_t*)tasks[i].esp;
+
+        // CRITICAL: the saved `esp` field holds the absolute kernel-stack
+        // address of THIS frame's int_no slot (the epilogue does popad ->
+        // add esp,8 -> iret and reads eip/cs/eflags/useresp/ss through it).
+        // The byte copy above carried over the PARENT's address; without this
+        // repoint, the child's first iret would pop its return context from
+        // the parent's stack — stale the moment the parent pushes any new
+        // syscall frame (e.g. a draw_text right after fork()). It only ever
+        // worked because fork's slow serial log let the timer preempt the
+        // parent while its fork frame was still intact.
+        fr->esp = (uint32_t)&fr->int_no;
+
+        if (kern_entry) {
+            // Shell background child: never return to user mode — iret straight
+            // into a kernel entry that runs the command and exits.
+            fr->eip = (uint32_t)(uintptr_t)kern_entry;
+            fr->cs  = 0x08;   // kernel code segment
+            fr->ds  = 0x10;   // kernel data segment
+        } else {
+            fr->eax = 0;      // child sees fork() == 0
+        }
+
+        tasks[i].ring = 3;
+        tasks[i].priority = tasks[parent].priority;
+        tasks[i].sleep_ticks = 0;
+        tasks[i].wait_ticks = 0;
+        tasks[i].page_dir = new_pd;
+        tasks[i].parent = parent;
+        tasks[i].exit_code = 0;
+        tasks[i].waiting = 0;
+        tasks[i].pending_signals = 0;
+        tasks[i].sig_frame_esp = 0;
+        tasks[i].zombie_since = 0;
+        memcpy(tasks[i].signal_handlers, tasks[parent].signal_handlers,
+               sizeof(tasks[i].signal_handlers));
+        memcpy(tasks[i].fd_table, tasks[parent].fd_table, sizeof(tasks[i].fd_table));
+        memcpy(tasks[i].launch_arg, tasks[parent].launch_arg, sizeof(tasks[i].launch_arg));
+        tasks[i].current_dir = tasks[parent].current_dir;
+        tasks[i].heap_ptr = tasks[parent].heap_ptr;
+
+        // Share the parent's open fds: bump each global refcount so a close in
+        // one process does not yank the descriptor from the other.
+        extern global_fd_t global_fds[];
+        for (int j = 0; j < 16; j++) {
+            int gfd = tasks[i].fd_table[j];
+            if (gfd >= 0 && gfd < MAX_GLOBAL_FDS && global_fds[gfd].in_use) {
+                global_fds[gfd].ref_count++;
+            }
+        }
+
+        if (child_arg && child_arg[0]) {
+            int n = 0;
+            for (; child_arg[n] && n < 127; n++) tasks[i].launch_arg[n] = child_arg[n];
+            tasks[i].launch_arg[n] = '\0';
+        }
+
+        num_tasks++;
+        tasks[i].state = TASK_STATE_READY;
+
+        spin_unlock(&task_lock);
+        __asm__ volatile("sti");
+
+        write_serial_string("[TASK] fork: child tid=");
+        write_serial_hex(i);
+        write_serial_string(" pd=");
+        write_serial_hex(new_pd);
+        write_serial_string("\n");
+        return i;
+    }
+
+    spin_unlock(&task_lock);
+    __asm__ volatile("sti");
+    vmm_free_address_space(new_pd);
+    return -1;
+}
+
+int task_fork(void) {
+    return fork_common(NULL, NULL);
+}
+
+int task_fork_kernel(void (*entry)(void), const char* child_arg) {
+    return fork_common(entry, child_arg);
+}
+
+// ============================================================
+// waitpid()
+// ============================================================
+
+int task_waitpid(int pid, int* status, int options) {
+    int cid = get_cid();
+    int self = current_task[cid];
+    if (self <= 0) return -1;
+    if (status == NULL) return -1;
+
+    for (;;) {
+        int found_child = 0;
+        int zombie = -1;
+        for (int i = 1; i < MAX_TASKS; i++) {
+            if (tasks[i].state == TASK_STATE_FREE) continue;
+            if (tasks[i].parent != self) continue;
+            if (pid > 0 && i != pid) continue;
+            found_child = 1;
+            if (tasks[i].state == TASK_STATE_ZOMBIE) { zombie = i; break; }
+        }
+
+        if (zombie >= 0) {
+            *status = tasks[zombie].exit_code;
+            tasks[zombie].state = TASK_STATE_FREE;
+            num_tasks--;
+            return zombie;
+        }
+        if (!found_child) return -1;          // ECHILD
+        if (options & 1) return 0;            // WNOHANG: nothing to reap yet
+
+        // Park the task until a child exits. The exit path flips us back to
+        // READY (see terminate_task) — same hlt-park pattern as task_sleep().
+        __asm__ volatile("cli");
+        tasks[self].waiting = (pid > 0) ? pid : -1;
+        tasks[self].state = TASK_STATE_BLOCKED;
+        __asm__ volatile("sti");
+        while (tasks[self].state == TASK_STATE_BLOCKED) __asm__ volatile("hlt");
+        tasks[self].waiting = 0;
+    }
+}
+
+// ============================================================
+// Signals
+// ============================================================
+
+void task_set_signal_handler(int tid, int sig, void* h) {
+    if (tid < 0 || tid >= MAX_TASKS || sig <= 0 || sig >= SIG_MAX) return;
+    tasks[tid].signal_handlers[sig] = h;
+}
+
+void* task_get_signal_handler(int tid, int sig) {
+    if (tid < 0 || tid >= MAX_TASKS || sig <= 0 || sig >= SIG_MAX) return NULL;
+    return tasks[tid].signal_handlers[sig];
+}
+
+uint32_t task_get_sig_frame_esp(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    return tasks[tid].sig_frame_esp;
+}
+
+void task_set_sig_frame_esp(int tid, uint32_t esp) {
+    if (tid < 0 || tid >= MAX_TASKS) return;
+    tasks[tid].sig_frame_esp = esp;
+}
+
+int task_signal(int tid, int sig) {
     if (tid <= 0 || tid >= MAX_TASKS) return -1;
     if (tasks[tid].state == TASK_STATE_FREE) return -1;
-    
-    __asm__ volatile("cli");
-    task_cleanup(tid);
-    tasks[tid].state = TASK_STATE_FREE;
-    num_tasks--;
-    __asm__ volatile("sti");
-    
-    write_serial_string("[TASK] task_kill: killed task ");
-    write_serial('0' + tid);
-    write_serial('\n');
+    if (tasks[tid].state == TASK_STATE_ZOMBIE) return 0;  // already dead, waiting to be reaped
+    if (sig <= 0 || sig >= SIG_MAX) return -1;
+
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+
+    if (sig == SIGKILL) {
+        // Uncatchable: terminate immediately.
+        terminate_task(tid, 128 + SIGKILL);
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return 0;
+    }
+
+    void* h = tasks[tid].signal_handlers[sig];
+    if (h == SIG_IGN_SENTINEL) {
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return 0;   // ignored
+    }
+    if (h == NULL) {
+        // Default action: SIGCHLD is ignored; everything else terminates.
+        if (sig != SIGCHLD) terminate_task(tid, 128 + sig);
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return 0;
+    }
+
+    // A handler is installed: mark pending and wake the task if it is parked,
+    // so it returns to user mode and the handler runs there.
+    tasks[tid].pending_signals |= (1u << sig);
+    if (tasks[tid].state == TASK_STATE_BLOCKED || tasks[tid].state == TASK_STATE_SLEEP) {
+        tasks[tid].state = TASK_STATE_READY;
+    }
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
     return 0;
+}
+
+// Deliver one pending signal into the task's return frame. `frame` is the
+// registers_t* about to be iret'd back to Ring 3 (kernel stack).
+//
+// Handler signals: a sigframe with the full saved context is pushed on the
+// user stack, the stack is arranged as `handler(sig)` with a return address
+// pointing at the kernel-mapped trampoline (which performs SYS_SIGRETURN),
+// and the frame's EIP/USERESP are rewritten to enter the handler.
+//
+// Default-action signals terminate the task; the frame is patched to park in
+// the kernel so we never iret a dead task's user context.
+int task_deliver_signals(void* frame) {
+    registers_t* r = (registers_t*)frame;
+    if ((r->cs & 3) != 3) return 0;
+
+    int tid = get_current_task();
+    if (tid <= 0 || tid >= MAX_TASKS) return 0;
+    if (tasks[tid].state == TASK_STATE_FREE || tasks[tid].state == TASK_STATE_ZOMBIE) return 0;
+    if (tasks[tid].pending_signals == 0) return 0;
+    if (tasks[tid].sig_frame_esp != 0) return 0;  // already inside a handler
+
+    for (int sig = 1; sig < SIG_MAX; sig++) {
+        if (!(tasks[tid].pending_signals & (1u << sig))) continue;
+        tasks[tid].pending_signals &= ~(1u << sig);
+
+        void* h = tasks[tid].signal_handlers[sig];
+        if (h == SIG_IGN_SENTINEL) continue;
+
+        if (h == NULL) {
+            if (sig == SIGCHLD) continue;   // default: ignore
+            terminate_task(tid, 128 + sig);
+            // Never iret back into a dead task: park in the kernel instead.
+            r->eip = (uint32_t)(uintptr_t)&task_dead_park;
+            r->cs  = 0x08;
+            r->ds  = 0x10;
+            return 1;
+        }
+
+        // ---- User handler delivery ----
+        uint32_t esp = r->useresp;
+        // ~64 bytes of sigframe + handler call frame below the current stack
+        // top. Check the pages are mapped & user-writable so the direct write
+        // below cannot fault at CPL 0 (validate against this task's own
+        // page directory, which is active right now).
+        extern int validate_user_ptr(const void* ptr, uint32_t size);
+        if (!validate_user_ptr((void*)(esp - 128), 128)) {
+            // Broken stack: cannot deliver — terminate instead.
+            terminate_task(tid, 128 + sig);
+            r->eip = (uint32_t)(uintptr_t)&task_dead_park;
+            r->cs  = 0x08;
+            r->ds  = 0x10;
+            return 1;
+        }
+
+        esp -= sizeof(sigframe_t);
+        sigframe_t* f = (sigframe_t*)esp;
+        f->sig         = (uint32_t)sig;
+        f->saved_eax   = r->eax;
+        f->saved_ecx   = r->ecx;
+        f->saved_edx   = r->edx;
+        f->saved_ebx   = r->ebx;
+        f->saved_esi   = r->esi;
+        f->saved_edi   = r->edi;
+        f->saved_ebp   = r->ebp;
+        f->saved_eip   = r->eip;
+        f->saved_cs    = r->cs;
+        f->saved_eflags= r->eflags;
+        f->saved_esp   = r->useresp;
+        f->saved_ss    = r->ss;
+        tasks[tid].sig_frame_esp = (uint32_t)esp;
+
+        // cdecl handler(sig): [ret addr][arg] on the user stack. The handler
+        // `ret`s into the trampoline, which issues SYS_SIGRETURN.
+        esp -= 8;
+        ((uint32_t*)esp)[0] = SIG_TRAMPOLINE_VA;
+        ((uint32_t*)esp)[1] = (uint32_t)sig;
+
+        r->eip     = (uint32_t)h;
+        r->useresp = esp;
+        return 1;
+    }
+    return 0;
+}
+
+// Reap zombies whose parent is gone or that outlived the timeout. Called from
+// the BSP main loop once per second as a safety net for parents that launch
+// children but never call waitpid() (e.g. the terminal's `run`).
+void task_reap_zombies(void) {
+    uint32_t now = get_ticks();
+    for (int i = 1; i < MAX_TASKS; i++) {
+        if (tasks[i].state != TASK_STATE_ZOMBIE) continue;
+        int p = tasks[i].parent;
+        int parent_gone = (p <= 0 || p >= MAX_TASKS ||
+                           tasks[p].state == TASK_STATE_FREE ||
+                           tasks[p].state == TASK_STATE_ZOMBIE);
+        if (parent_gone || (now - tasks[i].zombie_since) > ZOMBIE_REAP_MS) {
+            tasks[i].state = TASK_STATE_FREE;
+            num_tasks--;
+        }
+    }
 }
 
 int get_task_info(int tid, task_info_t* info) {

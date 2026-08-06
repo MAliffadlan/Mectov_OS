@@ -190,6 +190,22 @@ uint32_t vmm_create_address_space(void) {
         }
     }
     
+    // Map the signal trampoline page (user-readable, read-only) at the fixed
+    // SIG_TRAMPOLINE_VA: signal handlers `ret` into it and it issues
+    // SYS_SIGRETURN. If the frame allocation fails the address space still
+    // works — default-action signals (which don't need the trampoline) are
+    // unaffected. Kept in sync with SYS_SIGRETURN (75) in syscall.h.
+    {
+        uint32_t tp = frame_alloc();
+        if (tp) {
+            uint8_t* code = (uint8_t*)(uintptr_t)tp;
+            code[0] = 0xB8; code[1] = 75; code[2] = 0; code[3] = 0; code[4] = 0; // mov eax, SYS_SIGRETURN
+            code[5] = 0xCD; code[6] = 0x80;                                     // int $0x80
+            code[7] = 0xC3;                                                     // ret (safety)
+            vmm_map_page(pd_paddr, SIG_TRAMPOLINE_VA, tp, PAGE_PRESENT | PAGE_USER);
+        }
+    }
+
     write_serial_string("[VMM] Created address space (cloned PTs) OK\n");
     return pd_paddr;
 }

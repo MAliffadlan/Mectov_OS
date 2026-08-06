@@ -19,6 +19,7 @@
 #include "../include/rtc.h"
 #include "../include/task.h"
 #include "../include/ext2.h"
+#include "../include/serial.h"  // write_serial_string/hex (job diagnostics)
 
 // --- Command buffer & state ---
 char cmd_b[CMD_BUF_SIZE]; int b_idx = 0;
@@ -174,11 +175,84 @@ void expand_alias(char* out, const char* in, int max_len) {
     }
 }
 
+// --- Job control (background processes) ---
+// `cmd &` forks a copy of the shell's task to run the command (or, for `run`,
+// just launches without grabbing the terminal). Jobs are tracked here so the
+// shell can list them (jobs), wait on them (fg) or kill them (kill %n).
+#define MAX_JOBS 16
+typedef struct {
+    int tid;
+    int done;
+    char cmd[48];
+} shell_job_t;
+static shell_job_t jobs[MAX_JOBS];
+static int job_count = 0;
+static int shell_bg_flag = 0;   // set while run_cmd_internal() runs a `&` command
+
+static int register_job(int tid, const char* cmd) {
+    // Reuse a finished job's slot when full
+    int slot = -1;
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (jobs[i].tid > 0 && !task_is_alive(jobs[i].tid)) { slot = i; break; }
+    }
+    if (slot < 0 && job_count < MAX_JOBS) slot = job_count++;
+    if (slot < 0) return -1;
+    jobs[slot].tid = tid;
+    jobs[slot].done = 0;
+    int n = 0;
+    for (; cmd[n] && n < 47; n++) jobs[slot].cmd[n] = cmd[n];
+    jobs[slot].cmd[n] = '\0';
+    // Return the 1-based job number
+    int num = 0;
+    for (int i = 0; i <= slot; i++) if (jobs[i].tid > 0) num++;
+    write_serial_string("[JOBS] registered job ");
+    write_serial_hex(num);
+    write_serial_string(" tid=");
+    write_serial_hex(tid);
+    write_serial_string(" cmd='");
+    write_serial_string(cmd);
+    write_serial_string("'\n");
+    return num;
+}
+
+static void refresh_jobs(void) {
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (jobs[i].tid > 0 && !task_is_alive(jobs[i].tid)) jobs[i].done = 1;
+    }
+}
+
+static void print_jobs(void) {
+    refresh_jobs();
+    int num = 0;
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (jobs[i].tid <= 0) continue;
+        num++;
+        print("[", 0x0E); p_int(num, 0x0E); print("] ", 0x0E);
+        print(jobs[i].done ? "Done    " : "Running ", jobs[i].done ? 0x0A : 0x0B);
+        print("pid=", 0x07); p_int(jobs[i].tid, 0x07); print("  ", 0x07);
+        print(jobs[i].cmd, 0x0F);
+        print("\n", 0x0F);
+    }
+}
+
+// Find the tid of the n-th job (1-based). -1 if none.
+static int find_job_tid(int num) {
+    refresh_jobs();
+    int count = 0;
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (jobs[i].tid <= 0) continue;
+        count++;
+        if (count == num) return jobs[i].tid;
+    }
+    return -1;
+}
+
 const char* cmd_list[] = {
     "help","clear","mfetch","mem","memstat","kmemstats","uptime","vfsinfo",
     "ls","cd","pwd","mkdir","touch","cat","tree","rm","rmdir","cp","mv","df",
     "edit","nano",
     "sh","source","export","alias","unalias","history","ps","kill",
+    "jobs","fg","bg",
     "echo","beep","tone","sleep","date","color","lock",
     "run","snake","taskmgr","flappy","doom","lspci","man",
     "ping","host","fetch","grep",
@@ -500,7 +574,8 @@ static void run_cmd_internal() {
         print(" FILE VFS: ", 0x0B); print("ls, cd, pwd, mkdir, touch, cat, tree, rm, rmdir, cp, mv, df\n", 0x0F);
         print(" EDITOR  : ", 0x0B); print("nano, edit\n", 0x0F);
         print(" SHELL   : ", 0x0B); print("export [NAME=VAL], alias [NAME=VAL], unalias, history, sh\n", 0x0F);
-        print(" APPS GUI: ", 0x0B); print("flappy, doom, taskmgr, snake, run [app.mct]\n", 0x0A);
+        print(" JOBS    : ", 0x0B); print("cmd & (background), jobs, fg [n], bg [n], kill [%n]\n", 0x0F);
+        print(" APPS GUI: ", 0x0B); print("flappy, doom, taskmgr, snake, run [app.mct], run [app.mct] &\n", 0x0A);
         print(" NET & HW: ", 0x0B); print("ping [ip], host [domain], fetch [domain], lspci\n", 0x0F);
         print(" UTILS   : ", 0x0B); print("echo [msg], sleep [sec], tone [freq], beep, man [cmd]\n", 0x0F);
         print(" POWER   : ", 0x0B); print("reboot, shutdown\n", 0x0C);
@@ -1019,13 +1094,22 @@ static void run_cmd_internal() {
             print("Launching MCT app: ", 0x0A); print(fname, 0x0A); print("\n", 0x0A);
             int res = load_mct_app_with_arg(fname, arg);
             if (res >= 0) {
-                print("[+] User Mode Task Created! (Task ID: ", 0x0A); p_int(res, 0x0A); print(")\n", 0x0A);
-                
-                extern int term_app_running;
-                extern int term_app_task_id;
-                term_app_running = 1;
-                term_app_task_id = res;
-                return; // DO NOT PRINT PROMPT
+                if (shell_bg_flag) {
+                    // `run app.mct &` — the app runs on its own; don't grab
+                    // the terminal, just track it as a background job.
+                    int jn = register_job(res, fname);
+                    print("[+] App in background [", 0x0A);
+                    p_int(jn, 0x0A); print("] (Task ID: ", 0x0A);
+                    p_int(res, 0x0A); print(")\n", 0x0A);
+                } else {
+                    print("[+] User Mode Task Created! (Task ID: ", 0x0A); p_int(res, 0x0A); print(")\n", 0x0A);
+                    
+                    extern int term_app_running;
+                    extern int term_app_task_id;
+                    term_app_running = 1;
+                    term_app_task_id = res;
+                    return; // DO NOT PRINT PROMPT
+                }
             } else {
                 print("[-] Failed to execute MCT.\n", 0x0C);
             }
@@ -1435,28 +1519,91 @@ static void run_cmd_internal() {
         }
         print("========================================================\n", 0x0B);
     }
+    // --- JOBS ---
+    else if (strcmp(cmd_b, "jobs") == 0) {
+        print_jobs();
+        if (job_count == 0) print("No background jobs.\n", 0x07);
+    }
+    // --- FG: bring a background job to the foreground (wait for it) ---
+    else if (strncmp(cmd_b, "fg", 2) == 0 &&
+             (cmd_b[2] == '\0' || cmd_b[2] == ' ')) {
+        int num = (cmd_b[2] == ' ') ? atoi(cmd_b + 3) : -1;
+        if (num <= 0) {
+            print("Usage: fg [job_number]  — wait for a background job\n", 0x0E);
+        } else {
+            int t = find_job_tid(num);
+            if (t < 0) {
+                print("fg: no such job\n", 0x0C);
+            } else {
+                extern int task_waitpid(int pid, int* status, int options);
+                int st = -1;
+                int r = task_waitpid(t, &st, 0);
+                if (r >= 0) {
+                    print("[", 0x0E); p_int(num, 0x0E); print("] Done", 0x0A);
+                    print(" (exit ", 0x07); p_int(st, 0x07); print(")\n", 0x07);
+                    write_serial_string("[JOBS] fg done status=");
+                    write_serial_hex(st);
+                    write_serial_string("\n");
+                } else {
+                    print("fg: job already finished\n", 0x0C);
+                }
+            }
+        }
+    }
+    // --- BG: resume a done job (no-op in this model; jobs run on their own) ---
+    else if (strncmp(cmd_b, "bg", 2) == 0 &&
+             (cmd_b[2] == '\0' || cmd_b[2] == ' ')) {
+        int num = (cmd_b[2] == ' ') ? atoi(cmd_b + 3) : -1;
+        if (num <= 0) {
+            print("Usage: bg [job_number]\n", 0x0E);
+        } else if (find_job_tid(num) < 0) {
+            print("bg: no such job\n", 0x0C);
+        } else {
+            print("bg: job ", 0x0A); p_int(num, 0x0A); print(" continues in background\n", 0x0A);
+        }
+    }
     // --- KILL ---
     else if (strncmp(cmd_b, "kill ", 5) == 0) {
-        int tid = atoi(cmd_b + 5);
-        if (tid == 0) {
-            print("kill: cannot terminate idle kernel process (PID 0)!\n", 0x0C);
-        } else if (tid < 0 || tid >= 64) {
-            print("kill: invalid PID!\n", 0x0C);
-        } else if (!task_is_alive(tid)) {
-            print("kill: process not found!\n", 0x0C);
-        } else {
-            int res = task_kill(tid);
-            if (res == 0) {
-                print("Process ", 0x0A);
-                p_int(tid, 0x0A);
-                print(" terminated successfully.\n", 0x0A);
+        char* arg = cmd_b + 5;
+        while (*arg == ' ') arg++;
+        if (arg[0] == '%') {
+            // Job syntax: kill %n
+            int num = atoi(arg + 1);
+            int t = find_job_tid(num);
+            if (t < 0) {
+                print("kill: no such job\n", 0x0C);
             } else {
-                print("kill: failed to terminate process!\n", 0x0C);
+                task_kill(t);
+                print("Job ", 0x0A); p_int(num, 0x0A); print(" (pid ", 0x0A);
+                p_int(t, 0x0A); print(") sent SIGKILL.\n", 0x0A);
+                write_serial_string("[JOBS] kill %");
+                write_serial_hex(num);
+                write_serial_string(" tid=");
+                write_serial_hex(t);
+                write_serial_string(" SIGKILL sent\n");
+            }
+        } else {
+            int tid = atoi(arg);
+            if (tid == 0) {
+                print("kill: cannot terminate idle kernel process (PID 0)!\n", 0x0C);
+            } else if (tid < 0 || tid >= 64) {
+                print("kill: invalid PID!\n", 0x0C);
+            } else if (!task_is_alive(tid)) {
+                print("kill: process not found!\n", 0x0C);
+            } else {
+                int res = task_kill(tid);
+                if (res == 0) {
+                    print("Process ", 0x0A);
+                    p_int(tid, 0x0A);
+                    print(" terminated successfully.\n", 0x0A);
+                } else {
+                    print("kill: failed to terminate process!\n", 0x0C);
+                }
             }
         }
     }
     else if (strcmp(cmd_b, "kill") == 0) {
-        print("Usage: kill [PID]  — Terminate a process\n", 0x0E);
+        print("Usage: kill [PID | %job]  — Terminate a process or job\n", 0x0E);
     }
     // --- ECHO ---
     else if (strncmp(cmd_b, "echo ", 5) == 0) {
@@ -1594,6 +1741,22 @@ void run_script(const char* f) {
     is_script = 0;
 }
 
+// Kernel entry point for a background command: reached by iret from the
+// forked child's patched frame (never returns to user mode). Reads its own
+// command from its launch_arg (written before the child could run), executes
+// it, then exits with status 0.
+static void bg_child_entry(void) {
+    const char* arg = task_get_launch_arg(get_current_task());
+    if (arg && arg[0]) {
+        int i = 0;
+        for (; arg[i] && i < CMD_BUF_SIZE - 1; i++) cmd_b[i] = arg[i];
+        cmd_b[i] = '\0';
+        b_idx = i;
+    }
+    run_cmd_internal();
+    task_exit_with_code(0);
+}
+
 void ex_cmd() {
     print("\n", 0x0F);
     cmd_b[b_idx] = '\0';
@@ -1615,6 +1778,50 @@ void ex_cmd() {
     }
     
     shell_reset_history_nav();
+    
+    // Background job: a trailing '&' (after trimming) runs the command in the
+    // background. `run`/`jalankan` already spawn their own task, so those just
+    // launch without grabbing the terminal; anything else is forked — the
+    // child is a copy of this task that iret's straight into bg_child_entry,
+    // runs the command in the kernel and exits.
+    {
+        int e = b_idx - 1;
+        while (e >= 0 && (cmd_b[e] == ' ' || cmd_b[e] == '\t')) { cmd_b[e] = '\0'; e--; }
+        if (e >= 0 && cmd_b[e] == '&') {
+            cmd_b[e] = '\0';
+            e--;
+            while (e >= 0 && (cmd_b[e] == ' ' || cmd_b[e] == '\t')) { cmd_b[e] = '\0'; e--; }
+            b_idx = (e >= 0) ? e + 1 : 0;
+
+            int is_run = (strncmp(cmd_b, "run ", 4) == 0 || strncmp(cmd_b, "jalankan ", 9) == 0);
+            if (is_run) {
+                shell_bg_flag = 1;
+                run_cmd_internal();
+                shell_bg_flag = 0;
+                b_idx = 0;
+                return;
+            }
+
+            extern int task_fork_kernel(void (*entry)(void), const char* arg);
+            extern int task_in_kernel_space(int);
+            int me = get_current_task();
+            if (me > 0 && !task_in_kernel_space(me)) {
+                int child = task_fork_kernel(bg_child_entry, cmd_b);
+                if (child > 0) {
+                    int jn = register_job(child, cmd_b);
+                    print("[", 0x0E); p_int(jn, 0x0E); print("] ", 0x0E);
+                    print("background pid=", 0x0A); p_int(child, 0x0A);
+                    print("\n", 0x0F);
+                    b_idx = 0;
+                    return;
+                }
+            }
+            // Cannot fork (kernel task / no slots): run synchronously instead.
+            run_cmd_internal();
+            b_idx = 0;
+            return;
+        }
+    }
     
     // Check for pipe '|'
     int pipe_idx = -1;

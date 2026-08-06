@@ -287,8 +287,10 @@ void isr_handler(registers_t *r) {
             write_serial_string("CR3: ");
             write_serial_hex(cr3_val);
             write_serial_string("\n");
-            // The new task_exit() handles full cleanup (WM + VMM)
-            task_exit();
+            // The new task_exit_with_code() handles full cleanup (WM + VMM)
+            // and records a SIGSEGV-style exit status for the parent.
+            extern void task_exit_with_code(int code);
+            task_exit_with_code(128 + SIGSEGV);
         } else {
             // Kernel crash
             print("\n[KERNEL PANIC] Unhandled Exception: ", 0x0C);

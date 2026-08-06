@@ -12,6 +12,7 @@
 #include "../include/fd.h"
 #include "../include/shell.h"
 #include "../include/vmm.h"   // USER_STACK_BOTTOM
+#include "../include/task.h"   // SIG_MAX, SIG_IGN_SENTINEL, sigframe_t
 
 extern int validate_user_ptr(const void* ptr, uint32_t size);
 extern int safe_strlen(const char* s, int max);
@@ -169,6 +170,88 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             regs->eax = (uint32_t)task_kill(tid);
             break;
         }
+        // ----- SYS_FORK (71): clone the current task (COW address space) -----
+        case SYS_FORK: {
+            extern int task_fork(void);
+            regs->eax = (uint32_t)task_fork();
+            break;
+        }
+
+        // ----- SYS_WAITPID (72) -----
+        case SYS_WAITPID: {
+            int pid = (int)regs->ebx;
+            int* status = (int*)regs->ecx;
+            int options = (int)regs->edx;
+            if (!validate_user_ptr(status, sizeof(int))) { regs->eax = (uint32_t)-1; break; }
+            extern int task_waitpid(int pid, int* status, int options);
+            regs->eax = (uint32_t)task_waitpid(pid, status, options);
+            break;
+        }
+
+        // ----- SYS_KILL (73): send a signal to a task -----
+        case SYS_KILL: {
+            int pid = (int)regs->ebx;
+            int sig = (int)regs->ecx;
+            if (pid <= 0) { regs->eax = (uint32_t)-1; break; }
+            extern int task_signal(int tid, int sig);
+            regs->eax = (uint32_t)task_signal(pid, sig);
+            break;
+        }
+
+        // ----- SYS_SIGNAL (74): set a signal handler -----
+        case SYS_SIGNAL: {
+            int sig = (int)regs->ebx;
+            uint32_t handler = (uint32_t)regs->ecx;
+            if (sig <= 0 || sig >= SIG_MAX || sig == SIGKILL) {
+                regs->eax = (uint32_t)-1;   // SIGKILL cannot be caught or ignored
+                break;
+            }
+            // handler must be NULL (default), SIG_IGN (1), or user-space code
+            if (handler != 0 && handler != SIG_IGN &&
+                !(handler >= 0x08000000 && handler < USER_STACK_BOTTOM)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            int tid = get_current_task();
+            uint32_t old = (uint32_t)task_get_signal_handler(tid, sig);
+            task_set_signal_handler(tid, sig, (void*)handler);
+            regs->eax = old;    // 0 = default, 1 = SIG_IGN, else previous handler
+            break;
+        }
+
+        // ----- SYS_SIGRETURN (75): restore context after a handler -----
+        case SYS_SIGRETURN: {
+            int tid = get_current_task();
+            uint32_t esp = task_get_sig_frame_esp(tid);
+            if (esp == 0 || !validate_user_ptr((void*)esp, sizeof(sigframe_t))) {
+                task_set_sig_frame_esp(tid, 0);
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            sigframe_t* f = (sigframe_t*)esp;
+            regs->eax  = f->saved_eax;
+            regs->ecx  = f->saved_ecx;
+            regs->edx  = f->saved_edx;
+            regs->ebx  = f->saved_ebx;
+            regs->esi  = f->saved_esi;
+            regs->edi  = f->saved_edi;
+            regs->ebp  = f->saved_ebp;
+            regs->eip  = f->saved_eip;
+            regs->cs   = f->saved_cs;
+            regs->eflags = f->saved_eflags;
+            regs->useresp = f->saved_esp;
+            regs->ss   = f->saved_ss;
+            task_set_sig_frame_esp(tid, 0);
+            break;
+        }
+
+        // ----- SYS_GETPPID (76) -----
+        case SYS_GETPPID: {
+            extern int task_get_ppid(void);
+            regs->eax = (uint32_t)task_get_ppid();
+            break;
+        }
+
         // ----- SYS_GET_LAUNCH_ARG (49) -----
         case SYS_GET_LAUNCH_ARG: {
             char* user_buf = (char*)regs->ebx;

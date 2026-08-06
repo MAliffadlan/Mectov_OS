@@ -124,6 +124,27 @@ typedef struct {
 // TCP connection management (multi-connection)
 #define SYS_TCP_CLOSE      70  // EBX=conn_id -> returns 0/-1
 
+// Process model & signals
+#define SYS_FORK        71  // -> child tid (parent) / 0 (child) / -1
+#define SYS_WAITPID     72  // EBX=pid, ECX=status_ptr, EDX=options -> child tid / 0 (WNOHANG) / -1
+#define SYS_KILL        73  // EBX=pid, ECX=sig -> 0/-1
+#define SYS_SIGNAL      74  // EBX=sig, ECX=handler(0=default,1=SIG_IGN,else fn) -> old handler
+#define SYS_SIGRETURN   75  // restore the frame saved before a signal handler
+#define SYS_GETPPID     76  // -> parent task id
+
+// Signal numbers (POSIX subset; SIGKILL cannot be caught or ignored)
+#define SIGINT   2
+#define SIGKILL  9
+#define SIGUSR1  10
+#define SIGSEGV  11
+#define SIGUSR2  12
+#define SIGTERM  15
+#define SIGCHLD  17
+// Pass 1 as the handler to sys_signal to ignore a signal
+#define SIG_IGN  1
+// waitpid options
+#define WNOHANG  1
+
 // Virtual Memory
 #define SYS_VMM_MAP        29  // EBX=vaddr, ECX=paddr, EDX=flags → return 0/-1
 #define SYS_VMM_ALLOC      30  // EBX=vaddr, ECX=flags → return vaddr or 0
@@ -201,6 +222,14 @@ static inline void sys_free(void* ptr) {
 
 static inline uint32_t sys_get_ticks(void) {
     return (uint32_t)syscall(SYS_GET_TICKS, 0, 0, 0);
+}
+
+static inline int sys_sleep(int ticks) {
+    return syscall(SYS_SLEEP, ticks, 0, 0);
+}
+
+static inline int sys_getpid(void) {
+    return syscall(SYS_GET_PID, 0, 0, 0);
 }
 
 static inline void sys_yield(void) {
@@ -441,6 +470,40 @@ static inline int sys_ipc_try_recv(int qid, void* data, int max_len) {
     __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_IPC_TRY_RECV), "b"(qid), "c"(0), "d"(data), "S"(&len_out) : "memory");
     if (ret == 0) return (int)len_out;
     return ret;
+}
+
+// ============================================================
+// Process model & signal syscalls (Ring 3 stubs)
+// ============================================================
+static inline int sys_fork(void) {
+    return syscall(SYS_FORK, 0, 0, 0);
+}
+
+static inline int sys_waitpid(int pid, int* status, int options) {
+    return syscall(SYS_WAITPID, pid, (int)status, options);
+}
+
+static inline int sys_kill(int pid, int sig) {
+    return syscall(SYS_KILL, pid, sig, 0);
+}
+
+static inline void* sys_signal(int sig, void* handler) {
+    return (void*)syscall(SYS_SIGNAL, sig, (int)handler, 0);
+}
+
+static inline int sys_sigreturn(void) {
+    return syscall(SYS_SIGRETURN, 0, 0, 0);
+}
+
+static inline int sys_getppid(void) {
+    return syscall(SYS_GETPPID, 0, 0, 0);
+}
+
+// Exit the current task with a status (available to child processes).
+// Legacy callers use sys_exit() which passes status 0.
+static inline void sys_exit_with_code(int code) {
+    syscall(SYS_EXIT, code, 0, 0);
+    for(;;); // Never returns
 }
 
 #endif

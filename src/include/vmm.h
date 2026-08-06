@@ -24,6 +24,13 @@
 #define USER_STACK_BOTTOM (USER_STACK_TOP - USER_STACK_SIZE)
 #define USER_STACK_PAGES  (USER_STACK_SIZE / 4096)
 
+// Signal trampoline: a user-readable page mapped into every address space at
+// this fixed VA. Signal handlers `ret` into it and it performs SYS_SIGRETURN
+// (mov eax,75; int $0x80; ret). It sits above the SYS_MALLOC cap
+// (0x08F00000) and below the shared-library base (0x09000000), so nothing
+// else ever maps there. Kept in sync with SYS_SIGRETURN in syscall.h.
+#define SIG_TRAMPOLINE_VA 0x08F7F000u
+
 // Allocate a new page directory for a process
 uint32_t vmm_create_address_space(void);
 

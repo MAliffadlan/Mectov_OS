@@ -394,6 +394,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         if (now - last_clock_tick >= 1000) {
             last_clock_tick = now;
             wm_tick_all();
+            // Reap zombie processes whose parent never waited for them
+            // (safety net; waitpid() reaps them normally when it is used).
+            extern void task_reap_zombies(void);
+            task_reap_zombies();
             mark_dirty((int)fb_width - 240, (int)fb_height - TASKBAR_H_PX, 240, TASKBAR_H_PX);
             needs_redraw = 1;
         }
