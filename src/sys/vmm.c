@@ -29,8 +29,8 @@ static uint8_t frame_bitmap[FRAME_BITMAP_SIZE];
 uint8_t frame_ref_count[TOTAL_PHYSICAL_PAGES];
 static int vmm_initialized = 0;
 
-// Mark kernel + heap region (first 32MB) as reserved
-#define KERNEL_RESERVED_PAGES (48 * 256)  // 48MB
+// Kernel + heap region (first 48MB) is reserved; the define lives in mem.h so
+// task.c (mmap/munmap frame checks) shares the same bound.
 
 static void bitmap_set(int idx) {
     frame_bitmap[idx / 8] |= (1 << (idx % 8));

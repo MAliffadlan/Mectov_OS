@@ -139,6 +139,10 @@ typedef struct {
 #define SYS_SHMDT       80  // EBX=addr -> 0/-1
 #define SYS_SHMCTL      81  // EBX=shmid, ECX=cmd(0=IPC_RMID) -> 0/-1
 
+// mmap / munmap (demand paging)
+#define SYS_MMAP        82  // EBX=size -> base VA (reserved, frames on fault) or 0
+#define SYS_MUNMAP      83  // EBX=base VA (from mmap) -> 1 or 0
+
 // Signal numbers (POSIX subset; SIGKILL cannot be caught or ignored)
 #define SIGINT   2
 #define SIGKILL  9
@@ -154,6 +158,16 @@ typedef struct {
 
 // Virtual Memory
 #define SYS_VMM_MAP        29  // EBX=vaddr, ECX=paddr, EDX=flags → return 0/-1
+static inline void* sys_mmap(uint32_t size) {
+    void* ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MMAP), "b"(size));
+    return ret;
+}
+static inline int sys_munmap(void* addr) {
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MUNMAP), "b"(addr));
+    return ret;
+}
 #define SYS_VMM_ALLOC      30  // EBX=vaddr, ECX=flags → return vaddr or 0
 #define SYS_VMM_FREE       31  // EBX=vaddr → return 0/-1
 

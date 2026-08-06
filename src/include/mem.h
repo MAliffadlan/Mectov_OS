@@ -4,6 +4,7 @@
 #include "types.h"
 
 #define PAGE_SIZE 4096
+#define KERNEL_RESERVED_PAGES (48 * 256)  // 48MB reserved for kernel+modules
 
 // Paging Flags
 #define PAGE_PRESENT 0x1

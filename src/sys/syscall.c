@@ -552,6 +552,18 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_MMAP (82) / SYS_MUNMAP (83) -----
+        case SYS_MMAP: {
+            extern uint32_t task_mmap_reserve(uint32_t size);
+            regs->eax = task_mmap_reserve((uint32_t)regs->ebx);
+            break;
+        }
+        case SYS_MUNMAP: {
+            extern uint32_t task_munmap(uint32_t addr);
+            regs->eax = task_munmap((uint32_t)regs->ebx);
+            break;
+        }
+
         // ----- SYS_GET_PCI_INFO (36) -----
         case SYS_GET_PCI_INFO: {
             pci_device_t* array = (pci_device_t*)regs->ebx;

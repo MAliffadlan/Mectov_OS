@@ -214,6 +214,15 @@ void isr_handler(registers_t *r) {
                 }
             }
         }
+        // --- Demand Paging for mmap() regions ---
+        // Reserved mmap ranges live at 0x40000000..0x80000000 with no frames;
+        // lazily map a zeroed frame per page on first access.
+        if ((r->cs & 3) == 3 && faulting_address >= MMAP_BASE && faulting_address < MMAP_END) {
+            extern int task_mmap_handle_fault(uint32_t addr, uint32_t cr3);
+            if (task_mmap_handle_fault(faulting_address, cr3_val)) {
+                return; // Resume execution, instruction will restart
+            }
+        }
         // --- NEW: Demand Paging for Ring 3 Heap ---
         if ((r->cs & 3) == 3 && faulting_address >= 0x08000000 && faulting_address < 0x20000000) {
             extern int get_current_task(void);

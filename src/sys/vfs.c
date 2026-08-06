@@ -264,6 +264,16 @@ void vfs_init() {
         extern uint8_t _binary_shmdemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/shmdemo.mct", (const char*)_binary_shmdemo_mct_start, _binary_shmdemo_mct_end - _binary_shmdemo_mct_start);
 
+        // mmap demand-paging demo
+        extern uint8_t _binary_mmapdemo_mct_start[];
+        extern uint8_t _binary_mmapdemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/mmapdemo.mct", (const char*)_binary_mmapdemo_mct_start, _binary_mmapdemo_mct_end - _binary_mmapdemo_mct_start);
+
+        // Ctrl+C interrupt demo (infinite loop)
+        extern uint8_t _binary_looper_mct_start[];
+        extern uint8_t _binary_looper_mct_end[];
+        changed += vfs_update_file_if_needed("apps/looper.mct", (const char*)_binary_looper_mct_start, _binary_looper_mct_end - _binary_looper_mct_start);
+
         // ELF demo app (real ELF32 binary, not MCT)
         extern uint8_t _binary_elfdemo_elf_start[];
         extern uint8_t _binary_elfdemo_elf_end[];
@@ -359,6 +369,18 @@ void vfs_init() {
     extern uint8_t _binary_shmdemo_mct_end[];
     vfs_create_file("apps/shmdemo.mct");
     vfs_write_file("apps/shmdemo.mct", (const char*)_binary_shmdemo_mct_start, _binary_shmdemo_mct_end - _binary_shmdemo_mct_start);
+
+    // mmap demand-paging demo
+    extern uint8_t _binary_mmapdemo_mct_start[];
+    extern uint8_t _binary_mmapdemo_mct_end[];
+    vfs_create_file("apps/mmapdemo.mct");
+    vfs_write_file("apps/mmapdemo.mct", (const char*)_binary_mmapdemo_mct_start, _binary_mmapdemo_mct_end - _binary_mmapdemo_mct_start);
+
+    // Ctrl+C interrupt demo (infinite loop)
+    extern uint8_t _binary_looper_mct_start[];
+    extern uint8_t _binary_looper_mct_end[];
+    vfs_create_file("apps/looper.mct");
+    vfs_write_file("apps/looper.mct", (const char*)_binary_looper_mct_start, _binary_looper_mct_end - _binary_looper_mct_start);
 
     // Inject hello.mct
     vfs_create_file("apps/hello.mct");

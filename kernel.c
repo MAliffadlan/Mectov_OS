@@ -369,7 +369,28 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                         needs_redraw = 1;
                     }
                 } else {
-                    if (sc == 0x0F && keyboard_alt_held) {
+                    // Ctrl+C interrupts the terminal's foreground app (SIGINT
+                    // to the whole job tree). The scancode is 0x2E for 'C';
+                    // the key is consumed here so it never reaches the focused
+                    // window as a normal character.
+                    if (keyboard_ctrl_held && sc == 0x2E) {
+                        extern int term_app_running;
+                        extern int term_app_task_id;
+                        extern int task_signal_group(int root_tid, int sig);
+                        if (term_app_running && term_app_task_id > 0) {
+                            // Snapshot the tid: signalling the job can reap it
+                            // (which resets term_app_task_id to -1), and the log
+                            // below must report the tid we actually sent to.
+                            int fg_tid = term_app_task_id;
+                            int n = task_signal_group(fg_tid, SIGINT);
+                            write_serial_string("[JOBS] Ctrl+C -> SIGINT to foreground TID ");
+                            write_serial_hex(fg_tid);
+                            write_serial_string(" (");
+                            write_serial_hex(n);
+                            write_serial_string(" tasks)\n");
+                        }
+                        needs_redraw = 1;
+                    } else if (sc == 0x0F && keyboard_alt_held) {
                         wm_alt_tab_start();
                         needs_redraw = 1;
                     } else if (sc < 0x80 || sc == 0xE0) {

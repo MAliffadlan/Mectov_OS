@@ -26,6 +26,18 @@
 #define SIGCHLD  17
 #define SIG_MAX  32
 
+// mmap() regions per task (demand paged): the region is reserved in VA space
+// with no physical frames; a page fault inside it lazily maps a fresh zeroed
+// frame. Max 8 concurrent mappings per task.
+#define MMAP_MAX_REGIONS 8
+#define MMAP_BASE        0x40000000u  // user VA region for mmap (above heap/shm)
+#define MMAP_END         0x80000000u
+
+typedef struct {
+    uint32_t base;   // page-aligned start VA (0 = free slot)
+    uint32_t size;   // page-aligned size in bytes
+} mmap_region_t;
+
 // Sentinel stored in signal_handlers[] for "ignore this signal". User space
 // passes 1 (SIG_IGN) to sys_signal; the kernel stores this pointer instead of
 // NULL (default) so a real handler at address 1 stays impossible.

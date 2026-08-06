@@ -171,15 +171,36 @@ def main():
             return 1
         print("[OK] `fg 1` waited and reported exit status 0")
 
-        # 4. sleep 5 & then kill %1 (SIGKILL terminates the parked job)
-        type_keys(keys("sleep 5 &"))
-        mon_cmd("sendkey ret")
-        if not wait_for_in_file(SERIAL_LOG, "[JOBS] registered job", 20):
+        # 4. sleep 5 & then kill %1 (SIGKILL terminates the parked job).
+        # Start exactly ONE background job (retry only until it registers,
+        # never typing it a second time — that would shift job numbers).
+        ok_sleep = False
+        for _ in range(3):
+            for _ in range(24):
+                mon_cmd("sendkey backspace")
+            type_keys(keys("sleep 5 &"), delay=0.15)
+            mon_cmd("sendkey ret")
+            if wait_for_in_file(SERIAL_LOG, "[JOBS] registered job", 20):
+                ok_sleep = True
+                break
+            time.sleep(1.0)
+        if not ok_sleep:
             print("[FAIL] second background job did not start")
             return 1
-        type_keys(keys("kill %1"))
-        mon_cmd("sendkey ret")
-        if not wait_for_in_file(SERIAL_LOG, "[JOBS] kill", 20):
+        time.sleep(1.5)  # let the prompt come back and the job park
+        ok_kill = False
+        for _ in range(5):
+            for _ in range(32):
+                mon_cmd("sendkey backspace")
+            time.sleep(0.5)
+            type_keys(keys("kill %1"), delay=0.3)
+            time.sleep(0.5)
+            mon_cmd("sendkey ret")
+            if wait_for_in_file(SERIAL_LOG, "[JOBS] kill %", 20):
+                ok_kill = True
+                break
+            time.sleep(1.0)
+        if not ok_kill:
             print("[FAIL] `kill %1` did not send SIGKILL")
             return 1
         print("[OK] `kill %1` sent SIGKILL")

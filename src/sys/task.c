@@ -54,6 +54,7 @@ typedef struct {
     uint32_t sig_frame_esp;     // user-stack address of the sigframe awaiting SYS_SIGRETURN
     uint32_t zombie_since;      // tick when the task became a zombie (reap timeout)
     uint32_t shm_bits;          // bitmap of shm segments this task has attached
+    mmap_region_t mmap_regions[MMAP_MAX_REGIONS]; // reserved mmap() ranges (0 = free)
 } task_t;
 
 static task_t tasks[MAX_TASKS];
@@ -82,6 +83,7 @@ void init_tasking() {
         tasks[i].zombie_since = 0;
         for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
         for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
+        for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[i].mmap_regions[j].base = 0;
     }
     tasks[0].state = TASK_STATE_RUNNING;
     tasks[0].ring = 0;
@@ -182,6 +184,18 @@ static void task_cleanup(int tid) {
     // 1. Clean up windows owned by this task
     extern void wm_cleanup_task(int tid);
     wm_cleanup_task(tid);
+
+    // 1b. If this was the terminal's foreground app, release the terminal
+    //     (so a later Ctrl+C is a no-op and the terminal is free again).
+    extern int term_app_running;
+    extern int term_app_task_id;
+    if (term_app_running && term_app_task_id == tid) {
+        term_app_running = 0;
+        term_app_task_id = -1;
+        write_serial_string("[JOBS] foreground app TID ");
+        write_serial_hex(tid);
+        write_serial_string(" exited — terminal released\n");
+    }
 
     // 2. Release all fds this task holds (global fd slots + pipes). Without
     //    this, exit/kill leaked slots and left pipe readers blocked forever.
@@ -492,6 +506,7 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             tasks[i].sig_frame_esp = 0;
             tasks[i].zombie_since = 0;
             tasks[i].shm_bits = 0;
+            for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[i].mmap_regions[j].base = 0;
             for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
@@ -627,6 +642,40 @@ int task_kill(int tid) {
     return task_signal(tid, SIGKILL);
 }
 
+// Send a signal to a task and every descendant still alive (POSIX process-
+// group semantics for Ctrl+C: interrupting the foreground job must reach the
+// whole job tree, not just the job leader). Used by the terminal's Ctrl+C.
+// Returns the number of tasks signalled, or -1 on a bad root.
+int task_signal_group(int root_tid, int sig) {
+    if (root_tid <= 0 || root_tid >= MAX_TASKS) return -1;
+    if (tasks[root_tid].state == TASK_STATE_FREE) return -1;
+
+    int sent = 0;
+    // One pass over the task table: any task whose parent chain leads back to
+    // root_tid is in the group. (Root itself is sent last so its children get
+    // the signal even if terminating root first would orphan them.)
+    for (int i = 1; i < MAX_TASKS; i++) {
+        if (tasks[i].state == TASK_STATE_FREE || i == root_tid) continue;
+        int p = tasks[i].parent;
+        int hops = 0;
+        // Walk the parent chain toward the root. Guard with a hop cap so a
+        // corrupt/cyclic parent chain cannot loop forever.
+        while (p > 0 && p < MAX_TASKS && hops < MAX_TASKS && p != i) {
+            if (p == root_tid) {
+                task_signal(i, sig);
+                sent++;
+                break;
+            }
+            p = tasks[p].parent;
+            hops++;
+        }
+    }
+    // Root last: it is the group leader; children above were signalled first.
+    task_signal(root_tid, sig);
+    sent++;
+    return sent;
+}
+
 // ============================================================
 // fork()
 // ============================================================
@@ -715,6 +764,10 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         memcpy(tasks[i].launch_arg, tasks[parent].launch_arg, sizeof(tasks[i].launch_arg));
         tasks[i].current_dir = tasks[parent].current_dir;
         tasks[i].heap_ptr = tasks[parent].heap_ptr;
+        // Child inherits mmap regions (the COW clone keeps the same VA layout;
+        // faulted pages become COW, unfaulted ones stay demand-paged).
+        memcpy(tasks[i].mmap_regions, tasks[parent].mmap_regions,
+               sizeof(tasks[i].mmap_regions));
 
         // Share the parent's open fds: bump each global refcount so a close in
         // one process does not yank the descriptor from the other.
@@ -816,6 +869,8 @@ int task_exec(const char* path, const char* arg, void* frame) {
     // ---- Rewire the task state to the new image ----
     tasks[tid].page_dir = img.page_dir;
     tasks[tid].heap_ptr = img.heap_start;
+    // A fresh address space has no mmap regions.
+    for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[tid].mmap_regions[j].base = 0;
 
     // Reset signal state per POSIX: caught handlers revert to default, ignored
     // ones stay ignored; nothing is pending; no sigframe in flight.
@@ -1115,4 +1170,145 @@ uint32_t task_get_shm_bits(int tid) {
 void task_set_shm_bits(int tid, uint32_t bits) {
     if (tid < 0 || tid >= MAX_TASKS) return;
     tasks[tid].shm_bits = bits;
+}
+
+// ============================================================
+// mmap() — reserve a VA range now, materialize frames on fault
+// ============================================================
+
+// Reserve a page-aligned range in the task's mmap VA window (MMAP_BASE..
+// MMAP_END). No physical frames are committed — the page fault handler
+// (task_mmap_handle_fault) lazily maps a fresh zeroed frame per page on first
+// access. Returns the base VA or 0 on failure.
+uint32_t task_mmap_reserve(uint32_t size) {
+    int cid = get_cid();
+    if (current_task[cid] < 0) return 0;
+    int tid = current_task[cid];
+    if (size == 0) return 0;
+
+    size = (size + 0xFFF) & ~0xFFFu;
+    if (size == 0) size = 4096;
+    // The window is MMAP_BASE..MMAP_END; a mapping larger than the window
+    // (or one that would wrap cursor+size past 2^32) can never fit.
+    if (size > (MMAP_END - MMAP_BASE)) return 0;
+
+    // Find a free slot for the new mapping.
+    int slot = -1;
+    for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+        if (tasks[tid].mmap_regions[j].base == 0) { slot = j; break; }
+    }
+    if (slot < 0) {
+        write_serial_string("[MMAP] too many regions for TID ");
+        write_serial_hex(tid);
+        write_serial_string("\n");
+        return 0;
+    }
+
+    // Best-fit a gap between existing regions, starting from MMAP_BASE.
+    // Sort by base would be cleaner; with <=8 regions a linear scan is fine:
+    // find the lowest free gap that fits.
+    uint32_t cursor = MMAP_BASE;
+    for (;;) {
+        int fits = 1;
+        for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+            uint32_t b = tasks[tid].mmap_regions[j].base;
+            if (b == 0) continue;
+            uint32_t e = b + tasks[tid].mmap_regions[j].size;
+            // Overlap if cursor < e && cursor + size > b
+            if (cursor < e && (cursor + size) > b) { fits = 0; break; }
+        }
+        if (fits) break;
+        // Move cursor past the region that overlaps.
+        cursor = ((cursor + size + 0xFFF) & ~0xFFFu) + 4096;
+        if (cursor >= MMAP_END) {
+            write_serial_string("[MMAP] no VA space left for TID ");
+            write_serial_hex(tid);
+            write_serial_string("\n");
+            return 0;
+        }
+    }
+
+    tasks[tid].mmap_regions[slot].base = cursor;
+    tasks[tid].mmap_regions[slot].size = size;
+
+    write_serial_string("[MMAP] reserved ");
+    write_serial_hex(cursor);
+    write_serial_string(" size=");
+    write_serial_hex(size);
+    write_serial_string(" for TID ");
+    write_serial_hex(tid);
+    write_serial_string("\n");
+    return cursor;
+}
+
+// Handle a page fault inside a reserved mmap region: allocate a zeroed frame
+// and map it writable. Returns 1 if handled (resume), 0 if not ours.
+int task_mmap_handle_fault(uint32_t addr, uint32_t cr3) {
+    int cid = get_cid();
+    if (current_task[cid] < 0) return 0;
+    int tid = current_task[cid];
+
+    for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+        uint32_t b = tasks[tid].mmap_regions[j].base;
+        if (b == 0) continue;
+        if (addr >= b && addr < b + tasks[tid].mmap_regions[j].size) {
+            uint32_t phys = frame_alloc();
+            if (phys == 0) {
+                write_serial_string("[MMAP] OOM on fault at ");
+                write_serial_hex(addr);
+                write_serial_string("\n");
+                return 0;  // let it become a crash
+            }
+            vmm_map_page(cr3, addr & ~0xFFFu, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+            memset((void*)(uintptr_t)(addr & ~0xFFFu), 0, 4096);
+            write_serial_string("[MMAP] demand paged ");
+            write_serial_hex(addr & ~0xFFFu);
+            write_serial_string(" for TID ");
+            write_serial_hex(tid);
+            write_serial_string("\n");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Unmap a reserved region: free any frames already faulted in, then release
+// the reservation. addr must be the exact base returned by mmap().
+uint32_t task_munmap(uint32_t addr) {
+    int cid = get_cid();
+    if (current_task[cid] < 0) return 0;
+    int tid = current_task[cid];
+    uint32_t page_dir = tasks[tid].page_dir;
+
+    for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+        if (tasks[tid].mmap_regions[j].base != addr) continue;
+        uint32_t size = tasks[tid].mmap_regions[j].size;
+
+        // Free every frame that was faulted in. The page fault handler maps
+        // exactly the pages in [base, base+size), so walk the PTEs.
+        for (uint32_t va = addr; va < addr + size; va += 4096) {
+            uint32_t pd_idx = va >> 22;
+            uint32_t pt_idx = (va >> 12) & 0x3FF;
+            uint32_t* pd = (uint32_t*)(uintptr_t)page_dir;
+            if (!(pd[pd_idx] & PAGE_PRESENT)) continue;
+            uint32_t pt_paddr = pd[pd_idx] & 0xFFFFF000;
+            uint32_t* pt = (uint32_t*)(uintptr_t)pt_paddr;
+            if (pt[pt_idx] & PAGE_PRESENT) {
+                uint32_t paddr = pt[pt_idx] & 0xFFFFF000;
+                if (paddr >= (KERNEL_RESERVED_PAGES * 4096)) frame_free(paddr);
+                pt[pt_idx] = 0;
+                __asm__ __volatile__("invlpg (%0)" : : "r"(va));
+            }
+        }
+
+        tasks[tid].mmap_regions[j].base = 0;
+        tasks[tid].mmap_regions[j].size = 0;
+        write_serial_string("[MMAP] unmapped ");
+        write_serial_hex(addr);
+        write_serial_string(" for TID ");
+        write_serial_hex(tid);
+        write_serial_string("\n");
+        return 1;
+    }
+    return 0;
 }

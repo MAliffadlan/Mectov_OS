@@ -50,6 +50,8 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/execdemo_mct.o \
        $(OBJ_DIR)/execchild_mct.o \
        $(OBJ_DIR)/shmdemo_mct.o \
+       $(OBJ_DIR)/mmapdemo_mct.o \
+       $(OBJ_DIR)/looper_mct.o \
        $(OBJ_DIR)/libc_mct.o \
        $(OBJ_DIR)/calc_mct.o \
        $(OBJ_DIR)/volume_mct.o \
@@ -151,6 +153,12 @@ execchild.mct: apps/execchild.c $(MCT_LIBC_H)
 shmdemo.mct: apps/shmdemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/shmdemo.c shmdemo.mct
 
+mmapdemo.mct: apps/mmapdemo.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/mmapdemo.c mmapdemo.mct
+
+looper.mct: apps/looper.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/looper.c looper.mct
+
 $(OBJ_DIR)/clock_mct.o: clock.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
@@ -204,6 +212,12 @@ $(OBJ_DIR)/execchild_mct.o: execchild.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/shmdemo_mct.o: shmdemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 shmdemo.mct $(OBJ_DIR)/shmdemo_mct.o
+
+$(OBJ_DIR)/mmapdemo_mct.o: mmapdemo.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 mmapdemo.mct $(OBJ_DIR)/mmapdemo_mct.o
+
+$(OBJ_DIR)/looper_mct.o: looper.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 looper.mct $(OBJ_DIR)/looper_mct.o
 
 $(OBJ_DIR)/music_wav.o: apps/music.wav | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 apps/music.wav $(OBJ_DIR)/music_wav.o
