@@ -619,7 +619,7 @@ void _start(void) {
             buf[r][c] = 0; col[r][c] = 0;
         }
     
-    term_print("Mectov OS v25.0 Terminal [Ring 3]\n", 0x0B);
+    term_print("Mectov OS v36.3 Terminal [Ring 3]\n", 0x0B);
     term_print("Welcome Bos Alif! System ready.\n\n", 0x0D);
     print_prompt();
     cmd_len = 0;

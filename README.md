@@ -1,10 +1,14 @@
-# Mectov OS v35.5 — Multi-Connection TCP Update
+# Mectov OS v36.3 — Unix Process Model & Virtual Memory Update
 
 The Mectov Kernel — an operating system kernel written from scratch in C and Assembly. No external libraries, no libc, no POSIX — every byte runs directly on hardware.
 
 ## About
 
 Mectov OS is a hobby operating system designed as a learning project and technical showcase. It boots via GRUB Multiboot, sets up protected mode with paging, and provides a fully graphical desktop environment with floating windows, custom static wallpapers, persistent draggable icons, hardware detection, standalone Ring 3 user applications, and real internet connectivity.
+
+The v36.x line turns the kernel from a "launcher of apps" into a real Unix process model. The v36.1 release fixed a **fork GPF that only reproduced under KVM** (the fork frame was computed from a stale saved ESP pointing into the middle of the kernel stack; it now derives deterministically from the stack top, where the live `int 0x80` frame always sits). The v36.2 release added **`exec()`** — the missing third of the fork/exec/waitpid trio — plus shell **redirection** (`>`/`>>`/`<`), **System V shared memory** (`shmget`/`shmat`/`shmdt`/`shmctl`), and switched `int 0x80` to a **trap gate** so long-running syscalls stay preemptible (the frame stays deterministic because `isr128` saves it with `cli` first). The v36.3 release adds **demand-paged `mmap()`** (a VA range is reserved with zero physical frames; each page is lazily mapped and zeroed on first fault) and **Ctrl+C job interruption** (SIGINT to the whole foreground job tree, terminal released when the app exits). Together: `forkdemo` clones itself via COW, `execdemo` forks → `exec`s a different image → the parent `waitpid`s the exit status, `shmdemo` shares memory across processes, `mmapdemo` proves lazy allocation (a 1 MiB mapping faults only 6 pages), and `run /apps/looper.mct` + Ctrl+C interrupts an infinite loop while the OS stays alive.
+
+Previous release highlights (v35.5 multi-connection TCP, v35.4 security hardening, v35.3 English localization, v35.2 shell file management + ext2 fixes, v35.1 ext2 write support, v35.0 SMP/GDB/ELF/sync) remain below in the Version History.
 
 The v35.5 release upgrades the network stack from a single hard-coded TCP socket to a real **multi-connection TCP layer**: eight independent connection slots, per-connection sequence numbers / receive buffers / retransmit state, and a proper FIN handshake — all exposed to Ring 3 via conn-id syscalls. A new `fetch [domain]` shell command and the Ring 3 browser both use it end-to-end. Along the way, testing surfaced and fixed a **latent SMP race in the RTL8139 driver** that could silently drop a TCP frame:
 
@@ -14,8 +18,6 @@ The v35.5 release upgrades the network stack from a single hard-coded TCP socket
 4. **Browser Upgrade:** The Ring 3 mini-browser tracks its active conn id, closes it on abort/ESC/EOF, and distinguishes a peer FIN (page complete) from a reset (`Connection lost`).
 5. **`fetch [domain]` Shell Command:** Resolves the gateway via ARP, the domain via DNS, connects to port 80 (redirected through the host Web Gateway Proxy), sends `GET /`, and streams the response until EOF — with bounded waits safe under the interrupt-gate syscall path.
 6. **RTL8139 SMP TX/RX Race Fix:** The NIC's TX descriptors and RX ring were shared state with no lock. With SMP active, the IRQ handler on one CPU and `net_poll()` on another could both read `rtl_tx_cur`, copy into the *same* TX buffer, and fire the same descriptor — the second SYN silently never left the NIC and the handshake timed out. A spinlock (`rtl_enter`/`rtl_exit`, save/restore IF so it is safe from IRQ context) now serializes every TX send and RX poll. Verified in QEMU: two parallel connections both complete the handshake, fetch the page through the gateway, and close cleanly.
-
-Previous release highlights (v35.4 security hardening, v35.3 English localization, v35.2 shell file management + ext2 fixes, v35.1 ext2 write support, v35.0 SMP/GDB/ELF/sync) remain below in the Version History.
 
 1. **ELF Loader Integer Wrap Fix:** The segment bounds check compared `p_offset + p_filesz` in 32-bit math; a crafted `p_offset` could wrap past the check and the follow-up `memcpy` read unmapped memory at CPL 0, panicking the kernel. The check now uses 64-bit math, and both loaders (`.mct` + ELF) abort cleanly instead of faulting when page allocation fails.
 2. **Unbounded Shell Script Recursion Fix:** A script containing `sh a.sh` (or two scripts sourcing each other) recursed until the kernel stack overflowed — `is_script` was set but never read. Nested script execution is now refused.
@@ -304,6 +306,26 @@ Created by M Alif Fadlan.
 - **Two Pre-Existing Mount Bugs Fixed:** `/ext2` was created as a plain `FS_DIR` instead of `FS_EXT2_DIR`, silently routing every "ext2" write into the MECTOVFS disk, and the mount node carried `ext2_inode = 0` instead of the root-dir inode 2. Both are corrected (with in-place migration for existing disk images).
 - **Hardened:** allocators refuse metadata blocks (boot/superblock/BGD/bitmaps/inode tables) even if a corrupt bitmap marks them free; all bitmap/sync buffers are heap-allocated to keep the 16KB kernel stack safe; cross-directory ext2 renames are rejected rather than corrupting the tree. Validated end-to-end: write → reboot → read-back, plus `fsck.ext2` clean and `debugfs` reading the files straight from the image, on both 1024- and 4096-byte-block filesystems.
 
+### 33. Unix Process Model — fork / exec / waitpid / Signals (src/sys/task.c, src/sys/loader.c, src/sys/syscall_proc.c)
+- **`fork()` (COW):** `SYS_FORK` (71) clones the current task — the address space is COW-cloned (`vmm_clone_address_space`), the kernel stack is copied with the register frame, the child inherits fds (refcounted), signal handlers, mmap regions, shm attachments, and the launch argument, then returns 0 in the child and the new tid in the parent.
+- **`exec()`:** `SYS_EXEC` (77) replaces the running image in place. The loader was split into `loader_build_image()` (build a fresh address space + copy code, no task) and `task_exec()` which patches the **live syscall frame** — the child's EIP/CS/ESP/SS are rewritten so the `iret` lands in the new program. Per POSIX, caught signal handlers revert to default on exec (ignored ones stay ignored), pending signals and sigframes are cleared.
+- **`waitpid()`:** `SYS_WAITPID` (72) parks the parent in `TASK_STATE_BLOCKED` until the child exits, then reaps the zombie and returns its exit status; `WNOHANG` returns immediately. Zombies older than 15s are reaped as a safety net even without a waiter.
+- **Signal delivery:** `SYS_SIGNAL` (74) installs handlers; pending signals are delivered into the task's return frame via a user-stack sigframe + trampoline, and `SYS_SIGRETURN` (75) restores it. SIGKILL is uncatchable; the default action of every other signal is to terminate with exit code `128+sig`; SIGCHLD is ignored by default. `SYS_KILL` (73) routes through the same framework.
+- **Frame determinism (the KVM fork fix):** the live `int 0x80` frame always sits at the kernel-stack top (`TSS.esp0 - sizeof(registers_t)`), so `fork_common` copies the child frame from there instead of from the possibly-stale saved ESP — eliminating the GPF that froze the OS under KVM timing.
+
+### 34. Shared Memory — System V (src/sys/shm.c + src/include/shm.h)
+- **Segments:** `SYS_SHMGET` (78) creates a segment by key with a page count; `SYS_SHMAT` (79) maps it at `SHM_BASE + id*SHM_REGION`; `SYS_SHMDT` (80) detaches; `SYS_SHMCTL` (81) with `IPC_RMID` frees it.
+- **PAGE_SHARED:** shared pages are flagged so the COW clone copies them as-is (RW, same physical frame) instead of marking them COW — two processes genuinely share frames, with refcounting keeping them alive until the last detach/exit.
+- **Leak-proof:** each task keeps a shm-attach bitmap; `shm_task_exit()` runs during task cleanup so a segment is freed even if the task dies without `shmdt`.
+
+### 35. mmap & Demand Paging (src/sys/task.c + src/sys/idt.c)
+- **Reserve-then-fault:** `SYS_MMAP` (82) reserves a page-aligned range in `0x40000000..0x80000000` with **zero physical frames**; the page-fault handler (`task_mmap_handle_fault`) lazily maps and zeroes one frame per page on first access. A 1 MiB mapping touches only the pages actually used.
+- **Fork/exec semantics:** the region table lives in the task struct — `fork` copies it (faulted pages become COW; unfaulted pages stay lazy), `exec` clears it. `SYS_MUNMAP` (83) walks the PTEs and frees only the frames that were actually faulted in.
+
+### 36. Ctrl+C Job Interruption & Trap-Gate Syscalls (kernel.c + src/sys/idt.c + src/sys/interrupt_entry.asm)
+- **Ctrl+C → SIGINT:** the kernel loop detects Ctrl+C (scancode `0x2E` while Ctrl is held) and sends SIGINT to the whole foreground job tree via `task_signal_group()` (root + every live descendant), consuming the key so it never reaches the focused window. `task_cleanup` releases the terminal when the foreground app exits.
+- **Trap-gate `int 0x80`:** the syscall entry is now a trap gate (IF=1 inside handlers) so long-running syscalls stay preemptible; `isr128` saves the frame with `cli` so the frame stays deterministic at the kernel-stack top (fork/exec integrity), then `sti`s before calling the handler. Handlers that mutate shared state keep their own `cli` internally — zero regression observed across KVM + TCG test suites.
+
 ---
 
 ## Syscall API Reference
@@ -415,6 +437,31 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 | 68 | SYS_UDP_SEND | Send UDP datagram. EBX=ip_ptr, ECX=dst_port, EDX=data, ESI=len → 0/-1 |
 | 69 | SYS_UDP_RECV | Receive queued UDP datagram. EBX=buf, ECX=max_len → bytes |
 
+### Process Model & Signals (71–77)
+| # | Name | Description |
+|---|------|-------------|
+| 71 | SYS_FORK | Clone the current task (COW address space). → child tid (parent) / 0 (child) / -1 |
+| 72 | SYS_WAITPID | Wait for a child. EBX=pid, ECX=status_ptr, EDX=options (WNOHANG) → tid / 0 / -1 |
+| 73 | SYS_KILL | Send a signal. EBX=pid, ECX=sig → 0/-1 |
+| 74 | SYS_SIGNAL | Install a handler. EBX=sig, ECX=handler (0 default, 1 ignore, else fn) → old handler |
+| 75 | SYS_SIGRETURN | Restore the frame saved before a signal handler |
+| 76 | SYS_GETPPID | Get parent task id → ppid |
+| 77 | SYS_EXEC | Replace this task's image. EBX=path, ECX=arg → never returns on success, -1 on failure |
+
+### Shared Memory (78–81)
+| # | Name | Description |
+|---|------|-------------|
+| 78 | SYS_SHMGET | Create/attach a shared segment. EBX=key, ECX=size → shm id (1-based) or -1 |
+| 79 | SYS_SHMAT | Attach a segment. EBX=shmid → base VA or 0 |
+| 80 | SYS_SHMDT | Detach a segment. EBX=addr → 0/-1 |
+| 81 | SYS_SHMCTL | Control a segment. EBX=shmid, ECX=cmd (0=IPC_RMID) → 0/-1 |
+
+### mmap — Demand Paging (82–83)
+| # | Name | Description |
+|---|------|-------------|
+| 82 | SYS_MMAP | Reserve a VA range (no frames yet). EBX=size → base VA or 0 (pages faulted in lazily) |
+| 83 | SYS_MUNMAP | Unmap a reserved range, freeing faulted frames. EBX=base VA → 1 or 0 |
+
 ---
 
 ## Applications
@@ -435,6 +482,11 @@ All syscalls are invoked via `int 0x80`. Register conventions: `EAX`=syscall num
 | Mini Browser | Ring 3 (.mct) | Text-mode web browser navigating via host proxy gateway with scroll support |
 | Hello Ring 3 | Ring 3 (.mct) | Demo user-space app with isolated memory and GUI window |
 | ELF Demo | Ring 3 (.elf) | Proves the ELF loader — a real ELF32 binary with its own PT_LOAD segments running in Ring 3 |
+| Fork Demo | Ring 3 (.mct) | Forks via COW, child runs a SIGUSR1 handler, exits 42, parent waitpid reaps it |
+| Exec Demo | Ring 3 (.mct) | Fork → child execs a different image (execchild) → exits 7 → parent waitpid reads it |
+| SHM Demo | Ring 3 (.mct) | Two processes share a System V segment: child writes, parent reads the same frames |
+| mmap Demo | Ring 3 (.mct) | Reserves 1 MiB, touches sparse pages (lazy zero-fill), munmap + re-mmap |
+| Looper | Ring 3 (.mct) | Infinite loop for testing Ctrl+C job interruption |
 | GUI Calculator | Ring 3 (.mct) | Standalone external GUI calculator |
 | Power Options | Ring 0 | Shut Down, Restart, and Log Out dialog with accurate button hit-zones |
 | DOOM Engine | Ring 0 (Port) | Full integration of the legendary 1993 DOOM engine with graceful exit to desktop |
@@ -498,6 +550,9 @@ The `.github/workflows/build-boot-test.yml` workflow runs this on every push —
 
 | Version | Highlights |
 |---|---|
+| v36.3 | **mmap() Demand Paging + Ctrl+C Job Interruption Update:** New `SYS_MMAP` (82) / `SYS_MUNMAP` (83) reserve a VA range in a per-task window (`0x40000000`–`0x80000000`) with zero physical frames committed — the page-fault handler lazily maps a zeroed frame per page on first access (verified: a 1 MiB mapping faults only the 6 pages actually touched). Regions live in the task struct, survive `fork` (COW clone keeps the VA layout; faulted pages become COW) and are cleared by `exec`; `munmap` walks the PTEs and frees only the frames actually faulted in. Ctrl+C (scancode 0x2E while Ctrl held) sends **SIGINT to the whole foreground job tree** via new `task_signal_group()` (root + every live descendant), consuming the key so it never reaches the focused window; `task_cleanup` now releases the terminal when the foreground app exits (fixes `term_app_running` never being reset). Demo apps: `mmapdemo` (sparse writes over a 1 MiB mapping, zero-fill + readback checks, munmap + re-mmap) and `looper` (infinite loop for Ctrl+C testing). `KERNEL_RESERVED_PAGES` moved to `mem.h` so `task.c` shares the same frame-reserved bound. Verified KVM + TCG: mmap, ctrl+c, exec, shm, fork, boot, jobcontrol all green. |
+| v36.2 | **exec(), Shell Redirection, Shared Memory & Trap-Gate Syscalls Update:** New `SYS_EXEC` (77) completes the Unix trio — the loader was refactored into `loader_build_image()` (build an image without a task) and `task_exec()` patches the **live syscall frame in place** (replaces the address space, inherits fds, resets signal handlers per POSIX), so `fork()` → `exec()` → `waitpid()` now works end-to-end (`execdemo` forks, the child execs a different image, exits 7, and the parent reaps it). Shell **redirection** `>` / `>>` / `<` captures command output through `pipe_buffer` and feeds files into `cat`/`grep`. **System V shared memory**: `SYS_SHMGET/SHMAT/SHMDT/SHMCTL` (78–81) map shared segments at a fixed VA with a new `PAGE_SHARED` flag that the COW clone skips, plus a per-task attach bitmap so segments are freed even if a task exits without `shmdt` (`shmdemo` proves two processes write/read the same frames). `int 0x80` switched to a **trap gate**: `isr128` saves the frame with `cli` (keeping it deterministic at the kernel-stack top — fork/exec integrity), then `sti`s before the handler so long-running syscalls stay preemptible; handlers that mutate shared state keep `cli` internally, so zero regression (jobcontrol/fork tests hardened against pre-existing keyboard-focus flakiness and now pass 3–4/4). |
+| v36.1 | **Fork GPF Fix (KVM):** `fork_common()` computed the child's frame offset from `tasks[parent].esp` — the *last preemption frame*, which under fast KVM timing could point into the middle of the kernel stack (the parent was preempted in kernel mode during an IF=1 window, e.g. after `gui_unlock()`'s `sti`), so the child's first context switch popped a garbage DS and raised a GPF, freezing the OS. The offset now comes from the kernel-stack top (`KERNEL_STACK_SIZE - sizeof(registers_t)`), where the live `int 0x80` syscall frame deterministically sits, since the parent is inside the fork syscall at that moment. Verified under KVM: `forkdemo` clones COW, child runs the SIGUSR1 handler, exits 42, parent reports `waitpid OK, child exit code = 42`, OS stays alive; TCG boot/fork/jobcontrol regression tests stay green. |
 | v35.5 | **Multi-Connection TCP Update:** Replaced the single-socket TCP layer with an 8-slot connection table — per-connection seq/ack, 16KB receive buffers, retransmit (5×6s) and connect-timeout (10s) sweeps, and a full FIN handshake (FIN_WAIT_1/2, CLOSE_WAIT, LAST_ACK). Conn-id based API: `net_tcp_connect/send/recv/close/state/latest_state`, syscalls 40–43 now carry the conn id (`EDX`) and new `SYS_TCP_CLOSE` (70) does graceful shutdown; `sys_tcp_*` wrappers updated for Ring 3. Browser tracks/closed its conn on abort/ESC/EOF and handles peer-FIN vs reset; new `fetch [domain]` shell command streams an HTTP GET through the host gateway to EOF. Fixed a latent RTL8139 SMP race — TX descriptors/RX ring now under a spinlock (`rtl_enter`/`rtl_exit`), so the IRQ path and `net_poll()` can no longer both fire the same TX descriptor and silently drop a SYN. Validated in QEMU: two parallel connections establish, both fetch through the gateway, and close cleanly; CI boot test passes. |
 | v35.4 | **Security Hardening Update:** Audited every trust boundary the kernel accepts input from (disk images, ELF/.mct binaries, Ring 3 syscalls, shell commands). Fixed the ELF loader's 32-bit wrap in the segment bounds check (crafted `p_offset` → CPL0 panic) and made both loaders abort cleanly on OOM; refused nested `sh`/`source` recursion (kernel stack overflow via `is_script` that was set but never read); sanitized the on-disk VFS node table (missing NUL in 32-byte names, out-of-range `parent`); rejected ext2 superblocks whose `s_inode_size` doesn't divide `block_size` (memcpy past 4KB stack buffers) and bound every ext2 block read/write against the block count/drive sectors; released all 16 per-task fds on exit/kill (pipe+fd leak, hung pipe readers) and refused deleting files that open fds reference (stale-slot aliasing); replaced the 100k-`pause` busy-wait `task_sleep()` with an exact hlt-park; clamped window resize/open coordinates (uncloseable and zombie windows), grew the wm free-list to 64; snapshotted mouse state with interrupts off; clamped tab completion into `cmd_b[256]`, dead-CMOS month-0, and `vfs_read_file()` disk bounds. |
 | v35.3 | **English UI Localization Update:** Translated the last remaining Indonesian user-facing strings to English. Shell commands are now English-first — `snake`, `tone`, `sleep`, `date`, `color`, `lock`, `run` replace `ular`, `nada`, `tunggu`, `waktu`, `warna`, `kunci`, `jalankan` — while every legacy Indonesian name still works via built-in aliases (`buat`→`touch`, `tulis`→`nano`, `baca`→`cat`, `hapus`→`rm`, `matikan`→`shutdown`, `mulaiulang`→`reboot`). Translated shell help/mfetch text, the nano footer (`ESC: Save & Exit`), calculator prompts/results, updated explorer app launches to `run`, and synced the GUI terminal's tab-completion list with the shell's. Help now lists only English commands, with a note that legacy aliases remain functional. |
