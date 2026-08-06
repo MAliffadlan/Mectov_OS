@@ -252,6 +252,37 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_EXEC (77): replace this task's image -----
+        case SYS_EXEC: {
+            const char* path = (const char*)regs->ebx;
+            const char* arg  = (const char*)regs->ecx;
+
+            // Validate + copy path and arg into KERNEL memory first: task_exec()
+            // frees the old address space, so any user pointer handed to it would
+            // be dangling by the time the VFS read runs.
+            int plen = safe_strlen(path, 128);
+            if (plen < 0) { regs->eax = (uint32_t)-1; break; }
+            if (!validate_user_ptr(path, (uint32_t)plen + 1)) {
+                regs->eax = (uint32_t)-1; break;
+            }
+            char kpath[128];
+            for (int i = 0; i < plen; i++) kpath[i] = path[i];
+            kpath[plen] = '\0';
+
+            char karg[128] = {0};
+            if (arg) {
+                int alen = safe_strlen(arg, 128);
+                if (alen >= 0 && validate_user_ptr(arg, (uint32_t)alen + 1)) {
+                    for (int i = 0; i < alen; i++) karg[i] = arg[i];
+                    karg[alen] = '\0';
+                }
+            }
+
+            extern int task_exec(const char* path, const char* arg, void* frame);
+            regs->eax = (uint32_t)task_exec(kpath, karg, regs);
+            break;
+        }
+
         // ----- SYS_GET_LAUNCH_ARG (49) -----
         case SYS_GET_LAUNCH_ARG: {
             char* user_buf = (char*)regs->ebx;

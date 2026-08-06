@@ -23,6 +23,11 @@
 
 // --- Command buffer & state ---
 char cmd_b[CMD_BUF_SIZE]; int b_idx = 0;
+
+// File redirection stdin buffer: filled by '<' redirection, consumed by
+// cat/grep when they would otherwise read the pipe buffer.
+char shell_stdin_buf[4096];
+int shell_stdin_len = 0;
 char hist_b[256];
 int is_script = 0;
 
@@ -575,6 +580,7 @@ static void run_cmd_internal() {
         print(" EDITOR  : ", 0x0B); print("nano, edit\n", 0x0F);
         print(" SHELL   : ", 0x0B); print("export [NAME=VAL], alias [NAME=VAL], unalias, history, sh\n", 0x0F);
         print(" JOBS    : ", 0x0B); print("cmd & (background), jobs, fg [n], bg [n], kill [%n]\n", 0x0F);
+        print(" REDIR   : ", 0x0B); print("cmd > file (truncate), cmd >> file (append), cmd < file (stdin)\n", 0x0F);
         print(" APPS GUI: ", 0x0B); print("flappy, doom, taskmgr, snake, run [app.mct], run [app.mct] &\n", 0x0A);
         print(" NET & HW: ", 0x0B); print("ping [ip], host [domain], fetch [domain], lspci\n", 0x0F);
         print(" UTILS   : ", 0x0B); print("echo [msg], sleep [sec], tone [freq], beep, man [cmd]\n", 0x0F);
@@ -770,7 +776,9 @@ static void run_cmd_internal() {
         if (strcmp(cmd_b, "cat") == 0) {
             extern int pipe_buf_len;
             extern char pipe_buffer[];
-            if (pipe_buf_len > 0) {
+            if (shell_stdin_len > 0) {
+                print(shell_stdin_buf, 0x0F);
+            } else if (pipe_buf_len > 0) {
                 print(pipe_buffer, 0x0F);
                 print("\n", 0x0F);
             } else {
@@ -797,18 +805,29 @@ static void run_cmd_internal() {
         
         extern int pipe_buf_len;
         extern char pipe_buffer[];
-        if (pipe_buf_len > 0) {
+        // With '<' redirection, grep consumes the stdin buffer instead.
+        const char* src = (shell_stdin_len > 0) ? shell_stdin_buf : pipe_buffer;
+        int src_len = (shell_stdin_len > 0) ? shell_stdin_len : pipe_buf_len;
+        if (src_len > 0) {
             int i = 0;
             char line[256];
             int line_len = 0;
-            while (i < pipe_buf_len) {
-                char c = pipe_buffer[i++];
+            while (i < src_len) {
+                char c = src[i++];
                 if (c == '\n' || c == '\r') {
                     line[line_len] = '\0';
                     if (line_len > 0) {
                         if (strstr_custom(line, pattern) >= 0) {
                             print(line, 0x0A); // Print matching lines in green
                             print("\n", 0x0F);
+                            // Serial mirror for stdin-redirected grep so tests
+                            // can see matches without the IPC channel.
+                            if (shell_stdin_len > 0) {
+                                extern void write_serial_string(const char*);
+                                write_serial_string("[SH] grep: ");
+                                write_serial_string(line);
+                                write_serial_string("\n");
+                            }
                         }
                     }
                     line_len = 0;
@@ -1823,6 +1842,149 @@ void ex_cmd() {
         }
     }
     
+    // ---- File redirection: > (truncate), >> (append), < (stdin) ----
+    // Output redirection reuses the pipe capture mechanism (pipe_active ->
+    // pipe_buffer): run the left-hand command with capture on, then write the
+    // captured bytes to the file. '<' feeds the file's contents into a shell
+    // stdin buffer that cat/grep consume when they would otherwise read the
+    // pipe buffer.
+    {
+        int redir_gt = -1, redir_append = 0, redir_lt = -1;
+        for (int i = 0; cmd_b[i]; i++) {
+            if (cmd_b[i] == '>' && redir_gt < 0) {
+                redir_gt = i;
+                if (cmd_b[i + 1] == '>') { redir_append = 1; i++; }
+            } else if (cmd_b[i] == '<' && redir_lt < 0) {
+                redir_lt = i;
+            }
+        }
+
+        if (redir_gt >= 0 || redir_lt >= 0) {
+            // Split into: command part, redirect part
+            int split_at = (redir_gt >= 0 && (redir_lt < 0 || redir_gt < redir_lt)) ? redir_gt : redir_lt;
+            int second_at = (redir_gt >= 0 && (redir_lt < 0 || redir_gt < redir_lt)) ? redir_lt : redir_gt;
+
+            // Command = everything before the first redirection token
+            char redir_cmd[256];
+            int clen = split_at;
+            if (clen > 255) clen = 255;
+            strncpy(redir_cmd, cmd_b, clen);
+            redir_cmd[clen] = '\0';
+            int ce = clen - 1;
+            while (ce >= 0 && redir_cmd[ce] == ' ') { redir_cmd[ce] = '\0'; ce--; }
+
+            // Target file = token after '>' (or '<')
+            char redir_file[128];
+            int fi = 0;
+            int k = (redir_gt >= 0 && (redir_lt < 0 || redir_gt < redir_lt))
+                        ? redir_gt + 1 + redir_append : redir_lt + 1;
+            while (cmd_b[k] == ' ') k++;
+            while (cmd_b[k] && cmd_b[k] != ' ' && cmd_b[k] != '>' && cmd_b[k] != '<' && fi < 127) {
+                redir_file[fi++] = cmd_b[k++];
+            }
+            redir_file[fi] = '\0';
+            (void)second_at;
+
+            if (redir_cmd[0] == '\0' || redir_file[0] == '\0') {
+                print("sh: syntax error in redirection\n", 0x0C);
+                b_idx = 0;
+                return;
+            }
+
+            // ---- stdin redirection: load the file into the stdin buffer ----
+            if (redir_lt >= 0) {
+                extern char shell_stdin_buf[];
+                extern int shell_stdin_len;
+                shell_stdin_len = vfs_read_file(redir_file, shell_stdin_buf, 4095);
+                if (shell_stdin_len < 0) {
+                    print("sh: cannot open input file: ", 0x0C);
+                    print(redir_file, 0x0C);
+                    print("\n", 0x0C);
+                    b_idx = 0;
+                    return;
+                }
+                shell_stdin_buf[shell_stdin_len] = '\0';
+
+                strcpy(cmd_b, redir_cmd);
+                b_idx = strlen(cmd_b);
+                run_cmd_internal();
+                shell_stdin_len = 0;
+                shell_stdin_buf[0] = '\0';
+                b_idx = 0;
+                return;
+            }
+
+            // ---- output redirection ----
+            if (redir_gt >= 0) {
+                extern int pipe_active;
+                extern char pipe_buffer[];
+                extern int pipe_buf_len;
+
+                pipe_buf_len = 0;
+                pipe_buffer[0] = '\0';
+                pipe_active = 1;
+
+                strcpy(cmd_b, redir_cmd);
+                b_idx = strlen(cmd_b);
+                run_cmd_internal();
+
+                pipe_buffer[pipe_buf_len] = '\0';
+                pipe_active = 0;
+
+                // Ensure the target file exists before writing (vfs_write_file
+                // requires an existing node). '>>' on a missing file creates it
+                // just like '>'.
+                if (vfs_get_node(redir_file) < 0) {
+                    vfs_create_file(redir_file);
+                }
+
+                // '>' truncates, '>>' appends. Build the final content and write.
+                int written = pipe_buf_len;
+                int new_bytes = pipe_buf_len;   // bytes from this command (mirror)
+                if (redir_append) {
+                    char existing[4096];
+                    int esz = vfs_read_file(redir_file, existing, 4095);
+                    if (esz < 0) esz = 0;
+                    existing[esz] = '\0';
+                    if (esz + pipe_buf_len < 4096) {
+                        for (int i = 0; i < pipe_buf_len; i++) existing[esz + i] = pipe_buffer[i];
+                        existing[esz + pipe_buf_len] = '\0';
+                        vfs_write_file(redir_file, existing, esz + pipe_buf_len);
+                        written = esz + pipe_buf_len;
+                    }
+                } else {
+                    vfs_write_file(redir_file, pipe_buffer, pipe_buf_len);
+                }
+
+                print("redirected ", 0x0A);
+                p_int(written, 0x0A);
+                print(" bytes -> ", 0x0A);
+                print(redir_file, 0x0A);
+                print("\n", 0x0F);
+                // Serial mirror so automated tests can verify the write
+                // (terminal output itself goes over IPC, not serial). Do this
+                // BEFORE pipe_buffer is reset.
+                extern void write_serial_string(const char*);
+                write_serial_string("[SH] redirected ");
+                write_serial_hex(written);
+                write_serial_string(" bytes -> ");
+                write_serial_string(redir_file);
+                write_serial_string(" content='");
+                int mi = 0;
+                while (mi < new_bytes && mi < 80) {
+                    char mc = pipe_buffer[mi++];
+                    if (mc == '\n') write_serial_string("\\n");
+                    else write_serial(mc);
+                }
+                write_serial_string("'\n");
+                pipe_buf_len = 0;
+                pipe_buffer[0] = '\0';
+                b_idx = 0;
+                return;
+            }
+        }
+    }
+
     // Check for pipe '|'
     int pipe_idx = -1;
     for (int i = 0; cmd_b[i]; i++) {

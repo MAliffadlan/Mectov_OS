@@ -251,6 +251,19 @@ void vfs_init() {
         extern uint8_t _binary_forkdemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/forkdemo.mct", (const char*)_binary_forkdemo_mct_start, _binary_forkdemo_mct_end - _binary_forkdemo_mct_start);
 
+        // Exec demo (fork + exec + waitpid)
+        extern uint8_t _binary_execdemo_mct_start[];
+        extern uint8_t _binary_execdemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/execdemo.mct", (const char*)_binary_execdemo_mct_start, _binary_execdemo_mct_end - _binary_execdemo_mct_start);
+        extern uint8_t _binary_execchild_mct_start[];
+        extern uint8_t _binary_execchild_mct_end[];
+        changed += vfs_update_file_if_needed("apps/execchild.mct", (const char*)_binary_execchild_mct_start, _binary_execchild_mct_end - _binary_execchild_mct_start);
+
+        // Shared memory demo
+        extern uint8_t _binary_shmdemo_mct_start[];
+        extern uint8_t _binary_shmdemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/shmdemo.mct", (const char*)_binary_shmdemo_mct_start, _binary_shmdemo_mct_end - _binary_shmdemo_mct_start);
+
         // ELF demo app (real ELF32 binary, not MCT)
         extern uint8_t _binary_elfdemo_elf_start[];
         extern uint8_t _binary_elfdemo_elf_end[];
@@ -330,6 +343,22 @@ void vfs_init() {
     // Inject gcalc.mct dari embedded binary ke VFS
     vfs_create_file("apps/gcalc.mct");
     vfs_write_file("apps/gcalc.mct", (const char*)_binary_gcalc_mct_start, gcalc_mct_size());
+
+    // Exec demo apps
+    extern uint8_t _binary_execdemo_mct_start[];
+    extern uint8_t _binary_execdemo_mct_end[];
+    vfs_create_file("apps/execdemo.mct");
+    vfs_write_file("apps/execdemo.mct", (const char*)_binary_execdemo_mct_start, _binary_execdemo_mct_end - _binary_execdemo_mct_start);
+    extern uint8_t _binary_execchild_mct_start[];
+    extern uint8_t _binary_execchild_mct_end[];
+    vfs_create_file("apps/execchild.mct");
+    vfs_write_file("apps/execchild.mct", (const char*)_binary_execchild_mct_start, _binary_execchild_mct_end - _binary_execchild_mct_start);
+
+    // Shared memory demo
+    extern uint8_t _binary_shmdemo_mct_start[];
+    extern uint8_t _binary_shmdemo_mct_end[];
+    vfs_create_file("apps/shmdemo.mct");
+    vfs_write_file("apps/shmdemo.mct", (const char*)_binary_shmdemo_mct_start, _binary_shmdemo_mct_end - _binary_shmdemo_mct_start);
 
     // Inject hello.mct
     vfs_create_file("apps/hello.mct");

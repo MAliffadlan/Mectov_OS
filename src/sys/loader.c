@@ -50,9 +50,15 @@ typedef struct {
 // MCT loader (existing proprietary format)
 // ============================================================
 
-static int load_mct_from_buffer(const char* filename, const char* arg,
-                                uint8_t* buf, mct_header_t* header,
-                                uint32_t total_size) {
+static int finish_loaded_task(const char* filename, const char* arg,
+                              loader_image_t* img);
+
+// Build the address space + copy the image. Returns 0 on success; on failure
+// returns a negative error and frees any partially built address space.
+static int build_mct_image(const char* filename, const char* arg,
+                           uint8_t* buf, mct_header_t* header,
+                           uint32_t total_size, loader_image_t* out) {
+    (void)filename;
     // Create a new address space
     write_serial_string("[LOADER] vmm_create_address_space...\n");
     uint32_t page_dir = vmm_create_address_space();
@@ -95,42 +101,21 @@ static int load_mct_from_buffer(const char* filename, const char* arg,
 
     __asm__ volatile("sti");
 
-    void (*entry_point)() = (void (*)())((uint32_t)app_mem + header->entry);
-
-    // CRITICAL: Set launch arg BEFORE creating the task to prevent race condition.
-    // thread_create() enables interrupts at the end, and the scheduler could run
-    // the new task before we get to set the arg.
-    extern void task_set_launch_arg(int tid, const char* a);
-
-    __asm__ volatile("cli");
-    int task_id = thread_create(entry_point, PRIORITY_INTERACTIVE, page_dir);
-    if (task_id < 0) {
-        __asm__ volatile("sti");
-        vmm_free_address_space(page_dir);
-        write_serial_string("FAIL\n");
-        return -7;
-    }
-
-    if (arg && arg[0] != '\0') {
-        task_set_launch_arg(task_id, arg);
-    } else {
-        task_set_launch_arg(task_id, filename);
-    }
-    extern void task_set_heap_ptr(int tid, uint32_t ptr);
-    uint32_t heap_start = 0x08000000 + (num_pages * 4096);
-    task_set_heap_ptr(task_id, heap_start);
-    __asm__ volatile("sti");
-
+    (void)arg;
+    out->page_dir = page_dir;
+    out->entry = 0x08000000 + header->entry;
+    out->heap_start = 0x08000000 + (num_pages * 4096);
     write_serial_string("OK\n");
-    return task_id;
+    return 0;
 }
 
 // ============================================================
 // ELF loader — maps PT_LOAD segments at their p_vaddr
 // ============================================================
 
-static int load_elf_from_buffer(const char* filename, const char* arg,
-                                uint8_t* buf, int sz) {
+static int build_elf_image(const char* filename, const char* arg,
+                           uint8_t* buf, int sz, loader_image_t* out) {
+    (void)filename;
     if (sz < (int)sizeof(elf32_ehdr_t)) {
         write_serial_string("[LOADER] ELF too small\n");
         return -20;
@@ -188,6 +173,7 @@ static int load_elf_from_buffer(const char* filename, const char* arg,
     write_serial_string("[LOADER] ELF vmm_create_address_space...\n");
     uint32_t page_dir = vmm_create_address_space();
     if (page_dir == 0) return -26;
+    out->page_dir = page_dir;
 
     // Map every page covered by any PT_LOAD segment
     write_serial_string("[LOADER] ELF mapping segments...\n");
@@ -243,29 +229,12 @@ static int load_elf_from_buffer(const char* filename, const char* arg,
     write_serial_hex(eh->e_entry);
     write_serial_string("\n");
 
-    extern void task_set_launch_arg(int tid, const char* a);
-
-    __asm__ volatile("cli");
-    int task_id = thread_create(entry_point, PRIORITY_INTERACTIVE, page_dir);
-    if (task_id < 0) {
-        __asm__ volatile("sti");
-        vmm_free_address_space(page_dir);
-        write_serial_string("[LOADER] ELF task create failed\n");
-        return -28;
-    }
-
-    if (arg && arg[0] != '\0') {
-        task_set_launch_arg(task_id, arg);
-    } else {
-        task_set_launch_arg(task_id, filename);
-    }
-    extern void task_set_heap_ptr(int tid, uint32_t ptr);
-    uint32_t heap_start = (max_end + 0xFFF) & ~0xFFFu;
-    task_set_heap_ptr(task_id, heap_start);
-    __asm__ volatile("sti");
-
+    (void)entry_point;
+    (void)arg;
+    out->entry = eh->e_entry;
+    out->heap_start = (max_end + 0xFFF) & ~0xFFFu;
     write_serial_string("[LOADER] ELF OK\n");
-    return task_id;
+    return 0;
 }
 
 // ============================================================
@@ -303,11 +272,15 @@ int load_mct_app_with_arg(const char* filename, const char* arg) {
     write_serial_hex(sz);
     write_serial_string("\n");
 
+    loader_image_t img = {0};
+    int rc;
+
     // ---- ELF detection: 0x7F 'E' 'L' 'F' ----
     if (buf[0] == 0x7F && buf[1] == 'E' && buf[2] == 'L' && buf[3] == 'F') {
-        int tid = load_elf_from_buffer(filename, arg, buf, sz);
+        rc = build_elf_image(filename, arg, buf, sz, &img);
         kfree(buf);
-        return tid;
+        if (rc < 0) return rc;
+        return finish_loaded_task(filename, arg, &img);
     }
 
     // ---- MCT format ----
@@ -333,13 +306,109 @@ int load_mct_app_with_arg(const char* filename, const char* arg) {
     // The file only contains the header and the code. data_size (BSS) is uninitialized memory.
     if ((int)(sizeof(mct_header_t) + header->code_size) > sz) { kfree(buf); return -5; }
 
-    int tid = load_mct_from_buffer(filename, arg, buf, header, total_size);
+    rc = build_mct_image(filename, arg, buf, header, total_size, &img);
     kfree(buf);
-    return tid;
+    if (rc < 0) return rc;
+    return finish_loaded_task(filename, arg, &img);
+}
+
+// Create a new task for a built image: thread_create + launch arg + heap.
+// Shared by the MCT and ELF build paths above.
+static int finish_loaded_task(const char* filename, const char* arg,
+                              loader_image_t* img) {
+    // CRITICAL: Set launch arg BEFORE creating the task to prevent race condition.
+    // thread_create() leaves interrupts disabled at the end, and the scheduler
+    // could run the new task before we get to set the arg.
+    extern void task_set_launch_arg(int tid, const char* a);
+
+    __asm__ volatile("cli");
+    int task_id = thread_create((void (*)(void))(uintptr_t)img->entry,
+                                PRIORITY_INTERACTIVE, img->page_dir);
+    if (task_id < 0) {
+        __asm__ volatile("sti");
+        vmm_free_address_space(img->page_dir);
+        write_serial_string("[LOADER] task create failed\n");
+        return -7;
+    }
+
+    if (arg && arg[0] != '\0') {
+        task_set_launch_arg(task_id, arg);
+    } else {
+        task_set_launch_arg(task_id, filename);
+    }
+    extern void task_set_heap_ptr(int tid, uint32_t ptr);
+    task_set_heap_ptr(task_id, img->heap_start);
+    __asm__ volatile("sti");
+
+    write_serial_string("[LOADER] task ");
+    write_serial_hex(task_id);
+    write_serial_string("\n");
+    return task_id;
 }
 
 int load_mct_app(const char* filename) {
     return load_mct_app_with_arg(filename, "");
+}
+
+// ============================================================
+// Exec support — build an image WITHOUT creating a task.
+// ============================================================
+// Used by task_exec() to replace the current task's image in place. The
+// caller owns img->page_dir: it must either hand it to the task or free it.
+// Returns 0 on success, negative error code on failure.
+// NOTE: `filename` is a kernel-side copy made by the syscall layer; never a
+// raw user pointer (it is dereferenced across a CR3 switch).
+int loader_build_image(const char* filename, const char* arg,
+                       loader_image_t* img) {
+    write_serial_string("[LOADER] exec: ");
+    write_serial_string(filename);
+    write_serial_string("\n");
+
+    int node = vfs_get_node(filename);
+    if (node < 0 || vfs_is_dir(node)) {
+        write_serial_string("[LOADER] NOT FOUND\n");
+        return -1;
+    }
+
+    int file_size = fs_nodes[node].size;
+    if (file_size <= 0 || file_size > 1024 * 1024) {
+        write_serial_string("[LOADER] invalid size\n");
+        return -2;
+    }
+
+    uint8_t* buf = (uint8_t*)kmalloc(file_size);
+    if (!buf) return -10;
+
+    int sz = vfs_read_file(filename, (char*)buf, file_size);
+    if (sz < 4) {
+        write_serial_string("[LOADER] too small\n");
+        kfree(buf);
+        return -2;
+    }
+
+    memset(img, 0, sizeof(*img));
+    int rc;
+    if (buf[0] == 0x7F && buf[1] == 'E' && buf[2] == 'L' && buf[3] == 'F') {
+        rc = build_elf_image(filename, arg, buf, sz, img);
+    } else {
+        if (sz < (int)sizeof(mct_header_t)) {
+            write_serial_string("[LOADER] too small (mct)\n");
+            kfree(buf);
+            return -2;
+        }
+        mct_header_t* header = (mct_header_t*)buf;
+        if (header->magic != MCT_MAGIC) {
+            write_serial_string("[LOADER] Invalid magic\n");
+            kfree(buf);
+            return -3;
+        }
+        uint32_t total_size = header->code_size + header->data_size;
+        if (total_size == 0 || total_size > 1024 * 1024) { kfree(buf); return -4; }
+        if ((int)(sizeof(mct_header_t) + header->code_size) > sz) { kfree(buf); return -5; }
+        rc = build_mct_image(filename, arg, buf, header, total_size, img);
+    }
+    kfree(buf);
+    return rc;
 }
 
 void* load_mct_library(const char* filename) {

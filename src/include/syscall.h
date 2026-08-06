@@ -131,6 +131,13 @@ typedef struct {
 #define SYS_SIGNAL      74  // EBX=sig, ECX=handler(0=default,1=SIG_IGN,else fn) -> old handler
 #define SYS_SIGRETURN   75  // restore the frame saved before a signal handler
 #define SYS_GETPPID     76  // -> parent task id
+#define SYS_EXEC        77  // EBX=path_ptr, ECX=arg_ptr(optional) -> never returns on success, -1 on failure
+
+// Shared memory (System V style)
+#define SYS_SHMGET      78  // EBX=key, ECX=size -> shm id (1-based) or -1
+#define SYS_SHMAT       79  // EBX=shmid -> base VA or 0
+#define SYS_SHMDT       80  // EBX=addr -> 0/-1
+#define SYS_SHMCTL      81  // EBX=shmid, ECX=cmd(0=IPC_RMID) -> 0/-1
 
 // Signal numbers (POSIX subset; SIGKILL cannot be caught or ignored)
 #define SIGINT   2
@@ -497,6 +504,28 @@ static inline int sys_sigreturn(void) {
 
 static inline int sys_getppid(void) {
     return syscall(SYS_GETPPID, 0, 0, 0);
+}
+
+// Replace the current task's image with the program at `path` (POSIX exec).
+// `arg` (optional, may be NULL) becomes the new program's launch arg. On
+// success the current program is replaced and this never returns; returns -1
+// on failure (old image keeps running).
+static inline int sys_exec(const char* path, const char* arg) {
+    return syscall(SYS_EXEC, (int)path, (int)arg, 0);
+}
+
+// Shared memory
+static inline int sys_shmget(uint32_t key, uint32_t size) {
+    return syscall(SYS_SHMGET, (int)key, (int)size, 0);
+}
+static inline void* sys_shmat(int shmid) {
+    return (void*)syscall(SYS_SHMAT, shmid, 0, 0);
+}
+static inline int sys_shmdt(void* addr) {
+    return syscall(SYS_SHMDT, (int)addr, 0, 0);
+}
+static inline int sys_shmctl(int shmid, int cmd) {
+    return syscall(SYS_SHMCTL, shmid, cmd, 0);
 }
 
 // Exit the current task with a status (available to child processes).

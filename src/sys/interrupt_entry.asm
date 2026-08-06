@@ -195,6 +195,12 @@ IRQ 12, 44   ; Mouse
 ; ============================================================
 global isr128
 isr128:
+    ; TRAP gate (IDT flags 0xEF): the CPU leaves IF=1 on entry, so interrupts
+    ; are live the moment we arrive. Push the register frame with IF=0 so the
+    ; registers_t layout is deterministic (fork/exec read the frame at the top
+    ; of the kernel stack), then re-enable interrupts for the C handler so the
+    ; scheduler can preempt long syscalls.
+    cli
     push byte 0           ; dummy err_code
     push dword 128        ; int_no = 0x80 (use dword to avoid sign extension!)
     pushad
@@ -206,10 +212,12 @@ isr128:
     mov fs, ax
     mov gs, ax
 
+    sti                   ; preemptible from here on
     push esp              ; Pass registers_t* to handler
     call isr_handler
     add esp, 4
 
+    cli                   ; deterministic epilogue (no nested IRQ frames)
     pop eax               ; Restore user's DS
     mov ds, ax
     mov es, ax

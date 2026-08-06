@@ -53,6 +53,14 @@ int get_current_task(void);
 // of the kernel stack (so its syscall returns 0), the fd table (refcounts
 // bumped) and the signal handlers.
 int task_fork(void);
+// Replace the current task's image with the program at `path` (POSIX exec).
+// The old address space is freed, the fd table / current dir / parent survive,
+// caught signal handlers reset to default (SIG_IGN stays), and the task's live
+// syscall return frame is patched to enter the new entry point. `path` and
+// `arg` must be kernel-side copies (the user pointers die with the old space).
+// On success this never returns to the old image; on failure the task keeps
+// running and returns a negative error.
+int task_exec(const char* path, const char* arg, void* frame);
 // Fork and redirect the child's return frame straight into a kernel function
 // (never returns to user mode). Used by the shell for background commands.
 // child_arg (optional) is written into the child's launch_arg BEFORE it can
@@ -123,6 +131,12 @@ void task_set_fd(int tid, int local_fd, int global_fd);
 // === NEW: Heap Pointer for Demand Paging ===
 uint32_t task_get_heap_ptr(int tid);
 void task_set_heap_ptr(int tid, uint32_t ptr);
+
+// === NEW: Shared memory attachment bitmap ===
+// Bit (shmid-1) set while the task has that segment mapped via shmat(). Kept
+// in the task so exit can release segments a task died without shmdt()ing.
+uint32_t task_get_shm_bits(int tid);
+void task_set_shm_bits(int tid, uint32_t bits);
 
 // === NEW: Task Info for GUI ===
 typedef struct {

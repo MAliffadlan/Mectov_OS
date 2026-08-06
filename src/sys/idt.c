@@ -82,8 +82,14 @@ void idt_init() {
     idt_set_gate(43, (uint32_t)irq11, 0x08, 0x8E);  // Network (RTL8139, IRQ11)
     idt_set_gate(44, (uint32_t)irq12, 0x08, 0x8E);  // Mouse
 
-    // Syscall gate: int 0x80, DPL=3 (Ring 3 can call this)
-    idt_set_gate(0x80, (uint32_t)isr128, 0x08, 0xEE);
+    // Syscall gate: int 0x80, DPL=3 (Ring 3 can call this).
+    // TRAP gate (0xEF, not 0xEE): the CPU does NOT auto-clear IF on entry, so
+    // the syscall handler is preemptible by the timer. isr128 manually cli()s
+    // while pushing its frame so the registers_t stays deterministically at the
+    // top of the kernel stack (fork/exec rely on that), then sti()s before
+    // calling the handler. This keeps the door open for preemptible kernel
+    // handlers while preserving every existing frame-layout assumption.
+    idt_set_gate(0x80, (uint32_t)isr128, 0x08, 0xEF);
 
     idt_flush((uint32_t)&idt_ptr);
 

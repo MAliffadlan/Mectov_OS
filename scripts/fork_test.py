@@ -7,7 +7,7 @@ Boots mectov.iso in QEMU, logs in, double-clicks the Terminal desktop icon
 mouse_move is relative), types `run /apps/forkdemo.mct`, and verifies from the
 serial log that:
 
-  1. a child task was forked            ("[TASK] fork: child tid=")
+  1. a child task was forked            ("fork: child")
   2. the child exited with status 42    ("SYS_EXIT code=2A")
   3. the OS stayed alive afterwards
 
@@ -122,13 +122,34 @@ def main():
             print("[FAIL] terminal did not launch (icon double-click missed?)")
             return 1
         print("[OK] terminal launched")
-        time.sleep(1)  # let the terminal create its window + IPC queue
+        # Wait for the terminal's IPC queue (keyboard routing is live only then),
+        # like a real user would wait for the window to appear.
+        if not wait_for_in_file(SERIAL_LOG, "ipc_create key=0x0000DEAD", 30):
+            print("[FAIL] terminal never became ready")
+            return 1
+        time.sleep(1.0)
 
-        for k in RUN_KEYS:
-            mon_cmd("sendkey " + k)
-            time.sleep(0.08)
+        # Click inside the terminal window (60,40,600x400 -> center ~(360,240))
+        # so keyboard focus lands on it, like a real user would.
+        mon_cmd("mouse_move 300 176")
+        time.sleep(0.1)
+        mon_cmd("mouse_button 1"); time.sleep(0.1); mon_cmd("mouse_button 0")
+        time.sleep(0.5)
 
-        if not wait_for_in_file(SERIAL_LOG, "[TASK] fork: child tid=", 30):
+        ok_run = False
+        for _ in range(3):
+            # Clear any half-typed garbage first, then type fresh.
+            for _ in range(24):
+                mon_cmd("sendkey backspace")
+            for k in RUN_KEYS:
+                mon_cmd("sendkey " + k)
+                time.sleep(0.12)
+            mon_cmd("sendkey ret")
+            if wait_for_in_file(SERIAL_LOG, "fork: child", 25):
+                ok_run = True
+                break
+            time.sleep(1.0)
+        if not ok_run:
             print("[FAIL] fork() never happened")
             return 1
         print("[OK] fork() created a child task")

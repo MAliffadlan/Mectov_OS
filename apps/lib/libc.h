@@ -124,9 +124,15 @@ static inline void exit(int status) {
     for(;;);
 }
 
-// --- Process model (fork / waitpid / signals) ---
+// --- Process model (fork / waitpid / signals / exec) ---
 static inline int fork(void) {
     return sys_fork();
+}
+
+// Replace this process's image with `path`. arg may be NULL. Never returns on
+// success; returns -1 on failure (old image keeps running).
+static inline int exec(const char* path, const char* arg) {
+    return sys_exec(path, arg);
 }
 
 static inline int waitpid(int pid, int* status, int options) {

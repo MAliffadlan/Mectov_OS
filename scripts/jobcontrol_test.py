@@ -119,12 +119,38 @@ def main():
             print("[FAIL] terminal did not launch")
             return 1
         print("[OK] terminal launched")
-        time.sleep(1.5)
+        # Wait until the terminal has finished init (its IPC queue is up) so
+        # keystrokes are guaranteed to reach the shell. Under TCG the terminal
+        # can take a while to pump its event loop; typing before that drops keys
+        # and makes this test flaky.
+        if not wait_for_in_file(SERIAL_LOG, "ipc_create key=0x0000DEAD", 30):
+            print("[FAIL] terminal never became ready")
+            return 1
+        time.sleep(1.0)
+
+        # Click inside the terminal window (60,40,600x400 -> center ~(360,240))
+        # so keyboard focus lands on it, like a real user would.
+        mon_cmd("mouse_move 300 176")
+        time.sleep(0.1)
+        mon_cmd("mouse_button 1"); time.sleep(0.1); mon_cmd("mouse_button 0")
+        time.sleep(0.5)
 
         # 1. Background job: sleep 2 &  (kernel logs the fork + job registration)
-        type_keys(keys("sleep 2 &"))
-        mon_cmd("sendkey ret")
-        if not wait_for_in_file(SERIAL_LOG, "[JOBS] registered job", 20):
+        # Retry a few times: TCG can still lose an early keystroke even after
+        # the terminal is ready.
+        ok_job = False
+        for _ in range(3):
+            # Clear any half-typed garbage first (a dropped key on a previous
+            # attempt would otherwise corrupt the command line), then type fresh.
+            for _ in range(24):
+                mon_cmd("sendkey backspace")
+            type_keys(keys("sleep 2 &"), delay=0.15)
+            mon_cmd("sendkey ret")
+            if wait_for_in_file(SERIAL_LOG, "[JOBS] registered job", 15):
+                ok_job = True
+                break
+            time.sleep(1.0)
+        if not ok_job:
             print("[FAIL] `sleep 2 &` did not start a background job")
             return 1
         print("[OK] background job forked + registered")

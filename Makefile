@@ -47,6 +47,9 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/notepad_mct.o \
        $(OBJ_DIR)/flappy_mct.o \
        $(OBJ_DIR)/forkdemo_mct.o \
+       $(OBJ_DIR)/execdemo_mct.o \
+       $(OBJ_DIR)/execchild_mct.o \
+       $(OBJ_DIR)/shmdemo_mct.o \
        $(OBJ_DIR)/libc_mct.o \
        $(OBJ_DIR)/calc_mct.o \
        $(OBJ_DIR)/volume_mct.o \
@@ -139,6 +142,15 @@ mplayer.mct: apps/mplayer.c $(MCT_LIBC_H)
 forkdemo.mct: apps/forkdemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/forkdemo.c forkdemo.mct
 
+execdemo.mct: apps/execdemo.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/execdemo.c execdemo.mct
+
+execchild.mct: apps/execchild.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/execchild.c execchild.mct
+
+shmdemo.mct: apps/shmdemo.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/shmdemo.c shmdemo.mct
+
 $(OBJ_DIR)/clock_mct.o: clock.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
@@ -183,6 +195,15 @@ $(OBJ_DIR)/mplayer_mct.o: mplayer.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/forkdemo_mct.o: forkdemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 forkdemo.mct $(OBJ_DIR)/forkdemo_mct.o
+
+$(OBJ_DIR)/execdemo_mct.o: execdemo.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 execdemo.mct $(OBJ_DIR)/execdemo_mct.o
+
+$(OBJ_DIR)/execchild_mct.o: execchild.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 execchild.mct $(OBJ_DIR)/execchild_mct.o
+
+$(OBJ_DIR)/shmdemo_mct.o: shmdemo.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 shmdemo.mct $(OBJ_DIR)/shmdemo_mct.o
 
 $(OBJ_DIR)/music_wav.o: apps/music.wav | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 apps/music.wav $(OBJ_DIR)/music_wav.o

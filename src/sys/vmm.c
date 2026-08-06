@@ -439,8 +439,12 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
         for (uint32_t e = 0; e < 1024; e++) {
             if (!(src_pt[e] & PAGE_PRESENT)) continue;
             
-            // Mark user-space writable pages as COW and Read-Only
-            if ((src_pt[e] & PAGE_USER) && (src_pt[e] & PAGE_RW)) {
+            // Mark user-space writable pages as COW and Read-Only — UNLESS the
+            // page is shared memory (PAGE_SHARED): shm pages must stay shared
+            // across fork, so they are copied as-is (RW, same physical frame)
+            // and the refcount bump below keeps them alive for both tasks.
+            if ((src_pt[e] & PAGE_USER) && (src_pt[e] & PAGE_RW) &&
+                !(src_pt[e] & PAGE_SHARED)) {
                 src_pt[e] &= ~PAGE_RW;  // clear RW
                 src_pt[e] |= PAGE_COW;  // set COW
             }

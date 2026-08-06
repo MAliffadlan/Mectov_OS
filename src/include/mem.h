@@ -10,6 +10,7 @@
 #define PAGE_RW      0x2
 #define PAGE_USER    0x4
 #define PAGE_COW     0x200
+#define PAGE_SHARED  0x400   // shared memory page (never COW'd on fork)
 
 void init_mem(uint32_t mem_size);
 void paging_init(uint32_t fb_addr, uint32_t fb_size);

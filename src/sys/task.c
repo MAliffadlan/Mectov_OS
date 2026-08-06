@@ -9,6 +9,7 @@
 #include "../include/timer.h" // get_ticks()
 #include "../include/fd.h"    // global_fds[] for fork fd sharing
 #include "../include/utils.h" // memcpy/memset
+#include "../include/loader.h" // loader_image_t for exec()
 
 static spinlock_t task_lock = SPINLOCK_INIT;
 
@@ -52,6 +53,7 @@ typedef struct {
     void*    signal_handlers[SIG_MAX]; // NULL=default, SIG_IGN_SENTINEL=ignore, else user fn
     uint32_t sig_frame_esp;     // user-stack address of the sigframe awaiting SYS_SIGRETURN
     uint32_t zombie_since;      // tick when the task became a zombie (reap timeout)
+    uint32_t shm_bits;          // bitmap of shm segments this task has attached
 } task_t;
 
 static task_t tasks[MAX_TASKS];
@@ -87,6 +89,7 @@ void init_tasking() {
     tasks[0].wait_ticks = 0;
     tasks[0].esp = 0; // Will be filled by scheduler on first preemption
     tasks[0].parent = 0;
+    tasks[0].shm_bits = 0;
     
     // Save boot CR3 to task 0
     uint32_t boot_cr3;
@@ -121,6 +124,7 @@ int create_task(void (*entry)()) {
             tasks[i].pending_signals = 0;
             tasks[i].sig_frame_esp = 0;
             tasks[i].zombie_since = 0;
+            tasks[i].shm_bits = 0;
             for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
             task_set_launch_arg(i, "sys_kernel");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
@@ -184,7 +188,15 @@ static void task_cleanup(int tid) {
     extern void task_close_all_fds(int tid);
     task_close_all_fds(tid);
     
-    // 3. Free address space (if it's not the kernel's) — but only when this is
+    // 3. Release shm segments this task still had attached (task may have
+    //    died without calling shmdt). This must run BEFORE the address space
+    //    is freed so segment accounting sees the mapping still in place.
+    if (tasks[tid].shm_bits != 0) {
+        extern void shm_task_exit(int tid);
+        shm_task_exit(tid);
+    }
+
+    // 4. Free address space (if it's not the kernel's) — but only when this is
     //    the LAST task still using it. Sibling threads of one process share the
     //    same page_dir; freeing it when one of them exits would yank the memory
     //    out from under the others.
@@ -479,6 +491,7 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             tasks[i].pending_signals = 0;
             tasks[i].sig_frame_esp = 0;
             tasks[i].zombie_since = 0;
+            tasks[i].shm_bits = 0;
             for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
@@ -695,6 +708,7 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         tasks[i].pending_signals = 0;
         tasks[i].sig_frame_esp = 0;
         tasks[i].zombie_since = 0;
+        tasks[i].shm_bits = tasks[parent].shm_bits;  // child inherits attachments
         memcpy(tasks[i].signal_handlers, tasks[parent].signal_handlers,
                sizeof(tasks[i].signal_handlers));
         memcpy(tasks[i].fd_table, tasks[parent].fd_table, sizeof(tasks[i].fd_table));
@@ -740,6 +754,113 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
 
 int task_fork(void) {
     return fork_common(NULL, NULL);
+}
+
+// ============================================================
+// exec() — replace the current task's image in place
+// ============================================================
+
+// exec does NOT return to the caller on success — the syscall epilogue iret's
+// straight into the new program's entry point. So the failure path is the only
+// one that matters here: it must leave the old image completely untouched.
+int task_exec(const char* path, const char* arg, void* frame) {
+    int cid = get_cid();
+    if (current_task[cid] < 0) return -1;
+    int tid = current_task[cid];
+    if (tid == 0) return -1;                     // kernel idle task cannot exec
+    if (task_in_kernel_space(tid)) return -1;    // exec needs a private address space
+
+    // Build the new image (new address space + code copied in). The caller
+    // already copied path/arg into kernel memory, so the VFS read below works
+    // regardless of which address space is active.
+    extern int loader_build_image(const char* filename, const char* arg, loader_image_t* img);
+    loader_image_t img;
+    int rc = loader_build_image(path, arg, &img);
+    if (rc < 0) return rc;
+    if (img.page_dir == 0) return -6;
+
+    // Map a fresh Ring 3 stack for this task's slot in the NEW address space.
+    uint32_t stack_top = USER_STACK_TOP - ((uint32_t)(tid + 1) * USER_STACK_SIZE);
+    uint32_t user_esp = vmm_setup_user_stack(img.page_dir, stack_top);
+    if (user_esp == 0) {
+        vmm_free_address_space(img.page_dir);
+        return -6;
+    }
+
+    __asm__ volatile("cli");
+
+    // Drop the old image's windows (the app code that owned them is gone).
+    extern void wm_cleanup_task(int tid);
+    wm_cleanup_task(tid);
+
+    // Switch CR3 to the new address space BEFORE freeing the old one. The
+    // kernel identity map lives in every address space, so we keep running.
+    vmm_switch_page_dir(img.page_dir);
+
+    // Free the old address space only if no sibling task shares it (threads of
+    // one process share page_dir; freeing it under a sibling would yank its
+    // memory away).
+    uint32_t old_pd = tasks[tid].page_dir;
+    if (old_pd != 0 && old_pd != tasks[0].page_dir) {
+        int sharers = 0;
+        for (int k = 1; k < MAX_TASKS; k++) {
+            if (k != tid && tasks[k].state != TASK_STATE_FREE &&
+                tasks[k].page_dir == old_pd) sharers++;
+        }
+        if (sharers == 0) {
+            extern void vmm_free_address_space(uint32_t);
+            vmm_free_address_space(old_pd);
+        }
+    }
+
+    // ---- Rewire the task state to the new image ----
+    tasks[tid].page_dir = img.page_dir;
+    tasks[tid].heap_ptr = img.heap_start;
+
+    // Reset signal state per POSIX: caught handlers revert to default, ignored
+    // ones stay ignored; nothing is pending; no sigframe in flight.
+    for (int s = 1; s < SIG_MAX; s++) {
+        if (tasks[tid].signal_handlers[s] != SIG_IGN_SENTINEL) {
+            tasks[tid].signal_handlers[s] = NULL;
+        }
+    }
+    tasks[tid].pending_signals = 0;
+    tasks[tid].sig_frame_esp = 0;
+
+    if (arg && arg[0]) {
+        int n = 0;
+        for (; arg[n] && n < 127; n++) tasks[tid].launch_arg[n] = arg[n];
+        tasks[tid].launch_arg[n] = '\0';
+    } else {
+        task_set_launch_arg(tid, path);
+    }
+
+    // ---- Patch the LIVE syscall return frame ----
+    // The task is inside SYS_EXEC (interrupt gate, IF=0), so its registers_t
+    // frame is deterministically at the top of the kernel stack — exactly the
+    // frame the syscall epilogue will iret from. Rewriting eip/cs/useresp/ss
+    // makes that iret land in the new program instead of returning to the old.
+    registers_t* fr = (registers_t*)frame;
+    fr->eip     = img.entry;
+    fr->cs      = 0x1B;
+    fr->ss      = 0x23;
+    fr->ds      = 0x23;
+    fr->eflags  = 0x202;   // IF=1
+    fr->useresp = user_esp;
+    fr->eax     = 0;       // exec() reports success (never actually returned)
+
+    __asm__ volatile("sti");
+
+    write_serial_string("[TASK] exec: tid=");
+    write_serial_hex(tid);
+    write_serial_string(" entry=");
+    write_serial_hex(img.entry);
+    write_serial_string(" pd=");
+    write_serial_hex(img.page_dir);
+    write_serial_string("\n");
+
+    // The frame is now the new program's entry; the epilogue iret's into it.
+    return 0;
 }
 
 int task_fork_kernel(void (*entry)(void), const char* child_arg) {
@@ -984,4 +1105,14 @@ uint32_t task_get_heap_ptr(int tid) {
 void task_set_heap_ptr(int tid, uint32_t ptr) {
     if (tid < 0 || tid >= MAX_TASKS) return;
     tasks[tid].heap_ptr = ptr;
+}
+
+uint32_t task_get_shm_bits(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    return tasks[tid].shm_bits;
+}
+
+void task_set_shm_bits(int tid, uint32_t bits) {
+    if (tid < 0 || tid >= MAX_TASKS) return;
+    tasks[tid].shm_bits = bits;
 }

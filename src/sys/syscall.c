@@ -290,8 +290,18 @@ extern uint32_t handle_syscall_proc(registers_t* regs);
 extern uint32_t handle_syscall_ipc(registers_t* regs);
 
 static void syscall_handler(registers_t* regs) {
-        uint32_t call_no = regs->eax;   // captured before handlers overwrite eax
-        switch (regs->eax) {
+    // The 0x80 gate is a TRAP gate now (isr128 sti's before calling us), so
+    // handlers run with IF=1 by default. Most of them touch shared state
+    // (VFS nodes, WM windows, fd table, event queues) that is not locked — a
+    // timer interrupt in the middle of, say, SYS_GET_EVENT lets the keyboard
+    // IRQ push into the same queue and drop keystrokes. So default to
+    // non-preemptible (IF=0) exactly like the old interrupt gate; blocking
+    // syscalls (SYS_SLEEP / SYS_WAITPID / SYS_YIELD) re-enable IF themselves
+    // and stay genuinely preemptible while parked.
+    __asm__ volatile("cli");
+
+    uint32_t call_no = regs->eax;   // captured before handlers overwrite eax
+    switch (regs->eax) {
         case SYS_OPEN:
         case SYS_READ:
         case SYS_WRITE:
@@ -342,6 +352,7 @@ static void syscall_handler(registers_t* regs) {
         case SYS_SIGNAL:
         case SYS_SIGRETURN:
         case SYS_GETPPID:
+        case SYS_EXEC:
             regs->eax = handle_syscall_proc(regs);
             break;
 
@@ -516,6 +527,28 @@ static void syscall_handler(registers_t* regs) {
             } else {
                 regs->eax = -1;
             }
+            break;
+        }
+
+        // ----- Shared memory (78-81) -----
+        case SYS_SHMGET: {
+            extern int shm_get(uint32_t key, uint32_t size);
+            regs->eax = (uint32_t)shm_get((uint32_t)regs->ebx, (uint32_t)regs->ecx);
+            break;
+        }
+        case SYS_SHMAT: {
+            extern uint32_t shm_at(int shmid);
+            regs->eax = shm_at((int)regs->ebx);
+            break;
+        }
+        case SYS_SHMDT: {
+            extern int shm_dt(uint32_t addr);
+            regs->eax = (uint32_t)shm_dt((uint32_t)regs->ebx);
+            break;
+        }
+        case SYS_SHMCTL: {
+            extern int shm_ctl(int shmid, int cmd);
+            regs->eax = (uint32_t)shm_ctl((int)regs->ebx, (int)regs->ecx);
             break;
         }
 
@@ -704,9 +737,10 @@ static void syscall_handler(registers_t* regs) {
 
     // Deliver pending signals before iret'ing back to Ring 3. The frame is
     // rewritten in place (EIP/USERESP) so the handler runs; SYS_SIGRETURN
-    // restores it afterwards. SYS_SIGRETURN already did its own frame restore
-    // and SYS_EXIT never returns.
-    if (call_no != SYS_SIGRETURN && call_no != SYS_EXIT) {
+    // restores it afterwards. SYS_SIGRETURN already did its own frame restore,
+    // SYS_EXIT never returns, and SYS_EXEC replaced the frame with the new
+    // program's entry (no old-image signals apply to it).
+    if (call_no != SYS_SIGRETURN && call_no != SYS_EXIT && call_no != SYS_EXEC) {
         extern int task_deliver_signals(void* frame);
         task_deliver_signals(regs);
     }
