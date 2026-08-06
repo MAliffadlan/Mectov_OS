@@ -298,12 +298,14 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             } else {
                 handled = wm_handle_mouse(mx, my, btn, prev_btn);
                 if (!handled) {
-                    if (in_taskbar && !btn && prev_btn) {
+                    extern int desktop_drag_active(void);
+                    if (in_taskbar && !btn && prev_btn && !desktop_drag_active()) {
                         taskbar_handle_click(mx, my);
                     } else if (!in_taskbar && !btn && prev_btn && popup_open) {
                         // Route release above taskbar to taskbar if a popup was open
                         taskbar_handle_click(mx, my);
-                    } else if (!in_taskbar) {
+                    } else if (!in_taskbar || desktop_drag_active()) {
+                        // A live icon drag keeps its events even over the taskbar
                         desktop_handle_mouse(mx, my, btn, prev_btn);
                     }
                 }

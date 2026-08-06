@@ -102,7 +102,15 @@ void draw_app_icon(int ix, int iy, const char* title, int size) {
     draw_rounded_rect(ix, iy, size, size, size/4, bg_col);
 
     if      (stristr(title, "Terminal")) {
-        draw_string_px(ix + size/4, iy + size/4, ">_", 0x0048BB78, bg_col);
+        // ">" prompt chevron + underscore bar. ">_" as text overflowed the
+        // 14px taskbar box (glyph is 16px wide x 16px tall, box is size x size):
+        // it spilled past the rounded rect on the right and bottom. Draw the
+        // ">" centered by its ink rows and add the underscore as a bar so the
+        // whole glyph stays inside the box.
+        int tx = ix + (size - 8) / 2;
+        int ty = iy + (size - 16) / 2;          // ">" ink rows 3..11 land centered
+        draw_string_px(tx, ty, ">", 0x0048BB78, bg_col);
+        draw_rect(tx + 1, iy + size - 4, 6, 2, 0x0048BB78);
     } else if (stristr(title, "Explorer")) {
         draw_rect(cx - size/3, cy - size/3, size*2/3, size/2, 0x00FFFFFF);
         draw_rect(cx - size/3, cy - size/3 - 1, size/4, 2, 0x00EBF8FF);
@@ -220,8 +228,15 @@ void taskbar_draw() {
     unsigned char dow  = tm.dow;
     unsigned char c_day = tm.day;
     unsigned char c_mon = tm.month;
+    unsigned int  c_yr = tm.year;
     int h_tmp = hour + 7;
-    if (h_tmp >= 24) { dow++; if (dow > 7) dow = 1; c_day++; }
+    if (h_tmp >= 24) {
+        dow++;
+        if (dow > 7) dow = 1;
+        c_day++;
+        // Roll into the next month instead of displaying "Apr 32"
+        if (c_day > days_in_month(c_mon, c_yr)) { c_day = 1; c_mon++; if (c_mon > 12) c_mon = 1; }
+    }
     hour = h_tmp % 24;
 
     char time_str[9];

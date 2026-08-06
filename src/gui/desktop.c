@@ -218,16 +218,19 @@ static void draw_icon(int i) {
     }
     draw_pro_icon(ic->x, ic->y, ic->label);
 
-    // Label below icon: modern pill-shaped background
+    // Label below icon. The glyph font is 8x16 (font8x16_data), NOT 8x8, so
+    // the label box must be 16px tall — a 14px box clipped the bottom half of
+    // long labels that take the vga_set_clip() path below (glyph rows 11-15
+    // landed outside the clip rect).
     int llen = strlen(ic->label);
     int lw = llen * 8 + 10;   // padding 5px each side
     int lx = ic->x + (ICON_W - lw) / 2;
     int ly = ic->y + ICON_W - 4;
-    int lh = 14;               // label height
+    int lh = 16;               // label height (matches the 8x16 font)
 
     // White text centered under icon
     int tx = lx + (lw - llen * 8) / 2;
-    int ty = ly + (lh - 8) / 2;
+    int ty = ly;               // glyph rows fill the 16px label box exactly
 
     // Clip the label to the icon cell width ONLY when it overflows the cell,
     // so a long label never paints over the neighbouring icon.
@@ -251,6 +254,7 @@ extern uint32_t _binary_obj_wallpaper_bin_start[];
 static int ctx_menu_open = 0;
 static int ctx_menu_x = 0;
 static int ctx_menu_y = 0;
+static int ctx_menu_last_hover = -1;
 
 void desktop_draw() {
     if (!is_vbe) return;
@@ -333,9 +337,15 @@ static int drag_start_y = 0;
 static int last_clicked_icon = -1;
 static uint32_t last_click_tick = 0;
 
+// True while an icon drag is in flight. The kernel uses this to keep routing
+// mouse events to the desktop even when the cursor crosses into the taskbar,
+// so the release is handled here (snap-back/save) instead of being eaten by
+// a taskbar button click.
+int desktop_drag_active(void) { return dragged_icon != -1; }
+
 void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
     int ty = (int)fb_height - TASKBAR_H_PX;
-    if (my >= ty) return; // taskbar handles its own clicks
+    if (my >= ty && !desktop_drag_active()) return; // taskbar handles its own clicks
 
     // --- Right-click Context Menu logic ---
     if (ctx_menu_open) {
@@ -377,14 +387,20 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
             needs_redraw = 1;
             return;
         } else {
-            // Hover check: if mouse moves over context menu, refresh it
-            int dx = ctx_menu_x;
-            int dy = ctx_menu_y;
-            int dw = 130;
-            int dh = 78;
-            if (mx >= dx && mx < dx + dw && my >= dy && my < dy + dh) {
+            // Hover check: refresh only when the hovered item CHANGES (enter,
+            // leave, or switch). Redrawing on every move was fine, but NOT
+            // marking when the mouse leaves the menu left the blue highlight
+            // stuck on the last item.
+            int hover = -1;
+            if (mx >= ctx_menu_x && mx < ctx_menu_x + 130 &&
+                my >= ctx_menu_y && my < ctx_menu_y + 78) {
+                hover = (my - ctx_menu_y - 3) / 18;
+                if (hover < 0 || hover > 3) hover = -1;
+            }
+            if (hover != ctx_menu_last_hover) {
+                ctx_menu_last_hover = hover;
                 extern void mark_dirty(int, int, int, int);
-                mark_dirty(dx, dy, dw, dh);
+                mark_dirty(ctx_menu_x, ctx_menu_y, 130, 78);
                 extern int needs_redraw;
                 needs_redraw = 1;
             }
