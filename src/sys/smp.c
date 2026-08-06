@@ -96,7 +96,12 @@ void smp_init(void) {
         uint8_t lapic_id = smp_lapic_ids[i];
         if (lapic_id == smp_bsp_lapic_id) continue;
         
-        uint32_t ap_stack = (uint32_t)kmalloc(16384) + 16384;
+        void* ap_stack_alloc = kmalloc(16384);
+        if (!ap_stack_alloc) {
+            write_serial_string("[SMP] out of memory for AP stack, aborting AP startup\n");
+            break;
+        }
+        uint32_t ap_stack = (uint32_t)ap_stack_alloc + 16384;
         *boot_esp = ap_stack;
         
         write_serial_string("[SMP] Waking up CPU APIC ID ");

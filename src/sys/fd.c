@@ -128,15 +128,12 @@ int do_sys_write(int fd, const char* buf, int size) {
     return -1;
 }
 
-int do_sys_close(int fd) {
-    int tid = get_current_task();
-    if (tid < 0) return -1;
-    int gfd = task_get_fd(tid, fd);
-    if (gfd < 0 || !global_fds[gfd].in_use) return -1;
-    
-    task_set_fd(tid, fd, -1);
+// Release one global FD: drop its refcount and free the slot (and any pipe it
+// owns) when the last reference goes away. Used by do_sys_close and by task
+// teardown (task_close_all_fds).
+static void fd_release_global(int gfd) {
     global_fds[gfd].ref_count--;
-    
+
     if (global_fds[gfd].ref_count == 0) {
         int p = global_fds[gfd].pipe_id;
         if (global_fds[gfd].type == FD_TYPE_PIPE_WRITE) {
@@ -155,7 +152,29 @@ int do_sys_close(int fd) {
         }
         global_fds[gfd].in_use = 0;
     }
+}
+
+int do_sys_close(int fd) {
+    int tid = get_current_task();
+    if (tid < 0) return -1;
+    int gfd = task_get_fd(tid, fd);
+    if (gfd < 0 || !global_fds[gfd].in_use) return -1;
+
+    task_set_fd(tid, fd, -1);
+    fd_release_global(gfd);
     return 0;
+}
+
+// Close every fd a task holds. Called from task_cleanup() (exit/kill) — without
+// this, the task's global fd slots and pipes leaked forever, and a pipe reader
+// whose writer task died blocked on a pipe that was never closed.
+void task_close_all_fds(int tid) {
+    for (int i = 0; i < MAX_FDS_PER_TASK; i++) {
+        int gfd = task_get_fd(tid, i);
+        if (gfd < 0) continue;
+        task_set_fd(tid, i, -1);
+        if (gfd < MAX_GLOBAL_FDS && global_fds[gfd].in_use) fd_release_global(gfd);
+    }
 }
 
 int do_sys_pipe(int pipefd[2]) {

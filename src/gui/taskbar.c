@@ -481,6 +481,10 @@ void taskbar_draw() {
         unsigned char mon_cmos = tm.month;
         unsigned int  c_yr     = tm.year;
 
+        // A dead CMOS battery reports month 0; (0 - 1) % 12 is -1 in C, an
+        // OOB read of months[] that dereferences a wild pointer below.
+        if (mon_cmos < 1 || mon_cmos > 12) mon_cmos = 1;
+
         int cal_w = 210;
         int cal_h = 170;
         int cal_x = clk_x - 10;

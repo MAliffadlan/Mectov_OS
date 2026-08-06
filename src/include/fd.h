@@ -29,5 +29,6 @@ int do_sys_read(int fd, char* buf, int size);
 int do_sys_write(int fd, const char* buf, int size);
 int do_sys_close(int fd);
 int do_sys_pipe(int pipefd[2]);
+void task_close_all_fds(int tid);
 
 #endif

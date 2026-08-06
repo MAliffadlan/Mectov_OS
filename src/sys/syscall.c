@@ -598,7 +598,6 @@ static void syscall_handler(registers_t* regs) {
             sb16_set_audio_buffer(new_buf, len);
             kfree(play_buf);          // free previous copy (NULL-safe)
             play_buf = new_buf;
-            sb16_set_audio_buffer(play_buf, len);
             sb16_start_playback(rate);
             regs->eax = 0;
             break;

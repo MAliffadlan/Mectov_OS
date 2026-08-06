@@ -12,6 +12,9 @@
 #include "../include/utils.h"
 #include "../include/mem.h"
 #include "../include/ext2.h"
+#include "../include/fd.h"
+
+extern global_fd_t global_fds[MAX_GLOBAL_FDS];
 
 extern void write_serial_string(const char*);
 extern void write_serial_hex(uint32_t);
@@ -491,6 +494,18 @@ int vfs_load() {
         ata_read_sector(VFS_NODE_START + i, p + (i * 512));
     }
     
+    // Sanitize the on-disk node table. Names and parent links are attacker
+    // controlled: a name with no NUL byte in its 32 bytes makes strtolower()/
+    // strlen() walk off the node buffer (stack corruption), and an out-of-range
+    // parent makes vfs_get_abs_path() index fs_nodes[] out of bounds.
+    for (int i = 0; i < MAX_NODES; i++) {
+        fs_nodes[i].name[MAX_FILENAME - 1] = '\0';
+        if (fs_nodes[i].in_use &&
+            (fs_nodes[i].parent < -1 || fs_nodes[i].parent >= MAX_NODES)) {
+            fs_nodes[i].parent = 0;
+        }
+    }
+    
     // Restore current_dir
     int loaded_cd = meta[16] | (meta[17] << 8);
     if (loaded_cd < 0 || loaded_cd >= MAX_NODES || !fs_nodes[loaded_cd].in_use)
@@ -790,6 +805,16 @@ int vfs_delete_node(const char* path) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
     if (node == 0) return -3; // Cannot delete root
+
+    // Refuse to delete while any open fd references the node: its slot would
+    // be reused by the next create, and reads/writes on the stale fd would
+    // silently hit an unrelated file.
+    for (int i = 0; i < MAX_GLOBAL_FDS; i++) {
+        if (global_fds[i].in_use && global_fds[i].type == FD_TYPE_FILE &&
+            global_fds[i].vfs_node == node) {
+            return -6;
+        }
+    }
     
     // Recursively delete children if directory (handle nested dirs)
     if (fs_nodes[node].type == FS_DIR || fs_nodes[node].type == FS_EXT2_DIR) {
@@ -948,7 +973,12 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
     if (size <= 0) { buf[0] = '\0'; return 0; }
     
     int sector = fs_nodes[node].data_sector;
-    if (sector <= 0) { buf[0] = '\0'; return 0; }
+    if (sector <= 0 || sector >= 2048) { buf[0] = '\0'; return 0; }
+    
+    // A corrupt node can claim sectors past the end of the 2048-sector disk;
+    // clamp so ata_read_sector never walks off the disk.
+    int max_readable = (2048 - sector) * 512;
+    if (size > max_readable) size = max_readable;
     
     // Read sectors
     int remaining = size;

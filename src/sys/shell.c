@@ -382,16 +382,19 @@ void shell_apply_tab() {
         // Replace from word_start with the match
         int j = word_start;
         int k = 0;
-        while (tab_matches[0][k]) {
+        // cmd_b is CMD_BUF_SIZE bytes; word_start can be up to 255, so the
+        // match must be truncated rather than allowed to overflow into the
+        // adjacent globals (hist_b, env_vars, aliases).
+        while (tab_matches[0][k] && j < CMD_BUF_SIZE - 2) {
             cmd_b[j++] = tab_matches[0][k++];
         }
         // If directory, add trailing /
         int node = vfs_get_node(tab_matches[0]);
         if (node >= 0 && vfs_is_dir(node)) {
-            cmd_b[j++] = '/';
+            if (j < CMD_BUF_SIZE - 1) cmd_b[j++] = '/';
         } else if (is_first_word) {
             // Add trailing space after command name for convenience
-            cmd_b[j++] = ' ';
+            if (j < CMD_BUF_SIZE - 1) cmd_b[j++] = ' ';
         }
         cmd_b[j] = '\0';
         b_idx = j;
@@ -1437,6 +1440,13 @@ static void run_cmd_internal() {
 }
 
 void run_script(const char* f) {
+    // A script containing `sh`/`source` would recurse here until the kernel
+    // stack overflows — `is_script` was set but never read. Refuse nested
+    // script execution outright.
+    if (is_script) {
+        print("sh: nested script execution is not allowed\n", 0x0C);
+        return;
+    }
     is_script = 1;
     
     // Find file in new VFS

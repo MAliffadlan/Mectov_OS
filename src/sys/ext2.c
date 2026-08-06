@@ -12,8 +12,15 @@ static ext2_bg_descriptor_t* bgd_table = NULL;
 static uint32_t ext2_max_groups = 0; // capped at MAX below; read_inode bounds-checks against it
 
 static void ext2_read_block(uint32_t block, unsigned char* buf) {
+    // A crafted image can name arbitrary block numbers. Bound the read to the
+    // filesystem's own block count and the 4096-sector (2MB) drive BEFORE the
+    // block * sectors_per_block multiplication can wrap 32 bits; an out-of-
+    // range block reads as zeros instead of hitting the wrong disk area.
+    if (block >= sb.s_blocks_count) { memset(buf, 0, block_size); return; }
     uint32_t sectors_per_block = block_size / 512;
     uint32_t start_sector = block * sectors_per_block;
+    if (start_sector >= 4096) { memset(buf, 0, block_size); return; }
+    if (start_sector + sectors_per_block > 4096) sectors_per_block = 4096 - start_sector;
     for (uint32_t i = 0; i < sectors_per_block; i++) {
         ata_read_sector_drive(ext2_drive, start_sector + i, buf + (i * 512));
     }
@@ -57,6 +64,12 @@ int ext2_init(int drive) {
     if (sb.s_inode_size < sizeof(ext2_inode_t)) { write_serial_string("[EXT2] inode size too small\n"); return -1; }
 
     block_size = 1024 << sb.s_log_block_size;
+    // The inode accessors copy a record at `(index * inode_size) % block_size`
+    // inside a fixed 4KB buffer. A forged s_inode_size that does not divide
+    // block_size lets a record span block boundaries, running that memcpy past
+    // the buffer and smashing the kernel stack. Real ext2 images (128/256/512
+    // byte inodes) always divide evenly.
+    if (block_size % sb.s_inode_size != 0) { write_serial_string("[EXT2] inode size not block-aligned\n"); return -1; }
     bgd_block = (block_size == 1024) ? 2 : 1;
     
     // Read Block Group Descriptor Table (assume it fits in one block for simplicity)
@@ -142,8 +155,10 @@ static void ext2_scan_dir_block(uint32_t block, int vfs_parent_node, int depth) 
                 if (new_file >= 0) {
                     fs_nodes[new_file].ext2_inode = entry->inode;
                     ext2_inode_t finode;
-                    ext2_read_inode(entry->inode, &finode);
-                    fs_nodes[new_file].size = finode.i_size;
+                    // Ignoring the return left finode uninitialized on failure,
+                    // storing garbage i_size into the VFS node.
+                    if (ext2_read_inode(entry->inode, &finode) == 0)
+                        fs_nodes[new_file].size = finode.i_size;
                 }
             }
         }
@@ -264,8 +279,13 @@ int ext2_read_file_data(uint32_t inode_num, char* buf, int max_size) {
 extern void write_serial_string(const char*);
 
 static void ext2_write_block(uint32_t block, unsigned char* buf) {
+    // Same bounds as ext2_read_block: never write past the filesystem's block
+    // count or the 4096-sector drive.
+    if (block >= sb.s_blocks_count) return;
     uint32_t sectors_per_block = block_size / 512;
     uint32_t start_sector = block * sectors_per_block;
+    if (start_sector >= 4096) return;
+    if (start_sector + sectors_per_block > 4096) sectors_per_block = 4096 - start_sector;
     for (uint32_t i = 0; i < sectors_per_block; i++) {
         ata_write_sector_drive(ext2_drive, start_sector + i, buf + (i * 512));
     }
@@ -834,7 +854,10 @@ static int ext2_unlink_entry(uint32_t parent_inode, const char* name, uint32_t* 
             ext2_dir_entry_t* e = (ext2_dir_entry_t*)(buf + off);
             uint32_t rec = e->rec_len;
             if (rec == 0 || rec > block_size - off) rec = block_size - off;
-            if (e->inode != 0 && e->name_len == name_len &&
+            // e->name is only rec - 8 bytes long on the block; a forged name_len
+            // could otherwise make the memcmp read past the block buffer.
+            uint32_t avail_name = rec - 8;
+            if (e->inode != 0 && e->name_len == name_len && name_len <= avail_name &&
                 memcmp(e->name, name, name_len) == 0) {
                 found_block = b;
                 found_off = off;

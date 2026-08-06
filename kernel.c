@@ -238,8 +238,15 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     uint32_t last_frame_tick = 0;
 
     while (1) {
-        int mx  = mouse_x, my = mouse_y;
-        int btn = (int)(uint32_t)mouse_btn;
+        // Snapshot mouse state with interrupts off: x/y/btn are written by
+        // IRQ12 and reading them separately can tear (x from one update, y
+        // from the next), producing a wrong hit-test for a frame.
+        int mx, my, btn;
+        __asm__ volatile("cli");
+        mx  = mouse_x;
+        my  = mouse_y;
+        btn = (int)(uint32_t)mouse_btn;
+        __asm__ volatile("sti");
 
         if (mx != prev_mx || my != prev_my || btn != prev_btn) {
             extern int cursor_draw_x, cursor_draw_y;

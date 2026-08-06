@@ -36,11 +36,19 @@ static int next_id = 1;
 // loop (task 0) context: close paths (wm_close kernel branch, wm_cleanup_task)
 // can run from other preemptable tasks while draw_one() is mid-render on the
 // very buffer, so they NULL the field and park the pointer here.
-static void* wm_free_list[16];
+// 64 slots: a full list means >64 kernel windows closed within one frame,
+// which never happens in practice; anything beyond that is logged and leaked
+// rather than freed from the wrong context.
+static void* wm_free_list[64];
 static int wm_free_count = 0;
 
 void wm_defer_free(void* p) {
-    if (p && wm_free_count < 16) wm_free_list[wm_free_count++] = p;
+    if (!p) return;
+    if (wm_free_count >= 64) {
+        write_serial_string("[WM] wm_free_list full, leaking a window buffer\n");
+        return;
+    }
+    wm_free_list[wm_free_count++] = p;
 }
 
 void wm_flush_frees(void) {
@@ -268,6 +276,14 @@ int wm_open(int x, int y, int w, int h, const char* title,
     // heap overflow and a multi-hundred-MB OOB read. Cap to 4x the framebuffer.
     if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return -1;
     if (w > (int)fb_width * 4 || h > (int)fb_height * 4) return -1;
+    // Clamp absurd positions. A fully off-screen window is unreachable by
+    // mouse (and an x+w overflow makes the hit test wrap negative), so a Ring
+    // 3 app could plant a window that can never be closed — a zombie-window
+    // DoS. x is clamped BEFORE the x+w test so that expression cannot
+    // overflow: x <= fb_width (1024) and w <= 8192 keep it far below 2^31.
+    // Partially off-screen windows are allowed.
+    if (x > (int)fb_width || x + w < 0) x = 0;
+    if (y > (int)fb_height || y + h < 0) y = 0;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!wm_wins[i].visible) {
             wm_wins[i].id        = next_id++;
@@ -714,6 +730,14 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
                     if (new_y + new_h > (int)fb_height) new_h = (int)fb_height - new_y;
                     if (new_w < 220) new_w = 220;
                     if (new_h < 150) new_h = 150;
+                    // Re-clamp the position AFTER forcing the minimum size: the
+                    // screen clamp above can shrink the window below 220x150,
+                    // then the minimum push re-extends it past the screen edge
+                    // with the titlebar buttons off-screen (uncloseable).
+                    if (new_x + new_w > (int)fb_width) new_x = (int)fb_width - new_w;
+                    if (new_y + new_h > (int)fb_height) new_y = (int)fb_height - new_h;
+                    if (new_x < 0) new_x = 0;
+                    if (new_y < 0) new_y = 0;
 
                     wm_wins[i].x = new_x;
                     wm_wins[i].y = new_y;

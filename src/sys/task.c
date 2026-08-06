@@ -140,8 +140,13 @@ static void task_cleanup(int tid) {
     // 1. Clean up windows owned by this task
     extern void wm_cleanup_task(int tid);
     wm_cleanup_task(tid);
+
+    // 2. Release all fds this task holds (global fd slots + pipes). Without
+    //    this, exit/kill leaked slots and left pipe readers blocked forever.
+    extern void task_close_all_fds(int tid);
+    task_close_all_fds(tid);
     
-    // 2. Free address space (if it's not the kernel's) — but only when this is
+    // 3. Free address space (if it's not the kernel's) — but only when this is
     //    the LAST task still using it. Sibling threads of one process share the
     //    same page_dir; freeing it when one of them exits would yank the memory
     //    out from under the others.
@@ -374,11 +379,13 @@ void task_sleep(int ticks) {
     tasks[current_task[cid]].state = TASK_STATE_SLEEP;
     __asm__ volatile("sti");
     
-    // Yield — wait for scheduler to skip us until wake
-    __asm__ volatile("sti");
-    for (int i = 0; i < 100000; i++) {
-        __asm__ volatile("pause");
-        if (tasks[current_task[cid]].state != TASK_STATE_SLEEP) break;
+    // Park the task. The timer IRQ runs schedule(), which skips SLEEP tasks
+    // (decrementing sleep_ticks) until they flip back to READY; the task then
+    // resumes here and exits the loop. The old 100k-pause busy-wait was both a
+    // CPU burn and imprecise: it could return while still marked SLEEP, after
+    // which the scheduler froze the task at an arbitrary instruction.
+    while (tasks[current_task[cid]].state == TASK_STATE_SLEEP) {
+        __asm__ volatile("hlt");
     }
 }
 

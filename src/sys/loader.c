@@ -64,7 +64,13 @@ static int load_mct_from_buffer(const char* filename, const char* arg,
     write_serial_string("[LOADER] mapping pages...\n");
     for (uint32_t i = 0; i < num_pages; i++) {
         uint32_t addr = 0x08000000 + (i * 4096);
-        vmm_alloc_page_at(page_dir, addr, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+        // A failed mapping (OOM) would make the memcpy below fault at CPL 0
+        // and panic the kernel — abort the load cleanly instead.
+        if (!vmm_alloc_page_at(page_dir, addr, PAGE_PRESENT | PAGE_RW | PAGE_USER)) {
+            write_serial_string("[LOADER] MCT out of memory mapping image\n");
+            vmm_free_address_space(page_dir);
+            return -6;
+        }
     }
 
     // CRITICAL SECTION: Temporarily switch to the new address space to copy data.
@@ -191,7 +197,11 @@ static int load_elf_from_buffer(const char* filename, const char* arg,
         uint32_t start = ph->p_vaddr & ~0xFFFu;
         uint32_t end   = (ph->p_vaddr + ph->p_memsz + 0xFFF) & ~0xFFFu;
         for (uint32_t a = start; a < end; a += 4096) {
-            vmm_alloc_page_at(page_dir, a, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+            if (!vmm_alloc_page_at(page_dir, a, PAGE_PRESENT | PAGE_RW | PAGE_USER)) {
+                write_serial_string("[LOADER] ELF out of memory mapping segments\n");
+                vmm_free_address_space(page_dir);
+                return -26;
+            }
         }
     }
 
@@ -204,8 +214,11 @@ static int load_elf_from_buffer(const char* filename, const char* arg,
     for (int i = 0; i < eh->e_phnum; i++) {
         elf32_phdr_t* ph = (elf32_phdr_t*)(buf + eh->e_phoff + i * eh->e_phentsize);
         if (ph->p_type != PT_LOAD) continue;
-        // Guard: segment must lie fully inside the file we read
-        if (ph->p_offset + ph->p_filesz > (uint32_t)sz) {
+        // Guard: segment must lie fully inside the file we read.
+        // 64-bit math: a crafted p_offset (e.g. 0xFFFFFF00) plus p_filesz can
+        // wrap 32 bits and slip past the check, then buf + p_offset in the
+        // memcpy below points into unmapped memory and panics the kernel.
+        if ((uint64_t)ph->p_offset + ph->p_filesz > (uint64_t)sz) {
             write_serial_string("[LOADER] ELF segment out of file bounds\n");
             vmm_switch_page_dir(old_cr3);
             __asm__ volatile("sti");
