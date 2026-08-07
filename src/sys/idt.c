@@ -63,7 +63,10 @@ void idt_init() {
         outb(0x21, 0x01); outb(0xA1, 0x01);
         // Unmask: IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade), IRQ5 (SB16),
         // IRQ11 (RTL8139 NIC), IRQ12 (mouse)
-        outb(0x21, 0xE8);          // master: IRQ0,1,3,5,7
+        // 0xD8 = 1101_1000: unmask bits 0,1,2,5 (IRQ0 timer, IRQ1 kb, IRQ2
+        // cascade, IRQ5 SB16); mask the rest. (0xE8 previously masked IRQ5
+        // and the cascade, silently killing SB16 + mouse on legacy-PIC boots.)
+        outb(0x21, 0xD8);
         outb(0xA1, 0xEF ^ (1 << 3)); // slave: unmask IRQ11 (bit 3 = 0)
     }
 

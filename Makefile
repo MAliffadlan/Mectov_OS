@@ -13,6 +13,7 @@ DOOM_CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 \
               -isystem doom/include_override -Idoom \
               -fno-builtin \
               -DDOOMGENERIC_RESX=1024 -DDOOMGENERIC_RESY=768 \
+              -DFEATURE_SOUND \
               -w
 
 SRC_DIR = src
