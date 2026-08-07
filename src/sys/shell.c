@@ -1276,10 +1276,18 @@ static void run_cmd_internal() {
     // --- FLAPPY ---
     else if (strcmp(cmd_b, "flappy") == 0) load_mct_app("/apps/flappy.mct");
     // --- DOOM ---
-    else if (strcmp(cmd_b, "doom") == 0) {
+    else if (strcmp(cmd_b, "doom") == 0 || strncmp(cmd_b, "doom ", 5) == 0) {
+        // `doom -nosound` runs DOOM with the SB16 module disabled — an
+        // escape hatch if the audio path (or the host audio backend it
+        // drives) is what freezes the display.
+        extern int doom_mute_sound;
+        doom_mute_sound = (strstr_custom(cmd_b, "-nosound") >= 0) ? 1 : 0;
+        if (doom_mute_sound) write_serial_string("[DOOM] sound disabled via -nosound\n");
         print("Starting DOOM...\n", 0x0C);
         extern void doom_start(void);
         doom_start();
+        // Reset so the next launch starts with sound on by default
+        doom_mute_sound = 0;
     }
     // --- TASKMGR ---
     else if (strcmp(cmd_b, "taskmgr") == 0) load_mct_app("/apps/taskmgr.mct");

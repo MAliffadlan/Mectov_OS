@@ -5,6 +5,9 @@
 #include "doomgeneric.h"
 #include "doomkeys.h"
 
+/* Kernel font table (linked in from src/drivers/font8x16.c) */
+#include "../src/include/font8x16.h"
+
 /* Kernel API */
 extern uint32_t* fb_addr;
 extern uint32_t* back_buffer;
@@ -16,6 +19,7 @@ extern uint32_t  bb_pitch;
 extern volatile uint32_t timer_ticks;  // 1000 Hz tick counter
 extern uint8_t   k_get_scancode(void);
 extern void      write_serial_string(const char *s);
+extern void      write_serial_hex(uint32_t);
 
 /* DOOM renders at 320x200 internally (or DOOMGENERIC_RESX x DOOMGENERIC_RESY) */
 /* We need to scale it up to fit our framebuffer */
@@ -152,12 +156,98 @@ void DG_Init(void) {
     write_serial_string("[DOOM] DG_Init: Mectov OS platform initialized\n");
 }
 
+/* ===== Doom heartbeat overlay =====
+ * Frame counter + uptime drawn directly to the front framebuffer after each
+ * blit. Lets the user distinguish a frozen QEMU window (display/audio main
+ * loop stalled while the guest keeps running) from a dead OS: if the counter
+ * advances, the game loop is alive; if it is static while the serial log
+ * still grows, the window is stale.
+ */
+static uint32_t doom_frame_counter = 0;
+
+static uint32_t pow10(int e) {
+    uint32_t r = 1;
+    for (int i = 0; i < e; i++) r *= 10;
+    return r;
+}
+
+static void doom_draw_heartbeat(void) {
+    if (!fb_addr) return;
+
+    uint32_t uptime = timer_ticks / 1000;
+    uint32_t fc = doom_frame_counter;
+
+    /* Build "Fdddddd Uddddd" (frame, 6 digits; uptime, 5 digits ~27h) */
+    char buf[16];
+    int n = 0;
+    buf[n++] = 'F';
+    for (int d = 5; d >= 0; d--) { buf[n++] = (char)('0' + (fc / pow10(d)) % 10); }
+    buf[n++] = ' ';
+    buf[n++] = 'U';
+    for (int d = 4; d >= 0; d--) { buf[n++] = (char)('0' + (uptime / pow10(d)) % 10); }
+
+    int chars = n;
+    int bw = chars * 8 + 8;  /* box width  */
+    int bx = (int)fb_width - bw - 6;
+    int by = 4;
+    /* Raw write with no clipping — refuse tiny framebuffers to keep bx >= 0 */
+    if (bx < 0 || (int)fb_height < 24) return;
+    uint32_t stride = fb_pitch / 4;
+    uint32_t *fb = fb_addr;
+
+    /* Dark box + hairline border */
+    for (int y = 0; y < 20; y++) {
+        for (int x = 0; x < bw; x++) {
+            uint32_t col = (y < 1 || y >= 19 || x < 1 || x >= bw - 1) ? 0x00333333 : 0x00000000;
+            fb[(by + y) * stride + (bx + x)] = col;
+        }
+    }
+
+    /* Green digits */
+    for (int i = 0; i < chars; i++) {
+        unsigned char c = (unsigned char)buf[i];
+        int gx = bx + 4 + i * 8;
+        for (int j = 0; j < 16; j++) {
+            unsigned char row = font8x16_data[c][j];
+            for (int k = 0; k < 8; k++) {
+                if (row & (0x80 >> k))
+                    fb[(by + 2 + j) * stride + (gx + k)] = 0x0000FF00;
+            }
+        }
+    }
+
+    /* Blinking status dot (toggles every 8 frames) */
+    int on = (fc / 8) & 1;
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++) {
+            uint32_t col = on ? 0x00FF4400 : 0x00443300;
+            fb[(by + 8 + y) * stride + (bx + bw - 6 + x)] = col;
+        }
+}
+
 /* ===== DG_DrawFrame ===== */
+/* Serial heartbeat: emits one line every DOOM_TICK_EVERY frames so the
+ * serial log can tell a frozen game loop apart from a frozen QEMU window.
+ * If [DOOM] tick lines stop while kernel [LOAD] lines continue, the doom
+ * task is stuck; if they keep going while the screen looks frozen, it is
+ * the QEMU display/audio side. */
+#define DOOM_TICK_EVERY 600   /* ~17 s at 35 fps */
+static uint32_t doom_tick_serial_counter = 0;
+
 void DG_DrawFrame(void) {
     if (!DG_ScreenBuffer || !fb_addr) return;
     
     /* Poll keyboard every frame */
     doom_poll_keyboard();
+
+    if (++doom_tick_serial_counter >= DOOM_TICK_EVERY) {
+        doom_tick_serial_counter = 0;
+        write_serial_string("[DOOM] tick f=");
+        write_serial_hex(doom_frame_counter);
+        write_serial_string(" t=");
+        write_serial_hex(timer_ticks / 1000);
+        write_serial_string("\n");
+    }
     
     /* FULLSCREEN NATIVE 1:1 BLIT (1024x768) */
     uint32_t src_w = DOOMGENERIC_RESX;
@@ -173,6 +263,10 @@ void DG_DrawFrame(void) {
         /* Fast blit via memcpy */
         memcpy(dst_row, src_row, src_w * 4);
     }
+
+    /* Heartbeat overlay on top of the frame */
+    doom_frame_counter++;
+    doom_draw_heartbeat();
 }
 
 /* ===== DG_SleepMs ===== */
@@ -211,7 +305,19 @@ void DG_SetWindowTitle(const char *title) {
 }
 
 /* ===== Entry point called from shell/desktop ===== */
+/* Set by the shell when the user types `doom -nosound`: skips the SB16
+ * module entirely, so doom runs silently — an escape hatch if the audio
+ * path (or the host audio backend it drives) is what freezes the box. */
+int doom_mute_sound = 0;
+
 void doom_start(void) {
+    /* The shell sets doom_mute_sound right before calling us. Snapshot it
+     * into a local, then self-clear so the flag can never leak into the next
+     * launch if doom_start is reached through any other path (the resume path
+     * skips doomgeneric_Create, so a stale flag would be silently ignored
+     * there anyway — and wrongly applied if it ever ran Create). */
+    int mute = doom_mute_sound;
+    doom_mute_sound = 0;
     write_serial_string("[DOOM] Starting DOOM on Mectov OS...\n");
     
     /* Hide desktop cursor during DOOM */
@@ -222,9 +328,12 @@ void doom_start(void) {
      * advance and keyboard won't work. */
     __asm__ volatile("sti");
     
-    /* Fake argc/argv for DOOM — point to WAD file */
-    char *argv[] = { "doom", "-iwad", "doom1.wad", NULL };
+    /* Fake argc/argv for DOOM — point to WAD file. 5 slots so the
+     * optional -nosound arg + terminator never write past the array. */
+    char *argv[5] = { "doom", "-iwad", "doom1.wad", NULL, NULL };
     int argc = 3;
+    if (mute) argv[argc++] = "-nosound";
+    argv[argc] = NULL;
     
     /* Initialize DOOM only once to prevent crashes on relaunch */
     if (!doom_initialized) {
