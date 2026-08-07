@@ -46,6 +46,23 @@ GATEWAY_PID=$!
 # Bersihkan log serial lama
 rm -f serial_debug.log log.txt
 
+# --- Audio backend: pilih yang paling stabil ---
+# `pa` (PulseAudio-over-PipeWire) bisa nyangkut di host tertentu dan bikin
+# main loop QEMU ke-block -> window beku padahal guest (KVM) tetap hidup
+# (gejala "freeze Doom" sejak sound aktif). Prioritas: pipewire native
+# (paling baru, robust), lalu pa, lalu none (bisu tapi tidak bisa macet).
+# Override manual:  MECTOV_AUDIO=none|pa|pipewire|alsa ./run.sh
+AUDIO_DRIVER="${MECTOV_AUDIO:-}"
+if [ -z "$AUDIO_DRIVER" ]; then
+    if qemu-system-i386 -audiodev help 2>&1 | grep -q '^pipewire$'; then
+        AUDIO_DRIVER=pipewire
+    else
+        AUDIO_DRIVER=pa
+    fi
+fi
+AUDIO_ARGS="-audiodev id=snd0,driver=$AUDIO_DRIVER -device sb16,audiodev=snd0"
+echo "[*] Audio backend: $AUDIO_DRIVER (override: MECTOV_AUDIO=...)"
+
 echo "[*] Menjalankan Mectov OS di QEMU (VBE GRUB Mode)..."
 echo "[*] Serial debug output -> serial_debug.log"
 qemu-system-i386 -enable-kvm -cpu host \
@@ -53,9 +70,7 @@ qemu-system-i386 -enable-kvm -cpu host \
     -cdrom mectov.iso \
     -m 128 \
     -smp 4 \
-    -audiodev pa,id=snd0 \
-    -device sb16,audiodev=snd0 \
-    -machine pcspk-audiodev=snd0 \
+    $AUDIO_ARGS \
     -net nic,model=rtl8139 -net user \
     -chardev socket,id=char0,host=127.0.0.1,port=45454,server=on,wait=off,logfile=serial_debug.log -serial chardev:char0 \
     -drive file=disk.img,format=raw,index=0,media=disk \
