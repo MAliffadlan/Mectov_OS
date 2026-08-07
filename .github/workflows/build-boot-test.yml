@@ -21,6 +21,7 @@ jobs:
             nasm \
             grub-pc-bin \
             xorriso \
+            mtools \
             qemu-system-x86 \
             python3-pil \
             e2fsprogs

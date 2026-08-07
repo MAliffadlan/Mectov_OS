@@ -356,7 +356,7 @@ All syscalls are invoked via `int 0x80` (trap gate). Registers: `EAX` = number, 
 ## Build and Run
 
 ### Requirements
-`gcc (-m32)` · `nasm` · `make` · `qemu-system-i386` · `python3` + `Pillow` · `grub-mkrescue` · `mkfs.ext2` (for the ext2 drive)
+`gcc (-m32)` · `nasm` · `make` · `qemu-system-i386` · `python3` + `Pillow` · `grub-mkrescue` + `mtools` · `mkfs.ext2` (for the ext2 drive)
 
 ### Commands
 ```bash
