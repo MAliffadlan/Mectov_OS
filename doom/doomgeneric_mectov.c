@@ -305,19 +305,22 @@ void DG_SetWindowTitle(const char *title) {
 }
 
 /* ===== Entry point called from shell/desktop ===== */
-/* Set by the shell when the user types `doom -nosound`: skips the SB16
- * module entirely, so doom runs silently — an escape hatch if the audio
- * path (or the host audio backend it drives) is what freezes the box. */
-int doom_mute_sound = 0;
+/* Default 0 = DOOM runs silent. The shell sets this to 1 when the user
+ * types `doom -sound`. SB16 DMA + IRQ activity while DOOM streams audio is
+ * what froze the display on some hosts (guest stays alive, QEMU window
+ * stalls), so sound is opt-in; without it the SB16 module is never even
+ * registered, which also removes the harmless 'd_ not found' music spam.
+ */
+int doom_sound_enabled = 0;
 
 void doom_start(void) {
-    /* The shell sets doom_mute_sound right before calling us. Snapshot it
+    /* The shell sets doom_sound_enabled right before calling us. Snapshot it
      * into a local, then self-clear so the flag can never leak into the next
      * launch if doom_start is reached through any other path (the resume path
      * skips doomgeneric_Create, so a stale flag would be silently ignored
      * there anyway — and wrongly applied if it ever ran Create). */
-    int mute = doom_mute_sound;
-    doom_mute_sound = 0;
+    int snd = doom_sound_enabled;
+    doom_sound_enabled = 0;
     write_serial_string("[DOOM] Starting DOOM on Mectov OS...\n");
     
     /* Hide desktop cursor during DOOM */
@@ -332,7 +335,7 @@ void doom_start(void) {
      * optional -nosound arg + terminator never write past the array. */
     char *argv[5] = { "doom", "-iwad", "doom1.wad", NULL, NULL };
     int argc = 3;
-    if (mute) argv[argc++] = "-nosound";
+    if (!snd) argv[argc++] = "-nosound";   /* silent by default */
     argv[argc] = NULL;
     
     /* Initialize DOOM only once to prevent crashes on relaunch */

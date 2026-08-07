@@ -228,94 +228,18 @@ void exit(int status) {
 
 /* ===== printf family ===== */
 
-// Minimal vsnprintf
+// Forward declaration for the real implementation below.
+static int doom_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
+
+// Public vsnprintf — routes to the real implementation below. The old
+// inline attempt here was broken: it had no %s case at all and consumed
+// the va_arg twice for %d, which mangled "d_%s" into "d_" and could
+// corrupt any caller of M_snprintf/M_vsnprintf (music lump lookups, I_Error).
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
-    size_t pos = 0;
-    if (size == 0) return 0;
-    
-    #define PUT(ch) do { if (pos < size - 1) buf[pos] = (ch); pos++; } while(0)
-    
-    while (*fmt) {
-        if (*fmt != '%') { PUT(*fmt); fmt++; continue; }
-        fmt++; // skip '%'
-        
-        // Flags
-        int left_align = 0, zero_pad = 0, has_plus = 0;
-        while (*fmt == '-' || *fmt == '0' || *fmt == '+' || *fmt == ' ') {
-            if (*fmt == '-') left_align = 1;
-            if (*fmt == '0') zero_pad = 1;
-            if (*fmt == '+') has_plus = 1;
-            fmt++;
-        }
-        (void)left_align; (void)has_plus;
-        
-        // Width
-        int width = 0;
-        if (*fmt == '*') { width = va_arg(ap, int); fmt++; }
-        else { while (isdigit(*fmt)) { width = width * 10 + (*fmt - '0'); fmt++; } }
-        
-        // Precision
-        int precision = -1;
-        if (*fmt == '.') {
-            fmt++;
-            precision = 0;
-            if (*fmt == '*') { precision = va_arg(ap, int); fmt++; }
-            else { while (isdigit(*fmt)) { precision = precision * 10 + (*fmt - '0'); fmt++; } }
-        }
-        
-        // Length modifier
-        int is_long = 0, is_longlong = 0;
-        if (*fmt == 'l') { is_long = 1; fmt++; if (*fmt == 'l') { is_longlong = 1; fmt++; } }
-        else if (*fmt == 'h') { fmt++; if (*fmt == 'h') fmt++; }
-        else if (*fmt == 'z') { is_long = 1; fmt++; }
-        (void)is_longlong;
-        
-        char tmp[32];
-        int tlen = 0;
-        
-        switch (*fmt) {
-        case 'd': case 'i': {
-            int val = is_long ? (int)va_arg(ap, long) : va_arg(ap, int);
-            int neg = 0;
-            unsigned int uval;
-            if (val < 0) { neg = 1; uval = (unsigned int)(-val); }
-            else uval = (unsigned int)val;
-            if (uval == 0) tmp[tlen++] = '0';
-            else { while (uval) { tmp[tlen++] = '0' + (uval % 10); uval /= 10; } }
-            if (neg) tmp[tlen++] = '-';
-            int pad = width - tlen;
-            char padch = zero_pad ? '0' : ' ';
-            if (neg && zero_pad) { PUT('-'); tlen--; }
-            while (pad-- > 0) PUT(padch);
-            if (neg && !zero_pad) PUT('-');  // already added if zero_pad
-            // Actually fix: just print reversed
-            // Let me redo this more carefully
-            break;
-        }
-        default: break;
-        }
-        
-        // Simplified approach: just handle each format
-        // Reset and use a simpler method
-        if (*fmt == 'd' || *fmt == 'i') {
-            int val = is_long ? (int)va_arg(ap, long) : va_arg(ap, int);
-            // Undo the va_arg above — actually we already consumed it
-            // This is getting complicated. Let me use a different approach.
-        }
-        
-        fmt++;
-    }
-    
-    if (pos < size) buf[pos] = '\0';
-    else buf[size-1] = '\0';
-    
-    #undef PUT
-    return (int)pos;
+    return doom_vsnprintf(buf, size, fmt, ap);
 }
 
-// Actually, let me rewrite vsnprintf properly:
-// The above attempt was getting messy. Here's a clean implementation.
-
+// Real vsnprintf implementation.
 static int doom_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
     size_t pos = 0;
     if (size == 0) return 0;

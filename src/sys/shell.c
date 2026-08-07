@@ -1277,17 +1277,19 @@ static void run_cmd_internal() {
     else if (strcmp(cmd_b, "flappy") == 0) load_mct_app("/apps/flappy.mct");
     // --- DOOM ---
     else if (strcmp(cmd_b, "doom") == 0 || strncmp(cmd_b, "doom ", 5) == 0) {
-        // `doom -nosound` runs DOOM with the SB16 module disabled — an
-        // escape hatch if the audio path (or the host audio backend it
-        // drives) is what freezes the display.
-        extern int doom_mute_sound;
-        doom_mute_sound = (strstr_custom(cmd_b, "-nosound") >= 0) ? 1 : 0;
-        if (doom_mute_sound) write_serial_string("[DOOM] sound disabled via -nosound\n");
+        // DOOM is SILENT by default: SB16 DMA/IRQ activity while DOOM streams
+        // audio froze the display on some hosts (guest stays alive, QEMU
+        // window stalls). `doom -sound` opts back in to the SB16 module.
+        extern int doom_sound_enabled;
+        /* '-sound' enables sound, but '-nosound' (substring of '-sound')
+         * must keep it off — the old escape hatch stays honored. */
+        doom_sound_enabled = (strstr_custom(cmd_b, "-sound") >= 0
+                              && strstr_custom(cmd_b, "-nosound") < 0) ? 1 : 0;
+        if (!doom_sound_enabled) write_serial_string("[DOOM] sound off (use 'doom -sound' to enable)\n");
         print("Starting DOOM...\n", 0x0C);
         extern void doom_start(void);
         doom_start();
-        // Reset so the next launch starts with sound on by default
-        doom_mute_sound = 0;
+        // Self-cleared inside doom_start(); nothing to reset here.
     }
     // --- TASKMGR ---
     else if (strcmp(cmd_b, "taskmgr") == 0) load_mct_app("/apps/taskmgr.mct");
