@@ -219,6 +219,68 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_SIGACTION (86): set handler + mask + flags (POSIX) -----
+        // EBX=sig, ECX=&user_sigaction_t (in, optional), EDX=&user_sigaction_t (old, optional)
+        case SYS_SIGACTION: {
+            typedef struct { uint32_t handler; uint32_t mask; uint32_t flags; } user_sigaction_t;
+            int sig = (int)regs->ebx;
+            user_sigaction_t* act = (user_sigaction_t*)regs->ecx;
+            user_sigaction_t* old = (user_sigaction_t*)regs->edx;
+            if (sig <= 0 || sig >= SIG_MAX || sig == SIGKILL) {
+                regs->eax = (uint32_t)-1;   // SIGKILL cannot be caught or ignored
+                break;
+            }
+            if (old && !validate_user_ptr(old, sizeof(user_sigaction_t))) { regs->eax = (uint32_t)-1; break; }
+            if (act && !validate_user_ptr(act, sizeof(user_sigaction_t))) { regs->eax = (uint32_t)-1; break; }
+
+            int tid = get_current_task();
+            void* oh; uint32_t om, of;
+            task_get_sigaction(tid, sig, &oh, &om, &of);
+            if (old) {
+                old->handler = (uint32_t)(uintptr_t)oh;
+                old->mask = om;
+                old->flags = of;
+            }
+            if (act) {
+                uint32_t handler = act->handler;
+                // handler must be 0 (default), 1 (SIG_IGN), or user-space code
+                if (handler != 0 && handler != 1 &&
+                    !(handler >= 0x08000000 && handler < USER_STACK_BOTTOM)) {
+                    regs->eax = (uint32_t)-1;
+                    break;
+                }
+                void* h = (handler == 1) ? SIG_IGN_SENTINEL : (void*)(uintptr_t)handler;
+                task_set_sigaction(tid, sig, h, act->mask, act->flags & (SA_RESTART | SA_NODEFER));
+            }
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_SIGPROCMASK (87): block/unblock/set the signal mask -----
+        // EBX=how (0=SIG_BLOCK,1=SIG_UNBLOCK,2=SIG_SETMASK), ECX=&newset (optional),
+        // EDX=&oldset (optional). SIGKILL/SIGSTOP/SIGCONT bits are ignored.
+        case SYS_SIGPROCMASK: {
+            int how = (int)regs->ebx;
+            uint32_t* newset = (uint32_t*)regs->ecx;
+            uint32_t* oldset = (uint32_t*)regs->edx;
+            if (newset && !validate_user_ptr(newset, 4)) { regs->eax = (uint32_t)-1; break; }
+            if (oldset && !validate_user_ptr(oldset, 4)) { regs->eax = (uint32_t)-1; break; }
+
+            int tid = get_current_task();
+            uint32_t cur = task_get_blocked(tid);
+            if (oldset) *oldset = cur;
+            if (newset) {
+                uint32_t m = *newset;
+                m &= ~((1u << SIGKILL) | (1u << SIGSTOP) | (1u << SIGCONT)); // never blockable
+                if (how == SIG_BLOCK)      cur |= m;
+                else if (how == SIG_UNBLOCK) cur &= ~m;
+                else /* SIG_SETMASK */    cur = m;
+                task_set_blocked(tid, cur);
+            }
+            regs->eax = 0;
+            break;
+        }
+
         // ----- SYS_SIGRETURN (75): restore context after a handler -----
         case SYS_SIGRETURN: {
             int tid = get_current_task();
@@ -229,6 +291,13 @@ uint32_t handle_syscall_proc(registers_t* regs) {
                 break;
             }
             sigframe_t* f = (sigframe_t*)esp;
+            // Restore the pre-handler signal mask first: SA_RESTART re-parks
+            // the task in SYS_SLEEP below, and that sleep must run under the
+            // original mask (e.g. SIGKILL-able, signals delivered normally).
+            extern uint32_t task_get_blocked(int);
+            extern void task_set_blocked(int, uint32_t);
+            task_set_blocked(tid, f->saved_blocked);
+
             regs->eax  = f->saved_eax;
             regs->ecx  = f->saved_ecx;
             regs->edx  = f->saved_edx;
@@ -242,6 +311,18 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             regs->useresp = f->saved_esp;
             regs->ss   = f->saved_ss;
             task_set_sig_frame_esp(tid, 0);
+
+            // SA_RESTART semantics: re-enter the interrupted SYS_SLEEP with
+            // the remaining ticks before returning to user mode, so the total
+            // sleep duration is preserved across the handler.
+            if (f->restart && f->restart_arg > 0) {
+                extern void task_sleep(int);
+                write_serial_string("[SIG] SA_RESTART re-entering SYS_SLEEP ticks=");
+                write_serial_hex(f->restart_arg);
+                write_serial_string("\n");
+                task_sleep((int)f->restart_arg);
+                regs->eax = 0;   // SYS_SLEEP completes normally
+            }
             break;
         }
 

@@ -124,6 +124,8 @@ typedef struct {
 // TCP connection management (multi-connection)
 #define SYS_TCP_CLOSE      70  // EBX=conn_id -> returns 0/-1
 #define SYS_TCP_LISTEN     85  // EBX=port -> conn_id or -1
+#define SYS_SIGACTION      86  // EBX=sig, ECX=&sigaction(in,opt), EDX=&sigaction(old,opt) -> 0/-1
+#define SYS_SIGPROCMASK    87  // EBX=how(0/1/2), ECX=&set(in,opt), EDX=&oldset(opt) -> 0/-1
 
 // Process model & signals
 #define SYS_FORK        71  // -> child tid (parent) / 0 (child) / -1
@@ -525,6 +527,25 @@ static inline int sys_kill(int pid, int sig) {
 
 static inline void* sys_signal(int sig, void* handler) {
     return (void*)syscall(SYS_SIGNAL, sig, (int)handler, 0);
+}
+
+// sigaction (POSIX subset): handler (0=default,1=SIG_IGN,else fn), sa_mask
+// (signals auto-blocked while the handler runs), sa_flags (SA_RESTART=1,
+// SA_NODEFER=2).
+typedef struct {
+    uint32_t handler;
+    uint32_t mask;
+    uint32_t flags;
+} sigaction_t;
+
+static inline int sys_sigaction(int sig, sigaction_t* act, sigaction_t* old) {
+    return syscall(SYS_SIGACTION, sig, (int)act, (int)old);
+}
+
+// sigprocmask: how is SIG_BLOCK(0)/SIG_UNBLOCK(1)/SIG_SETMASK(2); newset and
+// oldset are optional (NULL to skip). Returns 0/-1.
+static inline int sys_sigprocmask(int how, uint32_t* newset, uint32_t* oldset) {
+    return syscall(SYS_SIGPROCMASK, how, (int)newset, (int)oldset);
 }
 
 static inline int sys_sigreturn(void) {

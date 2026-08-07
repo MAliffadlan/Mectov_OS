@@ -276,6 +276,9 @@ void vfs_init() {
         extern uint8_t _binary_tcpserver_mct_start[];
         extern uint8_t _binary_tcpserver_mct_end[];
         changed += vfs_update_file_if_needed("apps/tcpserver.mct", (const char*)_binary_tcpserver_mct_start, _binary_tcpserver_mct_end - _binary_tcpserver_mct_start);
+        extern uint8_t _binary_sigdemo_mct_start[];
+        extern uint8_t _binary_sigdemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/sigdemo.mct", (const char*)_binary_sigdemo_mct_start, _binary_sigdemo_mct_end - _binary_sigdemo_mct_start);
 
         // Pipeline demo apps
         extern uint8_t _binary_pipegen_mct_start[];
@@ -396,6 +399,10 @@ void vfs_init() {
     extern uint8_t _binary_tcpserver_mct_end[];
     vfs_create_file("apps/tcpserver.mct");
     vfs_write_file("apps/tcpserver.mct", (const char*)_binary_tcpserver_mct_start, _binary_tcpserver_mct_end - _binary_tcpserver_mct_start);
+    extern uint8_t _binary_sigdemo_mct_start[];
+    extern uint8_t _binary_sigdemo_mct_end[];
+    vfs_create_file("apps/sigdemo.mct");
+    vfs_write_file("apps/sigdemo.mct", (const char*)_binary_sigdemo_mct_start, _binary_sigdemo_mct_end - _binary_sigdemo_mct_start);
 
     // Pipeline demo apps
     extern uint8_t _binary_pipegen_mct_start[];

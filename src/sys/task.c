@@ -51,6 +51,10 @@ typedef struct {
     int      waiting;      // while blocked in waitpid: target pid (>0) or -1 (any)
     uint32_t pending_signals;   // bitmap of pending signals (bit sig)
     void*    signal_handlers[SIG_MAX]; // NULL=default, SIG_IGN_SENTINEL=ignore, else user fn
+    uint32_t sig_masks[SIG_MAX];    // sa_mask: extra signals blocked while handler runs
+    uint32_t sig_flags[SIG_MAX];    // per-signal sigaction flags (SA_RESTART, SA_NODEFER)
+    uint32_t blocked_signals;   // bitmap of signals held pending (sigprocmask)
+    uint32_t sig_restart_ticks; // remaining sleep ticks when a SA_RESTART handler interrupted SYS_SLEEP
     uint32_t sig_frame_esp;     // user-stack address of the sigframe awaiting SYS_SIGRETURN
     uint32_t zombie_since;      // tick when the task became a zombie (reap timeout)
     uint32_t shm_bits;          // bitmap of shm segments this task has attached
@@ -79,9 +83,10 @@ void init_tasking() {
         tasks[i].exit_code = 0;
         tasks[i].waiting = 0;
         tasks[i].pending_signals = 0;
+        tasks[i].blocked_signals = 0;
         tasks[i].sig_frame_esp = 0;
         tasks[i].zombie_since = 0;
-        for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
+        for (int j = 0; j < SIG_MAX; j++) { tasks[i].signal_handlers[j] = NULL; tasks[i].sig_masks[j] = 0; tasks[i].sig_flags[j] = 0; }
         for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
         for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[i].mmap_regions[j].base = 0;
     }
@@ -124,10 +129,11 @@ int create_task(void (*entry)()) {
             tasks[i].exit_code = 0;
             tasks[i].waiting = 0;
             tasks[i].pending_signals = 0;
+            tasks[i].blocked_signals = 0;
             tasks[i].sig_frame_esp = 0;
             tasks[i].zombie_since = 0;
             tasks[i].shm_bits = 0;
-            for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
+            for (int j = 0; j < SIG_MAX; j++) { tasks[i].signal_handlers[j] = NULL; tasks[i].sig_masks[j] = 0; tasks[i].sig_flags[j] = 0; }
             task_set_launch_arg(i, "sys_kernel");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
@@ -503,6 +509,8 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             tasks[i].exit_code = 0;
             tasks[i].waiting = 0;
             tasks[i].pending_signals = 0;
+            tasks[i].blocked_signals = 0;
+            tasks[i].sig_restart_ticks = 0;
             tasks[i].sig_frame_esp = 0;
             tasks[i].zombie_since = 0;
             tasks[i].shm_bits = 0;
@@ -770,11 +778,15 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         tasks[i].exit_code = 0;
         tasks[i].waiting = 0;
         tasks[i].pending_signals = 0;
+        tasks[i].blocked_signals = tasks[parent].blocked_signals;  // mask inherits
+        tasks[i].sig_restart_ticks = 0;
         tasks[i].sig_frame_esp = 0;
         tasks[i].zombie_since = 0;
         tasks[i].shm_bits = tasks[parent].shm_bits;  // child inherits attachments
         memcpy(tasks[i].signal_handlers, tasks[parent].signal_handlers,
                sizeof(tasks[i].signal_handlers));
+        memcpy(tasks[i].sig_masks, tasks[parent].sig_masks, sizeof(tasks[i].sig_masks));
+        memcpy(tasks[i].sig_flags, tasks[parent].sig_flags, sizeof(tasks[i].sig_flags));
         memcpy(tasks[i].fd_table, tasks[parent].fd_table, sizeof(tasks[i].fd_table));
         memcpy(tasks[i].launch_arg, tasks[parent].launch_arg, sizeof(tasks[i].launch_arg));
         tasks[i].current_dir = tasks[parent].current_dir;
@@ -888,13 +900,20 @@ int task_exec(const char* path, const char* arg, void* frame) {
     for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[tid].mmap_regions[j].base = 0;
 
     // Reset signal state per POSIX: caught handlers revert to default, ignored
-    // ones stay ignored; nothing is pending; no sigframe in flight.
+    // ones stay ignored; nothing is pending; no sigframe in flight; the signal
+    // mask is cleared.
     for (int s = 1; s < SIG_MAX; s++) {
         if (tasks[tid].signal_handlers[s] != SIG_IGN_SENTINEL) {
             tasks[tid].signal_handlers[s] = NULL;
         }
+        tasks[tid].sig_masks[s] = 0;
+        tasks[tid].sig_flags[s] = 0;
     }
     tasks[tid].pending_signals = 0;
+    // The signal mask survives exec (POSIX): only caught handlers reset to
+    // default. This matters once process groups land (SIGTTIN/SIGTTOU rely on
+    // the inherited mask across exec).
+    tasks[tid].sig_restart_ticks = 0;
     tasks[tid].sig_frame_esp = 0;
 
     if (arg && arg[0]) {
@@ -993,6 +1012,8 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
     tasks[child].exit_code = 0;
     tasks[child].waiting = 0;
     tasks[child].pending_signals = 0;
+    tasks[child].blocked_signals = 0;
+    tasks[child].sig_restart_ticks = 0;
     tasks[child].sig_frame_esp = 0;
     tasks[child].zombie_since = 0;
     tasks[child].shm_bits = 0;
@@ -1103,13 +1124,40 @@ int task_waitpid(int pid, int* status, int options) {
 // ============================================================
 
 void task_set_signal_handler(int tid, int sig, void* h) {
-    if (tid < 0 || tid >= MAX_TASKS || sig <= 0 || sig >= SIG_MAX) return;
-    tasks[tid].signal_handlers[sig] = h;
+    task_set_sigaction(tid, sig, h, 0, 0);
 }
 
 void* task_get_signal_handler(int tid, int sig) {
-    if (tid < 0 || tid >= MAX_TASKS || sig <= 0 || sig >= SIG_MAX) return NULL;
-    return tasks[tid].signal_handlers[sig];
+    void* h; uint32_t m, f;
+    task_get_sigaction(tid, sig, &h, &m, &f);
+    return h;
+}
+
+void task_set_sigaction(int tid, int sig, void* h, uint32_t mask, uint32_t flags) {
+    if (tid < 0 || tid >= MAX_TASKS || sig <= 0 || sig >= SIG_MAX) return;
+    tasks[tid].signal_handlers[sig] = h;
+    tasks[tid].sig_masks[sig] = mask;
+    tasks[tid].sig_flags[sig] = flags;
+}
+
+void task_get_sigaction(int tid, int sig, void** h, uint32_t* mask, uint32_t* flags) {
+    if (h) *h = NULL;
+    if (mask) *mask = 0;
+    if (flags) *flags = 0;
+    if (tid < 0 || tid >= MAX_TASKS || sig <= 0 || sig >= SIG_MAX) return;
+    if (h) *h = tasks[tid].signal_handlers[sig];
+    if (mask) *mask = tasks[tid].sig_masks[sig];
+    if (flags) *flags = tasks[tid].sig_flags[sig];
+}
+
+uint32_t task_get_blocked(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    return tasks[tid].blocked_signals;
+}
+
+void task_set_blocked(int tid, uint32_t bits) {
+    if (tid < 0 || tid >= MAX_TASKS) return;
+    tasks[tid].blocked_signals = bits;
 }
 
 uint32_t task_get_sig_frame_esp(int tid) {
@@ -1155,6 +1203,18 @@ int task_signal(int tid, int sig) {
         return 0;
     }
 
+    // SIGKILL/SIGSTOP/SIGCONT are never blocked (POSIX). For every other
+    // signal, a blocked signal is marked pending but its action (default or
+    // handler) is deferred until sigprocmask unblocks it — it must also NOT
+    // wake a parked task, since the delivery would otherwise race ahead of the
+    // unblock.
+    uint32_t blocked = tasks[tid].blocked_signals & (1u << sig);
+    if (blocked && sig != SIGKILL && sig != SIGSTOP && sig != SIGCONT) {
+        tasks[tid].pending_signals |= (1u << sig);
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return 0;
+    }
+
     void* h = tasks[tid].signal_handlers[sig];
     if (h == SIG_IGN_SENTINEL) {
         __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
@@ -1177,9 +1237,14 @@ int task_signal(int tid, int sig) {
     }
 
     // A handler is installed: mark pending and wake the task if it is parked,
-    // so it returns to user mode and the handler runs there.
+    // so it returns to user mode and the handler runs there. If the handler is
+    // SA_RESTART and the task was parked in SYS_SLEEP, remember the remaining
+    // ticks so delivery can re-enter the sleep after the handler returns.
     tasks[tid].pending_signals |= (1u << sig);
     if (tasks[tid].state == TASK_STATE_BLOCKED || tasks[tid].state == TASK_STATE_SLEEP) {
+        if ((tasks[tid].sig_flags[sig] & SA_RESTART) && tasks[tid].state == TASK_STATE_SLEEP) {
+            tasks[tid].sig_restart_ticks = tasks[tid].sleep_ticks;
+        }
         tasks[tid].state = TASK_STATE_READY;
     }
     __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
@@ -1208,6 +1273,10 @@ int task_deliver_signals(void* frame) {
 
     for (int sig = 1; sig < SIG_MAX; sig++) {
         if (!(tasks[tid].pending_signals & (1u << sig))) continue;
+        // A blocked signal stays pending (delivered only after sigprocmask
+        // unblocks it). SIGKILL/SIGSTOP/SIGCONT bypass the mask.
+        if ((tasks[tid].blocked_signals & (1u << sig)) &&
+            sig != SIGKILL && sig != SIGSTOP && sig != SIGCONT) continue;
         tasks[tid].pending_signals &= ~(1u << sig);
 
         void* h = tasks[tid].signal_handlers[sig];
@@ -1254,6 +1323,24 @@ int task_deliver_signals(void* frame) {
         f->saved_eflags= r->eflags;
         f->saved_esp   = r->useresp;
         f->saved_ss    = r->ss;
+        // Save the current mask so SYS_SIGRETURN can restore it. While the
+        // handler runs, the delivered signal itself is auto-blocked (unless
+        // SA_NODEFER) together with sa_mask — this is what prevents a handler
+        // from re-entering itself or clobbering a signal the app is holding.
+        f->saved_blocked = tasks[tid].blocked_signals;
+        // SA_RESTART: hand the interrupted SYS_SLEEP's remaining ticks to the
+        // sigreturn path, which re-parks the task before returning to user.
+        // Only the delivered signal's own SA_RESTART flag qualifies — if
+        // several signals were pending when the sleep was interrupted, the
+        // restart must not ride along on a non-SA_RESTART handler's frame.
+        f->restart = (tasks[tid].sig_flags[sig] & SA_RESTART) &&
+                     (tasks[tid].sig_restart_ticks > 0) ? 1 : 0;
+        f->restart_arg = tasks[tid].sig_restart_ticks;
+        tasks[tid].sig_restart_ticks = 0;
+        uint32_t run_mask = tasks[tid].blocked_signals;
+        run_mask |= tasks[tid].sig_masks[sig];
+        if (!(tasks[tid].sig_flags[sig] & SA_NODEFER)) run_mask |= (1u << sig);
+        tasks[tid].blocked_signals = run_mask;
         tasks[tid].sig_frame_esp = (uint32_t)esp;
 
         // cdecl handler(sig): [ret addr][arg] on the user stack. The handler

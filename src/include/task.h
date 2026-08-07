@@ -48,6 +48,18 @@ typedef struct {
 // NULL (default) so a real handler at address 1 stays impossible.
 #define SIG_IGN_SENTINEL ((void*)1)
 
+// sigaction flags (Fase 1 signal hardening). SA_RESTART re-enters an
+// interrupted blocking syscall (currently SYS_SLEEP) after the handler
+// returns; SA_NODEFER keeps the signal itself unblocked while its handler
+// runs (default: the delivered signal is auto-blocked during the handler).
+#define SA_RESTART  1
+#define SA_NODEFER  2
+
+// sigprocmask operations (POSIX how values)
+#define SIG_BLOCK    0
+#define SIG_UNBLOCK  1
+#define SIG_SETMASK  2
+
 // Saved-context frame the kernel pushes onto the user stack before calling a
 // signal handler. SYS_SIGRETURN restores execution from it.
 typedef struct {
@@ -55,6 +67,9 @@ typedef struct {
     uint32_t saved_eax, saved_ecx, saved_edx, saved_ebx;
     uint32_t saved_esi, saved_edi, saved_ebp;
     uint32_t saved_eip, saved_cs, saved_eflags, saved_esp, saved_ss;
+    uint32_t saved_blocked;  // signal mask to restore when the handler returns
+    uint32_t restart;        // 1 = SA_RESTART: re-enter the interrupted syscall
+    uint32_t restart_arg;    // argument for the restarted syscall (sleep ticks)
 } sigframe_t;
 
 void init_tasking();
@@ -113,6 +128,13 @@ void task_reap_zombies(void);
 int task_deliver_signals(void* frame);
 void task_set_signal_handler(int tid, int sig, void* h);
 void* task_get_signal_handler(int tid, int sig);
+// sigaction core: handler + sa_mask + flags. Backward-compatible with
+// task_set_signal_handler (mask=0, flags=0).
+void task_set_sigaction(int tid, int sig, void* h, uint32_t mask, uint32_t flags);
+void task_get_sigaction(int tid, int sig, void** h, uint32_t* mask, uint32_t* flags);
+// sigprocmask support: per-task blocked-signal bitmap
+uint32_t task_get_blocked(int tid);
+void task_set_blocked(int tid, uint32_t bits);
 uint32_t task_get_sig_frame_esp(int tid);
 void task_set_sig_frame_esp(int tid, uint32_t esp);
 
