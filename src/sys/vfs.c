@@ -279,6 +279,9 @@ void vfs_init() {
         extern uint8_t _binary_sigdemo_mct_start[];
         extern uint8_t _binary_sigdemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/sigdemo.mct", (const char*)_binary_sigdemo_mct_start, _binary_sigdemo_mct_end - _binary_sigdemo_mct_start);
+        extern uint8_t _binary_smpstress_mct_start[];
+        extern uint8_t _binary_smpstress_mct_end[];
+        changed += vfs_update_file_if_needed("apps/smpstress.mct", (const char*)_binary_smpstress_mct_start, _binary_smpstress_mct_end - _binary_smpstress_mct_start);
         extern uint8_t _binary_bgread_mct_start[];
         extern uint8_t _binary_bgread_mct_end[];
         changed += vfs_update_file_if_needed("apps/bgread.mct", (const char*)_binary_bgread_mct_start, _binary_bgread_mct_end - _binary_bgread_mct_start);
@@ -406,6 +409,10 @@ void vfs_init() {
     extern uint8_t _binary_sigdemo_mct_end[];
     vfs_create_file("apps/sigdemo.mct");
     vfs_write_file("apps/sigdemo.mct", (const char*)_binary_sigdemo_mct_start, _binary_sigdemo_mct_end - _binary_sigdemo_mct_start);
+    extern uint8_t _binary_smpstress_mct_start[];
+    extern uint8_t _binary_smpstress_mct_end[];
+    vfs_create_file("apps/smpstress.mct");
+    vfs_write_file("apps/smpstress.mct", (const char*)_binary_smpstress_mct_start, _binary_smpstress_mct_end - _binary_smpstress_mct_start);
     extern uint8_t _binary_bgread_mct_start[];
     extern uint8_t _binary_bgread_mct_end[];
     vfs_create_file("apps/bgread.mct");

@@ -4,6 +4,7 @@
 #include "../include/io.h"
 #include "../include/spinlock.h"
 #include "../include/apic.h"
+#include "../include/acpi.h"   // smp_cpu_count / smp_lapic_ids for per-CPU idle tasks
 #include "../include/vmm.h"   // vmm_setup_user_stack(), USER_STACK_* layout
 #include "../include/idt.h"   // registers_t
 #include "../include/timer.h" // get_ticks()
@@ -40,6 +41,8 @@ typedef struct {
     int      priority;     // 0=background, 1=interactive, 2=realtime
     int      sleep_ticks;  // remaining ticks until wake (0 = not sleeping)
     int      wait_ticks;   // consecutive ticks waiting in READY state
+    int      rq_cpu;       // per-CPU runqueue this task is queued on (-1 = not queued)
+    int      is_idle;      // 1 = pinned per-CPU idle task (never migrated)
     uint32_t page_dir;     // per-process page directory (0 = global identity)
     int      fd_table[16]; // local file descriptors mapped to global FDs
     char     launch_arg[128]; // command-line argument passed at launch
@@ -73,6 +76,193 @@ static int boot_current_dir = 0;
 // checks and by Ctrl+C/Ctrl+Z in kernel.c.
 static int kernel_fg_pgrp = 0;
 
+// ============================================================
+// Per-CPU runqueues (Fase 3: SMP scheduler)
+// ============================================================
+// Each CPU owns a runqueue of runnable tasks (READY or RUNNING). A task is
+// queued iff tasks[tid].rq_cpu >= 0. RUNNING members are only ever the
+// current task of that CPU; pickers/stealers only take READY members, so a
+// task can never execute on two CPUs at once. Every rq_* helper below
+// requires task_lock to be held.
+#define MAX_CPUS 16
+
+struct runqueue {
+    int tids[MAX_TASKS];
+    int count;
+};
+
+static struct runqueue rq[MAX_CPUS];
+
+// Queue tid on cpu's runqueue (no-op if already queued).
+static void rq_enqueue(int cpu, int tid) {
+    if (tid < 0 || tid >= MAX_TASKS || cpu < 0 || cpu >= MAX_CPUS) return;
+    if (tasks[tid].rq_cpu >= 0) return;
+    if (rq[cpu].count >= MAX_TASKS) cpu = 0;  // overflow fallback (cannot happen)
+    rq[cpu].tids[rq[cpu].count++] = tid;
+    tasks[tid].rq_cpu = cpu;
+}
+
+// Unqueue tid from whatever runqueue it currently sits on.
+static void rq_remove(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return;
+    int cpu = tasks[tid].rq_cpu;
+    if (cpu < 0 || cpu >= MAX_CPUS) return;
+    struct runqueue* q = &rq[cpu];
+    for (int i = 0; i < q->count; i++) {
+        if (q->tids[i] == tid) {
+            q->tids[i] = q->tids[q->count - 1];
+            q->count--;
+            break;
+        }
+    }
+    tasks[tid].rq_cpu = -1;
+}
+
+// Number of CPUs that actually exist (lapic ids are contiguous 0..N-1 in
+// QEMU). rq_least_loaded MUST only consider real cores: scanning the whole
+// 16-slot table would pick a phantom CPU (4..15) whose queue never ticks and
+// park every new task on a core that does not exist.
+static int rq_cpu_count(void) {
+    extern uint32_t smp_cpu_count;
+    int n = (int)smp_cpu_count;
+    if (n < 1 || n > MAX_CPUS) n = 1;
+    return n;
+}
+
+// CPU with the fewest queued tasks (tie -> lowest id). New tasks land on the
+// least-loaded core so the four CPUs share the work.
+static int rq_least_loaded(void) {
+    int best = 0;
+    int n = rq_cpu_count();
+    for (int c = 1; c < n; c++) {
+        if (rq[c].count < rq[best].count) best = c;
+    }
+    return best;
+}
+
+// Wake-path enqueue: park the task on the least-loaded CPU. A task that was
+// SLEEP/BLOCKED/STOPPED is no longer current anywhere (the scheduler parked
+// it), so any CPU may pick it up.
+static void rq_enqueue_wake(int tid) {
+    rq_enqueue(rq_least_loaded(), tid);
+}
+
+// Pick the best READY task from cpu cid's own runqueue (priority + aging).
+// Task 0 (the kernel main loop) may only run on the BSP; idle tasks only on
+// the core they were pinned to.
+static int rq_pick(int cid) {
+    struct runqueue* q = &rq[cid];
+    int best = -1, best_score = -1;
+    for (int i = 0; i < q->count; i++) {
+        int tid = q->tids[i];
+        if (tasks[tid].state != TASK_STATE_READY) continue;
+        if (tid == 0 && cid != 0) continue;
+        tasks[tid].wait_ticks++;
+        int score = tasks[tid].priority * 10 + tasks[tid].wait_ticks;
+        if (score > best_score) { best_score = score; best = tid; }
+    }
+    if (best >= 0) tasks[best].wait_ticks = 0;
+    return best;
+}
+
+// Steal a READY task from a peer CPU's runqueue (migration). Never steals
+// task 0 or per-CPU idle tasks.
+static int rq_steal(int cid) {
+    int best = -1, best_score = -1, best_src = -1;
+    // Only real cores: phantom CPUs (4..15) have empty queues, but scanning
+    // them is wasted work — and rq_cpu_count() is the same source of truth
+    // rq_least_loaded() uses, so both agree on what "a CPU" is.
+    int n = rq_cpu_count();
+    for (int c = 0; c < n; c++) {
+        if (c == cid) continue;
+        struct runqueue* q = &rq[c];
+        for (int i = 0; i < q->count; i++) {
+            int tid = q->tids[i];
+            if (tid == 0 || tasks[tid].is_idle) continue;
+            if (tasks[tid].state != TASK_STATE_READY) continue;
+            int score = tasks[tid].priority * 10 + tasks[tid].wait_ticks;
+            if (score > best_score) { best_score = score; best = tid; best_src = c; }
+        }
+    }
+    if (best < 0) return -1;
+    struct runqueue* src = &rq[best_src];
+    for (int i = 0; i < src->count; i++) {
+        if (src->tids[i] == best) {
+            src->tids[i] = src->tids[src->count - 1];
+            src->count--;
+            break;
+        }
+    }
+    tasks[best].rq_cpu = cid;
+    rq[cid].tids[rq[cid].count++] = best;
+    return best;
+}
+
+// Ring 0 entry for a per-CPU idle task: halt until the next timer IRQ wakes
+// the scheduler. Mirrors task_dead_park but as a schedulable idle.
+static void ap_idle(void) {
+    for (;;) __asm__ volatile("hlt");
+}
+
+// Create a Ring 0 idle task pinned to `cpu` (its lapic id). Created for every
+// Application Processor during init_tasking() so a core with an empty
+// runqueue can park instead of stealing the BSP's kernel main loop. The BSP's
+// idle is task 0 itself.
+static int create_idle_task(int cpu) {
+    __asm__ volatile("cli");
+    spin_lock(&task_lock);
+    int tid = -1;
+    for (int i = 1; i < MAX_TASKS; i++) {
+        if (tasks[i].state == TASK_STATE_FREE) { tid = i; break; }
+    }
+    if (tid < 0) {
+        spin_unlock(&task_lock);
+        __asm__ volatile("sti");
+        return -1;
+    }
+    tasks[tid].ring = 0;
+    tasks[tid].priority = PRIORITY_BACKGROUND;
+    tasks[tid].sleep_ticks = 0;
+    tasks[tid].wait_ticks = 0;
+    tasks[tid].page_dir = tasks[0].page_dir;
+    tasks[tid].parent = 0;
+    tasks[tid].exit_code = 0;
+    tasks[tid].pgrp = 0;
+    tasks[tid].session = 0;
+    tasks[tid].waiting = 0;
+    tasks[tid].pending_signals = 0;
+    tasks[tid].blocked_signals = 0;
+    tasks[tid].sig_restart_ticks = 0;
+    tasks[tid].sig_frame_esp = 0;
+    tasks[tid].zombie_since = 0;
+    tasks[tid].shm_bits = 0;
+    for (int j = 0; j < 16; j++) tasks[tid].fd_table[j] = -1;
+    for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[tid].mmap_regions[j].base = 0;
+    for (int j = 0; j < SIG_MAX; j++) { tasks[tid].signal_handlers[j] = NULL; tasks[tid].sig_masks[j] = 0; tasks[tid].sig_flags[j] = 0; }
+    tasks[tid].is_idle = 1;
+    tasks[tid].rq_cpu = -1;
+
+    // Ring 0 interrupt frame -> ap_idle() (same layout as create_task).
+    uint32_t* stack = (uint32_t*)&tasks[tid].kernel_stack[KERNEL_STACK_SIZE];
+    *(--stack) = 0x202;      // EFLAGS (IF=1)
+    *(--stack) = 0x08;       // CS (kernel code)
+    *(--stack) = (uint32_t)(uintptr_t)&ap_idle;
+    *(--stack) = 0;          // err_code
+    *(--stack) = 0;          // int_no
+    *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
+    *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
+    *(--stack) = 0x10;       // DS (kernel data)
+    tasks[tid].esp = (uint32_t)stack;
+
+    num_tasks++;
+    tasks[tid].state = TASK_STATE_READY;
+    rq_enqueue(cpu, tid);   // pinned to its own core
+
+    spin_unlock(&task_lock);
+    __asm__ volatile("sti");
+    return tid;
+}
+
 void init_tasking() {
     int cid = get_cid();
     for (int i = 0; i < MAX_TASKS; i++) {
@@ -81,6 +271,8 @@ void init_tasking() {
         tasks[i].priority = PRIORITY_INTERACTIVE;
         tasks[i].sleep_ticks = 0;
         tasks[i].wait_ticks = 0;
+        tasks[i].rq_cpu = -1;
+        tasks[i].is_idle = 0;
         tasks[i].page_dir = 0;
         tasks[i].heap_ptr = 0x08000000;
         tasks[i].launch_arg[0] = '\0';
@@ -114,6 +306,22 @@ void init_tasking() {
     current_task[cid] = 0;
     num_tasks = 1;
     task_set_launch_arg(0, "idle");
+
+    // Task 0 is the BSP's idle (kernel main loop): pin it to runqueue 0.
+    tasks[0].rq_cpu = 0;
+    tasks[0].is_idle = 0;
+    rq[0].tids[0] = 0;
+    rq[0].count = 1;
+
+    // Create a pinned idle task for every Application Processor so the
+    // per-CPU scheduler has somewhere to park when a core has nothing to run.
+    // APs are already awake (smp_init() runs before init_tasking()) and pick
+    // their idle task up on the next timer IRQ.
+    for (uint32_t i = 0; i < smp_cpu_count; i++) {
+        uint8_t lapic_id = smp_lapic_ids[i];
+        if (lapic_id == (smp_bsp_lapic_id & 15)) continue;
+        create_idle_task(lapic_id & 15);
+    }
 }
 
 uint32_t tasks_get_boot_cr3(void) {
@@ -160,10 +368,13 @@ int create_task(void (*entry)()) {
             *(--stack) = 0x10;       // DS (kernel data)
             
             tasks[i].esp = (uint32_t)stack;
+            tasks[i].rq_cpu = -1;
+            tasks[i].is_idle = 0;
             num_tasks++;
             
             // Set state LAST — only now is it safe for the scheduler
             tasks[i].state = 2;
+            rq_enqueue(rq_least_loaded(), i);
             
             spin_unlock(&task_lock);
             __asm__ volatile("sti");
@@ -253,151 +464,155 @@ static void task_cleanup(int tid) {
                 tasks[k].page_dir == tasks[tid].page_dir) sharers++;
         }
         if (sharers == 0) {
+            // SMP safety: the dying task may still be mid-flight on ANOTHER
+            // core with this page directory loaded in CR3 (it runs for up to
+            // one timer tick after being killed). Freeing the tables under it
+            // would corrupt that core's page walks. If any CPU's CR3 is this
+            // directory, skip the free — a bounded leak, but never a crash.
+            // (The current CPU's own CR3 is handled by switching to task 0's.)
             uint32_t active_cr3;
             __asm__ volatile("mov %%cr3, %0" : "=r"(active_cr3));
-            if ((active_cr3 & 0xFFFFF000) == (tasks[tid].page_dir & 0xFFFFF000)) {
+            int busy_elsewhere = 0;
+            for (int c = 0; c < MAX_CPUS; c++) {
+                if (current_task[c] == tid) busy_elsewhere = 1;
+            }
+            if (!busy_elsewhere &&
+                (active_cr3 & 0xFFFFF000) == (tasks[tid].page_dir & 0xFFFFF000)) {
                 extern void vmm_switch_page_dir(uint32_t);
                 vmm_switch_page_dir(tasks[0].page_dir);
             }
-            extern void vmm_free_address_space(uint32_t);
-            vmm_free_address_space(tasks[tid].page_dir);
+            if (!busy_elsewhere) {
+                extern void vmm_free_address_space(uint32_t);
+                vmm_free_address_space(tasks[tid].page_dir);
+            }
         }
         tasks[tid].page_dir = 0;
     }
 }
 
+// Per-CPU scheduler entry — called from the timer IRQ on every core.
+//
+// Lock discipline: schedule() runs with IF=0 (interrupt gate). It may take
+// task_lock because every other holder disables interrupts before acquiring
+// it: a timer IRQ can therefore never fire while this CPU holds the lock (no
+// self-deadlock), and a cross-CPU holder is never preemptible either.
+//
+// NOTE: net_poll() is deliberately NOT called here. The BSP main loop
+// (kernel.c) drains the NIC once per loop iteration; polling it from the
+// 1000Hz timer IRQ as well made RX/TX state mutate from two contexts at
+// once (double-processing, descriptor desync).
 uint32_t schedule(uint32_t esp) {
     int cid = get_cid();
-    if (current_task[cid] < 0) return esp;
-    // NOTE: No spinlock needed here. schedule() is called from the timer IRQ
-    // handler, which runs with interrupts disabled (IDT gate 0x8E auto-clears IF).
-    // Using a spinlock would cause self-deadlock if any other code path
-    // (e.g. create_task) holds task_lock when the timer interrupt fires.
-    
-    // NOTE: net_poll() is deliberately NOT called here. The BSP main loop
-    // (kernel.c) drains the NIC once per loop iteration; polling it from the
-    // 1000Hz timer IRQ as well made RX/TX state mutate from two contexts at
-    // once (double-processing, descriptor desync).
-    
-    // If we're the only task AND we're active, no need to switch
-    if (num_tasks <= 1 && tasks[current_task[cid]].state != 0) {
-        return esp;
-    }
-    
-    // 1. Update sleeping tasks
-    for (int i = 0; i < MAX_TASKS; i++) {
-        if (tasks[i].state == TASK_STATE_SLEEP) {
-            if (tasks[i].sleep_ticks > 0) {
-                tasks[i].sleep_ticks--;
-            }
-            if (tasks[i].sleep_ticks <= 0) {
-                tasks[i].state = TASK_STATE_READY;
+    int cur = current_task[cid];
+
+    spin_lock(&task_lock);
+
+    // 1. Sleep upkeep — BSP only. One global decrement per tick keeps sleep
+    //    durations wall-clock correct now that all four CPUs tick at 1kHz.
+    if (cid == 0) {
+        for (int i = 0; i < MAX_TASKS; i++) {
+            if (tasks[i].state == TASK_STATE_SLEEP) {
+                if (tasks[i].sleep_ticks > 0) {
+                    tasks[i].sleep_ticks--;
+                }
+                if (tasks[i].sleep_ticks <= 0) {
+                    tasks[i].state = TASK_STATE_READY;
+                    rq_enqueue_wake(i);
+                }
             }
         }
     }
 
-    // Save current task's register frame pointer
-    tasks[current_task[cid]].esp = esp;
-    if (tasks[current_task[cid]].state == TASK_STATE_RUNNING) {
-        tasks[current_task[cid]].state = TASK_STATE_READY;
+    // Fast path: single-task system (kernel only), nothing to pick.
+    if (num_tasks <= 1 && cur >= 0) {
+        spin_unlock(&task_lock);
+        return esp;
     }
-    
-    // Increment wait_ticks for all READY tasks to prevent starvation (aging)
-    for (int i = 0; i < MAX_TASKS; i++) {
-        if (tasks[i].state == TASK_STATE_READY) {
-            tasks[i].wait_ticks++;
+
+    // 2. Save the preempted frame; RUNNING -> READY (stays on our runqueue).
+    if (cur >= 0) {
+        tasks[cur].esp = esp;
+        if (tasks[cur].state == TASK_STATE_RUNNING) {
+            tasks[cur].state = TASK_STATE_READY;
         }
     }
-    
-    // Find next ready task using priority + aging score
-    int next = -1;
-    int max_score = -1;
-    int start = (current_task[cid] + 1) % MAX_TASKS;
-    for (int i = 0; i < MAX_TASKS; i++) {
-        int idx = (start + i) % MAX_TASKS;
-        if (tasks[idx].state == TASK_STATE_READY) {
-            int score = (tasks[idx].priority * 10) + tasks[idx].wait_ticks;
-            if (score > max_score) {
-                max_score = score;
-                next = idx;
-            }
-        }
-    }
-    
-    if (next >= 0) {
-        tasks[next].wait_ticks = 0;
-    } else {
-        // If no other task is ready, keep running current (if it's not free/sleeping)
-        if (tasks[current_task[cid]].state == TASK_STATE_READY || tasks[current_task[cid]].state == TASK_STATE_RUNNING) {
-            next = current_task[cid];
-            tasks[next].wait_ticks = 0;
+
+    // 3. Pick from our own runqueue; steal from a peer if empty; keep the
+    //    current task if it is still runnable; otherwise idle out (on the BSP
+    //    that is the kernel main loop, on APs their own pinned idle task).
+    int next = rq_pick(cid);
+    if (next < 0) next = rq_steal(cid);
+    if (next < 0) {
+        if (cur >= 0 &&
+            (tasks[cur].state == TASK_STATE_READY ||
+             tasks[cur].state == TASK_STATE_RUNNING)) {
+            next = cur;
         } else {
-            // Fallback to task 0 (kernel/idle)
-            next = 0;
-            tasks[next].wait_ticks = 0;
+            current_task[cid] = -1;
+            spin_unlock(&task_lock);
+            return esp;   // iret back to this CPU's idle loop
         }
     }
-    
-    tasks[next].state = 1;
+
+    // 4. Commit the switch.
+    tasks[next].state = TASK_STATE_RUNNING;
     current_task[cid] = next;
-    
-    // CRITICAL: Update TSS.esp0 for the next task.
-    // When a Ring 3 task gets interrupted, the CPU loads ESP from TSS.esp0.
-    // It MUST point to the TOP of this task's kernel stack (empty, ready for pushes).
-    // For Ring 0 tasks this is harmless (TSS.esp0 is unused for same-ring interrupts).
+
+    // CRITICAL: TSS.esp0 must point at the TOP of the next task's kernel
+    // stack. A Ring 3 interrupt on THIS CPU pushes its frame there; the TSS is
+    // per-CPU, so a task migrating between cores still gets its own stack top.
     tss_set_kernel_stack((uint32_t)&tasks[next].kernel_stack[KERNEL_STACK_SIZE]);
-    
-    // Switch page directory if different
+
+    // Switch page directory if different.
     extern void vmm_switch_page_dir(uint32_t);
     if (tasks[next].page_dir != 0) {
         vmm_switch_page_dir(tasks[next].page_dir);
     } else {
-        // Fallback to task 0's page_dir (boot cr3)
         vmm_switch_page_dir(tasks[0].page_dir);
     }
-    
-    // Deliver pending signals to the task about to return to Ring 3. Its CR3
-    // is already active (switched above), so the handler frame can be written
-    // straight into its user stack. If a default-action signal terminates the
-    // task, re-pick another ready task instead of iret'ing a dead frame.
+
+    // 5. Deliver pending signals to the task about to return to Ring 3. Its
+    //    CR3 is already active, so the handler frame can be written straight
+    //    into its user stack. If a default-action signal terminates the task,
+    //    re-pick another ready task instead of iret'ing a dead frame.
     if (tasks[next].ring == 3) {
-        while (tasks[next].state == TASK_STATE_RUNNING && tasks[next].pending_signals != 0) {
+        while (tasks[next].state == TASK_STATE_RUNNING &&
+               tasks[next].pending_signals != 0) {
             if (!task_deliver_signals((void*)tasks[next].esp)) break;
             if (tasks[next].state == TASK_STATE_ZOMBIE) {
-                goto pick_next;
+                // The signal killed it: choose another task (terminate_task
+                // already removed it from the runqueue).
+                next = rq_pick(cid);
+                if (next < 0) next = rq_steal(cid);
+                if (next < 0) {
+                    current_task[cid] = -1;
+                    spin_unlock(&task_lock);
+                    return esp;
+                }
+                tasks[next].state = TASK_STATE_RUNNING;
+                current_task[cid] = next;
+                tss_set_kernel_stack((uint32_t)&tasks[next].kernel_stack[KERNEL_STACK_SIZE]);
+                if (tasks[next].page_dir != 0) {
+                    vmm_switch_page_dir(tasks[next].page_dir);
+                } else {
+                    vmm_switch_page_dir(tasks[0].page_dir);
+                }
             }
         }
     }
-    
-    return tasks[next].esp;
 
-pick_next:
-    // The task we chose died from a signal; choose another READY task.
-    next = -1;
-    max_score = -1;
-    for (int i = 0; i < MAX_TASKS; i++) {
-        if (tasks[i].state == TASK_STATE_READY) {
-            int score = (tasks[i].priority * 10) + tasks[i].wait_ticks;
-            if (score > max_score) {
-                max_score = score;
-                next = i;
-            }
-        }
-    }
-    if (next < 0) {
-        // Nothing else runnable — fall back to the kernel idle task.
-        next = 0;
-    }
-    tasks[next].state = TASK_STATE_RUNNING;
-    current_task[cid] = next;
-    tss_set_kernel_stack((uint32_t)&tasks[next].kernel_stack[KERNEL_STACK_SIZE]);
-    if (tasks[next].page_dir != 0) {
-        vmm_switch_page_dir(tasks[next].page_dir);
-    } else {
-        vmm_switch_page_dir(tasks[0].page_dir);
-    }
-    return tasks[next].esp;
+    uint32_t ret = tasks[next].esp;
+    spin_unlock(&task_lock);
+    return ret;
 }
+
+// Exported lock helpers for code paths outside task.c that touch the task
+// table (signal delivery on the syscall-return path in syscall.c). Callers
+// MUST disable interrupts before task_lock_acquire() (same cli-first
+// discipline as every internal user) or a timer IRQ can self-deadlock inside
+// schedule()'s own spin_lock(&task_lock).
+void task_lock_acquire(void) { spin_lock(&task_lock); }
+void task_lock_release(void) { spin_unlock(&task_lock); }
 
 // Terminate a task (exit or default-action signal). Cleans up its resources,
 // reparents its children to the kernel task, turns it into a ZOMBIE when a
@@ -406,10 +621,14 @@ pick_next:
 //
 // Called with interrupts disabled by all callers (exit path holds cli;
 // task_signal holds its own cli/sti pair).
+// Requires task_lock held by the caller (schedule delivery path, task_signal,
+// task_exit_with_code — all lock before calling). Removes the task from its
+// runqueue so the per-CPU scheduler never picks a dying task.
 static void terminate_task(int tid, int code) {
     if (tid <= 0 || tid >= MAX_TASKS) return;
     if (tasks[tid].state == TASK_STATE_FREE || tasks[tid].state == TASK_STATE_ZOMBIE) return;
 
+    rq_remove(tid);
     task_cleanup(tid);
 
     // Reparent this task's children to the kernel task. Zombie children get
@@ -436,6 +655,7 @@ static void terminate_task(int tid, int code) {
         if (tasks[p].waiting != 0) {
             tasks[p].waiting = 0;
             tasks[p].state = TASK_STATE_READY;
+            rq_enqueue_wake(p);
         }
         // SIGCHLD is pending for the parent (default action: ignored)
         tasks[p].pending_signals |= (1u << SIGCHLD);
@@ -455,7 +675,9 @@ void task_exit_with_code(int code) {
     if (tid <= 0) return; // never kill the kernel task
 
     __asm__ volatile("cli");
+    spin_lock(&task_lock);
     terminate_task(tid, code);
+    spin_unlock(&task_lock);
     __asm__ volatile("sti");
 
     // Never returns. The scheduler will not reschedule a ZOMBIE.
@@ -576,8 +798,11 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             *(--stack) = 0x23;       // DS
             
             tasks[i].esp = (uint32_t)stack;
+            tasks[i].rq_cpu = -1;
+            tasks[i].is_idle = 0;
             num_tasks++;
             tasks[i].state = TASK_STATE_READY;
+            rq_enqueue(rq_least_loaded(), i);
             
             // NOTE: Interrupts stay DISABLED. Caller must call sti after
             // finishing any post-create setup
@@ -595,8 +820,11 @@ void task_sleep(int ticks) {
     if (current_task[cid] < 0 || ticks <= 0) return;
     
     __asm__ volatile("cli");
+    spin_lock(&task_lock);
     tasks[current_task[cid]].sleep_ticks = ticks;
     tasks[current_task[cid]].state = TASK_STATE_SLEEP;
+    rq_remove(current_task[cid]);
+    spin_unlock(&task_lock);
     __asm__ volatile("sti");
     
     // Park the task. The timer IRQ runs schedule(), which skips SLEEP tasks
@@ -612,10 +840,15 @@ void task_sleep(int ticks) {
 // Wake up a sleeping task
 void task_wake(int tid) {
     if (tid < 0 || tid >= MAX_TASKS) return;
+    __asm__ volatile("cli");
+    spin_lock(&task_lock);
     if (tasks[tid].state == TASK_STATE_SLEEP) {
         tasks[tid].sleep_ticks = 0;
         tasks[tid].state = TASK_STATE_READY;
+        rq_enqueue_wake(tid);
     }
+    spin_unlock(&task_lock);
+    __asm__ volatile("sti");
 }
 
 // Blocked-state accessors for sync.c (semaphores/futexes).
@@ -628,8 +861,20 @@ int task_get_state(int tid) {
 
 void task_set_state(int tid, int state) {
     if (tid < 0 || tid >= MAX_TASKS) return;
-    tasks[tid].state = state;
-    if (state == TASK_STATE_READY) tasks[tid].sleep_ticks = 0;
+    __asm__ volatile("cli");
+    spin_lock(&task_lock);
+    int old = tasks[tid].state;
+    if (old != state) {
+        tasks[tid].state = state;
+        if (state == TASK_STATE_READY) {
+            tasks[tid].sleep_ticks = 0;
+            rq_enqueue_wake(tid);
+        } else if (state != TASK_STATE_RUNNING) {
+            rq_remove(tid);
+        }
+    }
+    spin_unlock(&task_lock);
+    __asm__ volatile("sti");
 }
 
 // Get/set priority
@@ -864,6 +1109,8 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         tasks[i].priority = tasks[parent].priority;
         tasks[i].sleep_ticks = 0;
         tasks[i].wait_ticks = 0;
+        tasks[i].rq_cpu = -1;       // fresh runqueue membership (not inherited)
+        tasks[i].is_idle = 0;
         tasks[i].page_dir = new_pd;
         tasks[i].parent = parent;
         tasks[i].exit_code = 0;
@@ -907,6 +1154,7 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
 
         num_tasks++;
         tasks[i].state = TASK_STATE_READY;
+        rq_enqueue(rq_least_loaded(), i);
 
         spin_unlock(&task_lock);
         __asm__ volatile("sti");
@@ -1101,6 +1349,8 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
     tasks[child].page_dir = img.page_dir;
     tasks[child].sleep_ticks = 0;
     tasks[child].wait_ticks = 0;
+    tasks[child].rq_cpu = -1;
+    tasks[child].is_idle = 0;
     tasks[child].parent = current_task[cid];   // shell can waitpid it
     tasks[child].exit_code = 0;
     tasks[child].pgrp = tasks[current_task[cid]].pgrp;  // inherits the shell group
@@ -1157,6 +1407,7 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
 
     num_tasks++;
     tasks[child].state = TASK_STATE_READY;
+    rq_enqueue(rq_least_loaded(), child);
 
     spin_unlock(&task_lock);
     __asm__ volatile("sti");
@@ -1206,8 +1457,11 @@ int task_waitpid(int pid, int* status, int options) {
         // Park the task until a child exits. The exit path flips us back to
         // READY (see terminate_task) — same hlt-park pattern as task_sleep().
         __asm__ volatile("cli");
+        spin_lock(&task_lock);
         tasks[self].waiting = (pid > 0) ? pid : -1;
         tasks[self].state = TASK_STATE_BLOCKED;
+        rq_remove(self);
+        spin_unlock(&task_lock);
         __asm__ volatile("sti");
         while (tasks[self].state == TASK_STATE_BLOCKED) __asm__ volatile("hlt");
         tasks[self].waiting = 0;
@@ -1273,10 +1527,12 @@ int task_signal(int tid, int sig) {
 
     uint32_t eflags;
     __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&task_lock);
 
     if (sig == SIGKILL) {
         // Uncatchable: terminate immediately.
         terminate_task(tid, 128 + SIGKILL);
+        spin_unlock(&task_lock);
         __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
         return 0;
     }
@@ -1285,6 +1541,8 @@ int task_signal(int tid, int sig) {
         // scheduler only picks READY tasks, so a STOPPED task never runs.
         tasks[tid].state = TASK_STATE_STOPPED;
         tasks[tid].pending_signals &= ~((1u << SIGSTOP) | (1u << SIGTSTP));
+        rq_remove(tid);
+        spin_unlock(&task_lock);
         __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
         return 0;
     }
@@ -1293,7 +1551,9 @@ int task_signal(int tid, int sig) {
         tasks[tid].pending_signals &= ~((1u << SIGSTOP) | (1u << SIGTSTP));
         if (tasks[tid].state == TASK_STATE_STOPPED) {
             tasks[tid].state = TASK_STATE_READY;
+            rq_enqueue_wake(tid);
         }
+        spin_unlock(&task_lock);
         __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
         return 0;
     }
@@ -1306,12 +1566,14 @@ int task_signal(int tid, int sig) {
     uint32_t blocked = tasks[tid].blocked_signals & (1u << sig);
     if (blocked && sig != SIGKILL && sig != SIGSTOP && sig != SIGCONT) {
         tasks[tid].pending_signals |= (1u << sig);
+        spin_unlock(&task_lock);
         __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
         return 0;
     }
 
     void* h = tasks[tid].signal_handlers[sig];
     if (h == SIG_IGN_SENTINEL) {
+        spin_unlock(&task_lock);
         __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
         return 0;   // ignored
     }
@@ -1325,6 +1587,7 @@ int task_signal(int tid, int sig) {
         } else if (sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
             tasks[tid].state = TASK_STATE_STOPPED;
             tasks[tid].pending_signals &= ~(1u << sig);
+            rq_remove(tid);
             write_serial_string("[SIG] default ");
             write_serial_hex(sig);
             write_serial_string(": stopped tid=");
@@ -1333,6 +1596,7 @@ int task_signal(int tid, int sig) {
         } else {
             terminate_task(tid, 128 + sig);
         }
+        spin_unlock(&task_lock);
         __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
         return 0;
     }
@@ -1347,7 +1611,9 @@ int task_signal(int tid, int sig) {
             tasks[tid].sig_restart_ticks = tasks[tid].sleep_ticks;
         }
         tasks[tid].state = TASK_STATE_READY;
+        rq_enqueue_wake(tid);
     }
+    spin_unlock(&task_lock);
     __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
     return 0;
 }
@@ -1462,6 +1728,8 @@ int task_deliver_signals(void* frame) {
 // children but never call waitpid() (e.g. the terminal's `run`).
 void task_reap_zombies(void) {
     uint32_t now = get_ticks();
+    __asm__ volatile("cli");
+    spin_lock(&task_lock);
     for (int i = 1; i < MAX_TASKS; i++) {
         if (tasks[i].state != TASK_STATE_ZOMBIE) continue;
         int p = tasks[i].parent;
@@ -1473,6 +1741,8 @@ void task_reap_zombies(void) {
             num_tasks--;
         }
     }
+    spin_unlock(&task_lock);
+    __asm__ volatile("sti");
 }
 
 int get_task_info(int tid, task_info_t* info) {

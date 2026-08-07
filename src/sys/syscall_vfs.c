@@ -92,7 +92,10 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
             int cur_tid = get_current_task();
             extern int task_get_fd(int, int);
             if (task_get_fd(cur_tid, fd) == -1 && (fd == 1 || fd == 2)) {
-                for (int i = 0; i < size; i++) write_serial(buf[i]);
+                // One locked serial write for the whole buffer: byte-by-byte
+                // writes would let other CPUs interleave between the bytes and
+                // garble every log line (Fase 3 SMP).
+                write_serial_buffer(buf, size);
                 regs->eax = (uint32_t)size;
             } else {
                 regs->eax = (uint32_t)do_sys_write(fd, buf, size);

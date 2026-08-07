@@ -38,6 +38,68 @@ void apic_init(void) {
     write_serial_string("\n");
 }
 
+// Read the PIT channel-0 counter (a 16-bit countdown reloading to 1193 at the
+// BSP's 1 kHz rate). The PIT is a global I/O device, so any CPU may read it.
+static uint32_t pit_read(void) {
+    outb(0x43, 0x00);            // latch channel 0
+    uint8_t lo = inb(0x40);
+    uint8_t hi = inb(0x40);
+    return (uint32_t)((hi << 8) | lo);
+}
+
+// Shared LAPIC timer rate (counts per 1 ms), measured ONCE on the BSP before
+// the APs wake (see lapic_timer_calibrate below). All cores share the same
+// bus clock, so one measurement is valid for every LAPIC.
+uint32_t lapic_timer_per_ms = 0;
+
+// Measure this core's LAPIC timer rate against the PIT over a 50 ms window.
+// Must run on the BSP while the APs are still asleep: the PIT is shared
+// hardware, so if three APs calibrate at once they corrupt each other's
+// readings and end up with timers firing at wild rates — a timer storm on
+// the APs that starves the BSP and makes the whole system flaky.
+uint32_t lapic_timer_calibrate(void) {
+    if (smp_lapic_addr == 0) return 0;
+
+    // Masked one-shot with a huge count; we measure how far it counts down in
+    // a 50 ms window of PIT time.
+    lapic_write(LAPIC_LVT_TIMER, 32 | 0x10000);   // vector 32, masked
+    lapic_write(LAPIC_TIMER_DIV, 0xB);            // divide by 1
+    lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
+
+    // Busy-wait ~50 ms of PIT time: the 16-bit counter counts 0..1193 then
+    // wraps, so accumulate each (downward) step, adding a full period on wrap.
+    uint32_t c = pit_read();
+    int32_t acc = 0;
+    while (acc < 59659) {
+        uint32_t c2 = pit_read();
+        if (c2 != c) {
+            if (c2 < c) acc += (int32_t)(c - c2);
+            else        acc += (int32_t)(c + (1194 - c2));   // wrapped
+            c = c2;
+        }
+        __asm__ __volatile__("pause");
+    }
+
+    uint32_t lapic_elapsed = 0xFFFFFFFF - lapic_read(LAPIC_TIMER_CUR);
+    uint32_t per_ms = lapic_elapsed / 50;         // counts per 1 ms
+    if (per_ms == 0 || per_ms > 0x7FFFFF) per_ms = 1000000;  // sanity fallback
+
+    lapic_timer_per_ms = per_ms;
+    return per_ms;
+}
+
+// Program THIS core's local APIC timer at ~1 kHz using the shared calibrated
+// rate. IRQ0 (PIT) is routed to the BSP only, so without this the Application
+// Processors would never receive a timer interrupt — tasks parked on their
+// runqueues would starve forever. Called from ap_main() before interrupts are
+// enabled; the LAPIC timer drives irq_handler -> schedule() on the AP.
+void lapic_timer_init(void) {
+    if (smp_lapic_addr == 0) return;
+    if (lapic_timer_per_ms == 0) lapic_timer_calibrate();  // safety net
+    lapic_write(LAPIC_LVT_TIMER, 32 | (1u << 17)); // periodic, vector 32
+    lapic_write(LAPIC_TIMER_INIT, lapic_timer_per_ms);
+}
+
 void apic_send_eoi(void) {
     if (smp_lapic_addr) {
         lapic_write(LAPIC_EOI, 0);
@@ -112,7 +174,10 @@ void ioapic_init(void) {
     entry_net |= ((uint64_t)smp_bsp_lapic_id) << 56;
     ioapic_set_entry(11, entry_net);
 
-    // Route Timer to GSI dynamically parsed from MADT (smp_pit_gsi)
+    // Route Timer to GSI dynamically parsed from MADT (smp_pit_gsi). The PIT
+    // tick stays BSP-only: Application Processors get their own periodic
+    // tick from the local APIC timer (see lapic_timer_init() in ap_main), so
+    // the per-CPU scheduler runs on every core.
     uint64_t entry_pit = 32 | (0 << 8) | (0 << 11) | (0 << 13) | (0 << 15) | (0 << 16);
     entry_pit |= ((uint64_t)smp_bsp_lapic_id) << 56;
     ioapic_set_entry(smp_pit_gsi, entry_pit);

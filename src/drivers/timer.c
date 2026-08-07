@@ -1,28 +1,33 @@
 #include "../include/timer.h"
 #include "../include/vga.h"
 #include "../include/io.h"
+#include "../include/apic.h"
+#include "../include/serial.h"   // write_serial() (locked — multi-CPU safe)
 
 // volatile: written by the IRQ0 handler, read by wait loops in thread context.
 // Without it the compiler may hoist the load out of a polling loop and spin on
 // a stale value forever. (syscall.c already declared it extern volatile.)
 volatile uint32_t timer_ticks = 0;
 
-// Direct serial write (no function call overhead, no blocking risk)
-static inline void serial_char(char c) {
-    // Quick poll (limited retries to avoid blocking)
-    for (int i = 0; i < 10000; i++) {
-        if (inb(0x3F8 + 5) & 0x20) break;
-    }
-    outb(0x3F8, c);
+// Which CPU am I? IRQ0 is broadcast to every core (see ioapic_init), but only
+// the BSP owns the global tick counter / GUI heartbeat — the APs only need the
+// interrupt to drive schedule().
+static inline int get_cid(void) {
+    extern uint32_t smp_lapic_addr;
+    return smp_lapic_addr ? (apic_get_id() & 15) : 0;
 }
 
 static void timer_handler(registers_t* regs) {
     (void)regs;
+    // BSP only: the wall clock, heartbeat and GUI updates must not run four
+    // times per tick just because IRQ0 is now broadcast to every core.
+    if (get_cid() != 0) return;
     timer_ticks++;
     
-    // Heartbeat: send '.' every 1000 ticks (1 second)
+    // Heartbeat: send '.' every 1000 ticks (1 second). write_serial() takes
+    // the serial lock, so the dot can never split a log line from another CPU.
     if ((timer_ticks % 1000) == 0) {
-        serial_char('.');
+        write_serial('.');
     }
     
     // Drive the 'heartbeat' for UI

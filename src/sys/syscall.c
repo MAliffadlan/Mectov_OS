@@ -768,8 +768,19 @@ static void syscall_handler(registers_t* regs) {
     // SYS_EXIT never returns, and SYS_EXEC replaced the frame with the new
     // program's entry (no old-image signals apply to it).
     if (call_no != SYS_SIGRETURN && call_no != SYS_EXIT && call_no != SYS_EXEC) {
+        // The delivery path can terminate this task (default-action signal),
+        // which mutates the runqueues — it must hold task_lock (Fase 3 SMP).
+        // cli-first: the int 0x80 trap gate leaves IF=1, so taking the lock
+        // without cli would self-deadlock if a timer IRQ fires meanwhile.
+        uint32_t eflags;
+        __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+        extern void task_lock_acquire(void);
+        extern void task_lock_release(void);
+        task_lock_acquire();
         extern int task_deliver_signals(void* frame);
         task_deliver_signals(regs);
+        task_lock_release();
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
     }
 }
 

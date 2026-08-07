@@ -27,6 +27,12 @@ void ap_main(void) {
     // 3. Initialize LAPIC for this core
     apic_init();
     
+    // 3b. Program this core's own LAPIC timer (~1kHz, PIT-calibrated). IRQ0
+    //     is routed to the BSP only, so without this the AP would never tick
+    //     and the per-CPU runqueue would starve (see Fase 3 scheduler).
+    extern void lapic_timer_init(void);
+    lapic_timer_init();
+    
     int cid = apic_get_id() & 15;
     
     write_serial_string("[SMP] CPU ");
@@ -71,6 +77,13 @@ void smp_init(void) {
     }
     
     write_serial_string("[SMP] Starting Application Processors...\n");
+
+    // Calibrate the LAPIC timer rate ONCE here, before any AP wakes. The PIT
+    // is shared hardware: letting every AP measure it at boot corrupts each
+    // reading (timer storms later). APs just program their LAPIC with this
+    // shared value in ap_main() -> lapic_timer_init().
+    extern void lapic_timer_calibrate(void);
+    lapic_timer_calibrate();
     
     uint32_t trampoline_len = _binary_obj_src_sys_smp_trampoline_bin_end - _binary_obj_src_sys_smp_trampoline_bin_start;
     
