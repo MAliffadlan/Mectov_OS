@@ -1789,6 +1789,19 @@ int get_task_info(int tid, task_info_t* info) {
     return 1;
 }
 
+int task_enum(int after, task_info_t* info) {
+    for (int i = after + 1; i < MAX_TASKS; i++) {
+        if (tasks[i].state == TASK_STATE_FREE) continue;
+        info->id = i;
+        info->state = tasks[i].state;
+        info->ring = tasks[i].ring;
+        info->priority = tasks[i].priority;
+        info->sleep_ticks = tasks[i].sleep_ticks;
+        return i;
+    }
+    return -1;
+}
+
 void task_set_launch_arg(int tid, const char* arg) {
     if (tid < 0 || tid >= MAX_TASKS) return;
     int i = 0;

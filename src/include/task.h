@@ -217,5 +217,9 @@ typedef struct {
 int get_task_info(int tid, task_info_t* info);
 void task_set_launch_arg(int tid, const char* arg);
 const char* task_get_launch_arg(int tid);
+// Enumerate live tasks: returns the first live task with id > `after` and
+// fills `info` (like get_task_info), or -1 when no more tasks exist. Start
+// with after = -1 to include the kernel task (tid 0). Used by /proc/tasks.
+int task_enum(int after, task_info_t* info);
 
 #endif

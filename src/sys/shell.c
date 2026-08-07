@@ -21,9 +21,7 @@
 #include "../include/ext2.h"
 #include "../include/serial.h"  // write_serial_string/hex (job diagnostics)
 
-// Single source of truth for the kernel release string shown by the help
-// banner, mfetch and uname, so the three can never drift out of sync.
-#define OS_VERSION "36.8"
+// OS_VERSION lives in utils.h (single source of truth shared with /proc).
 
 // --- Command buffer & state ---
 char cmd_b[CMD_BUF_SIZE]; int b_idx = 0;

@@ -13,8 +13,13 @@
 #include "../include/mem.h"
 #include "../include/ext2.h"
 #include "../include/fd.h"
+#include "../include/task.h"
 
 extern global_fd_t global_fds[MAX_GLOBAL_FDS];
+
+// /proc generation reads these kernel-wide counters.
+extern uint32_t smp_cpu_count;
+extern uint32_t get_uptime_seconds(void);
 
 extern void write_serial_string(const char*);
 extern void write_serial_hex(uint32_t);
@@ -153,6 +158,20 @@ void vfs_init() {
                 write_serial_string("[VFS] saving /dev nodes...\n");
                 vfs_save();
                 write_serial_string("[VFS] saved /dev nodes\n");
+            }
+        }
+        
+        // Virtual /proc filesystem: FS_PROC nodes whose content is generated
+        // on the fly at read time (tasks, meminfo, cpuinfo, uptime, version).
+        if (vfs_get_node("/proc") < 0) {
+            int proc_node = vfs_create_node("proc", FS_DIR, 0);
+            if (proc_node >= 0) {
+                vfs_create_node("tasks", FS_PROC, proc_node);
+                vfs_create_node("meminfo", FS_PROC, proc_node);
+                vfs_create_node("cpuinfo", FS_PROC, proc_node);
+                vfs_create_node("uptime", FS_PROC, proc_node);
+                vfs_create_node("version", FS_PROC, proc_node);
+                write_serial_string("[VFS] created /proc nodes\n");
             }
         }
         
@@ -520,6 +539,17 @@ void vfs_init() {
         vfs_create_node("null", FS_DEV, dev_node);
         vfs_create_node("zero", FS_DEV, dev_node);
         vfs_create_node("random", FS_DEV, dev_node);
+    }
+    
+    // Phase 1b: virtual /proc filesystem (dynamic content on read)
+    int proc_node = vfs_create_node("proc", FS_DIR, 0);
+    if (proc_node >= 0) {
+        vfs_create_node("tasks", FS_PROC, proc_node);
+        vfs_create_node("meminfo", FS_PROC, proc_node);
+        vfs_create_node("cpuinfo", FS_PROC, proc_node);
+        vfs_create_node("uptime", FS_PROC, proc_node);
+        vfs_create_node("version", FS_PROC, proc_node);
+        write_serial_string("[VFS] created /proc nodes\n");
     }
     
     // Phase 2: Ext2 Filesystem on Drive 1
@@ -907,6 +937,11 @@ int vfs_delete_node(const char* path) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
     if (node == 0) return -3; // Cannot delete root
+    if (fs_nodes[node].type == FS_PROC) return -7; // virtual, cannot delete
+    // The /proc mount point itself is virtual too: deleting it would take the
+    // whole tree down until the next boot recreates it.
+    if (fs_nodes[node].type == FS_DIR && fs_nodes[node].parent == 0 &&
+        strcmp(fs_nodes[node].name, "proc") == 0) return -7;
 
     // Refuse to delete while any open fd references the node: its slot would
     // be reused by the next create, and reads/writes on the stale fd would
@@ -1034,6 +1069,116 @@ int vfs_rename(const char* old_path, const char* new_path) {
     return 0;
 }
 
+// ============================================================
+// Virtual /proc filesystem: content generated on the fly at read time.
+// ============================================================
+
+static void proc_itoa(char* out, int val) {
+    char tmp[16];
+    int i = 0;
+    if (val == 0) { out[0] = '0'; out[1] = '\0'; return; }
+    while (val > 0 && i < 15) { tmp[i++] = '0' + (val % 10); val /= 10; }
+    int j = 0;
+    while (i > 0) out[j++] = tmp[--i];
+    out[j] = '\0';
+}
+
+static void proc_add(char* buf, int* len, int cap, const char* s) {
+    while (*s && *len < cap - 1) buf[(*len)++] = *s++;
+}
+
+// Right-align a number into a fixed-width column.
+static void proc_field(char* buf, int* len, int cap, int val, int width) {
+    char num[16];
+    proc_itoa(num, val);
+    int pad = width - (int)strlen(num);
+    for (int i = 0; i < pad; i++) proc_add(buf, len, cap, " ");
+    proc_add(buf, len, cap, num);
+}
+
+// Fixed-width (8 chars, space-padded) so the tasks columns stay aligned.
+static const char* proc_state_str(int s) {
+    switch (s) {
+        case TASK_STATE_RUNNING: return "RUNNING";
+        case TASK_STATE_READY:   return "READY   ";
+        case TASK_STATE_SLEEP:   return "SLEEP   ";
+        case TASK_STATE_BLOCKED: return "BLOCKED ";
+        case TASK_STATE_ZOMBIE:  return "ZOMBIE  ";
+        case TASK_STATE_STOPPED: return "STOPPED ";
+        default: return "UNKNOWN ";
+    }
+}
+
+// Generate the content of a /proc file into buf. Returns the byte count, with
+// a NUL appended when there is room (same contract as vfs_read_file).
+static int vfs_proc_read(const char* name, char* buf, int max_size) {
+    int len = 0;
+
+    if (strcmp(name, "tasks") == 0) {
+        proc_add(buf, &len, max_size, "  PID STATE    RING PRI  PGRP SESS NAME\n");
+        task_info_t info;
+        int tid = -1;
+        while ((tid = task_enum(tid, &info)) >= 0) {
+            proc_field(buf, &len, max_size, info.id, 4);
+            proc_add(buf, &len, max_size, "  ");
+            proc_add(buf, &len, max_size, proc_state_str(info.state));
+            proc_add(buf, &len, max_size, "  ");
+            proc_field(buf, &len, max_size, info.ring, 3);
+            proc_add(buf, &len, max_size, "  ");
+            proc_field(buf, &len, max_size, info.priority, 3);
+            proc_add(buf, &len, max_size, "  ");
+            proc_field(buf, &len, max_size, task_get_pgrp(info.id), 4);
+            proc_add(buf, &len, max_size, "  ");
+            proc_field(buf, &len, max_size, task_get_session(info.id), 4);
+            proc_add(buf, &len, max_size, "  ");
+            const char* nm = task_get_launch_arg(info.id);
+            if (nm[0] == '\0') proc_add(buf, &len, max_size, "kernel");
+            else proc_add(buf, &len, max_size, nm);
+            proc_add(buf, &len, max_size, "\n");
+        }
+        if (len == 0) proc_add(buf, &len, max_size, "  (no tasks)\n");
+    } else if (strcmp(name, "meminfo") == 0) {
+        // Numbers must go through the capped proc_add too: max_size comes
+        // straight from the caller (an app can read() with a small buffer),
+        // so writing proc_itoa directly into buf would overflow it.
+        char num[16];
+        proc_add(buf, &len, max_size, "MemTotal: ");
+        proc_itoa(num, get_total_memory() / 1024);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " KB\nMemFree:  ");
+        proc_itoa(num, get_free_memory() / 1024);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " KB\nMemUsed:  ");
+        proc_itoa(num, get_used_memory() / 1024);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " KB\n");
+    } else if (strcmp(name, "cpuinfo") == 0) {
+        char num[16];
+        proc_add(buf, &len, max_size, "processor\t: 0\n");
+        proc_add(buf, &len, max_size, "vendor_id\t: ");
+        proc_add(buf, &len, max_size, cpu_brand);
+        proc_add(buf, &len, max_size, "\ncores\t\t: ");
+        proc_itoa(num, (int)smp_cpu_count);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, "\n");
+    } else if (strcmp(name, "uptime") == 0) {
+        char num[16];
+        proc_add(buf, &len, max_size, "up ");
+        proc_itoa(num, (int)get_uptime_seconds());
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " seconds\n");
+    } else if (strcmp(name, "version") == 0) {
+        proc_add(buf, &len, max_size, "MectovOS version ");
+        proc_add(buf, &len, max_size, OS_VERSION);
+        proc_add(buf, &len, max_size, " (i686, SMP)\n");
+    } else {
+        proc_add(buf, &len, max_size, "no such /proc file\n");
+    }
+
+    if (len < max_size) buf[len] = '\0';
+    return len;
+}
+
 // Reads up to max_size bytes and returns the byte count. A NUL terminator is
 // appended ONLY when there is room left over — callers such as load_mct_app()
 // pass max_size == the exact file size and need every one of those bytes, so
@@ -1042,6 +1187,10 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
     if (max_size <= 0) return -1;
+
+    if (fs_nodes[node].type == FS_PROC) {
+        return vfs_proc_read(fs_nodes[node].name, buf, max_size);
+    }
 
     if (fs_nodes[node].type == FS_DEV) {
         if (strcmp(fs_nodes[node].name, "zero") == 0) {
@@ -1334,6 +1483,11 @@ void vfs_list_dir(int dir_node, void (*print_fn)(const char*, unsigned char)) {
             print_fn("[DIR]  ", 0x0B);
             print_fn(fs_nodes[i].name, 0x0B);
             print_fn("/\n", 0x0B);
+        } else if (fs_nodes[i].type == FS_PROC) {
+            // Virtual /proc file: content generated on read, no disk size.
+            print_fn("[SYS]  ", 0x0D);
+            print_fn(fs_nodes[i].name, 0x0D);
+            print_fn("\n", 0x0D);
         } else {
             print_fn("[FILE] ", 0x0F);
             print_fn(fs_nodes[i].name, 0x0F);
