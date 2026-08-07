@@ -109,7 +109,24 @@ int do_sys_write(int fd, const char* buf, int size) {
     if (global_fds[gfd].type == FD_TYPE_FILE || global_fds[gfd].type == FD_TYPE_DEV) {
         char path[256];
         if (vfs_get_abs_path(global_fds[gfd].vfs_node, path, 256) < 0) return -1;
-        return vfs_write_file(path, buf, size);
+        // vfs_write_file() always writes from the START of the file, so a
+        // second write(1, ...) from an app would clobber the first. Track an
+        // offset per descriptor and append: read the existing content, splice
+        // the new bytes at the descriptor's offset, write back the whole file.
+        int off = global_fds[gfd].offset;
+        int oldsz = 0;
+        char whole[4096];
+        int r = vfs_read_file(path, whole, 4095);
+        if (r < 0) r = 0;
+        oldsz = r;
+        if (off + size > 4095) size = 4095 - off;
+        if (size <= 0) return 0;
+        for (int i = 0; i < size; i++) whole[off + i] = buf[i];
+        int newsz = (off + size > oldsz) ? off + size : oldsz;
+        whole[newsz] = '\0';
+        int w = vfs_write_file(path, whole, newsz);
+        if (w >= 0) global_fds[gfd].offset = off + size;
+        return (w >= 0) ? size : w;
     } else if (global_fds[gfd].type == FD_TYPE_PIPE_WRITE) {
         int p = global_fds[gfd].pipe_id;
         int written = 0;
@@ -163,6 +180,65 @@ int do_sys_close(int fd) {
     task_set_fd(tid, fd, -1);
     fd_release_global(gfd);
     return 0;
+}
+
+// POSIX dup2(oldfd, newfd) on an arbitrary task's fd table: make `newfd` a
+// copy of `oldfd`, closing `newfd` first if it is already open (and freeing
+// the pipe slot if that was its last reference). `tid` may be the calling
+// task (do_sys_dup2) or a not-yet-running child (task_fork_exec). Returns
+// the new fd number, or -1 on error.
+int do_sys_dup2_tid(int tid, int oldfd, int newfd) {
+    if (tid < 0) return -1;
+    if (oldfd < 0 || oldfd >= MAX_FDS_PER_TASK) return -1;
+    if (newfd < 0 || newfd >= MAX_FDS_PER_TASK) return -1;
+    if (oldfd == newfd) return newfd;
+
+    int ogfd = task_get_fd(tid, oldfd);
+    if (ogfd < 0 || !global_fds[ogfd].in_use) return -1;
+
+    // Close the target slot first (POSIX semantics).
+    int ngfd = task_get_fd(tid, newfd);
+    if (ngfd >= 0 && global_fds[ngfd].in_use) {
+        task_set_fd(tid, newfd, -1);
+        fd_release_global(ngfd);
+    }
+
+    // Point newfd at oldfd's global descriptor and bump its refcount so a
+    // close of the original does not yank the copy away.
+    global_fds[ogfd].ref_count++;
+    task_set_fd(tid, newfd, ogfd);
+    return newfd;
+}
+
+int do_sys_dup2(int oldfd, int newfd) {
+    int tid = get_current_task();
+    if (tid < 0) return -1;
+    return do_sys_dup2_tid(tid, oldfd, newfd);
+}
+
+// POSIX spawn fd wiring for a child that has not run yet: dup `in_fd` onto
+// its fd 0 and `out_fd` onto its fd 1 (each only when >= 0), then drop every
+// OTHER descriptor — including the inherited originals of in_fd/out_fd and
+// fd 2+ — so the exec'd image sees exactly its wired stdin/stdout and nothing
+// else. CRITICAL: fd 0/1 are only kept when they were actually wired; a child
+// that inherits the shell's pipe fds as local fd 0/1 (do_sys_pipe allocates
+// the lowest free slots) must have the unwanted end CLOSED. In a pipeline
+// (`a | b`) each child inherits BOTH pipe ends, and a writer that keeps a
+// stray copy of the read end — or a reader keeping the write end — makes the
+// peer's EOF (closed_write) never fire, hanging the reader forever.
+void task_rewire_fds(int tid, int in_fd, int out_fd) {
+    if (tid < 0) return;
+    if (in_fd >= 0 && in_fd != 0) do_sys_dup2_tid(tid, in_fd, 0);
+    if (out_fd >= 0 && out_fd != 1) do_sys_dup2_tid(tid, out_fd, 1);
+    for (int j = 0; j < MAX_FDS_PER_TASK; j++) {
+        if (j == 0 && in_fd >= 0) continue;    // wired stdin stays
+        if (j == 1 && out_fd >= 0) continue;   // wired stdout stays
+        int gfd = task_get_fd(tid, j);
+        if (gfd >= 0) {
+            task_set_fd(tid, j, -1);
+            if (gfd < MAX_GLOBAL_FDS && global_fds[gfd].in_use) fd_release_global(gfd);
+        }
+    }
 }
 
 // Close every fd a task holds. Called from task_cleanup() (exit/kill) — without

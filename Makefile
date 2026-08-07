@@ -49,9 +49,12 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/forkdemo_mct.o \
        $(OBJ_DIR)/execdemo_mct.o \
        $(OBJ_DIR)/execchild_mct.o \
+       $(OBJ_DIR)/tcpserver_mct.o \
        $(OBJ_DIR)/shmdemo_mct.o \
        $(OBJ_DIR)/mmapdemo_mct.o \
        $(OBJ_DIR)/looper_mct.o \
+       $(OBJ_DIR)/pipegen_mct.o \
+       $(OBJ_DIR)/piperead_mct.o \
        $(OBJ_DIR)/libc_mct.o \
        $(OBJ_DIR)/calc_mct.o \
        $(OBJ_DIR)/volume_mct.o \
@@ -159,6 +162,15 @@ mmapdemo.mct: apps/mmapdemo.c $(MCT_LIBC_H)
 looper.mct: apps/looper.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/looper.c looper.mct
 
+pipegen.mct: apps/pipegen.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/pipegen.c pipegen.mct
+
+piperead.mct: apps/piperead.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/piperead.c piperead.mct
+
+tcpserver.mct: apps/tcpserver.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/tcpserver.c tcpserver.mct
+
 $(OBJ_DIR)/clock_mct.o: clock.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
@@ -210,6 +222,9 @@ $(OBJ_DIR)/execdemo_mct.o: execdemo.mct | $(OBJ_DIR)
 $(OBJ_DIR)/execchild_mct.o: execchild.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 execchild.mct $(OBJ_DIR)/execchild_mct.o
 
+$(OBJ_DIR)/tcpserver_mct.o: tcpserver.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 tcpserver.mct $(OBJ_DIR)/tcpserver_mct.o
+
 $(OBJ_DIR)/shmdemo_mct.o: shmdemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 shmdemo.mct $(OBJ_DIR)/shmdemo_mct.o
 
@@ -218,6 +233,12 @@ $(OBJ_DIR)/mmapdemo_mct.o: mmapdemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/looper_mct.o: looper.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 looper.mct $(OBJ_DIR)/looper_mct.o
+
+$(OBJ_DIR)/pipegen_mct.o: pipegen.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 pipegen.mct $(OBJ_DIR)/pipegen_mct.o
+
+$(OBJ_DIR)/piperead_mct.o: piperead.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 piperead.mct $(OBJ_DIR)/piperead_mct.o
 
 $(OBJ_DIR)/music_wav.o: apps/music.wav | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 apps/music.wav $(OBJ_DIR)/music_wav.o

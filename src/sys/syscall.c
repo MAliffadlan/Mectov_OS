@@ -330,6 +330,8 @@ static void syscall_handler(registers_t* regs) {
         case SYS_TCP_CONNECT:
         case SYS_TCP_SEND:
         case SYS_TCP_RECV:
+        case SYS_TCP_CLOSE:
+        case SYS_TCP_LISTEN:
         case SYS_NET_STATUS:
         case SYS_UDP_BIND:
         case SYS_UDP_SEND:
@@ -561,6 +563,12 @@ static void syscall_handler(registers_t* regs) {
         case SYS_MUNMAP: {
             extern uint32_t task_munmap(uint32_t addr);
             regs->eax = task_munmap((uint32_t)regs->ebx);
+            break;
+        }
+        // ----- SYS_DUP2 (84): duplicate a file descriptor -----
+        case SYS_DUP2: {
+            extern int do_sys_dup2(int oldfd, int newfd);
+            regs->eax = (uint32_t)do_sys_dup2((int)regs->ebx, (int)regs->ecx);
             break;
         }
 

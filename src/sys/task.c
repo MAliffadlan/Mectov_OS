@@ -508,7 +508,22 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             tasks[i].shm_bits = 0;
             for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[i].mmap_regions[j].base = 0;
             for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
+            // Inherit the caller's fd table (POSIX spawn semantics). The shell's
+            // pipeline spawns a child that dup2()s a pipe/file onto fd 0/1 and
+            // then loads an app: without this copy the new task would have an
+            // empty fd table and the pipe/file would never be used.
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
+            if (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS &&
+                tasks[current_task[cid]].state != TASK_STATE_FREE) {
+                extern global_fd_t global_fds[];
+                for (int j = 0; j < 16; j++) {
+                    int gfd = tasks[current_task[cid]].fd_table[j];
+                    if (gfd >= 0 && gfd < MAX_GLOBAL_FDS && global_fds[gfd].in_use) {
+                        tasks[i].fd_table[j] = gfd;
+                        global_fds[gfd].ref_count++;
+                    }
+                }
+            }
             
             uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
 
@@ -923,6 +938,126 @@ int task_fork_kernel(void (*entry)(void), const char* child_arg) {
 }
 
 // ============================================================
+// fork + exec in one step (pipeline / redirection child)
+// ============================================================
+
+int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
+    int cid = get_cid();
+    if (current_task[cid] <= 0) return -1;   // kernel task cannot spawn
+
+    // Build the child's image FIRST (kernel-side copies, so safe regardless
+    // of which address space is active).
+    extern int loader_build_image(const char* filename, const char* arg,
+                                  loader_image_t* img);
+    loader_image_t img;
+    int rc = loader_build_image(path, arg, &img);
+    if (rc < 0) return rc;
+    if (img.page_dir == 0) return -6;
+
+    __asm__ volatile("cli");
+    spin_lock(&task_lock);
+
+    int child = -1;
+    for (int i = 1; i < MAX_TASKS; i++) {
+        if (tasks[i].state != TASK_STATE_FREE) continue;
+        child = i;
+        break;
+    }
+    if (child < 0) {
+        spin_unlock(&task_lock);
+        __asm__ volatile("sti");
+        extern void vmm_free_address_space(uint32_t);
+        vmm_free_address_space(img.page_dir);
+        return -2;
+    }
+
+    // Map the child's Ring 3 stack in the NEW address space (same slot
+    // discipline as thread_create so stacks never collide).
+    uint32_t stack_top = USER_STACK_TOP - ((uint32_t)(child + 1) * USER_STACK_SIZE);
+    uint32_t user_esp = vmm_setup_user_stack(img.page_dir, stack_top);
+    if (user_esp == 0) {
+        spin_unlock(&task_lock);
+        __asm__ volatile("sti");
+        vmm_free_address_space(img.page_dir);
+        return -6;
+    }
+
+    // Fill the task slot. The child is a brand-new process, NOT a copy of the
+    // shell: fresh stack, fresh kernel frame, exec'd image.
+    tasks[child].ring = 3;
+    tasks[child].priority = PRIORITY_INTERACTIVE;
+    tasks[child].page_dir = img.page_dir;
+    tasks[child].sleep_ticks = 0;
+    tasks[child].wait_ticks = 0;
+    tasks[child].parent = current_task[cid];   // shell can waitpid it
+    tasks[child].exit_code = 0;
+    tasks[child].waiting = 0;
+    tasks[child].pending_signals = 0;
+    tasks[child].sig_frame_esp = 0;
+    tasks[child].zombie_since = 0;
+    tasks[child].shm_bits = 0;
+    tasks[child].heap_ptr = img.heap_start;
+    tasks[child].current_dir = tasks[current_task[cid]].current_dir;
+    for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[child].mmap_regions[j].base = 0;
+    for (int j = 0; j < SIG_MAX; j++) tasks[child].signal_handlers[j] = NULL;
+
+    // Inherit the caller's fd table, then rewire fd 0/1 for the pipe/file and
+    // drop every other descriptor (POSIX spawn: clean stdin/stdout/stderr).
+    extern global_fd_t global_fds[];
+    for (int j = 0; j < 16; j++) tasks[child].fd_table[j] = -1;
+    for (int j = 0; j < 16; j++) {
+        int gfd = tasks[current_task[cid]].fd_table[j];
+        if (gfd >= 0 && gfd < MAX_GLOBAL_FDS && global_fds[gfd].in_use) {
+            tasks[child].fd_table[j] = gfd;
+            global_fds[gfd].ref_count++;
+        }
+    }
+    extern void task_rewire_fds(int tid, int in_fd, int out_fd);
+    task_rewire_fds(child, in_fd, out_fd);
+
+    if (arg && arg[0]) {
+        int n = 0;
+        for (; arg[n] && n < 127; n++) tasks[child].launch_arg[n] = arg[n];
+        tasks[child].launch_arg[n] = '\0';
+    } else {
+        int n = 0;
+        for (; path[n] && n < 127; n++) tasks[child].launch_arg[n] = path[n];
+        tasks[child].launch_arg[n] = '\0';
+    }
+
+    // Fresh Ring 3 interrupt frame at the top of the child's kernel stack.
+    uint32_t* stack = (uint32_t*)&tasks[child].kernel_stack[KERNEL_STACK_SIZE];
+    *(--stack) = 0x23;       // SS
+    *(--stack) = user_esp;   // ESP
+    *(--stack) = 0x202;      // EFLAGS
+    *(--stack) = 0x1B;       // CS
+    *(--stack) = (uint32_t)(uintptr_t)img.entry; // EIP
+    *(--stack) = 0;          // err_code
+    *(--stack) = 0;          // int_no
+    *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
+    *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
+    *(--stack) = 0x23;       // DS
+    tasks[child].esp = (uint32_t)stack;
+
+    num_tasks++;
+    tasks[child].state = TASK_STATE_READY;
+
+    spin_unlock(&task_lock);
+    __asm__ volatile("sti");
+
+    write_serial_string("[TASK] fork_exec: child tid=");
+    write_serial_hex(child);
+    write_serial_string(" path=");
+    write_serial_string(path);
+    write_serial_string(" in=");
+    write_serial_hex(in_fd);
+    write_serial_string(" out=");
+    write_serial_hex(out_fd);
+    write_serial_string("\n");
+    return child;
+}
+
+// ============================================================
 // waitpid()
 // ============================================================
 
@@ -1002,6 +1137,23 @@ int task_signal(int tid, int sig) {
         __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
         return 0;
     }
+    if (sig == SIGSTOP) {
+        // Uncatchable, like SIGKILL: suspend the task until SIGCONT. The
+        // scheduler only picks READY tasks, so a STOPPED task never runs.
+        tasks[tid].state = TASK_STATE_STOPPED;
+        tasks[tid].pending_signals &= ~((1u << SIGSTOP) | (1u << SIGTSTP));
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return 0;
+    }
+    if (sig == SIGCONT) {
+        // Resume a suspended task. Also discards any pending stop requests.
+        tasks[tid].pending_signals &= ~((1u << SIGSTOP) | (1u << SIGTSTP));
+        if (tasks[tid].state == TASK_STATE_STOPPED) {
+            tasks[tid].state = TASK_STATE_READY;
+        }
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return 0;
+    }
 
     void* h = tasks[tid].signal_handlers[sig];
     if (h == SIG_IGN_SENTINEL) {
@@ -1009,8 +1161,17 @@ int task_signal(int tid, int sig) {
         return 0;   // ignored
     }
     if (h == NULL) {
-        // Default action: SIGCHLD is ignored; everything else terminates.
-        if (sig != SIGCHLD) terminate_task(tid, 128 + sig);
+        // Default action: SIGCHLD is ignored; SIGTSTP suspends the task (it
+        // is the catchable variant of SIGSTOP, delivered by Ctrl+Z);
+        // everything else terminates.
+        if (sig == SIGCHLD) {
+            // ignored
+        } else if (sig == SIGTSTP) {
+            tasks[tid].state = TASK_STATE_STOPPED;
+            tasks[tid].pending_signals &= ~(1u << SIGTSTP);
+        } else {
+            terminate_task(tid, 128 + sig);
+        }
         __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
         return 0;
     }

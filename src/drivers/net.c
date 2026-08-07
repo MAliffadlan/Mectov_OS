@@ -418,6 +418,40 @@ int net_tcp_connect(uint8_t* target_ip, uint16_t port) {
     return id;
 }
 
+// Passive open: reserve a slot and wait for one inbound connection on `port`.
+// The slot starts in TCP_LISTEN; net_handle_tcp() walks it to SYN_RCVD on a
+// matching SYN and to ESTABLISHED on the final ACK. Server apps then use
+// net_tcp_recv/send/close identically to a client connection.
+int net_tcp_listen(uint16_t port) {
+    int id = -1;
+    for (int i = 0; i < TCP_MAX_CONNS; i++) {
+        if (!tcp_conns[i].in_use) { id = i; break; }
+    }
+    if (id < 0) {
+        write_serial_string("[TCP] listen: no free slot\n");
+        return -1;
+    }
+
+    tcp_conn_t* c = &tcp_conns[id];
+    memset(c, 0, sizeof(tcp_conn_t));
+    c->in_use = 1;
+    c->state = TCP_LISTEN;
+    c->local_port = port;
+    c->seq = get_ticks() * 54321 + port; // ISN for our SYN-ACK
+    c->rx_len = 0;
+    c->eof = 0;
+    c->unacked_len = 0;
+    c->retrans_count = 0;
+    tcp_latest = id;
+
+    write_serial_string("[TCP] listening on port=");
+    write_serial_hex(port);
+    write_serial_string(" id=");
+    write_serial_hex(id);
+    write_serial_string("\n");
+    return id;
+}
+
 // Send app data over an established connection. Tracks the segment for
 // retransmission until the peer ACKs it.
 int net_tcp_send(int id, uint8_t* payload, uint32_t len) {
@@ -661,7 +695,34 @@ static void net_handle_tcp(ip_header_t* ip, uint8_t* tcp_data, uint32_t tcp_len)
         }
     }
     if (!c) {
-        write_serial_string("[TCP] segment for unknown connection, dropped\n");
+        // No established connection matched. This is where a server accepts:
+        // a SYN aimed at a TCP_LISTEN slot starts the passive handshake.
+        if (tcp->flags & TCP_SYN) {
+            for (int i = 0; i < TCP_MAX_CONNS; i++) {
+                if (tcp_conns[i].in_use && tcp_conns[i].state == TCP_LISTEN &&
+                    tcp_conns[i].local_port == dst_port) {
+                    c = &tcp_conns[i];
+                    write_serial_string("[TCP] SYN on listening port ");
+                    write_serial_hex(dst_port);
+                    write_serial_string(" -> SYN_RCVD (conn ");
+                    write_serial_hex(i);
+                    write_serial_string(")\n");
+                    break;
+                }
+            }
+        }
+        if (!c) {
+            write_serial_string("[TCP] segment for unknown connection, dropped\n");
+            return;
+        }
+        // Fill in the peer from this SYN.
+        memcpy(c->remote_ip, ip->src_ip, 4);
+        c->remote_port = src_port;
+        c->ack = ntohl(tcp->seq) + 1;   // ACK the SYN
+        c->state = TCP_SYN_RCVD;
+        c->conn_start_tick = get_ticks();
+        net_send_tcp_segment(c, TCP_SYN | TCP_ACK, 0, 0);
+        c->seq++;   // SYN consumes one sequence number
         return;
     }
 
@@ -699,6 +760,21 @@ static void net_handle_tcp(ip_header_t* ip, uint8_t* tcp_data, uint32_t tcp_len)
             c->retrans_count = 0;
             write_serial_string("[TCP] connection established\n");
             net_send_tcp_segment(c, TCP_ACK, 0, 0);
+        }
+        return;
+    }
+
+    // Passive open: the peer's final ACK of our SYN-ACK completes the
+    // handshake. A duplicate SYN just re-sends the SYN-ACK (idempotent).
+    if (c->state == TCP_SYN_RCVD) {
+        if ((tcp->flags & TCP_ACK) && !(tcp->flags & TCP_SYN) &&
+            ntohl(tcp->ack) == c->seq) {
+            c->state = TCP_ESTABLISHED;
+            c->retrans_count = 0;
+            write_serial_string("[TCP] server: connection established (accepted)\n");
+        } else if (tcp->flags & TCP_SYN) {
+            net_send_tcp_segment(c, TCP_SYN | TCP_ACK, 0, 0);
+            c->seq = ntohl(tcp->seq) + 1;   // re-ACK the retransmitted SYN
         }
         return;
     }

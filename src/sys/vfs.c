@@ -273,6 +273,17 @@ void vfs_init() {
         extern uint8_t _binary_looper_mct_start[];
         extern uint8_t _binary_looper_mct_end[];
         changed += vfs_update_file_if_needed("apps/looper.mct", (const char*)_binary_looper_mct_start, _binary_looper_mct_end - _binary_looper_mct_start);
+        extern uint8_t _binary_tcpserver_mct_start[];
+        extern uint8_t _binary_tcpserver_mct_end[];
+        changed += vfs_update_file_if_needed("apps/tcpserver.mct", (const char*)_binary_tcpserver_mct_start, _binary_tcpserver_mct_end - _binary_tcpserver_mct_start);
+
+        // Pipeline demo apps
+        extern uint8_t _binary_pipegen_mct_start[];
+        extern uint8_t _binary_pipegen_mct_end[];
+        changed += vfs_update_file_if_needed("apps/pipegen.mct", (const char*)_binary_pipegen_mct_start, _binary_pipegen_mct_end - _binary_pipegen_mct_start);
+        extern uint8_t _binary_piperead_mct_start[];
+        extern uint8_t _binary_piperead_mct_end[];
+        changed += vfs_update_file_if_needed("apps/piperead.mct", (const char*)_binary_piperead_mct_start, _binary_piperead_mct_end - _binary_piperead_mct_start);
 
         // ELF demo app (real ELF32 binary, not MCT)
         extern uint8_t _binary_elfdemo_elf_start[];
@@ -381,6 +392,20 @@ void vfs_init() {
     extern uint8_t _binary_looper_mct_end[];
     vfs_create_file("apps/looper.mct");
     vfs_write_file("apps/looper.mct", (const char*)_binary_looper_mct_start, _binary_looper_mct_end - _binary_looper_mct_start);
+    extern uint8_t _binary_tcpserver_mct_start[];
+    extern uint8_t _binary_tcpserver_mct_end[];
+    vfs_create_file("apps/tcpserver.mct");
+    vfs_write_file("apps/tcpserver.mct", (const char*)_binary_tcpserver_mct_start, _binary_tcpserver_mct_end - _binary_tcpserver_mct_start);
+
+    // Pipeline demo apps
+    extern uint8_t _binary_pipegen_mct_start[];
+    extern uint8_t _binary_pipegen_mct_end[];
+    vfs_create_file("apps/pipegen.mct");
+    vfs_write_file("apps/pipegen.mct", (const char*)_binary_pipegen_mct_start, _binary_pipegen_mct_end - _binary_pipegen_mct_start);
+    extern uint8_t _binary_piperead_mct_start[];
+    extern uint8_t _binary_piperead_mct_end[];
+    vfs_create_file("apps/piperead.mct");
+    vfs_write_file("apps/piperead.mct", (const char*)_binary_piperead_mct_start, _binary_piperead_mct_end - _binary_piperead_mct_start);
 
     // Inject hello.mct
     vfs_create_file("apps/hello.mct");

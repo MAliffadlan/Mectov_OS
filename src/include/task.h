@@ -15,8 +15,10 @@
 #define TASK_STATE_SLEEP   3
 #define TASK_STATE_BLOCKED 4
 #define TASK_STATE_ZOMBIE  5   // exited, waiting for parent to waitpid()
+#define TASK_STATE_STOPPED 6   // suspended by SIGSTOP/SIGTSTP, not scheduled
 
-// Signal numbers (POSIX subset). SIGKILL cannot be caught or ignored.
+// Signal numbers (POSIX subset). SIGKILL and SIGSTOP cannot be caught or
+// ignored; SIGCONT resumes a stopped task.
 #define SIGINT   2
 #define SIGKILL  9
 #define SIGUSR1  10
@@ -24,6 +26,9 @@
 #define SIGUSR2  12
 #define SIGTERM  15
 #define SIGCHLD  17
+#define SIGCONT  18
+#define SIGSTOP  19
+#define SIGTSTP  20
 #define SIG_MAX  32
 
 // mmap() regions per task (demand paged): the region is reserved in VA space
@@ -78,6 +83,13 @@ int task_exec(const char* path, const char* arg, void* frame);
 // child_arg (optional) is written into the child's launch_arg BEFORE it can
 // run, so the child can read its command from there.
 int task_fork_kernel(void (*entry)(void), const char* child_arg);
+// Fork the current task AND exec a new image in the child in one step: the
+// child gets a FRESH address space built from `path` (no COW copy of the
+// parent), its fd table is rewired so fd 0 reads from `in_fd` and fd 1 writes
+// to `out_fd` (each only when >= 0), and its parent is set to the caller so
+// the shell can waitpid() it. `path`/`arg` must be kernel-side copies.
+// Returns the child tid (parent side), or a negative error.
+int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg);
 // Wait for a child. pid > 0 waits for that child, pid <= 0 any child.
 // options bit 0 (WNOHANG) returns 0 instead of blocking. Returns the child
 // tid on success, -1 if there are no children (ECHILD).

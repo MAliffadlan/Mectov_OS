@@ -390,6 +390,32 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                             write_serial_string(" tasks)\n");
                         }
                         needs_redraw = 1;
+                    } else if (keyboard_ctrl_held && sc == 0x2C) {
+                        // Ctrl+Z suspends the terminal's foreground app
+                        // (SIGTSTP to the whole job tree). Unlike Ctrl+C the
+                        // job survives: it is registered as a stopped job so
+                        // `jobs` lists it and `bg`/`fg` can resume it. The
+                        // scancode is 0x2C for 'Z'; the key is consumed here
+                        // so it never reaches the focused window.
+                        extern int term_app_running;
+                        extern int term_app_task_id;
+                        extern int task_signal_group(int root_tid, int sig);
+                        extern int shell_register_stopped_job(int tid);
+                        if (term_app_running && term_app_task_id > 0) {
+                            int fg_tid = term_app_task_id;
+                            int n = task_signal_group(fg_tid, SIGTSTP);
+                            write_serial_string("[JOBS] Ctrl+Z -> SIGTSTP to foreground TID ");
+                            write_serial_hex(fg_tid);
+                            write_serial_string(" (");
+                            write_serial_hex(n);
+                            write_serial_string(" tasks)\n");
+                            // The app is suspended, not dead: hand control back
+                            // to the terminal so the user can type jobs/bg/fg.
+                            term_app_running = 0;
+                            term_app_task_id = -1;
+                            shell_register_stopped_job(fg_tid);
+                        }
+                        needs_redraw = 1;
                     } else if (sc == 0x0F && keyboard_alt_held) {
                         wm_alt_tab_start();
                         needs_redraw = 1;

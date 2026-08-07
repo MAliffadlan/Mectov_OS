@@ -124,6 +124,13 @@ uint32_t handle_syscall_net(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_TCP_LISTEN (85): passive open (server) -----
+        case SYS_TCP_LISTEN: {
+            uint16_t port = (uint16_t)regs->ebx;
+            regs->eax = (uint32_t)net_tcp_listen(port);
+            break;
+        }
+
         // ----- SYS_UDP_BIND (67) -----
         case SYS_UDP_BIND: {
             uint16_t port = (uint16_t)regs->ebx;

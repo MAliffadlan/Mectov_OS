@@ -76,7 +76,9 @@ enum {
     TCP_FIN_WAIT_1,
     TCP_FIN_WAIT_2,
     TCP_CLOSE_WAIT,
-    TCP_LAST_ACK
+    TCP_LAST_ACK,
+    TCP_LISTEN,   // passive open: waiting for a SYN (server side)
+    TCP_SYN_RCVD  // SYN received, SYN-ACK sent, waiting for the final ACK
 };
 
 #define TCP_MAX_CONNS 8
@@ -104,6 +106,11 @@ typedef struct {
 
 // Returns the connection id (0..TCP_MAX_CONNS-1) or -1 if no free slot.
 int  net_tcp_connect(uint8_t* target_ip, uint16_t port);
+// Passive open: listen for one inbound connection on `port`. The slot
+// transitions LISTEN -> SYN_RCVD (on SYN) -> ESTABLISHED (on final ACK);
+// net_tcp_recv/send then work exactly like a client connection. Returns the
+// connection id or -1. Only one pending listener per slot (8 slots total).
+int  net_tcp_listen(uint16_t port);
 int  net_tcp_send(int id, uint8_t* payload, uint32_t len);
 // Returns bytes copied, 0 = nothing new, -1 = connection closed/EOF, -2 = bad id.
 int  net_tcp_recv(int id, uint8_t* out, uint32_t max_len);

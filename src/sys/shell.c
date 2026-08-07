@@ -188,6 +188,7 @@ void expand_alias(char* out, const char* in, int max_len) {
 typedef struct {
     int tid;
     int done;
+    int stopped;      // suspended by SIGTSTP (Ctrl+Z), waiting for bg/fg
     char cmd[48];
 } shell_job_t;
 static shell_job_t jobs[MAX_JOBS];
@@ -204,6 +205,7 @@ static int register_job(int tid, const char* cmd) {
     if (slot < 0) return -1;
     jobs[slot].tid = tid;
     jobs[slot].done = 0;
+    jobs[slot].stopped = 0;
     int n = 0;
     for (; cmd[n] && n < 47; n++) jobs[slot].cmd[n] = cmd[n];
     jobs[slot].cmd[n] = '\0';
@@ -222,8 +224,38 @@ static int register_job(int tid, const char* cmd) {
 
 static void refresh_jobs(void) {
     for (int i = 0; i < MAX_JOBS; i++) {
-        if (jobs[i].tid > 0 && !task_is_alive(jobs[i].tid)) jobs[i].done = 1;
+        if (jobs[i].tid <= 0) continue;
+        extern int task_get_state(int tid);
+        if (!task_is_alive(jobs[i].tid)) {
+            jobs[i].done = 1;
+            jobs[i].stopped = 0;
+        } else if (task_get_state(jobs[i].tid) == TASK_STATE_STOPPED) {
+            jobs[i].stopped = 1;
+            jobs[i].done = 0;
+        } else {
+            jobs[i].stopped = 0;
+        }
     }
+}
+
+// Public: register the foreground app that Ctrl+Z just suspended, so `jobs`
+// lists it and `bg`/`fg` can resume it. Called from kernel.c.
+int shell_register_stopped_job(int tid) {
+    if (tid <= 0) return -1;
+    int n = register_job(tid, "foreground");
+    if (n > 0) {
+        for (int i = 0; i < MAX_JOBS; i++) {
+            if (jobs[i].tid == tid) { jobs[i].stopped = 1; jobs[i].done = 0; break; }
+        }
+        print("[", 0x0E); p_int(n, 0x0E); print("] Stopped", 0x0C);
+        print(" pid=", 0x07); p_int(tid, 0x07); print("  (Ctrl+Z)\n", 0x07);
+        write_serial_string("[JOBS] stopped job ");
+        write_serial_hex(n);
+        write_serial_string(" tid=");
+        write_serial_hex(tid);
+        write_serial_string("\n");
+    }
+    return n;
 }
 
 static void print_jobs(void) {
@@ -233,7 +265,9 @@ static void print_jobs(void) {
         if (jobs[i].tid <= 0) continue;
         num++;
         print("[", 0x0E); p_int(num, 0x0E); print("] ", 0x0E);
-        print(jobs[i].done ? "Done    " : "Running ", jobs[i].done ? 0x0A : 0x0B);
+        if (jobs[i].stopped)      print("Stopped ", 0x0C);
+        else if (jobs[i].done)    print("Done    ", 0x0A);
+        else                      print("Running ", 0x0B);
         print("pid=", 0x07); p_int(jobs[i].tid, 0x07); print("  ", 0x07);
         print(jobs[i].cmd, 0x0F);
         print("\n", 0x0F);
@@ -794,6 +828,19 @@ static void run_cmd_internal() {
             } else {
                 buf[sz] = '\0';
                 print(buf, 0x0F);
+                // Serial mirror so automated tests can verify file contents
+                // (terminal output goes over IPC, not serial).
+                extern void write_serial_string(const char*);
+                extern void write_serial_hex(uint32_t);
+                write_serial_string("[SH] cat ");
+                write_serial_hex(sz);
+                write_serial_string(" bytes: ");
+                for (int ci = 0; ci < sz && ci < 120; ci++) {
+                    char cc = buf[ci];
+                    if (cc == '\n') write_serial_string("\\n");
+                    else write_serial(cc);
+                }
+                write_serial_string("\n");
                 print("\n", 0x0F);
             }
         }
@@ -1555,7 +1602,16 @@ static void run_cmd_internal() {
                 print("fg: no such job\n", 0x0C);
             } else {
                 extern int task_waitpid(int pid, int* status, int options);
+                extern int task_signal(int tid, int sig);
+                extern int task_get_state(int tid);
                 int st = -1;
+                // Resume a Ctrl+Z-suspended job before waiting on it.
+                if (task_get_state(t) == TASK_STATE_STOPPED) {
+                    task_signal(t, SIGCONT);
+                    write_serial_string("[JOBS] fg SIGCONT tid=");
+                    write_serial_hex(t);
+                    write_serial_string("\n");
+                }
                 int r = task_waitpid(t, &st, 0);
                 if (r >= 0) {
                     print("[", 0x0E); p_int(num, 0x0E); print("] Done", 0x0A);
@@ -1569,16 +1625,31 @@ static void run_cmd_internal() {
             }
         }
     }
-    // --- BG: resume a done job (no-op in this model; jobs run on their own) ---
+    // --- BG: resume a stopped (Ctrl+Z) job in the background ---
     else if (strncmp(cmd_b, "bg", 2) == 0 &&
              (cmd_b[2] == '\0' || cmd_b[2] == ' ')) {
         int num = (cmd_b[2] == ' ') ? atoi(cmd_b + 3) : -1;
         if (num <= 0) {
             print("Usage: bg [job_number]\n", 0x0E);
-        } else if (find_job_tid(num) < 0) {
-            print("bg: no such job\n", 0x0C);
         } else {
-            print("bg: job ", 0x0A); p_int(num, 0x0A); print(" continues in background\n", 0x0A);
+            int t = find_job_tid(num);
+            if (t < 0) {
+                print("bg: no such job\n", 0x0C);
+            } else {
+                extern int task_signal(int tid, int sig);
+                extern int task_get_state(int tid);
+                if (task_get_state(t) == TASK_STATE_STOPPED) {
+                    task_signal(t, SIGCONT);
+                    write_serial_string("[JOBS] bg SIGCONT tid=");
+                    write_serial_hex(t);
+                    write_serial_string("\n");
+                    print("bg: job ", 0x0A); p_int(num, 0x0A);
+                    print(" resumed in background\n", 0x0A);
+                } else {
+                    print("bg: job ", 0x0A); p_int(num, 0x0A);
+                    print(" is not stopped\n", 0x0C);
+                }
+            }
         }
     }
     // --- KILL ---
@@ -1588,9 +1659,13 @@ static void run_cmd_internal() {
         if (arg[0] == '%') {
             // Job syntax: kill %n
             int num = atoi(arg + 1);
+            write_serial_string("[JOBS] kill % arg='");
+            write_serial_string(arg);
+            write_serial_string("'\n");
             int t = find_job_tid(num);
             if (t < 0) {
                 print("kill: no such job\n", 0x0C);
+                write_serial_string("[JOBS] kill no such job\n");
             } else {
                 task_kill(t);
                 print("Job ", 0x0A); p_int(num, 0x0A); print(" (pid ", 0x0A);
@@ -1891,6 +1966,79 @@ void ex_cmd() {
                 return;
             }
 
+            // ---- REAL redirection for external apps: `run app > file` ----
+            // The in-process capture below only works for builtins. An
+            // external app is its own task writing via fds, so spawn a child
+            // with its fd 1 (or fd 0) wired to the opened file via
+            // task_fork_exec, then wait for it like fg.
+            {
+                int is_run = (strncmp(redir_cmd, "run ", 4) == 0 ||
+                              strncmp(redir_cmd, "jalankan ", 9) == 0);
+                if (is_run) {
+                    extern int do_sys_open(const char* path, int mode);
+                    extern int do_sys_close(int fd);
+                    extern int task_fork_exec(int in_fd, int out_fd,
+                                              const char* path, const char* arg);
+                    extern int task_waitpid(int pid, int* status, int options);
+
+                    // Parse app path + arg from "run /apps/x.mct arg"
+                    const char* ap = (strncmp(redir_cmd, "run ", 4) == 0)
+                                        ? redir_cmd + 4 : redir_cmd + 9;
+                    char apath[128], aarg[64];
+                    char acopy[192];
+                    strncpy(acopy, ap, 191); acopy[191] = '\0';
+                    char* sp = acopy; while (*sp == ' ') sp++;
+                    int pi = 0;
+                    while (sp[pi] && sp[pi] != ' ' && pi < 127) { apath[pi] = sp[pi]; pi++; }
+                    apath[pi] = '\0';
+                    int ai = 0; while (sp[pi] == ' ') pi++;
+                    while (sp[pi] && ai < 63) { aarg[ai++] = sp[pi++]; }
+                    aarg[ai] = '\0';
+
+                    if (apath[0]) {
+                        int in_fd = -1, out_fd = -1;
+                        if (redir_gt >= 0) {
+                            // Output redirection: ensure the file exists, open
+                            // it, wire it as the child's stdout.
+                            extern int vfs_get_node(const char* path);
+                            extern int vfs_create_file(const char* path);
+                            if (vfs_get_node(redir_file) < 0) vfs_create_file(redir_file);
+                            out_fd = do_sys_open(redir_file, 0);
+                        } else if (redir_lt >= 0) {
+                            in_fd = do_sys_open(redir_file, 0);
+                        }
+
+                        if ((redir_gt >= 0 && out_fd >= 0) ||
+                            (redir_lt >= 0 && in_fd >= 0)) {
+                            extern void write_serial_string(const char*);
+                            write_serial_string("[JOBS] fork_exec redir ");
+                            write_serial_string(apath);
+                            write_serial_string(" in=");
+                            write_serial_hex(in_fd);
+                            write_serial_string(" out=");
+                            write_serial_hex(out_fd);
+                            write_serial_string("\n");
+                            int child = task_fork_exec(in_fd, out_fd, apath, aarg);
+                            // Parent closes its copies of the file fds.
+                            if (in_fd >= 0) do_sys_close(in_fd);
+                            if (out_fd >= 0) do_sys_close(out_fd);
+                            if (child > 0) {
+                                int st = -1;
+                                task_waitpid(child, &st, 0);
+                                print("app ", 0x0A); print(apath, 0x0A);
+                                print(" finished (redirected)\n", 0x0A);
+                                write_serial_string("[JOBS] redir app done\n");
+                                b_idx = 0;
+                                return;
+                            }
+                            print("sh: could not spawn app for redirection\n", 0x0C);
+                            b_idx = 0;
+                            return;
+                        }
+                    }
+                }
+            }
+
             // ---- stdin redirection: load the file into the stdin buffer ----
             if (redir_lt >= 0) {
                 extern char shell_stdin_buf[];
@@ -1996,6 +2144,105 @@ void ex_cmd() {
     
     if (pipe_idx >= 0) {
         char cmd1[256];
+
+        // ---- REAL pipeline for external apps: `run A | run B` ----
+        // The in-process capture below only works for shell builtins (print()
+        // goes through pipe_buffer). An external app is its own task writing
+        // via fds, so a real pipe + fork/exec is required: create a kernel
+        // pipe, spawn one child per side with its fd 1 / fd 0 wired to the
+        // pipe ends (task_fork_exec), then wait for both.
+        {
+            char side[256];
+            int slen = pipe_idx;
+            if (slen > 255) slen = 255;
+            strncpy(side, cmd_b, slen);
+            side[slen] = '\0';
+            int se = slen - 1;
+            while (se >= 0 && side[se] == ' ') side[se--] = '\0';
+
+            int is_run_l = (strncmp(side, "run ", 4) == 0 || strncmp(side, "jalankan ", 9) == 0);
+            int k2 = pipe_idx + 1;
+            while (cmd_b[k2] == ' ') k2++;
+            int slen2 = 0;
+            while (cmd_b[k2 + slen2]) { if (slen2 < 255) side[slen2] = cmd_b[k2 + slen2]; slen2++; }
+            side[slen2 > 255 ? 255 : slen2] = '\0';
+            int se2 = (slen2 > 255 ? 255 : slen2) - 1;
+            while (se2 >= 0 && side[se2] == ' ') side[se2--] = '\0';
+            int is_run_r = (strncmp(side, "run ", 4) == 0 || strncmp(side, "jalankan ", 9) == 0);
+
+            if (is_run_l && is_run_r) {
+                // Re-extract the two command strings cleanly.
+                char lc[256], rc[256];
+                int llen = pipe_idx;
+                if (llen > 255) llen = 255;
+                strncpy(lc, cmd_b, llen); lc[llen] = '\0';
+                int le = llen - 1;
+                while (le >= 0 && lc[le] == ' ') lc[le--] = '\0';
+                int rp = pipe_idx + 1;
+                while (cmd_b[rp] == ' ') rp++;
+                int rlen = 0;
+                while (cmd_b[rp + rlen] && rlen < 255) { rc[rlen] = cmd_b[rp + rlen]; rlen++; }
+                rc[rlen] = '\0';
+                int re = rlen - 1;
+                while (re >= 0 && rc[re] == ' ') rc[re--] = '\0';
+
+                // Strip the leading run/jalankan + split path and arg.
+                const char* lp = (strncmp(lc, "run ", 4) == 0) ? lc + 4 : lc + 9;
+                const char* rp2 = (strncmp(rc, "run ", 4) == 0) ? rc + 4 : rc + 9;
+                char lpath[128], larg[64], rpath[128], rarg[64];
+                char lcopy[192], rcopy[192];
+                strncpy(lcopy, lp, 191); lcopy[191] = '\0';
+                strncpy(rcopy, rp2, 191); rcopy[191] = '\0';
+                char* sp = lcopy; while (*sp == ' ') sp++;
+                int pi = 0; while (sp[pi] && sp[pi] != ' ' && pi < 127) { lpath[pi] = sp[pi]; pi++; }
+                lpath[pi] = '\0';
+                int ai = 0; while (sp[pi] == ' ') pi++;
+                while (sp[pi] && ai < 63) { larg[ai++] = sp[pi++]; }
+                larg[ai] = '\0';
+                sp = rcopy; while (*sp == ' ') sp++;
+                pi = 0; while (sp[pi] && sp[pi] != ' ' && pi < 127) { rpath[pi] = sp[pi]; pi++; }
+                rpath[pi] = '\0';
+                ai = 0; while (sp[pi] == ' ') pi++;
+                while (sp[pi] && ai < 63) { rarg[ai++] = sp[pi++]; }
+                rarg[ai] = '\0';
+
+                if (lpath[0] && rpath[0]) {
+                    extern int do_sys_pipe(int pipefd[2]);
+                    extern int do_sys_close(int fd);
+                    extern int task_fork_exec(int in_fd, int out_fd,
+                                              const char* path, const char* arg);
+                    extern int task_waitpid(int pid, int* status, int options);
+                    int pfd[2];
+                    if (do_sys_pipe(pfd) == 0) {
+                        // Left child: stdout -> pipe write end.
+                        int cl = task_fork_exec(-1, pfd[1], lpath, larg);
+                        // Right child: stdin <- pipe read end.
+                        int cr = task_fork_exec(pfd[0], -1, rpath, rarg);
+                        if (cl > 0 && cr > 0) {
+                            // Parent: close both pipe ends (the children hold
+                            // their own references), then reap both children.
+                            do_sys_close(pfd[0]);
+                            do_sys_close(pfd[1]);
+                            int st = -1;
+                            task_waitpid(cl, &st, 0);
+                            task_waitpid(cr, &st, 0);
+                            print("[pipeline] both sides done\n", 0x0A);
+                            write_serial_string("[JOBS] real pipeline ok\n");
+                            b_idx = 0;
+                            return;
+                        }
+                        // Spawn failed: clean up and fall through to the
+                        // in-process capture (harmless for builtins).
+                        if (cl > 0) { extern int task_kill(int tid); task_kill(cl); }
+                        if (cr > 0) { extern int task_kill(int tid); task_kill(cr); }
+                        do_sys_close(pfd[0]);
+                        do_sys_close(pfd[1]);
+                        print("sh: pipeline spawn failed, falling back\n", 0x0C);
+                        write_serial_string("[JOBS] real pipeline spawn failed\n");
+                    }
+                }
+            }
+        }
         char cmd2[256];
         
         // Extract cmd1

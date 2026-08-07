@@ -123,6 +123,7 @@ typedef struct {
 
 // TCP connection management (multi-connection)
 #define SYS_TCP_CLOSE      70  // EBX=conn_id -> returns 0/-1
+#define SYS_TCP_LISTEN     85  // EBX=port -> conn_id or -1
 
 // Process model & signals
 #define SYS_FORK        71  // -> child tid (parent) / 0 (child) / -1
@@ -142,8 +143,10 @@ typedef struct {
 // mmap / munmap (demand paging)
 #define SYS_MMAP        82  // EBX=size -> base VA (reserved, frames on fault) or 0
 #define SYS_MUNMAP      83  // EBX=base VA (from mmap) -> 1 or 0
+#define SYS_DUP2        84  // EBX=oldfd, ECX=newfd -> newfd or -1
 
-// Signal numbers (POSIX subset; SIGKILL cannot be caught or ignored)
+// Signal numbers (POSIX subset; SIGKILL and SIGSTOP cannot be caught or
+// ignored, SIGCONT resumes a stopped task)
 #define SIGINT   2
 #define SIGKILL  9
 #define SIGUSR1  10
@@ -151,6 +154,9 @@ typedef struct {
 #define SIGUSR2  12
 #define SIGTERM  15
 #define SIGCHLD  17
+#define SIGCONT  18
+#define SIGSTOP  19
+#define SIGTSTP  20
 // Pass 1 as the handler to sys_signal to ignore a signal
 #define SIG_IGN  1
 // waitpid options
@@ -231,6 +237,10 @@ static inline void sys_close(int fd) {
 
 static inline int sys_pipe(int pipefd[2]) {
     return syscall(SYS_PIPE, (int)pipefd, 0, 0);
+}
+
+static inline int sys_dup2(int oldfd, int newfd) {
+    return syscall(SYS_DUP2, oldfd, newfd, 0);
 }
 
 static inline void* sys_malloc(int size) {
@@ -377,6 +387,11 @@ static inline int sys_tcp_recv(int conn_id, void* buf, int max_len) {
 static inline int sys_tcp_close(int conn_id) {
     int ret;
     __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_CLOSE), "b"(conn_id));
+    return ret;
+}
+static inline int sys_tcp_listen(int port) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_LISTEN), "b"(port));
     return ret;
 }
 
