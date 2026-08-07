@@ -29,6 +29,7 @@ Mectov OS is a from-scratch i386 operating system with:
 - **Ring 0 / Ring 3 isolation** — user applications run in separate address spaces with COW fork, demand-paged `mmap()`, and per-process page directories.
 - **True SMP** — per-CPU runqueues, work-stealing migration, and a LAPIC timer per core; all four QEMU cores execute tasks (verified live by SysInfo's per-core load bars).
 - **A Unix process model** — `fork` / `exec` / `waitpid`, POSIX signals (`sigaction`, `sa_mask`, `SA_RESTART`), process groups, sessions and a controlling terminal with SIGTTIN/SIGTTOU, plus System V shared memory, pipes, and fds.
+- **A real shell (msh)** — env vars with `$VAR` expansion, aliases, tab completion, scripts, job control, and a growing POSIX toolkit (`uname`, `whoami`, `hostname`, `env`, `seq`, `head`, `grep`, `cp`, `mv`, `df`, ...).
 - **A graphical desktop** — double-buffered window manager (resize, Aero snap, rounded corners), taskbar with system tray, draggable persistent icons, and a graphical login screen.
 - **On-disk persistence** — an ATA-backed VFS plus a fully writable ext2 partition (verified with host `fsck.ext2`).
 - **Networking** — RTL8139 driver with IRQ-driven RX, multi-connection TCP, UDP, ARP/ICMP/DNS, and a browser that reaches the real internet through a host gateway proxy.
@@ -52,6 +53,11 @@ Mectov OS is a from-scratch i386 operating system with:
 - Process groups + sessions + controlling terminal: `setpgid`, `setsid`, `tcsetpgrp`; background readers get stopped by SIGTTIN; Ctrl+C/Ctrl+Z target the foreground group.
 - Real pipelines and redirection: `run A | run B`, `run A > file`, `run A < file` through dup2 + a per-task fd table.
 - Job control: Ctrl+Z stops, `jobs` lists, `bg` resumes, `fg` waits, `kill %1` terminates.
+
+**Shell toolkit (v36.9)**
+- POSIX-style builtins: `uname` (`-a` banner), `whoami`, `hostname`, `env` (lists exported vars), `seq [FIRST] LAST`, `head [-n N] [file|stdin]` — including pipes (`cat f | head -n 2`).
+- A single `OS_VERSION` constant shared by the help banner, `mfetch` and `uname`, so the release string can never drift (previously help still said v35.2 at v36.8).
+- Env/alias tables lazy-init in the Ring-3 terminal path with a shared module-level guard — `$USER` & friends now work there, and a second init can never wipe user-exported variables.
 
 **Memory**
 - Frame-bitmap physical allocator, per-process address spaces, COW paging with frame reference counting, demand-paged `mmap()` (`0x40000000..0x80000000`, zero-fault), System V shared memory with `PAGE_SHARED`.
@@ -186,7 +192,7 @@ doom/                  Embedded DOOM engine (GPLv2)
 | `waitpid()` | Blocks in TASK_STATE_BLOCKED, reaps zombie, WNOHANG; 15 s orphan-zombie safety net |
 | Signals | sigaction/sa_mask/sigprocmask/SA_RESTART; sigframes on user stack; default action = exit `128+sig` |
 | Job control | pgrp/session per task; SIGTTIN/SIGTTOU on background tty access; fg/bg/jobs/kill %n |
-| Shell | env vars + `$VAR`, aliases, tab completion, scripts, `ps`/`kill`/`uptime`/`memstat`, `fetch` |
+| Shell | env vars + `$VAR`, aliases, tab completion, scripts, `ps`/`kill`/`uptime`/`memstat`, `fetch`; POSIX toolkit `uname`/`whoami`/`hostname`/`env`/`seq`/`head` |
 
 ### Filesystems & Storage
 
@@ -324,7 +330,7 @@ All syscalls are invoked via `int 0x80` (trap gate). Registers: `EAX` = number, 
 
 | App | Type | Description |
 |---|---|---|
-| Terminal | .mct | Terminal emulator: history, tab completion, auto-suggest, scrollback, job control |
+| Terminal | .mct | Terminal emulator: history, tab completion, auto-suggest, scrollback, job control; POSIX builtins `uname`/`env`/`seq`/`head`/... |
 | Nano / Notepad | .mct | Text editors with auto-save and dialogs |
 | File Explorer | .mct | Browse/open files, CRUD, context menus, file associations |
 | SysInfo | .mct | Live RAM/CPU/uptime + **per-core load bars** |
@@ -407,6 +413,7 @@ The project is tested on QEMU under **both KVM (4-core)** and TCG:
 
 | Version | Highlights |
 |---|---|
+| v36.9 | **Shell standard toolkit:** six POSIX-style builtins — `uname` (with `-a` kernel banner), `whoami`, `hostname`, `env` (lists exported vars), `seq [FIRST] LAST`, `head [-n N] [file\|stdin]` with a serial mirror so truncation/pipes are testable; single `OS_VERSION` constant shared by help/mfetch/uname (was stale at v35.2); env/alias tables lazy-init in the Ring-3 terminal path under one shared module-level guard (defaults like `$USER` previously missing there); `head -n` dispatch, tab completion, help and `man` pages updated. KVM-verified: all six commands, `-n` truncation, and `cat f \| head -n 1` pipes. |
 | v36.8 | **Per-CPU load monitor:** scheduler samples each core's utilization every tick (50 ms window) and exposes it via `SYS_GET_SYSINFO` (`cpu_count`, `cpu_load[4]`); SysInfo renders four live per-core bars; serial `[LOAD]` line every 3 s; SysInfo sleeps between frames instead of spinning. |
 | v36.7 | **Per-CPU SMP scheduler:** per-core runqueues with priority+aging pick and work-stealing migration; pinned Ring 0 idle task per AP; LAPIC timer per AP (PIT-calibrated once on the BSP — concurrent calibration caused timer storms); one cli-first `task_lock` for every runqueue mutation; locked signal delivery on the syscall-return path; SMP-safe serial (locked buffer writes). Fixed along the way: missing `spin_unlock` in `task_signal` (froze OS at `waitpid`), phantom-CPU scan in `rq_least_loaded`, cross-CPU page-dir free race. `smpstress` passes 16/16 children on 4 cores. |
 | v36.6 | **Process groups, sessions & controlling terminal:** `SYS_SETPGID/GETPGRP/SETSID/TCSETPGRP/TCGETPGRP` (88–92); per-task `pgrp`/`session`; the terminal becomes session leader and claims the foreground group; `SYS_GET_KEY` delivers SIGTTIN to background readers (bgread demo); Ctrl+C/Ctrl+Z target the foreground process group. |
