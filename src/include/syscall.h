@@ -126,6 +126,11 @@ typedef struct {
 #define SYS_TCP_LISTEN     85  // EBX=port -> conn_id or -1
 #define SYS_SIGACTION      86  // EBX=sig, ECX=&sigaction(in,opt), EDX=&sigaction(old,opt) -> 0/-1
 #define SYS_SIGPROCMASK    87  // EBX=how(0/1/2), ECX=&set(in,opt), EDX=&oldset(opt) -> 0/-1
+#define SYS_SETPGID        88  // EBX=pid(0=self), ECX=pgid(0=self) -> 0/-1
+#define SYS_GETPGRP        89  // -> pgrp of the calling task
+#define SYS_SETSID         90  // -> new session id (task becomes group+session leader)
+#define SYS_TCSETPGRP      91  // EBX=fd, ECX=pgrp -> 0/-1 (set foreground pgrp)
+#define SYS_TCGETPGRP      92  // EBX=fd -> foreground pgrp
 
 // Process model & signals
 #define SYS_FORK        71  // -> child tid (parent) / 0 (child) / -1
@@ -550,6 +555,23 @@ static inline int sys_sigprocmask(int how, uint32_t* newset, uint32_t* oldset) {
 
 static inline int sys_sigreturn(void) {
     return syscall(SYS_SIGRETURN, 0, 0, 0);
+}
+
+// Process groups / sessions (Fase 2)
+static inline int sys_setpgid(int pid, int pgid) {
+    return syscall(SYS_SETPGID, pid, pgid, 0);
+}
+static inline int sys_getpgrp(void) {
+    return syscall(SYS_GETPGRP, 0, 0, 0);
+}
+static inline int sys_setsid(void) {
+    return syscall(SYS_SETSID, 0, 0, 0);
+}
+static inline int sys_tcsetpgrp(int fd, int pgrp) {
+    return syscall(SYS_TCSETPGRP, fd, pgrp, 0);
+}
+static inline int sys_tcgetpgrp(int fd) {
+    return syscall(SYS_TCGETPGRP, fd, 0, 0);
 }
 
 static inline int sys_getppid(void) {

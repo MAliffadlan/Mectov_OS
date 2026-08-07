@@ -1160,9 +1160,17 @@ static void run_cmd_internal() {
             print("Launching MCT app: ", 0x0A); print(fname, 0x0A); print("\n", 0x0A);
             int res = load_mct_app_with_arg(fname, arg);
             if (res >= 0) {
+                // Give the app its own process group: a foreground app becomes
+                // the controlling terminal's foreground group (Ctrl+C/Z now
+                // target the group via task_signal_pgrp); a background app gets
+                // its own group so SIGTTIN stops it from reading the terminal.
+                extern int task_set_pgrp(int, int);
+                extern void task_set_fg_pgrp(int);
+                task_set_pgrp(res, res);
                 if (shell_bg_flag) {
                     // `run app.mct &` — the app runs on its own; don't grab
-                    // the terminal, just track it as a background job.
+                    // the terminal, just track it as a background job. It keeps
+                    // its own pgrp (!= fg), so reading the terminal stops it.
                     int jn = register_job(res, fname);
                     print("[+] App in background [", 0x0A);
                     p_int(jn, 0x0A); print("] (Task ID: ", 0x0A);
@@ -1174,6 +1182,7 @@ static void run_cmd_internal() {
                     extern int term_app_task_id;
                     term_app_running = 1;
                     term_app_task_id = res;
+                    task_set_fg_pgrp(res);   // foreground group owns the terminal
                     return; // DO NOT PRINT PROMPT
                 }
             } else {

@@ -118,9 +118,26 @@ uint32_t handle_syscall_gui(registers_t* regs) {
             extern int term_app_task_id;
             extern int get_current_task(void);
             extern uint8_t term_app_pop_key(void);
-            
+            extern int task_is_background(int);
+            extern int task_signal(int, int);
+
+            // SIGTTIN: a background process-group member reading from the
+            // controlling terminal is stopped (default action). The terminal's
+            // own shell is exempt; apps launched from the desktop have no
+            // group and are unaffected. We still deliver a key to apps that
+            // caught/ignored SIGTTIN, so the read never wedges.
+            int me = get_current_task();
+            if (me != term_app_task_id && task_is_background(me)) {
+                task_signal(me, SIGTTIN);
+                write_serial_string("[SIG] SIGTTIN to background tid=");
+                write_serial_hex(me);
+                write_serial_string("\n");
+                regs->eax = 0;
+                break;
+            }
+
             uint8_t sc = 0;
-            if (term_app_running && get_current_task() == term_app_task_id) {
+            if (term_app_running && me == term_app_task_id) {
                 sc = term_app_pop_key();
             } else {
                 sc = k_get_scancode();

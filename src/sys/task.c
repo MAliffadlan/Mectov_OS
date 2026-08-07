@@ -48,6 +48,8 @@ typedef struct {
     // === NEW: process model ===
     int      parent;       // tid of the parent task (0 = kernel task)
     int      exit_code;    // exit status (valid while ZOMBIE)
+    int      pgrp;         // process group id (0 = none); terminal signals target this
+    int      session;      // session id (0 = none); controlling-terminal membership
     int      waiting;      // while blocked in waitpid: target pid (>0) or -1 (any)
     uint32_t pending_signals;   // bitmap of pending signals (bit sig)
     void*    signal_handlers[SIG_MAX]; // NULL=default, SIG_IGN_SENTINEL=ignore, else user fn
@@ -66,6 +68,10 @@ static int current_task[16] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -
 static inline int get_cid() { extern uint32_t smp_lapic_addr; return smp_lapic_addr ? (apic_get_id() & 15) : 0; }
 static int num_tasks = 0;
 static int boot_current_dir = 0;
+// Foreground process group of the controlling terminal (set by the shell via
+// tcsetpgrp). 0 = no controlling terminal yet. Read by the SIGTTIN/SIGTTOU
+// checks and by Ctrl+C/Ctrl+Z in kernel.c.
+static int kernel_fg_pgrp = 0;
 
 void init_tasking() {
     int cid = get_cid();
@@ -81,6 +87,8 @@ void init_tasking() {
         tasks[i].current_dir = 0;
         tasks[i].parent = 0;
         tasks[i].exit_code = 0;
+        tasks[i].pgrp = 0;
+        tasks[i].session = 0;
         tasks[i].waiting = 0;
         tasks[i].pending_signals = 0;
         tasks[i].blocked_signals = 0;
@@ -127,6 +135,8 @@ int create_task(void (*entry)()) {
             tasks[i].current_dir = (current_task[cid] >= 0) ? tasks[current_task[cid]].current_dir : 0;
             tasks[i].parent = 0;
             tasks[i].exit_code = 0;
+            tasks[i].pgrp = 0;
+            tasks[i].session = 0;
             tasks[i].waiting = 0;
             tasks[i].pending_signals = 0;
             tasks[i].blocked_signals = 0;
@@ -198,6 +208,22 @@ static void task_cleanup(int tid) {
     if (term_app_running && term_app_task_id == tid) {
         term_app_running = 0;
         term_app_task_id = -1;
+        // The foreground group died: give the terminal back to the shell's
+        // group (the task that spawned the app — the app itself has its own
+        // pgrp == its own tid, so reading the app's pgrp would hand the
+        // terminal to a corpse), so Ctrl+C/Z keep working and new `run`
+        // commands are not treated as background.
+        int app_parent = tasks[tid].parent;
+        int shell_pgrp = (app_parent > 0 && app_parent < MAX_TASKS) ? tasks[app_parent].pgrp : 0;
+        if (kernel_fg_pgrp == tasks[tid].pgrp || kernel_fg_pgrp == tid) {
+            if (shell_pgrp > 0) kernel_fg_pgrp = shell_pgrp;
+            else kernel_fg_pgrp = 0;
+            write_serial_string("[JOBS] foreground TID ");
+            write_serial_hex(tid);
+            write_serial_string(" exited — fg pgrp reset to ");
+            write_serial_hex(kernel_fg_pgrp);
+            write_serial_string("\n");
+        }
         write_serial_string("[JOBS] foreground app TID ");
         write_serial_hex(tid);
         write_serial_string(" exited — terminal released\n");
@@ -507,6 +533,8 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             tasks[i].wait_ticks = 0;
             tasks[i].parent = (current_task[cid] >= 0) ? current_task[cid] : 0;
             tasks[i].exit_code = 0;
+            tasks[i].pgrp = (current_task[cid] >= 0) ? tasks[current_task[cid]].pgrp : 0;
+            tasks[i].session = (current_task[cid] >= 0) ? tasks[current_task[cid]].session : 0;
             tasks[i].waiting = 0;
             tasks[i].pending_signals = 0;
             tasks[i].blocked_signals = 0;
@@ -699,6 +727,69 @@ int task_signal_group(int root_tid, int sig) {
     return sent;
 }
 
+// ---- Process groups & sessions (Fase 2) ----
+
+int task_get_pgrp(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    return tasks[tid].pgrp;
+}
+
+int task_set_pgrp(int tid, int pgrp) {
+    if (tid <= 0 || tid >= MAX_TASKS) return -1;
+    if (tasks[tid].state == TASK_STATE_FREE) return -1;
+    tasks[tid].pgrp = pgrp;
+    return 0;
+}
+
+int task_get_session(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    return tasks[tid].session;
+}
+
+void task_set_session(int tid, int session) {
+    if (tid <= 0 || tid >= MAX_TASKS) return;
+    tasks[tid].session = session;
+}
+
+int task_get_parent(int tid) {
+    if (tid <= 0 || tid >= MAX_TASKS) return 0;
+    return tasks[tid].parent;
+}
+
+int task_get_fg_pgrp(void) {
+    return kernel_fg_pgrp;
+}
+
+void task_set_fg_pgrp(int pgrp) {
+    kernel_fg_pgrp = pgrp;
+}
+
+// Signal every task in a process group (POSIX semantics for Ctrl+C/Ctrl+Z:
+// the terminal delivers to the foreground group, not to a task subtree).
+int task_signal_pgrp(int pgrp, int sig) {
+    if (pgrp <= 0 || pgrp >= MAX_TASKS) return -1;
+    int sent = 0;
+    for (int i = 1; i < MAX_TASKS; i++) {
+        if (tasks[i].state == TASK_STATE_FREE) continue;
+        if (tasks[i].pgrp != pgrp) continue;
+        task_signal(i, sig);
+        sent++;
+    }
+    return sent;
+}
+
+// A task is in the background when there is a controlling terminal (fg pgrp
+// set) and its own group differs. Tasks without a group (pgrp == 0) or
+// without a controlling terminal are never background — this keeps apps
+// launched from the desktop (no tty) unaffected.
+int task_is_background(int tid) {
+    if (tid <= 0 || tid >= MAX_TASKS) return 0;
+    if (kernel_fg_pgrp <= 0) return 0;
+    int p = tasks[tid].pgrp;
+    if (p <= 0) return 0;
+    return p != kernel_fg_pgrp;
+}
+
 // ============================================================
 // fork()
 // ============================================================
@@ -776,6 +867,8 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         tasks[i].page_dir = new_pd;
         tasks[i].parent = parent;
         tasks[i].exit_code = 0;
+        tasks[i].pgrp = tasks[parent].pgrp;          // POSIX: group is inherited
+        tasks[i].session = tasks[parent].session;
         tasks[i].waiting = 0;
         tasks[i].pending_signals = 0;
         tasks[i].blocked_signals = tasks[parent].blocked_signals;  // mask inherits
@@ -1010,6 +1103,8 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
     tasks[child].wait_ticks = 0;
     tasks[child].parent = current_task[cid];   // shell can waitpid it
     tasks[child].exit_code = 0;
+    tasks[child].pgrp = tasks[current_task[cid]].pgrp;  // inherits the shell group
+    tasks[child].session = tasks[current_task[cid]].session;
     tasks[child].waiting = 0;
     tasks[child].pending_signals = 0;
     tasks[child].blocked_signals = 0;
@@ -1221,14 +1316,20 @@ int task_signal(int tid, int sig) {
         return 0;   // ignored
     }
     if (h == NULL) {
-        // Default action: SIGCHLD is ignored; SIGTSTP suspends the task (it
-        // is the catchable variant of SIGSTOP, delivered by Ctrl+Z);
+        // Default action: SIGCHLD is ignored; SIGTSTP/SIGTTIN/SIGTTOU suspend
+        // the task (SIGTSTP is the catchable variant of SIGSTOP, delivered by
+        // Ctrl+Z; SIGTTIN/SIGTTOU stop background jobs touching the terminal);
         // everything else terminates.
         if (sig == SIGCHLD) {
             // ignored
-        } else if (sig == SIGTSTP) {
+        } else if (sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU) {
             tasks[tid].state = TASK_STATE_STOPPED;
-            tasks[tid].pending_signals &= ~(1u << SIGTSTP);
+            tasks[tid].pending_signals &= ~(1u << sig);
+            write_serial_string("[SIG] default ");
+            write_serial_hex(sig);
+            write_serial_string(": stopped tid=");
+            write_serial_hex(tid);
+            write_serial_string("\n");
         } else {
             terminate_task(tid, 128 + sig);
         }

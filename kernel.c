@@ -377,15 +377,25 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                         extern int term_app_running;
                         extern int term_app_task_id;
                         extern int task_signal_group(int root_tid, int sig);
+                        extern int task_get_fg_pgrp(void);
+                        extern int task_signal_pgrp(int pgrp, int sig);
                         if (term_app_running && term_app_task_id > 0) {
                             // Snapshot the tid: signalling the job can reap it
                             // (which resets term_app_task_id to -1), and the log
                             // below must report the tid we actually sent to.
                             int fg_tid = term_app_task_id;
-                            int n = task_signal_group(fg_tid, SIGINT);
-                            write_serial_string("[JOBS] Ctrl+C -> SIGINT to foreground TID ");
+                            // Fase 2: signal the foreground PROCESS GROUP, not
+                            // a task subtree — the app and every task that
+                            // inherited its pgrp (pipeline sides, children)
+                            // get SIGINT together.
+                            int fg_pgrp = task_get_fg_pgrp();
+                            int n = (fg_pgrp > 0) ? task_signal_pgrp(fg_pgrp, SIGINT)
+                                                  : task_signal_group(fg_tid, SIGINT);
+                            write_serial_string("[JOBS] Ctrl+C -> SIGINT to fg pgrp ");
+                            write_serial_hex(fg_pgrp);
+                            write_serial_string(" (tid ");
                             write_serial_hex(fg_tid);
-                            write_serial_string(" (");
+                            write_serial_string(", ");
                             write_serial_hex(n);
                             write_serial_string(" tasks)\n");
                         }
@@ -400,13 +410,19 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                         extern int term_app_running;
                         extern int term_app_task_id;
                         extern int task_signal_group(int root_tid, int sig);
+                        extern int task_get_fg_pgrp(void);
+                        extern int task_signal_pgrp(int pgrp, int sig);
                         extern int shell_register_stopped_job(int tid);
                         if (term_app_running && term_app_task_id > 0) {
                             int fg_tid = term_app_task_id;
-                            int n = task_signal_group(fg_tid, SIGTSTP);
-                            write_serial_string("[JOBS] Ctrl+Z -> SIGTSTP to foreground TID ");
+                            int fg_pgrp = task_get_fg_pgrp();
+                            int n = (fg_pgrp > 0) ? task_signal_pgrp(fg_pgrp, SIGTSTP)
+                                                  : task_signal_group(fg_tid, SIGTSTP);
+                            write_serial_string("[JOBS] Ctrl+Z -> SIGTSTP to fg pgrp ");
+                            write_serial_hex(fg_pgrp);
+                            write_serial_string(" (tid ");
                             write_serial_hex(fg_tid);
-                            write_serial_string(" (");
+                            write_serial_string(", ");
                             write_serial_hex(n);
                             write_serial_string(" tasks)\n");
                             // The app is suspended, not dead: hand control back

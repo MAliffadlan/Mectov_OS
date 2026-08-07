@@ -29,6 +29,8 @@
 #define SIGCONT  18
 #define SIGSTOP  19
 #define SIGTSTP  20
+#define SIGTTIN  21   // background pgrp read from controlling terminal (default: stop)
+#define SIGTTOU  22   // background pgrp write to controlling terminal (default: stop)
 #define SIG_MAX  32
 
 // mmap() regions per task (demand paged): the region is reserved in VA space
@@ -137,6 +139,25 @@ uint32_t task_get_blocked(int tid);
 void task_set_blocked(int tid, uint32_t bits);
 uint32_t task_get_sig_frame_esp(int tid);
 void task_set_sig_frame_esp(int tid, uint32_t esp);
+// Process groups & sessions (Fase 2): a process group is a set of tasks that
+// receive terminal signals together; the foreground pgrp of the controlling
+// terminal owns reads/writes. Default pgrp = shell pgrp (inherited); a task
+// becomes its own group leader with setpgid(pid,0)/setsid().
+int task_get_pgrp(int tid);
+int task_set_pgrp(int tid, int pgrp);
+int task_get_session(int tid);
+void task_set_session(int tid, int session);
+int task_get_parent(int tid);
+// Foreground process group of the controlling terminal (0 = none).
+int task_get_fg_pgrp(void);
+void task_set_fg_pgrp(int pgrp);
+// Send a signal to every task in `pgrp` (POSIX process-group semantics for
+// Ctrl+C/Ctrl+Z). Returns the number signalled, -1 on a bad group.
+int task_signal_pgrp(int pgrp, int sig);
+// 1 if `tid` is in the background (has a pgrp that is not the controlling
+// terminal's foreground pgrp). Returns 0 when there is no controlling
+// terminal or the task has no group.
+int task_is_background(int tid);
 
 // === NEW: Thread & Priority API ===
 // Create a task with explicit priority and optional page directory

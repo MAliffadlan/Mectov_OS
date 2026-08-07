@@ -357,6 +357,11 @@ static void syscall_handler(registers_t* regs) {
         case SYS_EXEC:
         case SYS_SIGACTION:
         case SYS_SIGPROCMASK:
+        case SYS_SETPGID:
+        case SYS_GETPGRP:
+        case SYS_SETSID:
+        case SYS_TCSETPGRP:
+        case SYS_TCGETPGRP:
             regs->eax = handle_syscall_proc(regs);
             break;
 

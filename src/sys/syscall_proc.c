@@ -281,6 +281,82 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_SETPGID (88): join or create a process group -----
+        // EBX=pid (0=self), ECX=pgid (0 = pid). Self is always allowed; a
+        // parent may regroup its own child (POSIX allows a shell to set the
+        // child's group before it execs).
+        case SYS_SETPGID: {
+            int pid = (int)regs->ebx;
+            int pgid = (int)regs->ecx;
+            int self = get_current_task();
+            extern int task_get_parent(int);
+            extern int task_get_pgrp(int);
+            extern int task_set_pgrp(int, int);
+            int target = (pid <= 0) ? self : pid;
+            if (target != self && task_get_parent(target) != self) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            int new_pgid = (pgid <= 0) ? target : pgid;
+            if (task_set_pgrp(target, new_pgid) < 0) { regs->eax = (uint32_t)-1; break; }
+            write_serial_string("[SIG] setpgid tid=");
+            write_serial_hex(target);
+            write_serial_string(" pgrp=");
+            write_serial_hex(new_pgid);
+            write_serial_string("\n");
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_GETPGRP (89) -----
+        case SYS_GETPGRP: {
+            extern int task_get_pgrp(int);
+            regs->eax = (uint32_t)task_get_pgrp(get_current_task());
+            break;
+        }
+
+        // ----- SYS_SETSID (90): start a new session; this task becomes both
+        // the session leader and the group leader of its own new group. -----
+        case SYS_SETSID: {
+            int self = get_current_task();
+            extern int task_get_session(int);
+            if (task_get_session(self) == self) {
+                regs->eax = (uint32_t)-1;   // already a session leader
+                break;
+            }
+            extern int task_set_pgrp(int, int);
+            task_set_pgrp(self, self);
+            extern void task_set_session(int, int);
+            task_set_session(self, self);
+            write_serial_string("[SIG] setsid tid=");
+            write_serial_hex(self);
+            write_serial_string(" session=");
+            write_serial_hex(self);
+            write_serial_string("\n");
+            regs->eax = (uint32_t)self;
+            break;
+        }
+
+        // ----- SYS_TCSETPGRP (91): set the controlling terminal's foreground
+        // process group (the shell does this when it takes back the terminal).
+        case SYS_TCSETPGRP: {
+            int pgrp = (int)regs->ecx;
+            extern void task_set_fg_pgrp(int);
+            task_set_fg_pgrp(pgrp);
+            write_serial_string("[SIG] tcsetpgrp fg=");
+            write_serial_hex(pgrp);
+            write_serial_string("\n");
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_TCGETPGRP (92) -----
+        case SYS_TCGETPGRP: {
+            extern int task_get_fg_pgrp(void);
+            regs->eax = (uint32_t)task_get_fg_pgrp();
+            break;
+        }
+
         // ----- SYS_SIGRETURN (75): restore context after a handler -----
         case SYS_SIGRETURN: {
             int tid = get_current_task();

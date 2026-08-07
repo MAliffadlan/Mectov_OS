@@ -56,6 +56,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/pipegen_mct.o \
        $(OBJ_DIR)/piperead_mct.o \
        $(OBJ_DIR)/sigdemo_mct.o \
+       $(OBJ_DIR)/bgread_mct.o \
        $(OBJ_DIR)/libc_mct.o \
        $(OBJ_DIR)/calc_mct.o \
        $(OBJ_DIR)/volume_mct.o \
@@ -172,6 +173,9 @@ piperead.mct: apps/piperead.c $(MCT_LIBC_H)
 sigdemo.mct: apps/sigdemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/sigdemo.c sigdemo.mct
 
+bgread.mct: apps/bgread.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/bgread.c bgread.mct
+
 tcpserver.mct: apps/tcpserver.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/tcpserver.c tcpserver.mct
 
@@ -246,6 +250,9 @@ $(OBJ_DIR)/piperead_mct.o: piperead.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/sigdemo_mct.o: sigdemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 sigdemo.mct $(OBJ_DIR)/sigdemo_mct.o
+
+$(OBJ_DIR)/bgread_mct.o: bgread.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 bgread.mct $(OBJ_DIR)/bgread_mct.o
 
 $(OBJ_DIR)/music_wav.o: apps/music.wav | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 apps/music.wav $(OBJ_DIR)/music_wav.o

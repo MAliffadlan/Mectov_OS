@@ -606,7 +606,16 @@ static void print_prompt(void) {
 void _start(void) {
     int wid = sys_create_window(60, 40, 600, 400, "Terminal (Ring 3)");
     if (wid < 0) sys_exit();
-    
+
+    // Become the controlling terminal's session leader: setsid() makes this
+    // task its own process-group and session leader, then tcsetpgrp() marks
+    // that group as the terminal's foreground group. Apps spawned from the
+    // shell inherit this group (so they read the terminal freely); an app that
+    // calls setpgid(0,0) moves to its own background group and SIGTTIN stops
+    // it from stealing keyboard input.
+    sys_setsid();
+    sys_tcsetpgrp(1, sys_getpid());
+
     add_default_aliases();
     
     ipc_qid = sys_ipc_create(0xDEAD);
