@@ -57,4 +57,13 @@ Mectov OS features Symmetric Multiprocessing (SMP) support on x86 32-bit hardwar
    - Enables Protected Mode (sets CR0 PE bit).
    - Loads boot GDT and transitions to 32-bit Protected Mode.
    - Loads kernel page directory (`CR3`) and enables Paging (sets CR0 PG bit).
-   - Initializes its own per-core GDT, IDT, Local APIC, and enters the idle loop.
+   - Initializes its own per-core GDT, IDT, Local APIC, and programs its own **LAPIC timer** (~1 kHz), then enters the idle loop.
+
+---
+
+## ⏱️ Per-Core Timer (v36.7)
+
+The scheduler is per-CPU since v36.7, so every core must tick. The PIT remains a BSP-only device (IRQ0 is routed to the BSP via the I/O APIC) — Application Processors instead run a periodic **local APIC timer** at vector 32, which drives `irq_handler -> schedule()` on that core.
+
+- **Single Calibration (`lapic_timer_calibrate`)**: the LAPIC count rate is measured ONCE on the BSP, *before* any AP wakes, by counting LAPIC timer decrements over a 50 ms PIT window. The PIT is shared hardware: if three APs calibrated at once they would corrupt each other's readings, ending up with timers firing at wild rates — a timer storm on the APs that starved the BSP and made the whole system flaky (fixed after boot-time flakiness was traced to exactly this).
+- **Per-AP Programming (`lapic_timer_init`)**: each AP programs `LAPIC_LVT_TIMER` (vector 32, periodic) with the shared `lapic_timer_per_ms` count. BSP ticks stay PIT-driven; the wall clock, heartbeat and GUI updates are BSP-only (`timer_handler` returns early on APs), while AP ticks only drive scheduling.
