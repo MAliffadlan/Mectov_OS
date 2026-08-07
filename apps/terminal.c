@@ -91,10 +91,11 @@ static void history_add(const char* c) {
 // --- Built-in commands list for tab completion ---
 static const char* builtins[] = {
     "help", "clear", "mfetch", "mem", "memstat", "kmemstats", "uptime", "vfsinfo",
-    "ls", "cd", "pwd", "mkdir", "touch", "cat", "tree", "rm", "rmdir", "cp", "mv", "df",
+    "ls", "cd", "pwd", "mkdir", "touch", "cat", "head", "tree", "rm", "rmdir", "cp", "mv", "df",
     "edit", "nano",
     "sh", "source", "export", "unalias", "ps", "kill",
     "echo", "beep", "tone", "sleep", "date", "color", "lock",
+    "uname", "whoami", "hostname", "env", "seq",
     "run", "snake", "taskmgr", "flappy", "doom", "lspci", "man",
     "ping", "host", "grep", "shutdown", "reboot", "alias", "history", 0
 };

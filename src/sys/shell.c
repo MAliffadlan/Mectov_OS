@@ -21,6 +21,10 @@
 #include "../include/ext2.h"
 #include "../include/serial.h"  // write_serial_string/hex (job diagnostics)
 
+// Single source of truth for the kernel release string shown by the help
+// banner, mfetch and uname, so the three can never drift out of sync.
+#define OS_VERSION "36.8"
+
 // --- Command buffer & state ---
 char cmd_b[CMD_BUF_SIZE]; int b_idx = 0;
 
@@ -42,6 +46,11 @@ typedef struct {
 
 env_var_t env_vars[MAX_ENV_VARS];
 int env_var_count = 0;
+
+// Shared one-shot init guard for the env/alias tables (see ex_cmd and
+// shell_print_prompt). Module-level so both init sites agree and never reset
+// user-added variables.
+static int env_alias_initialized = 0;
 
 #define MAX_ALIASES 32
 #define ALIAS_NAME_LEN 32
@@ -288,11 +297,12 @@ static int find_job_tid(int num) {
 
 const char* cmd_list[] = {
     "help","clear","mfetch","mem","memstat","kmemstats","uptime","vfsinfo",
-    "ls","cd","pwd","mkdir","touch","cat","tree","rm","rmdir","cp","mv","df",
+    "ls","cd","pwd","mkdir","touch","cat","head","tree","rm","rmdir","cp","mv","df",
     "edit","nano",
     "sh","source","export","alias","unalias","history","ps","kill",
     "jobs","fg","bg",
     "echo","beep","tone","sleep","date","color","lock",
+    "uname","whoami","hostname","env","seq",
     "run","snake","taskmgr","flappy","doom","lspci","man",
     "ping","host","fetch","grep",
     "shutdown","reboot", NULL
@@ -326,10 +336,9 @@ void shell_print_timestamp() {
 }
 
 void shell_print_prompt() {
-    static int initialized = 0;
-    if (!initialized) {
+    if (!env_alias_initialized) {
         init_env_vars_and_aliases();
-        initialized = 1;
+        env_alias_initialized = 1;
     }
     char cwd[MAX_PATH];
     vfs_get_abs_path(get_current_dir(), cwd, MAX_PATH);
@@ -607,10 +616,11 @@ static void run_cmd_internal() {
     // --- HELP ---
     if (strcmp(cmd_b, "help") == 0) {
         print("======================================================================\n", 0x0B);
-        print("                ⚡ MECTOV OS v35.2 - COMMAND CENTER ⚡                \n", 0x0F);
+        print("                ⚡ MECTOV OS v", 0x0F); print(OS_VERSION, 0x0F); print(" - COMMAND CENTER ⚡                \n", 0x0F);
         print("======================================================================\n", 0x0B);
         print(" SYSTEM  : ", 0x0B); print("mfetch, date, color, clear, mem, memstat, kmemstats, uptime, lock, ps, kill\n", 0x0F);
-        print(" FILE VFS: ", 0x0B); print("ls, cd, pwd, mkdir, touch, cat, tree, rm, rmdir, cp, mv, df\n", 0x0F);
+        print(" FILE VFS: ", 0x0B); print("ls, cd, pwd, mkdir, touch, cat, head, tree, rm, rmdir, cp, mv, df\n", 0x0F);
+        print(" IDENTITY: ", 0x0B); print("uname [-a], whoami, hostname, env, seq [FIRST] LAST\n", 0x0F);
         print(" EDITOR  : ", 0x0B); print("nano, edit\n", 0x0F);
         print(" SHELL   : ", 0x0B); print("export [NAME=VAL], alias [NAME=VAL], unalias, history, sh\n", 0x0F);
         print(" JOBS    : ", 0x0B); print("cmd & (background), jobs, fg [n], bg [n], kill [%n]\n", 0x0F);
@@ -643,11 +653,11 @@ static void run_cmd_internal() {
         // Row 3: color blocks + OS
         print("  ", 0x00);
         print("## ## ## ## ", 0x0D); print("## ## ## ## ", 0x05);
-        print("  OS: ", 0x0B); print("Mectov OS v35.2\n", 0x0F);
+        print("  OS: ", 0x0B); print("Mectov OS v", 0x0F); print(OS_VERSION, 0x0F); print("\n", 0x0F);
         // Row 4: color blocks + Kernel
         print("  ", 0x00);
         print("## ## ## ## ", 0x0E); print("## ## ## ## ", 0x06);
-        print("  Kernel: ", 0x0B); print("Mectov 35.2.0\n", 0x0F);
+        print("  Kernel: ", 0x0B); print("Mectov ", 0x0F); print(OS_VERSION, 0x0F); print(".0\n", 0x0F);
         // Row 5: color blocks + Uptime
         print("  ", 0x00);
         print("## ## ## ## ", 0x0C); print("## ## ## ## ", 0x04);
@@ -893,6 +903,158 @@ static void run_cmd_internal() {
             }
         } else {
             print("grep: no input\n", 0x0C);
+        }
+    }
+    // --- UNAME (OS identity, Linux-style) ---
+    else if (strcmp(cmd_b, "uname") == 0 || strncmp(cmd_b, "uname ", 6) == 0) {
+        // `uname` prints the OS name; `uname -a` prints the full kernel banner
+        // (name hostname release version machine).
+        if (strncmp(cmd_b, "uname -a", 8) == 0) {
+            print("MectovOS mectov ", 0x0F); print(OS_VERSION, 0x0F);
+            print(" mectov i686\n", 0x0F);
+        } else {
+            print("MectovOS\n", 0x0F);
+        }
+    }
+    // --- WHOAMI ---
+    else if (strcmp(cmd_b, "whoami") == 0) {
+        // Single-user OS: always root (matches the $USER default).
+        print("root\n", 0x0F);
+    }
+    // --- HOSTNAME ---
+    else if (strcmp(cmd_b, "hostname") == 0) {
+        print("mectov\n", 0x0F);
+    }
+    // --- ENV (list exported environment variables) ---
+    else if (strcmp(cmd_b, "env") == 0) {
+        if (env_var_count == 0) {
+            print("env: no environment variables\n", 0x0C);
+        } else {
+            for (int i = 0; i < env_var_count; i++) {
+                print(env_vars[i].name, 0x0F);
+                print("=", 0x07);
+                print(env_vars[i].value, 0x0F);
+                print("\n", 0x0F);
+            }
+        }
+    }
+    // --- SEQ (print a number sequence) ---
+    else if (strncmp(cmd_b, "seq ", 4) == 0 || strcmp(cmd_b, "seq") == 0) {
+        // seq LAST       → 1 2 ... LAST
+        // seq FIRST LAST → FIRST ... LAST (descending works too)
+        char* arg = cmd_b + 4;
+        while (*arg == ' ') arg++;
+        int first = 1, last = -1;
+        // Accept numbers only (atoi returns 0 for garbage, which would
+        // otherwise print a bogus "1 0" sequence).
+        if (*arg >= '0' && *arg <= '9') {
+            int a = atoi(arg);
+            while (*arg >= '0' && *arg <= '9') arg++;
+            if (*arg == ' ') {
+                while (*arg == ' ') arg++;
+                if (*arg >= '0' && *arg <= '9') {
+                    first = a;
+                    last = atoi(arg);
+                }
+            } else {
+                last = a;
+            }
+        }
+        if (last < 0) {
+            print("seq: usage: seq [FIRST] LAST\n", 0x0C);
+        } else if (first <= last) {
+            for (int i = first; i <= last; i++) {
+                p_int(i, 0x0F);
+                if (i < last) print(" ", 0x0F);
+            }
+            print("\n", 0x0F);
+        } else {
+            for (int i = first; i >= last; i--) {
+                p_int(i, 0x0F);
+                if (i > last) print(" ", 0x0F);
+            }
+            print("\n", 0x0F);
+        }
+    }
+    // --- HEAD (print the first N lines of a file or stdin) ---
+    else if (strncmp(cmd_b, "head ", 5) == 0 || strcmp(cmd_b, "head") == 0) {
+        // head [FILE]      → first 10 lines
+        // head -n N [FILE] → first N lines
+        // head (no args)   → read from pipe / '<' redirection like cat
+        int lines = 10;
+        char fpath[MAX_PATH];
+        int have_file = 0;
+        if (strncmp(cmd_b, "head -n ", 8) == 0) {
+            char* p = cmd_b + 8;
+            lines = atoi(p);
+            if (lines < 1) lines = 1;
+            while (*p >= '0' && *p <= '9') p++;
+            while (*p == ' ') p++;
+            if (*p) {
+                strncpy(fpath, p, MAX_PATH - 1);
+                fpath[MAX_PATH - 1] = '\0';
+                have_file = 1;
+            }
+        } else if (strncmp(cmd_b, "head ", 5) == 0) {
+            strncpy(fpath, cmd_b + 5, MAX_PATH - 1);
+            fpath[MAX_PATH - 1] = '\0';
+            have_file = 1;
+        }
+        if (have_file) {
+            sanitize_path(fpath);
+            char buf[2048];
+            int sz = vfs_read_file(fpath, buf, 2047);
+            if (sz < 0) {
+                print("head: file not found: ", 0x0C);
+                print(fpath, 0x0C);
+                print("\n", 0x0C);
+            } else {
+                int nl = 0;
+                // Serial mirror so automated tests can verify head's output
+                // (terminal output goes over IPC, not serial). Mirrors the
+                // bytes actually printed (after -n truncation), like cat's.
+                extern void write_serial_string(const char*);
+                extern void write_serial_hex(uint32_t);
+                int printed = 0;
+                for (int i = 0; i < sz && nl < lines; i++) {
+                    char c = buf[i];
+                    if (c == '\n') nl++;
+                    p_char(c, 0x0F);
+                    printed++;
+                }
+                write_serial_string("[SH] head ");
+                write_serial_hex(printed);
+                write_serial_string(" bytes: ");
+                for (int i = 0; i < printed; i++) {
+                    char cc = buf[i];
+                    if (cc == '\n') write_serial_string("\\n");
+                    else write_serial(cc);
+                }
+                write_serial_string("\n");
+                if (printed > 0 && buf[printed - 1] != '\n') print("\n", 0x0F);
+            }
+        } else {
+            // stdin (pipe / '<' redirection)
+            extern int pipe_buf_len;
+            extern char pipe_buffer[];
+            const char* src = (shell_stdin_len > 0) ? shell_stdin_buf : pipe_buffer;
+            int src_len = (shell_stdin_len > 0) ? shell_stdin_len : pipe_buf_len;
+            if (src_len > 0) {
+                int nl = 0;
+                extern void write_serial_string(const char*);
+                write_serial_string("[SH] head stdin: ");
+                for (int i = 0; i < src_len && nl < lines; i++) {
+                    char c = src[i];
+                    if (c == '\n') nl++;
+                    p_char(c, 0x0F);
+                    if (c == '\n') write_serial_string("\\n");
+                    else write_serial(c);
+                }
+                write_serial_string("\n");
+                if (src_len > 0 && src[src_len - 1] != '\n') print("\n", 0x0F);
+            } else {
+                print("head: no input\n", 0x0C);
+            }
         }
     }
     // --- RM (delete) ---
@@ -1760,6 +1922,18 @@ static void run_cmd_internal() {
             print("rmdir [path] — Remove an empty directory\n", 0x0B);
         } else if (strcmp(topic, "df") == 0) {
             print("df — Show disk usage for mectovfs and /ext2\n", 0x0B);
+        } else if (strcmp(topic, "head") == 0) {
+            print("head [-n N] [file] — Print the first N lines (default 10)\n", 0x0B);
+        } else if (strcmp(topic, "seq") == 0) {
+            print("seq [FIRST] LAST — Print a sequence of numbers\n", 0x0B);
+        } else if (strcmp(topic, "uname") == 0) {
+            print("uname [-a] — Print OS name (or full kernel banner)\n", 0x0B);
+        } else if (strcmp(topic, "whoami") == 0) {
+            print("whoami — Print the current user (root)\n", 0x0B);
+        } else if (strcmp(topic, "hostname") == 0) {
+            print("hostname — Print the machine hostname\n", 0x0B);
+        } else if (strcmp(topic, "env") == 0) {
+            print("env — List all exported environment variables\n", 0x0B);
         } else {
             print("man: no manual entry for '", 0x0C);
             print(topic, 0x0C);
@@ -1863,7 +2037,17 @@ static void bg_child_entry(void) {
 void ex_cmd() {
     print("\n", 0x0F);
     cmd_b[b_idx] = '\0';
-    
+
+    // Lazy-init the env/alias tables. The other init site is
+    // shell_print_prompt(), but the Ring-3 terminal renders its own prompt, so
+    // defaults like $USER would stay unset there until the first `export`.
+    // Guarded by the shared module-level flag so user-added vars are never
+    // reset by a second init.
+    if (!env_alias_initialized) {
+        init_env_vars_and_aliases();
+        env_alias_initialized = 1;
+    }
+
     // Save to history (skip empty)
     if (b_idx > 0) {
         history_add(cmd_b);
