@@ -532,6 +532,12 @@ static void syscall_handler(registers_t* regs) {
                 for(int i=0; i<48; i++) info->cpu_brand[i] = cpu_brand[i];
                 extern uint8_t rtl_mac[6];
                 for(int i=0; i<6; i++) info->mac_addr[i] = rtl_mac[i];
+                // Per-CPU load (Fase 3 runqueues): how much real work each
+                // core did in the last ~50 ms window.
+                extern int task_cpu_count(void);
+                extern uint32_t task_cpu_load(int);
+                info->cpu_count = (uint32_t)task_cpu_count();
+                for (int i = 0; i < 4; i++) info->cpu_load[i] = task_cpu_load(i);
                 regs->eax = 0;
             } else {
                 regs->eax = -1;

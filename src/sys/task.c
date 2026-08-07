@@ -93,6 +93,26 @@ struct runqueue {
 
 static struct runqueue rq[MAX_CPUS];
 
+// Per-CPU load sampling (for the SysInfo app's live core bars). Every
+// schedule() tick counts whether the CPU ran a real task (not task 0 / the
+// pinned idle) and every 50 ticks (50 ms) publishes the percentage into
+// cpu_load_pct[cid], which the SYS_GET_SYSINFO syscall reads. All updates
+// happen under task_lock (schedule already holds it); reads are plain
+// 32-bit loads, fine for a monitor.
+static int rq_cpu_count(void);   // defined below (phantom-CPU-aware core count)
+
+#define CPU_LOAD_WINDOW 50   // ticks per window (1 kHz -> 50 ms)
+static volatile uint32_t cpu_load_pct[MAX_CPUS];
+static uint32_t cpu_win_busy[MAX_CPUS];
+static uint32_t cpu_win_ticks[MAX_CPUS];
+
+uint32_t task_cpu_load(int cid) {
+    if (cid < 0 || cid >= MAX_CPUS) return 0;
+    return cpu_load_pct[cid];
+}
+
+int task_cpu_count(void) { return rq_cpu_count(); }
+
 // Queue tid on cpu's runqueue (no-op if already queued).
 static void rq_enqueue(int cpu, int tid) {
     if (tid < 0 || tid >= MAX_TASKS || cpu < 0 || cpu >= MAX_CPUS) return;
@@ -551,6 +571,18 @@ uint32_t schedule(uint32_t esp) {
             current_task[cid] = -1;
             spin_unlock(&task_lock);
             return esp;   // iret back to this CPU's idle loop
+        }
+    }
+
+    // 3b. Per-CPU load sample: a tick counts as busy only when the picked
+    //     task is real work — never task 0 (kernel main loop / BSP idle) or a
+    //     pinned per-CPU idle task.
+    if (cid < MAX_CPUS) {
+        if (next != 0 && !tasks[next].is_idle) cpu_win_busy[cid]++;
+        if (++cpu_win_ticks[cid] >= CPU_LOAD_WINDOW) {
+            cpu_load_pct[cid] = (cpu_win_busy[cid] * 100) / cpu_win_ticks[cid];
+            cpu_win_busy[cid] = 0;
+            cpu_win_ticks[cid] = 0;
         }
     }
 

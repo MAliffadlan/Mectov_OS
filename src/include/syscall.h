@@ -14,6 +14,8 @@ typedef struct {
     uint32_t fb_bpp;
     char cpu_brand[48];
     uint8_t mac_addr[6];
+    uint32_t cpu_count;    // number of online cores (1..4)
+    uint32_t cpu_load[4];  // per-core load percent over the last ~50 ms
 } sysinfo_t;
 
 typedef struct {

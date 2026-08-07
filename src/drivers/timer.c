@@ -29,6 +29,22 @@ static void timer_handler(registers_t* regs) {
     if ((timer_ticks % 1000) == 0) {
         write_serial('.');
     }
+
+    // Per-core load line every 3 s (one locked line, BSP-only): "[LOAD]
+    // c0=<pct> c1=<pct> ...". Backed by the Fase 3 scheduler's per-CPU load
+    // sampling, so tail -f serial_debug.log shows all four cores at work.
+    if ((timer_ticks % 3000) == 0) {
+        extern uint32_t task_cpu_load(int);
+        extern int task_cpu_count(void);
+        int n = task_cpu_count();
+        if (n < 1 || n > 4) n = 4;
+        write_serial_string("[LOAD] ");
+        for (int c = 0; c < n; c++) {
+            write_serial_string(c == 0 ? "c0=" : c == 1 ? " c1=" : c == 2 ? " c2=" : " c3=");
+            write_serial_hex(task_cpu_load(c));
+        }
+        write_serial_string("\n");
+    }
     
     // Drive the 'heartbeat' for UI
     update_marquee();
