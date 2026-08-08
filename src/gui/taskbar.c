@@ -298,9 +298,9 @@ void taskbar_draw() {
         vga_bevel_raised(start_x, start_y, start_w, start_h);
     // Pressed content shifts 1px for the physical feel
     int start_txt_off = start_pressed ? 1 : 0;
-    // Mectov logo (small blue square before text) — vertically centered
-    draw_rounded_rect(start_x + 6 + start_txt_off, start_y + 3 + start_txt_off, 14, 14, 2, GUI_BLUE);
-    draw_string_px(start_x + 6 + start_txt_off, start_y + 3 + start_txt_off, "M", RETRO_SELTXT, GUI_BLUE);
+    // Mectov logo (small amber square before text) — vertically centered
+    draw_rounded_rect(start_x + 6 + start_txt_off, start_y + 3 + start_txt_off, 14, 14, 2, RETRO_SEL);
+    draw_string_px(start_x + 6 + start_txt_off, start_y + 3 + start_txt_off, "M", RETRO_SELTXT, RETRO_SEL);
     draw_string_px(start_x + 24 + start_txt_off, start_y + 2 + start_txt_off, "Mectov", RETRO_TEXT, TB_BG);
     
     // ---------- Separator (groove) ----------
@@ -427,8 +427,8 @@ void taskbar_draw() {
         // Header divider line
         draw_rect(2, sm_y + 35, sm_w, 1, RETRO_SHADOW);
         // Avatar circle placeholder
-        fill_circle(20, sm_y + 18, 14, GUI_BLUE);
-        draw_string_px(8, sm_y + 14, "M", RETRO_SELTXT, GUI_BLUE);
+        fill_circle(20, sm_y + 18, 14, RETRO_SEL);
+        draw_string_px(8, sm_y + 14, "M", RETRO_SELTXT, RETRO_SEL);
         // User name
         draw_string_px(38, sm_y + 10, "Mectov User", RETRO_TEXT, TB_BG);
         draw_string_px(38, sm_y + 22, "Professional Edition", TB_TEXT_DIM, TB_BG);
