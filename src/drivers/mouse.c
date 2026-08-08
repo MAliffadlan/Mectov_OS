@@ -102,6 +102,16 @@ static void mouse_handler(registers_t* regs) {
 }
 
 void init_mouse() {
+    // The whole protocol runs with interrupts disabled: IRQ1/IRQ12 fire
+    // ps2_drain(), which can steal the controller's replies from under our
+    // direct inb(0x60) reads. Most notably the command-byte response to
+    // `outb(0x64, 0x20)` — usually 0x41-0x4F — gets queued as a bogus
+    // keyboard "scancode" that later input consumers read as a real keypress
+    // (it once dismissed the lock screen instantly at boot). The poll loops
+    // make this a few hundred microseconds at most.
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+
     // Enable auxiliary PS/2 device
     mouse_wait_out(); outb(0x64, 0xA8);
 
@@ -130,6 +140,8 @@ void init_mouse() {
 
     // Enable data reporting
     mouse_write(0xF4); mouse_read();  // ACK
+
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
 
     // IRQ12 = interrupt vector 44 (0x2C)
     register_interrupt_handler(44, mouse_handler);

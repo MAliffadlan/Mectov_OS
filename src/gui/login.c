@@ -9,11 +9,12 @@
 #include "../include/font8x16.h"
 
 // ---- Instrument-console palette (warm charcoal + phosphor amber) ----
-// Deliberate departure from the previous glassmorphism/macOS-style login:
-// Mectov is a hand-built OS, so the gate should read as a machine console —
-// the live clock and system manifest are proof the box is awake, not a
-// consumer welcome screen. Amber is the phosphor of CRT terminals, warm
-// rather than the acid-green cliché or the blue every OS uses.
+// Mectov is a hand-built OS, so the gate should read as a machine console:
+// the live clock is proof the box is awake. Amber is the phosphor of CRT
+// terminals — warm rather than the acid-green cliché or the blue every OS
+// uses. The flow is deliberately Windows-like: a minimal lock screen with
+// just the time, dismissed by any keypress or click, followed by the
+// password entry screen.
 #define IC_BG_DEEP    0x000B0A08  // wallpaper dim layer (warm near-black)
 #define IC_BG_PANEL   0x0016130F  // panel fill (warm charcoal)
 #define IC_LINE       0x002C2821  // hairline borders
@@ -30,6 +31,23 @@ static void itoa2(char* out, int val) {
     out[1] = '0' + val % 10;
     out[2] = '\0';
 }
+
+static void itoa_dec(char* out, int val) {
+    char tmp[8];
+    int n = 0;
+    do { tmp[n++] = '0' + val % 10; val /= 10; } while (val);
+    while (n) *out++ = tmp[--n];
+    *out = '\0';
+}
+
+// ---- Date names (rtc dow: 1=Sunday..7=Saturday) ----
+static const char* const day_names[7] = {
+    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+};
+static const char* const month_names[12] = {
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+};
 
 // ---- Scaled bitmap text: renders the 8x16 font at `scale` pixels per bit ----
 static int draw_char_scale(int px, int py, char c, int scale, uint32_t fg) {
@@ -57,50 +75,45 @@ static int draw_str_scale(int px, int py, const char* s, int scale, int ls, uint
     return cx - px;
 }
 
-// ---- Live manifest (cores + uptime), two groups centered around cx ----
-static void draw_manifest(int cy, int cx) {
-    extern uint32_t smp_cpu_count;
-    extern uint32_t get_uptime_seconds(void);
-
-    char num[3];
-    uint32_t cores = (smp_cpu_count > 0) ? smp_cpu_count : 1;
-    uint32_t up = get_uptime_seconds();
-    uint32_t h = up / 3600, m = (up / 60) % 60, s = up % 60;
-
-    // Left group: 4 blocks + "4 cores"  (width 40 + 8 + 40 = 88)
-    int lx = cx - 96;
-    for (uint32_t i = 0; i < 4; i++) {
-        draw_rect(lx, cy, 6, 10, (i < cores) ? IC_AMBER : 0x00222019);
-        lx += 10;
-    }
-    itoa2(num, (int)cores);
-    draw_string_px(lx + 2, cy, num, IC_INK, 0xFFFFFFFF);
-    draw_string_px(lx + 12, cy, "cores", IC_DIM, 0xFFFFFFFF);
-
-    // Right group: "up 00:12:34"  (width 16 + 8 + 64 = 88)
-    int rx = cx + 18;
-    draw_string_px(rx, cy, "up", IC_DIM, 0xFFFFFFFF);
-    itoa2(num, (int)h); draw_string_px(rx + 26, cy, num, IC_AMBER, 0xFFFFFFFF);
-    draw_string_px(rx + 44, cy, ":", IC_DIM, 0xFFFFFFFF);
-    itoa2(num, (int)m); draw_string_px(rx + 52, cy, num, IC_AMBER, 0xFFFFFFFF);
-    draw_string_px(rx + 70, cy, ":", IC_DIM, 0xFFFFFFFF);
-    itoa2(num, (int)s); draw_string_px(rx + 78, cy, num, IC_AMBER, 0xFFFFFFFF);
+// Advance width of a string (same metrics as draw_str_scale), for centering.
+static int str_advance(const char* s, int scale, int ls) {
+    int w = 0;
+    for (; *s; s++) w += (*s == ' ') ? (4 * scale + ls) : (8 * scale + ls);
+    return w;
 }
 
-// Render the current time once per second from the cached string. The
-// CMOS read itself is gated too: rtc_read_time() busy-waits on the UIP
-// flag (up to 10ms), so reading it every 16ms frame (draw_login's cadence)
-// would stall frames whenever the update window is hit. Re-read at most
-// twice per second and only reformat when the second actually changed.
+// ---- Live clock + date ----
+// The CMOS read itself is gated: rtc_read_time() busy-waits on the UIP flag
+// (up to 10ms), so reading it every 16ms frame would stall frames whenever
+// the update window is hit. Re-read at most twice per second and only
+// reformat when the second (or the day) actually changed.
 static char clock_str[9];
+static char date_str[32];
 
 static void refresh_clock(void) {
     static int last_sec = -1;
+    static int last_day = -1;
     static uint32_t last_read = 0;
     uint32_t now = get_ticks();
-    if (now - last_read < 500) return;
+    if (last_read != 0 && now - last_read < 500) return;  // first call always reads
     last_read = now;
     rtc_time_t t = rtc_read_time();
+
+    if ((int)t.day != last_day) {  // rebuild the date once per day
+        last_day = t.day;
+        const char* dn = day_names[(t.dow - 1) % 7];
+        const char* mn = month_names[(t.month - 1) % 12];
+        int k = 0;
+        while (*dn) date_str[k++] = *dn++;
+        date_str[k++] = ',';
+        date_str[k++] = ' ';
+        itoa_dec(date_str + k, t.day);
+        while (date_str[k]) k++;
+        date_str[k++] = ' ';
+        while (*mn) date_str[k++] = *mn++;
+        date_str[k] = '\0';
+    }
+
     int sec = t.second;
     if (sec == last_sec) return;
     last_sec = sec;
@@ -112,15 +125,8 @@ static void refresh_clock(void) {
     clock_str[8] = '\0';
 }
 
-// Panel geometry shared by render and hit-test (one source of truth).
-#define LOGIN_PW  380
-#define LOGIN_PH  178
-#define LOGIN_PY  ((int)(fb_height - LOGIN_PH) / 2 + 56)
-
-static void draw_login(int pass_len, int shake, int err, int cap_lock) {
-    if (!is_vbe || fb_width == 0 || fb_height == 0) return;
-
-    // ----- Background: wallpaper dimmed to a deep warm field -----
+// ---- Shared background: wallpaper dimmed to a warm charcoal field ----
+static void draw_background(void) {
     extern uint32_t _binary_obj_wallpaper_bin_start[];
     uint32_t* wp_ptr = _binary_obj_wallpaper_bin_start;
     uint32_t wp_w = 1024, wp_h = 768;
@@ -131,29 +137,88 @@ static void draw_login(int pass_len, int shake, int err, int cap_lock) {
     }
     if (fb_width > wp_w)  draw_rect(wp_w, 0, fb_width - wp_w, fb_height, IC_BG_DEEP);
     if (fb_height > wp_h) draw_rect(0, wp_h, fb_width, fb_height - wp_h, IC_BG_DEEP);
-    // Two 50% blends (draw_rect_alpha) pull the wallpaper down to a warm
-    // charcoal field; a dark band at top and bottom adds gentle depth.
+    // Two 50% blends pull the wallpaper down to a warm charcoal field; a
+    // dark band at top and bottom adds gentle depth.
     draw_rect_alpha(0, 0, fb_width, fb_height, 0x00000000);
     draw_rect_alpha(0, 0, fb_width, fb_height, 0x000B0A08);
     draw_rect_alpha(0, 0, fb_width, fb_height / 5, 0x00000000);
     draw_rect_alpha(0, fb_height - fb_height / 5, fb_width, fb_height / 5, 0x00000000);
+}
+
+// ---- Bottom-center release string (both screens) ----
+static void draw_footer(void) {
+    char footer[48];
+    int fl = 0;
+    const char* fv = "v"; while (*fv) footer[fl++] = *fv++;
+    const char* ov = OS_VERSION; while (*ov) footer[fl++] = *ov++;
+    const char* fr = "  SMP  MECTOVFS  1024x768";
+    while (*fr) footer[fl++] = *fr++;
+    footer[fl] = '\0';
+    draw_string_px((int)(fb_width - fl * 8) / 2, 716, footer, IC_DIM, 0xFFFFFFFF);
+}
+
+// ---- Lock screen: one big clock, a date, nothing else ----
+static void draw_lock_screen(void) {
+    if (!is_vbe || fb_width == 0 || fb_height == 0) return;
+    draw_background();
+    refresh_clock();
+
+    int cx = (int)fb_width / 2;
+
+    // Brand wordmark — small, top center, deliberate restraint
+    const char* wm = "MECTOV OS";
+    draw_str_scale(cx - str_advance(wm, 2, 6) / 2, 64, wm, 2, 6, IC_AMBER);
+
+    // Hero clock: HH:MM at 8x with a blinking colon
+    int scale = 8;
+    int gy = 248;
+    int gx = cx - (5 * 8 * scale) / 2;  // 5 glyphs, no spacing
+    // draw_char_scale returns the glyph ADVANCE (8*scale), so accumulate
+    // into gx with += — assigning (=) would reset gx to 64 and stack every
+    // following glyph on top of each other.
+    gx += draw_char_scale(gx, gy, clock_str[0], scale, IC_AMBER_BRT);
+    gx += draw_char_scale(gx, gy, clock_str[1], scale, IC_AMBER_BRT);
+    if ((get_ticks() / 500) & 1) {
+        gx += draw_char_scale(gx, gy, ':', scale, IC_AMBER_BRT);
+    } else {
+        gx += 8 * scale;  // blink: skip the colon, background shows through
+    }
+    gx += draw_char_scale(gx, gy, clock_str[3], scale, IC_AMBER_BRT);
+    draw_char_scale(gx, gy, clock_str[4], scale, IC_AMBER_BRT);
+
+    // Date line under the clock
+    draw_str_scale(cx - str_advance(date_str, 2, 4) / 2, 424, date_str, 2, 4, IC_INK);
+
+    // Hint: how to proceed
+    const char* hint = "click anywhere or press any key";
+    draw_str_scale(cx - str_advance(hint, 1, 0) / 2, 690, hint, 1, 0, IC_DIM);
+
+    draw_footer();
+}
+
+// ---- Password entry screen ----
+// Panel geometry shared by render and hit-test (one source of truth).
+#define LOGIN_PW  380
+#define LOGIN_PH  178
+#define LOGIN_PY  ((int)(fb_height - LOGIN_PH) / 2 + 56)
+
+static void draw_login(int pass_len, int shake, int err, int cap_lock) {
+    if (!is_vbe || fb_width == 0 || fb_height == 0) return;
+    draw_background();
+    refresh_clock();
 
     int shake_off = shake ? ((shake & 1) ? 6 : -6) : 0;
     int cx = (int)fb_width / 2 + shake_off;
 
-    // ----- Wordmark: one line "MECTOV OS", 2x, letter-spaced -----
-    // advance = 9*16 + 8*6 = 192
-    const int ww = 192;
-    draw_str_scale(cx - ww / 2, 148, "MECTOV OS", 2, 6, IC_AMBER);
-    draw_rect(cx - ww / 2 - 6, 192, ww + 12, 1, 0x003C2E18);
+    // Clock + date shrink to the top-left corner (Windows-style after dismiss)
+    draw_str_scale(32, 28, clock_str, 2, 4, IC_AMBER_BRT);
+    draw_str_scale(32, 58, date_str, 1, 2, IC_DIM);
 
-    // ----- Signature: live clock (2x phosphor, centered) -----
-    refresh_clock();
-    // 8 glyphs, 2x, ls=5 → advance = 8*16 + 7*5 = 163
-    draw_str_scale(cx - 81, 210, clock_str, 2, 5, IC_AMBER_BRT);
-
-    // ----- Manifest: cores + uptime -----
-    draw_manifest(290, cx);
+    // User avatar above the panel: amber ring, warm fill, brand initial
+    int avx = cx, avy = LOGIN_PY - 46;
+    fill_circle(avx, avy, 26, IC_BG_PANEL);
+    draw_circle(avx, avy, 26, IC_AMBER);
+    draw_str_scale(avx - 8, avy - 16, "M", 2, 0, IC_AMBER);
 
     // ----- Flat instrument panel -----
     int py = LOGIN_PY;
@@ -209,27 +274,20 @@ static void draw_login(int pass_len, int shake, int err, int cap_lock) {
         draw_string_px(bbx + (bbw - 8 * 8) / 2, bby + 7, "SIGN IN", IC_AMBER, 0xFFFFFFFF);
     }
 
-    // ----- Footer manifest (release string from utils.h) -----
-    char footer[48];
-    int fl = 0;
-    const char* fv = "v";
-    while (*fv) footer[fl++] = *fv++;
-    const char* ov = OS_VERSION;
-    while (*ov) footer[fl++] = *ov++;
-    const char* fr = "  SMP  MECTOVFS  1024x768";
-    while (*fr) footer[fl++] = *fr++;
-    footer[fl] = '\0';
-    draw_string_px((int)(fb_width - fl * 8) / 2, 716, footer, IC_DIM, 0xFFFFFFFF);
+    draw_footer();
 }
 
 int gui_login() {
     const char* pass = "mectov123";
     char input[32];
     int idx = 0, shake = 0, err = 0, cap_lock_active = 0;
+    int locked = 1;                 // Windows-style: dismiss with any key/click
+    uint32_t click_ignore_until = 0; // debounce the dismissing click
 
     cursor_saved_x = -1;
     input[0] = '\0';
     clock_str[0] = '\0';
+    date_str[0] = '\0';
 
     uint32_t last_draw = 0;
 
@@ -239,7 +297,8 @@ int gui_login() {
             last_draw = now;
             extern void mark_dirty(int, int, int, int);
             mark_dirty(0, 0, fb_width, fb_height);
-            draw_login(idx, shake, err, cap_lock_active);
+            if (locked) draw_lock_screen();
+            else draw_login(idx, shake, err, cap_lock_active);
             extern int cursor_draw_x, cursor_draw_y;
             cursor_draw_x = mouse_x;
             cursor_draw_y = mouse_y;
@@ -247,32 +306,49 @@ int gui_login() {
             if (shake > 0) shake--;
         }
 
-        // Keyboard
+        // ---- State machine ----
         uint8_t sc = k_get_scancode();
         if (sc != 0 && sc < 0x80) {
-            char c = scancode_to_char(sc);
-            if (sc == 0x3A) { cap_lock_active = !cap_lock_active; }
+            if (locked) {
+                // Any key dismisses the lock screen. The dismissing press is
+                // consumed so it never reaches the password field — only the
+                // *next* keypress types (Windows behavior).
+                if (sc == 0x3A) cap_lock_active = !cap_lock_active;
+                locked = 0;
+            } else {
+                char c = scancode_to_char(sc);
+                if (sc == 0x3A) { cap_lock_active = !cap_lock_active; }
 
-            if (c == '\n') {
-                input[idx] = '\0';
-                if (strcmp(input, pass) == 0) { beep(); return 1; }
-                err = 1; shake = 10; idx = 0;
-            } else if (c == '\b') {
-                if (idx > 0) { idx--; err = 0; }
-            } else if (c != 0 && idx < 31) {
-                input[idx++] = c; err = 0;
+                if (c == '\n') {
+                    input[idx] = '\0';
+                    if (strcmp(input, pass) == 0) { beep(); return 1; }
+                    err = 1; shake = 10; idx = 0;
+                } else if (c == '\b') {
+                    if (idx > 0) { idx--; err = 0; }
+                } else if (c != 0 && idx < 31) {
+                    input[idx++] = c; err = 0;
+                }
             }
         }
 
-        // Mouse click on Sign In button (same geometry as the render)
-        int box_x2 = (int)(fb_width - LOGIN_PW) / 2;
-        int bbx2 = box_x2 + 32, bby2 = LOGIN_PY + 88;
-        if ((mouse_btn & 1) &&
-            mouse_x >= bbx2 && mouse_x < bbx2 + LOGIN_PW - 64 &&
-            mouse_y >= bby2 && mouse_y < bby2 + 30) {
-            input[idx] = '\0';
-            if (strcmp(input, pass) == 0) { beep(); return 1; }
-            err = 1; shake = 10; idx = 0;
+        if (locked) {
+            // Any left click dismisses; ignore the held button for a beat so
+            // it cannot immediately trigger Sign In on the next screen.
+            if ((mouse_btn & 1) && now >= click_ignore_until) {
+                click_ignore_until = now + 300;
+                locked = 0;
+            }
+        } else {
+            // Mouse click on Sign In button (same geometry as the render)
+            int box_x2 = (int)(fb_width - LOGIN_PW) / 2;
+            int bbx2 = box_x2 + 32, bby2 = LOGIN_PY + 88;
+            if ((mouse_btn & 1) && now >= click_ignore_until &&
+                mouse_x >= bbx2 && mouse_x < bbx2 + LOGIN_PW - 64 &&
+                mouse_y >= bby2 && mouse_y < bby2 + 30) {
+                input[idx] = '\0';
+                if (strcmp(input, pass) == 0) { beep(); return 1; }
+                err = 1; shake = 10; idx = 0;
+            }
         }
 
         __asm__ __volatile__ ("hlt");
