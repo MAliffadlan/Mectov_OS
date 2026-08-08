@@ -369,11 +369,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                         needs_redraw = 1;
                     }
                 } else {
-                    // Ctrl+C interrupts the terminal's foreground app (SIGINT
-                    // to the whole job tree). The scancode is 0x2E for 'C';
-                    // the key is consumed here so it never reaches the focused
-                    // window as a normal character.
-                    if (keyboard_ctrl_held && sc == 0x2E) {
+                    // Ctrl+C (no Shift) interrupts the terminal's foreground
+                    // app (SIGINT to the whole job tree). The scancode is 0x2E
+                    // for 'C'; the key is consumed here so it never reaches the
+                    // focused window as a normal character. Ctrl+Shift+C is
+                    // deliberately NOT consumed — it falls through to the
+                    // window so the terminal can use it for clipboard copy.
+                    if (keyboard_ctrl_held && !shift_p && sc == 0x2E) {
                         extern int term_app_running;
                         extern int term_app_task_id;
                         extern int task_signal_group(int root_tid, int sig);
@@ -398,10 +400,19 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                             write_serial_string(", ");
                             write_serial_hex(n);
                             write_serial_string(" tasks)\n");
+                        } else {
+                            // No foreground app: classic ^C — cancel whatever
+                            // was being typed. Delivered as a key event to the
+                            // focused window; the terminal prints "^C" and
+                            // clears its input line.
+                            extern void push_event(int, int, int, int, int);
+                            extern int wm_focused;
+                            if (wm_focused >= 0) push_event(wm_focused, 2, 0, 0, 3);
+                            write_serial_string("[JOBS] Ctrl+C -> ^C (no fg app)\n");
                         }
                         needs_redraw = 1;
-                    } else if (keyboard_ctrl_held && sc == 0x2C) {
-                        // Ctrl+Z suspends the terminal's foreground app
+                    } else if (keyboard_ctrl_held && !shift_p && sc == 0x2C) {
+                        // Ctrl+Z (no Shift) suspends the terminal's foreground app
                         // (SIGTSTP to the whole job tree). Unlike Ctrl+C the
                         // job survives: it is registered as a stopped job so
                         // `jobs` lists it and `bg`/`fg` can resume it. The

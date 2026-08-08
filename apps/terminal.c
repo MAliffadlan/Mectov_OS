@@ -800,7 +800,21 @@ void _start(void) {
                 } else if (ev.key == 0xE051) { // Page Down
                     scroll_offset -= 6;
                     if (scroll_offset < 0) scroll_offset = 0;
-                } else if (ev.key == 3) { // Ctrl+C = Copy current command
+                } else if (ev.key == 3) { // Ctrl+C, no fg app = cancel line (^C)
+                    // The kernel consumes Ctrl+C while a foreground app runs
+                    // (SIGINT to its process group) and only forwards this
+                    // event when the terminal is free. POSIX-style ^C: print
+                    // the marker and drop whatever was being typed.
+                    scroll_offset = 0;
+                    term_print("^C\n", 0x0F);
+                    cmd_len = 0;
+                    edit_cursor = 0;
+                    cmd[0] = '\0';
+                    print_prompt();
+                    cmd_start_cx = cx;
+                    cmd_start_cy = cy;
+                    redraw_input_line();
+                } else if (ev.key == 0x8003) { // Ctrl+Shift+C = Copy current command
                     if (cmd_len > 0) {
                         sys_clipboard_copy(cmd, cmd_len);
                     }

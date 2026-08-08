@@ -143,7 +143,18 @@ void win_draw_cb(int id, int cx, int cy, int cw, int ch) {
     // We don't push a Paint event every frame, we let the app decide when to update.
 }
 void win_key_cb(int id, char c, uint8_t sc) {
-    if (keyboard_ctrl_held && c >= 'a' && c <= 'z') {
+    // Ctrl+Shift+letter gets a distinct code (0x8000 | ctrl-char) so the
+    // terminal can tell e.g. Ctrl+Shift+C "copy" apart from a plain Ctrl+C
+    // "interrupt" — the kernel consumes plain Ctrl+C before it ever reaches
+    // the window, so without this the copy shortcut would be unreachable.
+    // Key off shift_p, not the character's case: with Caps Lock on, Shift+C
+    // yields lowercase 'c', which would otherwise fall into the plain Ctrl
+    // branch and emit 3 — the same code as a kernel-consumed Ctrl+C.
+    if (keyboard_ctrl_held && shift_p &&
+        ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) {
+        int n = (c >= 'a' && c <= 'z') ? c - 'a' + 1 : c - 'A' + 1;
+        push_event(id, 2, 0, 0, 0x8000 | n);
+    } else if (keyboard_ctrl_held && c >= 'a' && c <= 'z') {
         push_event(id, 2, 0, 0, c - 'a' + 1);
     } else if (keyboard_ctrl_held && c >= 'A' && c <= 'Z') {
         push_event(id, 2, 0, 0, c - 'A' + 1);
@@ -747,6 +758,18 @@ static void syscall_handler(registers_t* regs) {
             }
             extern int clipboard_copy(const char* data, int len);
             regs->eax = (uint32_t)clipboard_copy(user_data, len);
+            // Serial mirror so automated tests can verify Ctrl+Shift+C copy.
+            extern void write_serial_string(const char*);
+            extern void write_serial_hex(uint32_t);
+            write_serial_string("[CLIP] copy ");
+            write_serial_hex(len);
+            write_serial_string(": ");
+            for (int ci = 0; ci < len && ci < 64; ci++) {
+                char cc = user_data[ci];
+                if (cc == '\n') write_serial_string("\\n");
+                else write_serial(cc);
+            }
+            write_serial_string("\n");
             break;
         }
 
