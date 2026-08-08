@@ -62,6 +62,21 @@ typedef struct {
 alias_t aliases[MAX_ALIASES];
 int alias_count = 0;
 
+// Previous directory for `cd -` (OLDPWD). Only updated on a successful cd
+// to an explicit directory, so `cd -` always lands somewhere valid.
+static char shell_oldpwd[MAX_PATH];
+
+// Print n right-aligned in a field of `width` columns (space-padded), POSIX
+// `wc`/`cat -n` style, then a trailing space. Numbers beyond the field width
+// just print unpadded rather than overflowing.
+static void print_num_field(int n, int width) {
+    int digits = 1, t = n;
+    while (t >= 10) { t /= 10; digits++; }
+    for (int s = 0; s < width - digits; s++) print(" ", 0x0F);
+    p_int(n, 0x0F);
+    print(" ", 0x0F);
+}
+
 void init_env_vars_and_aliases() {
     // Default environment variables
     strcpy(env_vars[0].name, "USER");
@@ -305,7 +320,7 @@ const char* cmd_list[] = {
     "sh","source","export","alias","unalias","history","ps","kill",
     "jobs","fg","bg",
     "echo","beep","tone","sleep","date","color","lock",
-    "uname","whoami","hostname","env","seq",
+    "uname","whoami","hostname","env","seq","wc","type","yes",
     "run","snake","taskmgr","flappy","doom","lspci","man",
     "ping","host","fetch","grep",
     "shutdown","reboot", NULL
@@ -630,7 +645,7 @@ static void run_cmd_internal() {
         print(" REDIR   : ", 0x0B); print("cmd > file (truncate), cmd >> file (append), cmd < file (stdin)\n", 0x0F);
         print(" APPS GUI: ", 0x0B); print("flappy, doom, taskmgr, snake, run [app.mct], run [app.mct] &\n", 0x0A);
         print(" NET & HW: ", 0x0B); print("ping [ip], host [domain], fetch [domain], lspci\n", 0x0F);
-        print(" UTILS   : ", 0x0B); print("echo [msg], sleep [sec], tone [freq], beep, man [cmd]\n", 0x0F);
+        print(" UTILS   : ", 0x0B); print("echo [msg], sleep [sec], wc [file], cat -n, cd -, type [cmd], yes [str] &\n", 0x0F);
         print(" POWER   : ", 0x0B); print("reboot, shutdown\n", 0x0C);
         print("----------------------------------------------------------------------\n", 0x07);
         print(" SHORTCUT: ", 0x0E); print("Tab=Autocomplete  |  Up/Down=History  |  Pipes: cmd1 | cmd2\n", 0x0F);
@@ -751,13 +766,41 @@ static void run_cmd_internal() {
         } else {
             char* dirpath = cmd_b + 3;
             sanitize_path(dirpath);
-            int node = vfs_get_node(dirpath);
-            if (node < 0 || !vfs_is_dir(node)) {
-                print("cd: directory not found: ", 0x0C);
-                print(dirpath, 0x0C);
-                print("\n", 0x0C);
+            if (strcmp(dirpath, "-") == 0) {
+                // cd - : jump back to the previous directory (OLDPWD).
+                if (shell_oldpwd[0] == '\0') {
+                    print("cd: OLDPWD not set\n", 0x0C);
+                    extern void write_serial_string(const char*);
+                    write_serial_string("[SH] cd -: OLDPWD not set\n");
+                } else {
+                    int node = vfs_get_node(shell_oldpwd);
+                    if (node < 0 || !vfs_is_dir(node)) {
+                        print("cd: previous directory no longer exists\n", 0x0C);
+                    } else {
+                        set_current_dir(node);
+                        print(shell_oldpwd, 0x0F);
+                        print("\n", 0x0F);
+                        extern void write_serial_string(const char*);
+                        write_serial_string("[SH] cd -: ");
+                        write_serial_string(shell_oldpwd);
+                        write_serial_string("\n");
+                    }
+                }
             } else {
-                set_current_dir(node);
+                int node = vfs_get_node(dirpath);
+                if (node < 0 || !vfs_is_dir(node)) {
+                    print("cd: directory not found: ", 0x0C);
+                    print(dirpath, 0x0C);
+                    print("\n", 0x0C);
+                } else {
+                    // Remember where we were so `cd -` can come back.
+                    vfs_get_abs_path(get_current_dir(), shell_oldpwd, MAX_PATH);
+                    set_current_dir(node);
+                    extern void write_serial_string(const char*);
+                    write_serial_string("[SH] cd: ");
+                    write_serial_string(dirpath);
+                    write_serial_string(" (oldpwd saved)\n");
+                }
             }
         }
     }
@@ -833,6 +876,13 @@ static void run_cmd_internal() {
             }
         } else {
             char* fpath = cmd_b + 4;
+            int number_lines = 0;
+            // cat -n FILE : number each output line (right-aligned, 6 cols).
+            if (strncmp(fpath, "-n ", 3) == 0) {
+                number_lines = 1;
+                fpath += 3;
+                while (*fpath == ' ') fpath++;
+            }
             sanitize_path(fpath);
             char buf[2048];
             int sz = vfs_read_file(fpath, buf, 2047);
@@ -840,9 +890,21 @@ static void run_cmd_internal() {
                 print("cat: file not found\n", 0x0C);
             } else {
                 buf[sz] = '\0';
-                print(buf, 0x0F);
+                // Stream the file so `cat -n` can prefix each line. For plain
+                // `cat` this is byte-identical to the old print(buf).
+                int line_no = 1, at_bol = 1;
+                for (int ci = 0; ci < sz; ci++) {
+                    if (number_lines && at_bol) {
+                        print_num_field(line_no, 6);
+                        at_bol = 0;
+                    }
+                    p_char(buf[ci], 0x0F);
+                    if (buf[ci] == '\n') { line_no++; at_bol = 1; }
+                }
                 // Serial mirror so automated tests can verify file contents
-                // (terminal output goes over IPC, not serial).
+                // (terminal output goes over IPC, not serial). Mirrors the
+                // raw file bytes regardless of -n; numbered output is verified
+                // end-to-end via `cat -n F | grep N` (grep mirrors matches).
                 extern void write_serial_string(const char*);
                 extern void write_serial_hex(uint32_t);
                 write_serial_string("[SH] cat ");
@@ -1058,6 +1120,132 @@ static void run_cmd_internal() {
             } else {
                 print("head: no input\n", 0x0C);
             }
+        }
+    }
+    // --- WC (word count: lines, words, bytes) ---
+    else if (strncmp(cmd_b, "wc ", 3) == 0 || strcmp(cmd_b, "wc") == 0) {
+        // wc [FILE]     → count lines/words/bytes of a file
+        // wc (no args)  → count stdin (pipe / '<' redirection)
+        // Like cat/head, the read buffer is a plain stack local: a forked
+        // background builtin (`sh x.sh &` whose script runs wc) executes
+        // run_cmd_internal on another core, so a shared static here could
+        // race. Each task has its own kernel stack, so a local is safe.
+        const char* src = NULL;
+        int src_len = 0, file_fail = 0;
+        char wpath[MAX_PATH] = "";
+        if (strncmp(cmd_b, "wc ", 3) == 0) {
+            char* fpath = cmd_b + 3;
+            sanitize_path(fpath);
+            char wbuf[2048];
+            int sz = vfs_read_file(fpath, wbuf, 2047);
+            if (sz < 0) {
+                file_fail = 1;
+                print("wc: file not found: ", 0x0C);
+                print(fpath, 0x0C);
+                print("\n", 0x0C);
+            } else {
+                src = wbuf;
+                src_len = sz;
+                strncpy(wpath, fpath, MAX_PATH - 1);
+                wpath[MAX_PATH - 1] = '\0';
+            }
+        } else {
+            extern int pipe_buf_len;
+            extern char pipe_buffer[];
+            src = (shell_stdin_len > 0) ? shell_stdin_buf : pipe_buffer;
+            src_len = (shell_stdin_len > 0) ? shell_stdin_len : pipe_buf_len;
+        }
+        if (src) {
+            int lines = 0, words = 0, in_word = 0;
+            for (int i = 0; i < src_len; i++) {
+                char c = src[i];
+                if (c == '\n') lines++;
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                    in_word = 0;
+                } else if (!in_word) {
+                    in_word = 1;
+                    words++;
+                }
+            }
+            // POSIX format: lines words bytes [name], 7-column right-aligned.
+            print_num_field(lines, 7);
+            print_num_field(words, 7);
+            print_num_field(src_len, 7);
+            if (wpath[0]) print(wpath, 0x0F);
+            print("\n", 0x0F);
+            // Serial mirror for automated tests.
+            extern void write_serial_string(const char*);
+            extern void write_serial_hex(uint32_t);
+            write_serial_string("[SH] wc ");
+            write_serial_hex(lines); write_serial_string(" ");
+            write_serial_hex(words); write_serial_string(" ");
+            write_serial_hex(src_len); write_serial_string(" ");
+            write_serial_string(wpath);
+            write_serial_string("\n");
+        } else if (!file_fail) {
+            print("wc: no input\n", 0x0C);
+        }
+    }
+    // --- TYPE (describe a command: alias / builtin / app / not found) ---
+    else if (strncmp(cmd_b, "type ", 5) == 0) {
+        char* name = cmd_b + 5;
+        while (*name == ' ') name++;
+        // Only the first word is meaningful (bash: `type cmd`).
+        char tbuf[ALIAS_NAME_LEN];
+        int ti = 0;
+        for (; name[ti] && name[ti] != ' ' && ti < ALIAS_NAME_LEN - 1; ti++) {
+            tbuf[ti] = name[ti];
+        }
+        tbuf[ti] = '\0';
+        if (tbuf[0] == '\0') {
+            print("type: usage: type [name]\n", 0x0E);
+        } else {
+            const char* kind = NULL;
+            // 1) alias (expand_alias only expands the first word, so `type
+            //    ll` still sees the alias name, not its expansion).
+            for (int i = 0; i < alias_count && !kind; i++) {
+                if (strcmp(aliases[i].name, tbuf) == 0) {
+                    print(tbuf, 0x0F); print(" is aliased to `", 0x0F);
+                    print(aliases[i].value, 0x0A); print("'\n", 0x0F);
+                    kind = "alias";
+                }
+            }
+            // 2) shell builtin
+            for (int i = 0; cmd_list[i] != NULL && !kind; i++) {
+                if (strcmp(cmd_list[i], tbuf) == 0) {
+                    print(tbuf, 0x0F); print(" is a shell builtin\n", 0x0F);
+                    kind = "builtin";
+                }
+            }
+            // 3) external app on the VFS (/apps/name.mct)
+            if (!kind) {
+                char apath[MAX_PATH];
+                int ai = 0;
+                strcpy(apath, "/apps/");
+                ai = 6;
+                for (int k = 0; tbuf[k] && ai < MAX_PATH - 5; k++) {
+                    apath[ai++] = tbuf[k];
+                }
+                apath[ai++] = '.'; apath[ai++] = 'm'; apath[ai++] = 'c'; apath[ai++] = 't';
+                apath[ai] = '\0';
+                if (vfs_get_node(apath) >= 0) {
+                    print(tbuf, 0x0F); print(" is ", 0x0F);
+                    print(apath, 0x0A); print("\n", 0x0F);
+                    kind = "external";
+                }
+            }
+            if (!kind) {
+                print("type: ", 0x0C); print(tbuf, 0x0C);
+                print(": not found\n", 0x0C);
+                kind = "notfound";
+            }
+            // Serial mirror for automated tests.
+            extern void write_serial_string(const char*);
+            write_serial_string("[SH] type ");
+            write_serial_string(tbuf);
+            write_serial_string(" -> ");
+            write_serial_string(kind);
+            write_serial_string("\n");
         }
     }
     // --- RM (delete) ---
@@ -1898,6 +2086,25 @@ static void run_cmd_internal() {
             uint64_t ticks64 = (uint64_t)seconds * 1000u;
             if (ticks64 > 0x7FFFFFFF) ticks64 = 0x7FFFFFFF;
             task_sleep((int)ticks64);
+        }
+    }
+    // --- YES (repeat a string forever, `yes` / `yes hello`) ---
+    else if (strncmp(cmd_b, "yes", 3) == 0 &&
+             (cmd_b[3] == '\0' || cmd_b[3] == ' ')) {
+        // Prints STRING (default "y") forever, one per line — the classic
+        // pipeline filler. Run it backgrounded (`yes hi &`) and stop it with
+        // `kill <pid>` / `kill %job`; SIGKILL terminates it immediately, and
+        // a 50ms yield between lines keeps it gentle on the scheduler.
+        char* word = cmd_b + 3;
+        while (*word == ' ') word++;
+        if (word[0] == '\0') word = "y";
+        extern void task_sleep(int);
+        int it = 0;
+        for (;;) {
+            print(word, 0x0F);
+            print("\n", 0x0F);
+            task_sleep(50); // 50ms per line (~20 lines/sec)
+            if (++it == 1000000) break; // unreachable safety valve
         }
     }
     // --- TONE (nada, beep frequency) ---
