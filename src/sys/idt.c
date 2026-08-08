@@ -11,10 +11,25 @@ isr_t       interrupt_handlers[256];
 // Assembly stubs (from interrupt_entry.asm)
 extern void isr0();
 extern void isr1();
+extern void isr2();
 extern void isr3();
 extern void isr4();
+extern void isr5();
+extern void isr6();
+extern void isr7();
+extern void isr8();
+extern void isr9();
+extern void isr10();
+extern void isr11();
+extern void isr12();
 extern void isr13();
 extern void isr14();
+extern void isr16();
+extern void isr17();
+extern void isr18();
+extern void isr19();
+extern void isr20();
+extern void isr21();
 extern void isr128();
 extern void isr_default();
 extern void irq0();
@@ -70,13 +85,34 @@ void idt_init() {
         outb(0xA1, 0xEF ^ (1 << 3)); // slave: unmask IRQ11 (bit 3 = 0)
     }
 
-    // CPU Exceptions
-    idt_set_gate(0,  (uint32_t)isr0,  0x08, 0x8E);  // Division by Zero
-    idt_set_gate(1,  (uint32_t)isr1,  0x08, 0xEE);  // Debug/single-step (DPL=3 for GDB)
-    idt_set_gate(3,  (uint32_t)isr3,  0x08, 0xEE);  // Breakpoint (DPL=3 for GDB)
-    idt_set_gate(4,  (uint32_t)isr4,  0x08, 0xEE);  // Overflow (DPL=3, INTO from Ring 3)
-    idt_set_gate(13, (uint32_t)isr13, 0x08, 0x8E);  // General Protection Fault
-    idt_set_gate(14, (uint32_t)isr14, 0x08, 0x8E);  // Page Fault
+    // CPU Exceptions. Every real fault vector gets a dedicated stub so the
+    // frame is never misaligned by isr_default's dummy error code (see the
+    // ISR_WITH_ERR/ISR_NO_ERR macros in interrupt_entry.asm): a CPU-pushed
+    // error code shifted registers_t by 4 bytes, so an unregistered fault
+    // (e.g. #DF/#TS/#SS) silently triple-faulted instead of panicking with
+    // a real int_no. All are DPL=0 interrupt gates so Ring 3 cannot invoke
+    // them directly.
+    idt_set_gate(0,  (uint32_t)isr0,  0x08, 0x8E);  // #DE Division by Zero
+    idt_set_gate(1,  (uint32_t)isr1,  0x08, 0xEE);  // #DB Debug/single-step (DPL=3 for GDB)
+    idt_set_gate(2,  (uint32_t)isr2,  0x08, 0x8E);  // NMI
+    idt_set_gate(3,  (uint32_t)isr3,  0x08, 0xEE);  // #BP Breakpoint (DPL=3 for GDB)
+    idt_set_gate(4,  (uint32_t)isr4,  0x08, 0xEE);  // #OF Overflow (DPL=3, INTO from Ring 3)
+    idt_set_gate(5,  (uint32_t)isr5,  0x08, 0x8E);  // #BR Bound Range Exceeded
+    idt_set_gate(6,  (uint32_t)isr6,  0x08, 0x8E);  // #UD Invalid Opcode
+    idt_set_gate(7,  (uint32_t)isr7,  0x08, 0x8E);  // #NM Device Not Available
+    idt_set_gate(8,  (uint32_t)isr8,  0x08, 0x8E);  // #DF Double Fault
+    idt_set_gate(9,  (uint32_t)isr9,  0x08, 0x8E);  // Coprocessor Segment Overrun
+    idt_set_gate(10, (uint32_t)isr10, 0x08, 0x8E);  // #TS Invalid TSS
+    idt_set_gate(11, (uint32_t)isr11, 0x08, 0x8E);  // #NP Segment Not Present
+    idt_set_gate(12, (uint32_t)isr12, 0x08, 0x8E);  // #SS Stack-Segment Fault
+    idt_set_gate(13, (uint32_t)isr13, 0x08, 0x8E);  // #GP General Protection Fault
+    idt_set_gate(14, (uint32_t)isr14, 0x08, 0x8E);  // #PF Page Fault
+    idt_set_gate(16, (uint32_t)isr16, 0x08, 0x8E);  // #MF x87 Floating-Point Error
+    idt_set_gate(17, (uint32_t)isr17, 0x08, 0x8E);  // #AC Alignment Check
+    idt_set_gate(18, (uint32_t)isr18, 0x08, 0x8E);  // #MC Machine Check
+    idt_set_gate(19, (uint32_t)isr19, 0x08, 0x8E);  // #XF SIMD Floating-Point Exception
+    idt_set_gate(20, (uint32_t)isr20, 0x08, 0x8E);  // #VE Virtualization Exception
+    idt_set_gate(21, (uint32_t)isr21, 0x08, 0x8E);  // #CP Control Protection
 
     // Hardware IRQs
     idt_set_gate(32, (uint32_t)irq0,  0x08, 0x8E);  // Timer
@@ -151,6 +187,23 @@ void isr_handler(registers_t *r) {
     if (r->int_no == 1 || r->int_no == 3) {
         extern int gdb_stub_handle_trap(registers_t*);
         if (gdb_stub_handle_trap(r)) return;
+    }
+
+    // #DF Double Fault: the CPU faulted while handling another fault —
+    // usually a corrupt kernel stack (overflow, or a fault inside a fault
+    // handler). No task can survive this; panic immediately with a clear
+    // message instead of falling into the generic path (which would print
+    // EIP/CS and hlt — fine, but the dedicated banner makes the failure
+    // mode obvious in serial logs).
+    if (r->int_no == 8) {
+        uint32_t eip = r->eip, cs = r->cs;
+        write_serial_string("\n[PANIC] DOUBLE FAULT (int 8) at EIP=");
+        write_serial_hex(eip);
+        write_serial_string(" CS=");
+        write_serial_hex(cs);
+        write_serial_string(" — kernel stack corruption, halting\n");
+        print("\n[KERNEL PANIC] Double Fault — kernel stack corrupted\n", 0x0C);
+        for(;;) __asm__("hlt");
     }
 
     if (r->int_no == 14) {

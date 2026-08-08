@@ -2,7 +2,17 @@ CC = gcc
 AS = nasm
 LD = ld
 
-CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g
+CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g -msoft-float -mno-80387 -mno-sse -mno-mmx -MMD -MP
+# -MMD -MP: emit per-object .d dependency files so a header change (e.g.
+# MAX_WINDOWS in wm.h) rebuilds every object that includes it. Without this,
+# touching a header left stale .o files and the change silently never
+# reached the binary.
+# -msoft-float: the kernel core never touches the x87/SSE FPU, so no FPU
+# state exists to leak between tasks on context switch (there is no
+# fxsave/fxrstor in the scheduler). GCC only emits soft-float libgcc calls
+# where float arithmetic actually appears, and src/ + kernel.c have none.
+# Doom (DOOM_CFLAGS) keeps real x87 because it is the ONLY FPU user — a
+# single owner means its state can never be clobbered by another task.
 # -g keeps DWARF debug info in myos.bin so GDB can resolve kernel symbols
 # (break kernel_main, bt, list, etc.) when debugging via the in-kernel stub.
 LDFLAGS = -m elf_i386 -T linker.ld
@@ -54,6 +64,8 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/shmdemo_mct.o \
        $(OBJ_DIR)/mmapdemo_mct.o \
        $(OBJ_DIR)/looper_mct.o \
+       $(OBJ_DIR)/crashme_mct.o \
+       $(OBJ_DIR)/winman_mct.o \
        $(OBJ_DIR)/pipegen_mct.o \
        $(OBJ_DIR)/piperead_mct.o \
        $(OBJ_DIR)/sigdemo_mct.o \
@@ -166,6 +178,12 @@ mmapdemo.mct: apps/mmapdemo.c $(MCT_LIBC_H)
 looper.mct: apps/looper.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/looper.c looper.mct
 
+crashme.mct: apps/crashme.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/crashme.c crashme.mct
+
+winman.mct: apps/winman.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/winman.c winman.mct
+
 pipegen.mct: apps/pipegen.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/pipegen.c pipegen.mct
 
@@ -247,6 +265,12 @@ $(OBJ_DIR)/mmapdemo_mct.o: mmapdemo.mct | $(OBJ_DIR)
 $(OBJ_DIR)/looper_mct.o: looper.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 looper.mct $(OBJ_DIR)/looper_mct.o
 
+$(OBJ_DIR)/crashme_mct.o: crashme.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 crashme.mct $(OBJ_DIR)/crashme_mct.o
+
+$(OBJ_DIR)/winman_mct.o: winman.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 winman.mct $(OBJ_DIR)/winman_mct.o
+
 $(OBJ_DIR)/pipegen_mct.o: pipegen.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 pipegen.mct $(OBJ_DIR)/pipegen_mct.o
 
@@ -303,6 +327,10 @@ $(OBJ_DIR)/doom/%.o: doom/%.c | $(OBJ_DIR)
 # Kernel source compilation rule
 $(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Auto-dependencies: include the .d files -MMD -MP emitted alongside each
+# object so header changes trigger rebuilds (see CFLAGS comment).
+-include $(OBJS:.o=.d)
 
 myos.bin: $(OBJS)
 	$(LD) $(LDFLAGS) $(OBJS) -o myos.bin

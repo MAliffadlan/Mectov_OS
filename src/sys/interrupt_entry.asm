@@ -152,6 +152,48 @@ isr4:
     jmp isr_common_stub
 
 ; ============================================================
+; Remaining CPU exceptions (correct error-code handling)
+; ============================================================
+; The CPU pushes an error code for #DF(8), #TS(10), #NP(11), #SS(12),
+; #GP(13), #PF(14), #AC(17), #CP(21). Their stubs must push ONLY the
+; int_no — pushing a dummy error code like isr_default does would leave
+; BOTH the real error code and the dummy on the stack, shifting
+; registers_t by 4 bytes. The handler would read int_no/eip/cs from the
+; wrong offsets and the trailing `add esp, 8; iret` would pop the real
+; error code as EIP — jumping to a garbage address (triple fault /
+; silent reboot) instead of a logged panic.
+%macro ISR_WITH_ERR 1      ; CPU already pushed an error code
+  global isr%1
+  isr%1:
+    push byte %1           ; int_no
+    jmp isr_common_stub
+%endmacro
+
+%macro ISR_NO_ERR 1        ; no error code from CPU
+  global isr%1
+  isr%1:
+    push byte 0            ; dummy err_code
+    push byte %1           ; int_no
+    jmp isr_common_stub
+%endmacro
+
+ISR_NO_ERR 2               ; NMI (non-maskable interrupt)
+ISR_NO_ERR 5               ; #BR Bound Range Exceeded
+ISR_NO_ERR 6               ; #UD Invalid Opcode
+ISR_NO_ERR 7               ; #NM Device Not Available (x87 not present)
+ISR_WITH_ERR 8             ; #DF Double Fault
+ISR_NO_ERR 9               ; Coprocessor Segment Overrun (legacy)
+ISR_WITH_ERR 10            ; #TS Invalid TSS
+ISR_WITH_ERR 11            ; #NP Segment Not Present
+ISR_WITH_ERR 12            ; #SS Stack-Segment Fault
+ISR_NO_ERR 16              ; #MF x87 Floating-Point Error
+ISR_WITH_ERR 17            ; #AC Alignment Check
+ISR_NO_ERR 18              ; #MC Machine Check
+ISR_NO_ERR 19              ; #XF SIMD Floating-Point Exception
+ISR_NO_ERR 20              ; #VE Virtualization Exception
+ISR_WITH_ERR 21            ; #CP Control Protection
+
+; ============================================================
 ; ISR 13: General Protection Fault (has error code from CPU)
 ; ============================================================
 global isr13

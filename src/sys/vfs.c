@@ -135,8 +135,16 @@ static int vfs_update_file_if_needed(const char* path, const char* data, int siz
     return 0;
 }
 
+// Set while vfs_init() seeds the built-in apps: vfs_write_file() skips its
+// per-file vfs_save() (256 node-table sectors each) so a fresh-disk rebuild
+// is ONE write at the end of init instead of ~30 — the old behavior took
+// minutes at first boot after a layout change. Seeding is boot-time only;
+// runtime writes (shell echo > file, etc.) still save immediately.
+static int vfs_seeding = 0;
+
 void vfs_init() {
     write_serial_string("[VFS] init start\n");
+    vfs_seeding = 1;
     // Coba load dari disk
     if (vfs_load()) {
         write_serial_string("[VFS] loaded ok\n");
@@ -295,6 +303,16 @@ void vfs_init() {
         extern uint8_t _binary_tcpserver_mct_start[];
         extern uint8_t _binary_tcpserver_mct_end[];
         changed += vfs_update_file_if_needed("apps/tcpserver.mct", (const char*)_binary_tcpserver_mct_start, _binary_tcpserver_mct_end - _binary_tcpserver_mct_start);
+
+        // #UD exception-handler test (executes ud2, must be killed cleanly)
+        extern uint8_t _binary_crashme_mct_start[];
+        extern uint8_t _binary_crashme_mct_end[];
+        changed += vfs_update_file_if_needed("apps/crashme.mct", (const char*)_binary_crashme_mct_start, _binary_crashme_mct_end - _binary_crashme_mct_start);
+
+        // Window-manager capacity test (opens 12 windows)
+        extern uint8_t _binary_winman_mct_start[];
+        extern uint8_t _binary_winman_mct_end[];
+        changed += vfs_update_file_if_needed("apps/winman.mct", (const char*)_binary_winman_mct_start, _binary_winman_mct_end - _binary_winman_mct_start);
         extern uint8_t _binary_sigdemo_mct_start[];
         extern uint8_t _binary_sigdemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/sigdemo.mct", (const char*)_binary_sigdemo_mct_start, _binary_sigdemo_mct_end - _binary_sigdemo_mct_start);
@@ -360,9 +378,17 @@ void vfs_init() {
         // We always start at root (dir 0) when booting
         set_current_dir(0);
         
+        // Flush the seeded node table + app files in one write. The per-file
+        // saves were suppressed above (vfs_seeding) so a fresh-disk rebuild
+        // costs a single 256-sector write, not ~30.
+        vfs_seeding = 0;
+        vfs_save();
         write_serial_string("[VFS] init done\n");
         return;
     }
+    
+    // No filesystem on disk — build the tree from scratch (fresh disk).
+    vfs_seeding = 1;
     
     // Tidak ada filesystem — buat root directory
     memset(fs_nodes, 0, sizeof(fs_nodes));
@@ -424,6 +450,16 @@ void vfs_init() {
     extern uint8_t _binary_tcpserver_mct_end[];
     vfs_create_file("apps/tcpserver.mct");
     vfs_write_file("apps/tcpserver.mct", (const char*)_binary_tcpserver_mct_start, _binary_tcpserver_mct_end - _binary_tcpserver_mct_start);
+    // #UD exception-handler test
+    extern uint8_t _binary_crashme_mct_start[];
+    extern uint8_t _binary_crashme_mct_end[];
+    vfs_create_file("apps/crashme.mct");
+    vfs_write_file("apps/crashme.mct", (const char*)_binary_crashme_mct_start, _binary_crashme_mct_end - _binary_crashme_mct_start);
+    // Window-manager capacity test
+    extern uint8_t _binary_winman_mct_start[];
+    extern uint8_t _binary_winman_mct_end[];
+    vfs_create_file("apps/winman.mct");
+    vfs_write_file("apps/winman.mct", (const char*)_binary_winman_mct_start, _binary_winman_mct_end - _binary_winman_mct_start);
     extern uint8_t _binary_sigdemo_mct_start[];
     extern uint8_t _binary_sigdemo_mct_end[];
     vfs_create_file("apps/sigdemo.mct");
@@ -568,6 +604,9 @@ void vfs_init() {
         }
     }
     
+    // Flush the seeded tree in one write (per-file saves were suppressed by
+    // vfs_seeding); runtime writes save immediately again from here on.
+    vfs_seeding = 0;
     vfs_save();
 }
 
@@ -575,8 +614,13 @@ void vfs_init() {
 
 #define VFS_MAGIC_SECTOR  0
 #define VFS_NODE_START    1
-#define VFS_NODE_SECTORS  64   // 64 nodes * 512 bytes = 32KB on disk
+#define VFS_NODE_SECTORS  256  // 256 nodes * 512 bytes = 128KB on disk
 #define VFS_DATA_START    (VFS_NODE_START + VFS_NODE_SECTORS)
+// On-disk layout version. Bumped from 1 to 2 when the node table grew from
+// 64 to 256 entries (VFS_NODE_SECTORS 64 -> 256): vfs_load() rejects an old
+// image so the node table is rebuilt from the embedded apps instead of
+// reading garbage into nodes 64..255.
+#define VFS_LAYOUT_VERSION 2
 
 // Magic signature: 8 bytes + 2 bytes version + 6 bytes reserved = 16 bytes in sector 0
 void vfs_save() {
@@ -586,8 +630,8 @@ void vfs_save() {
     // Write magic + metadata
     meta[0] = 'M'; meta[1] = 'E'; meta[2] = 'C'; meta[3] = 'T';
     meta[4] = 'O'; meta[5] = 'V'; meta[6] = 'F'; meta[7] = 'S';  // "MECTOVFS"
-    meta[8] = 0x01;  // Version major
-    meta[9] = 0x00;  // Version minor
+    meta[8] = VFS_LAYOUT_VERSION;  // Version major (2 = 256-node table)
+    meta[9] = 0x00;                // Version minor
     
     // Current dir index
     int cur_dir = get_current_dir();
@@ -618,6 +662,17 @@ int vfs_load() {
         meta[3] != 'T' || meta[4] != 'O' || meta[5] != 'V' ||
         meta[6] != 'F' || meta[7] != 'S') {
         return 0;  // Not a valid VFS disk
+    }
+    // Layout mismatch: an image written with the old 64-node table must be
+    // rebuilt, not half-loaded. Without this, nodes 64..255 read file data
+    // as garbage and vfs_update_file_if_needed() finds phantom "files".
+    if (meta[8] != VFS_LAYOUT_VERSION) {
+        write_serial_string("[VFS] on-disk layout v");
+        write_serial_hex(meta[8]);
+        write_serial_string(" != expected v");
+        write_serial_hex(VFS_LAYOUT_VERSION);
+        write_serial_string(", rebuilding\n");
+        return 0;
     }
     
     // Read node table
@@ -1251,11 +1306,13 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
 }
 
 static int vfs_alloc_sectors(int sectors_needed, int exclude_node) {
-    // 2048 sectors total. VFS_DATA_START begins at 65.
+    // 2048 sectors total. VFS_DATA_START begins at 257 (1 magic + 256 node
+    // sectors with the 256-node table). sector_map is 2048 bytes so marking
+    // [0, VFS_DATA_START) as metadata is in-bounds by construction.
     uint8_t sector_map[2048];
     memset(sector_map, 0, sizeof(sector_map));
     
-    // Mark VFS metadata and node sectors (0 to 64) as allocated.
+    // Mark VFS metadata and node sectors (0 to VFS_DATA_START-1) as allocated.
     for (int i = 0; i < VFS_DATA_START; i++) {
         sector_map[i] = 1;
     }
@@ -1312,7 +1369,7 @@ int vfs_write_file(const char* path, const char* data, int size) {
         int r = ext2_write_file_data(fs_nodes[node].ext2_inode, data, size);
         if (r >= 0) {
             fs_nodes[node].size = r;
-            vfs_save();
+            if (!vfs_seeding) vfs_save();
         }
         return r;
     }
@@ -1360,7 +1417,7 @@ int vfs_write_file(const char* path, const char* data, int size) {
     }
     
     fs_nodes[node].size = size;
-    vfs_save();
+    if (!vfs_seeding) vfs_save();
     return size;
 }
 

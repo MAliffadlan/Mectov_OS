@@ -3,7 +3,7 @@
 
 #include "types.h"
 
-#define MAX_WINDOWS  8
+#define MAX_WINDOWS  16
 // TITLEBAR_H defined in theme.h (included via vga.h)
 
 typedef void (*WinDrawFn)(int id, int cx, int cy, int cw, int ch);

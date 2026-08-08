@@ -3,7 +3,7 @@
 
 #include "types.h"
 
-#define MAX_NODES     64
+#define MAX_NODES     256
 #define MAX_PATH      256
 #define MAX_FILENAME  32
 

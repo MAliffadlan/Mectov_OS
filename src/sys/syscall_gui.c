@@ -169,9 +169,15 @@ uint32_t handle_syscall_gui(registers_t* regs) {
             if (safe_strlen(title, 48) < 0) { regs->eax = (uint32_t)-1; break; }
             int wid = wm_open(x, y, w, h, title, win_draw_cb, win_key_cb, NULL, win_mouse_cb);
             
-            write_serial_string("SYS_CREATE_WINDOW returned ");
-            write_serial('0' + (wid / 10));
-            write_serial('0' + (wid % 10));
+            // Hex mirror so automated tests can count how many windows
+            // actually opened (wid is a positive id, or -1 when the WM's
+            // window table is full). The old 2-digit decimal print broke
+            // for wid > 99 and read as garbage for -1.
+            extern void write_serial_hex(uint32_t);
+            write_serial_string("[WM] create wid=");
+            write_serial_hex((uint32_t)wid);
+            write_serial_string(" title=");
+            write_serial_string(title);
             write_serial('\n');
 
             int idx = get_win_index(wid);
