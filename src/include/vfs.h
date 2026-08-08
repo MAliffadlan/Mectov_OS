@@ -7,6 +7,23 @@
 #define MAX_PATH      256
 #define MAX_FILENAME  32
 
+// On-disk layout of the MECTOVFS disk image (1MB = VFS_DISK_SECTORS
+// sectors, created by `dd if=/dev/zero of=disk.img bs=512 count=2048` in
+// run.sh and CI — keep the count in sync with VFS_DISK_SECTORS):
+//   Sector 0                          : magic "MECTOVFS" + metadata
+//   Sector 1 .. VFS_NODE_SECTORS      : node table (256 nodes × 512 bytes)
+//   VFS_DATA_START .. VFS_DISK_SECTORS-1 : file data blocks
+// Bumped from 64 to 256 nodes (layout v1 → v2): vfs_load() rejects an old
+// image so the node table is rebuilt from the embedded apps instead of
+// reading garbage into nodes 64..255. Kept here (not vfs.c) so shell's
+// `df` reports the same numbers.
+#define VFS_MAGIC_SECTOR  0
+#define VFS_NODE_START    1
+#define VFS_NODE_SECTORS  256  // 256 nodes * 512 bytes = 128KB on disk
+#define VFS_DATA_START    (VFS_NODE_START + VFS_NODE_SECTORS)
+#define VFS_DISK_SECTORS  2048 // total sectors on the 1MB image
+#define VFS_LAYOUT_VERSION 2
+
 typedef enum { FS_FILE, FS_DIR, FS_DEV, FS_EXT2_FILE, FS_EXT2_DIR, FS_PROC } fs_type_t;
 
 typedef struct {

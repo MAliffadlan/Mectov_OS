@@ -1,10 +1,10 @@
 // ============================================================
 // vfs.c — Mectov OS Virtual File System with Directory Support
 // ============================================================
-// Layout pada ATA disk:
+// Layout pada ATA disk (konstanta di vfs.h):
 //   Sector 0      : Magic signature "MECTOVFS" + metadata
-//   Sector 1-64   : Node table (64 nodes × 512 bytes = 32768)
-//   Sector 65+    : File data blocks (per file, kontigu)
+//   Sector 1..256 : Node table (256 nodes × 512 bytes = 128KB)
+//   Sector 257+   : File data blocks (per file, kontigu)
 // ============================================================
 
 #include "../include/vfs.h"
@@ -611,16 +611,8 @@ void vfs_init() {
 }
 
 // --- Simpan / Load dari ATA ---
-
-#define VFS_MAGIC_SECTOR  0
-#define VFS_NODE_START    1
-#define VFS_NODE_SECTORS  256  // 256 nodes * 512 bytes = 128KB on disk
-#define VFS_DATA_START    (VFS_NODE_START + VFS_NODE_SECTORS)
-// On-disk layout version. Bumped from 1 to 2 when the node table grew from
-// 64 to 256 entries (VFS_NODE_SECTORS 64 -> 256): vfs_load() rejects an old
-// image so the node table is rebuilt from the embedded apps instead of
-// reading garbage into nodes 64..255.
-#define VFS_LAYOUT_VERSION 2
+// Layout constants live in vfs.h (single source of truth: shell's `df` and
+// the allocator below both depend on VFS_DATA_START / VFS_DISK_SECTORS).
 
 // Magic signature: 8 bytes + 2 bytes version + 6 bytes reserved = 16 bytes in sector 0
 void vfs_save() {
@@ -912,7 +904,9 @@ int vfs_create_node(const char* name, fs_type_t type, int parent) {
                 fs_nodes[i].ext2_inode = einode;
                 fs_nodes[i].size = (int)ext2_inode_size(einode);
             }
-            vfs_save();
+            // Runtime creates persist immediately; seeding-time creates are
+            // flushed once by vfs_init()'s final vfs_save() (see vfs_seeding).
+            if (!vfs_seeding) vfs_save();
             return i;
         }
     }
@@ -1279,11 +1273,11 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
     if (size <= 0) { buf[0] = '\0'; return 0; }
     
     int sector = fs_nodes[node].data_sector;
-    if (sector <= 0 || sector >= 2048) { buf[0] = '\0'; return 0; }
+    if (sector <= 0 || sector >= VFS_DISK_SECTORS) { buf[0] = '\0'; return 0; }
     
-    // A corrupt node can claim sectors past the end of the 2048-sector disk;
-    // clamp so ata_read_sector never walks off the disk.
-    int max_readable = (2048 - sector) * 512;
+    // A corrupt node can claim sectors past the end of the disk;
+    // clamp so ata_read_sector never walks off the image.
+    int max_readable = (VFS_DISK_SECTORS - sector) * 512;
     if (size > max_readable) size = max_readable;
     
     // Read sectors
@@ -1306,10 +1300,10 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
 }
 
 static int vfs_alloc_sectors(int sectors_needed, int exclude_node) {
-    // 2048 sectors total. VFS_DATA_START begins at 257 (1 magic + 256 node
-    // sectors with the 256-node table). sector_map is 2048 bytes so marking
+    // VFS_DATA_START begins at 257 (1 magic + 256 node sectors with the
+    // 256-node table). sector_map is VFS_DISK_SECTORS bytes so marking
     // [0, VFS_DATA_START) as metadata is in-bounds by construction.
-    uint8_t sector_map[2048];
+    uint8_t sector_map[VFS_DISK_SECTORS];
     memset(sector_map, 0, sizeof(sector_map));
     
     // Mark VFS metadata and node sectors (0 to VFS_DATA_START-1) as allocated.
@@ -1324,7 +1318,7 @@ static int vfs_alloc_sectors(int sectors_needed, int exclude_node) {
             if (node_sectors < 1) node_sectors = 1; // min 1 sector allocated
             for (int s = 0; s < node_sectors; s++) {
                 int sector = fs_nodes[i].data_sector + s;
-                if (sector < 2048) {
+                if (sector < VFS_DISK_SECTORS) {
                     sector_map[sector] = 1;
                 }
             }
@@ -1332,7 +1326,7 @@ static int vfs_alloc_sectors(int sectors_needed, int exclude_node) {
     }
     
     // Find first contiguous block of free sectors
-    for (int i = VFS_DATA_START; i <= 2048 - sectors_needed; i++) {
+    for (int i = VFS_DATA_START; i <= VFS_DISK_SECTORS - sectors_needed; i++) {
         int found = 1;
         for (int s = 0; s < sectors_needed; s++) {
             if (sector_map[i + s]) {

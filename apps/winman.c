@@ -26,20 +26,9 @@ void _start(void) {
         title[6] = '\0';
         int wid = sys_win_open(40 + i * 20, 60 + i * 20, 160, 120, title);
         if (wid >= 0) ok++; else failed++;
-        // Print a single ASCII line per window (mirrored to serial).
-        char msg[40];
-        msg[0] = 'W'; msg[1] = ':'; msg[2] = '0' + (i / 10); msg[3] = '0' + (i % 10);
-        msg[4] = '=';
-        // wid can exceed 9; format it as hex by hand into msg[5..12].
-        msg[5] = '0'; msg[6] = 'x';
-        for (int sh = 28, k = 7; sh >= 0; sh -= 4, k++) {
-            int nib = (wid >> sh) & 0xF;
-            msg[k] = (nib < 10) ? ('0' + nib) : ('a' + nib - 10);
-        }
-        msg[13] = '\n'; msg[14] = '\0';
-        sys_print(msg, 0x0F);
     }
-    // Summary line so tests can assert all 12 succeeded.
+    // Summary line so tests can assert all 12 succeeded. The per-window
+    // wids are already mirrored by the kernel as "[WM] create wid=0x...".
     char sum[40];
     sum[0] = 'O'; sum[1] = 'K'; sum[2] = '=';
     sum[3] = '0' + (ok / 10); sum[4] = '0' + (ok % 10);

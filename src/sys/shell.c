@@ -1402,8 +1402,9 @@ static void run_cmd_internal() {
     // --- DF (disk free) ---
     else if (strcmp(cmd_b, "df") == 0) {
         print("Filesystem   1K-blocks   Used   Free   Use%  Mounted on\n", 0x0E);
-        // MECTOVFS (drive 0): 1MB disk = 2048 sectors, 65 metadata + node table
-        int used_sectors = 65;
+        // MECTOVFS (drive 0): 1MB disk = VFS_DISK_SECTORS sectors, of which
+        // VFS_DATA_START are magic + node table (see vfs.h).
+        int used_sectors = VFS_DATA_START;
         for (int i = 0; i < MAX_NODES; i++) {
             if (fs_nodes[i].in_use && fs_nodes[i].type == FS_FILE) {
                 int secs = (fs_nodes[i].size + 511) / 512;
@@ -1411,13 +1412,13 @@ static void run_cmd_internal() {
                 used_sectors += secs;
             }
         }
-        if (used_sectors > 2048) used_sectors = 2048;
-        int free_sectors = 2048 - used_sectors;
+        if (used_sectors > VFS_DISK_SECTORS) used_sectors = VFS_DISK_SECTORS;
+        int free_sectors = VFS_DISK_SECTORS - used_sectors;
         print("mectovfs       ", 0x0B);
         p_int(1024, 0x0F); print("      ", 0x07);
         p_int(used_sectors / 2, 0x0F); print("    ", 0x07);
         p_int(free_sectors / 2, 0x0F); print("    ", 0x07);
-        p_int(used_sectors * 100 / 2048, 0x0F); print("%  /", 0x0F);
+        p_int(used_sectors * 100 / VFS_DISK_SECTORS, 0x0F); print("%  /", 0x0F);
         print("\n", 0x0F);
         
         // ext2 (drive 1)

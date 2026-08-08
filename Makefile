@@ -19,7 +19,7 @@ LDFLAGS = -m elf_i386 -T linker.ld
 ASFLAGS = -f elf32
 
 # DOOM compile flags: redirect standard headers to our mini libc
-DOOM_CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 \
+DOOM_CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -MMD -MP \
               -isystem doom/include_override -Idoom \
               -fno-builtin \
               -DDOOMGENERIC_RESX=1024 -DDOOMGENERIC_RESY=768 \
