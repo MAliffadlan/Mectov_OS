@@ -321,6 +321,7 @@ const char* cmd_list[] = {
     "jobs","fg","bg",
     "echo","beep","tone","sleep","date","color","lock",
     "uname","whoami","hostname","env","seq","wc","type","yes",
+    "printf","sort","uniq","tee","find",
     "run","snake","taskmgr","flappy","doom","lspci","man",
     "ping","host","fetch","grep",
     "shutdown","reboot", NULL
@@ -630,6 +631,108 @@ static int net_wait_for(volatile int* flag, uint32_t timeout_ms) {
 // Main command execution
 // ============================================================
 
+// ---- Toolkit round 3 helpers (sort/uniq lines, find wildcard, printf hex) ----
+// Line tables are stack locals (not statics): a forked background builtin
+// (`sh x.sh &` whose script runs sort/uniq) executes run_cmd_internal on
+// another core, so shared statics could race.
+typedef struct { int off; int len; } sh_line_t;
+
+// Split src[0..src_len) into up to max_lines lines (pointers into src).
+// A line ends at '\n' or '\r' (CRLF counts as one terminator); an empty
+// line between two terminators is a real line (POSIX sort/uniq behavior);
+// a trailing line without a terminator counts too. Returns the line count.
+static int split_lines(const char* src, int src_len, sh_line_t* lines, int max_lines) {
+    int n = 0, start = 0, i = 0;
+    while (i < src_len && n < max_lines) {
+        if (src[i] == '\n' || src[i] == '\r') {
+            // i >= start: an empty line between separators is kept.
+            lines[n].off = start;
+            lines[n].len = i - start;
+            n++;
+            if (src[i] == '\r' && i + 1 < src_len && src[i + 1] == '\n') i++; // CRLF = one sep
+            i++;
+            start = i;
+        } else {
+            i++;
+        }
+    }
+    if (start < src_len && n < max_lines) {
+        lines[n].off = start; lines[n].len = src_len - start; n++;
+    }
+    return n;
+}
+
+// Compare two lines (via src) like strcmp but bounded by each line's length.
+static int line_cmp(const char* src, const sh_line_t* a, const sh_line_t* b) {
+    int n = (a->len < b->len) ? a->len : b->len;
+    int r = 0;
+    for (int i = 0; i < n; i++) {
+        r = (unsigned char)src[a->off + i] - (unsigned char)src[b->off + i];
+        if (r) return r;
+    }
+    return a->len - b->len;
+}
+
+// Glob match: '*' matches any run (incl. empty), '?' any single char.
+// Greedy two-pointer scan (linear in n*m): the recursive backtracking
+// version is exponential on patterns like "*a*a*a*...*b" against a long
+// run of 'a's, and this runs in kernel context.
+static int wild_match(const char* pat, const char* str) {
+    const char* star_pat = NULL;
+    const char* star_str = NULL;
+    while (*str) {
+        if (*pat == '*') {
+            star_pat = pat++;
+            star_str = str;
+        } else if (*pat == '?' || *pat == *str) {
+            pat++;
+            str++;
+        } else if (star_pat) {
+            // Backtrack: let the last '*' absorb one more char.
+            pat = star_pat + 1;
+            str = ++star_str;
+        } else {
+            return 0;
+        }
+    }
+    while (*pat == '*') pat++;
+    return *pat == '\0';
+}
+
+// Print v as lowercase hex without leading zeros (printf %x semantics).
+static void print_hex_value(uint32_t v) {
+    int started = 0;
+    for (int sh = 28; sh >= 0; sh -= 4) {
+        int nib = (v >> sh) & 0xF;
+        if (nib || started) {
+            started = 1;
+            p_char((nib < 10) ? ('0' + nib) : ('a' + nib - 10), 0x0F);
+        }
+    }
+    if (!started) p_char('0', 0x0F);
+}
+
+// Grab the next space-delimited token from *pp (modifies the string in
+// place), skipping spaces and stripping one pair of surrounding quotes.
+// Returns NULL at end of input.
+static char* next_token(char** pp) {
+    char* p = *pp;
+    while (*p == ' ') p++;
+    if (!*p) return NULL;
+    char* tok = p;
+    while (*p && *p != ' ') p++;
+    if (*p) { *p = '\0'; p++; }
+    *pp = p;
+    int len = 0;
+    while (tok[len]) len++;
+    if (len >= 2 && ((tok[0] == '"' && tok[len - 1] == '"') ||
+                     (tok[0] == '\'' && tok[len - 1] == '\''))) {
+        tok[len - 1] = '\0';
+        return tok + 1;
+    }
+    return tok;
+}
+
 static void run_cmd_internal() {
     // --- HELP ---
     if (strcmp(cmd_b, "help") == 0) {
@@ -646,6 +749,7 @@ static void run_cmd_internal() {
         print(" APPS GUI: ", 0x0B); print("flappy, doom, taskmgr, snake, run [app.mct], run [app.mct] &\n", 0x0A);
         print(" NET & HW: ", 0x0B); print("ping [ip], host [domain], fetch [domain], lspci\n", 0x0F);
         print(" UTILS   : ", 0x0B); print("echo [msg], sleep [sec], wc [file], cat -n, cd -, type [cmd], yes [str] &\n", 0x0F);
+        print(" TOOLKIT : ", 0x0B); print("printf FMT [args], sort [file], uniq [-c] [file], tee FILE, find [dir] [-name GLOB]\n", 0x0F);
         print(" POWER   : ", 0x0B); print("reboot, shutdown\n", 0x0C);
         print("----------------------------------------------------------------------\n", 0x07);
         print(" SHORTCUT: ", 0x0E); print("Tab=Autocomplete  |  Up/Down=History  |  Pipes: cmd1 | cmd2\n", 0x0F);
@@ -2155,10 +2259,274 @@ static void run_cmd_internal() {
             print("hostname — Print the machine hostname\n", 0x0B);
         } else if (strcmp(topic, "env") == 0) {
             print("env — List all exported environment variables\n", 0x0B);
+        } else if (strcmp(topic, "printf") == 0) {
+            print("printf FORMAT [ARGS...] — %s string, %d decimal, %x hex, %c char\n", 0x0B);
+        } else if (strcmp(topic, "sort") == 0) {
+            print("sort [FILE] — Sort lines alphabetically (stdin if no file)\n", 0x0B);
+        } else if (strcmp(topic, "uniq") == 0) {
+            print("uniq [-c] [FILE] — Drop consecutive duplicate lines; -c prefixes counts\n", 0x0B);
+        } else if (strcmp(topic, "tee") == 0) {
+            print("tee FILE — Write stdin to FILE and stdout (echo | tee file)\n", 0x0B);
+        } else if (strcmp(topic, "find") == 0) {
+            print("find [DIR] [-name GLOB] — List files recursively; GLOB supports * and ?\n", 0x0B);
         } else {
             print("man: no manual entry for '", 0x0C);
             print(topic, 0x0C);
             print("'\n", 0x0C);
+        }
+    }
+    // --- PRINTF (formatted output) ---
+    else if (strncmp(cmd_b, "printf ", 7) == 0) {
+        // printf FORMAT ARGS...  — %s string, %d decimal, %x hex, %c char,
+        // %% literal percent, \n newline, \t tab. Args are space-delimited
+        // tokens after the format (quotes stripped).
+        char* p = cmd_b + 7;
+        char* fmt = next_token(&p);
+        if (!fmt) {
+            print("printf: usage: printf FORMAT [ARGS...]\n", 0x0E);
+        } else {
+            extern void write_serial_string(const char*);
+            char mirror[256];
+            int mi = 0;
+            for (int i = 0; fmt[i] && i < 200; i++) {
+                char c = fmt[i];
+                if (c == '\\' && (fmt[i + 1] == 'n' || fmt[i + 1] == 't')) {
+                    c = (fmt[i + 1] == 'n') ? '\n' : '\t';
+                    i++;
+                } else if (c == '%') {
+                    char spec = fmt[++i];
+                    if (spec == '%') { c = '%'; }
+                    else {
+                        char* arg = next_token(&p);
+                        if (!arg) arg = "";
+                        if (spec == 's') {
+                            print(arg, 0x0F);
+                            for (int k = 0; arg[k] && mi < 255; k++) mirror[mi++] = arg[k];
+                            continue;
+                        } else if (spec == 'd') {
+                            int v = atoi(arg);
+                            p_int(v, 0x0F);
+                            // Split into sign + unsigned magnitude so INT_MIN
+                            // doesn't overflow (-INT_MIN is UB on i386).
+                            uint32_t mag = (v < 0) ? (uint32_t)(-(v + 1)) + 1u : (uint32_t)v;
+                            if (v < 0 && mi < 255) mirror[mi++] = '-';
+                            char db[12]; int di = 0;
+                            do { db[di++] = '0' + (int)(mag % 10u); mag /= 10u; } while (mag);
+                            while (di > 0 && mi < 255) mirror[mi++] = db[--di];
+                            continue;
+                        } else if (spec == 'x') {
+                            // Parse as unsigned decimal (strtoul-style): atoi is
+                            // signed, so values >= 2^31 would wrap through UB.
+                            uint32_t v = 0;
+                            for (int k = 0; arg[k] >= '0' && arg[k] <= '9'; k++) {
+                                v = v * 10u + (uint32_t)(arg[k] - '0');
+                            }
+                            print_hex_value(v);
+                            int started = 0;
+                            for (int sh = 28; sh >= 0 && mi < 255; sh -= 4) {
+                                int nib = (v >> sh) & 0xF;
+                                if (nib || started) {
+                                    started = 1;
+                                    mirror[mi++] = (nib < 10) ? ('0' + nib) : ('a' + nib - 10);
+                                }
+                            }
+                            if (!started && mi < 255) mirror[mi++] = '0';
+                            continue;
+                        } else if (spec == 'c') {
+                            c = arg[0];
+                        } else {
+                            // Unknown spec: echo literally.
+                            print("%", 0x0F);
+                            c = spec;
+                        }
+                    }
+                }
+                p_char(c, 0x0F);
+                if (c != '\n' && c != '\t' && mi < 255) mirror[mi++] = c;
+                else if (c == '\n' && mi < 255) mirror[mi++] = ' ';
+            }
+            mirror[mi] = '\0';
+            write_serial_string("[SH] printf: ");
+            write_serial_string(mirror);
+            write_serial_string("\n");
+        }
+    }
+    // --- SORT (sort lines from a file or stdin) ---
+    else if (strncmp(cmd_b, "sort", 4) == 0 && (cmd_b[4] == '\0' || cmd_b[4] == ' ')) {
+        char* arg = cmd_b + 4;
+        while (*arg == ' ') arg++;
+        const char* src = NULL;
+        int src_len = 0;
+        char fbuf[4096];
+        if (*arg) {
+            char fpath[MAX_PATH];
+            strncpy(fpath, arg, MAX_PATH - 1);
+            fpath[MAX_PATH - 1] = '\0';
+            sanitize_path(fpath);
+            int sz = vfs_read_file(fpath, fbuf, 4095);
+            if (sz < 0) {
+                print("sort: file not found: ", 0x0C);
+                print(fpath, 0x0C);
+                print("\n", 0x0C);
+            } else { src = fbuf; src_len = sz; }
+        } else {
+            extern int pipe_buf_len;
+            extern char pipe_buffer[];
+            src = (shell_stdin_len > 0) ? shell_stdin_buf : pipe_buffer;
+            src_len = (shell_stdin_len > 0) ? shell_stdin_len : pipe_buf_len;
+        }
+        if (src) {
+            sh_line_t lines[256];
+            int n = split_lines(src, src_len, lines, 256);
+            // Insertion sort (stable enough; tiny N from a 4KB pipe).
+            for (int i = 1; i < n; i++) {
+                sh_line_t key = lines[i];
+                int j = i - 1;
+                while (j >= 0 && line_cmp(src, &lines[j], &key) > 0) {
+                    lines[j + 1] = lines[j];
+                    j--;
+                }
+                lines[j + 1] = key;
+            }
+            extern void write_serial_string(const char*);
+            for (int i = 0; i < n; i++) {
+                write_serial_string("[SH] sort ");
+                for (int k = 0; k < lines[i].len; k++) {
+                    char cc = src[lines[i].off + k];
+                    p_char(cc, 0x0F);
+                    if (cc == '\n' || cc == '\t') write_serial_string(" ");
+                    else write_serial(cc);
+                }
+                write_serial_string("\n");
+                print("\n", 0x0F);
+            }
+            if (n == 0) print("\n", 0x0F);
+        }
+    }
+    // --- UNIQ (drop consecutive duplicate lines; -c prefixes counts) ---
+    else if (strncmp(cmd_b, "uniq", 4) == 0 && (cmd_b[4] == '\0' || cmd_b[4] == ' ')) {
+        int count_mode = 0;
+        char* arg = cmd_b + 4;
+        while (*arg == ' ') arg++;
+        if (strncmp(arg, "-c", 2) == 0) { count_mode = 1; arg += 2; while (*arg == ' ') arg++; }
+        const char* src = NULL;
+        int src_len = 0;
+        char fbuf[4096];
+        if (*arg) {
+            char fpath[MAX_PATH];
+            strncpy(fpath, arg, MAX_PATH - 1);
+            fpath[MAX_PATH - 1] = '\0';
+            sanitize_path(fpath);
+            int sz = vfs_read_file(fpath, fbuf, 4095);
+            if (sz < 0) {
+                print("uniq: file not found: ", 0x0C);
+                print(fpath, 0x0C);
+                print("\n", 0x0C);
+            } else { src = fbuf; src_len = sz; }
+        } else {
+            extern int pipe_buf_len;
+            extern char pipe_buffer[];
+            src = (shell_stdin_len > 0) ? shell_stdin_buf : pipe_buffer;
+            src_len = (shell_stdin_len > 0) ? shell_stdin_len : pipe_buf_len;
+        }
+        if (src) {
+            sh_line_t lines[256];
+            int n = split_lines(src, src_len, lines, 256);
+            extern void write_serial_string(const char*);
+            for (int i = 0; i < n; ) {
+                int j = i + 1;
+                while (j < n && line_cmp(src, &lines[i], &lines[j]) == 0) j++;
+                int cnt = j - i;
+                if (count_mode) {
+                    p_int(cnt, 0x0F); print(" ", 0x0F);
+                }
+                write_serial_string("[SH] uniq ");
+                if (count_mode) { char nb[8]; int ni = 0, t = cnt; do { nb[ni++] = '0' + t % 10; t /= 10; } while (t); while (ni) write_serial(nb[--ni]); write_serial(' '); }
+                for (int k = 0; k < lines[i].len; k++) {
+                    char cc = src[lines[i].off + k];
+                    p_char(cc, 0x0F);
+                    if (cc == '\n' || cc == '\t') write_serial_string(" ");
+                    else write_serial(cc);
+                }
+                write_serial_string("\n");
+                print("\n", 0x0F);
+                i = j;
+            }
+            if (n == 0) print("\n", 0x0F);
+        }
+    }
+    // --- TEE (write stdin to a file AND stdout) ---
+    else if (strncmp(cmd_b, "tee ", 4) == 0) {
+        char* fpath = cmd_b + 4;
+        sanitize_path(fpath);
+        extern int pipe_buf_len;
+        extern char pipe_buffer[];
+        const char* src = (shell_stdin_len > 0) ? shell_stdin_buf : pipe_buffer;
+        int src_len = (shell_stdin_len > 0) ? shell_stdin_len : pipe_buf_len;
+        if (fpath[0] == '\0') {
+            print("tee: usage: tee FILE (reads stdin)\n", 0x0C);
+        } else if (src_len <= 0) {
+            print("tee: no input\n", 0x0C);
+        } else {
+            // Ensure the target exists, then write (like '>' redirection).
+            if (vfs_get_node(fpath) < 0) vfs_create_file(fpath);
+            int wr = vfs_write_file(fpath, src, src_len);
+            // Mirror to stdout too.
+            for (int i = 0; i < src_len; i++) p_char(src[i], 0x0F);
+            if (src_len > 0 && src[src_len - 1] != '\n') print("\n", 0x0F);
+            extern void write_serial_string(const char*);
+            extern void write_serial_hex(uint32_t);
+            write_serial_string("[SH] tee ");
+            write_serial_hex((uint32_t)wr);
+            write_serial_string(" bytes -> ");
+            write_serial_string(fpath);
+            write_serial_string("\n");
+        }
+    }
+    // --- FIND (walk a directory tree, print full paths, -name filter) ---
+    else if (strncmp(cmd_b, "find", 4) == 0 && (cmd_b[4] == '\0' || cmd_b[4] == ' ')) {
+        // find [DIR] [-name GLOB]  — default DIR = current dir.
+        char* p = cmd_b + 4;
+        char dirpath[MAX_PATH] = "";
+        char pattern[64] = "";
+        int have_pattern = 0;
+        char* tok;
+        while ((tok = next_token(&p)) != NULL) {
+            if (strcmp(tok, "-name") == 0) {
+                char* pat = next_token(&p);
+                if (pat) { strncpy(pattern, pat, 63); pattern[63] = '\0'; have_pattern = 1; }
+            } else if (!dirpath[0]) {
+                strncpy(dirpath, tok, MAX_PATH - 1);
+                dirpath[MAX_PATH - 1] = '\0';
+            }
+        }
+        int start = (dirpath[0]) ? vfs_get_node(dirpath) : get_current_dir();
+        if (start < 0 || !vfs_is_dir(start)) {
+            print("find: directory not found: ", 0x0C);
+            print((dirpath[0]) ? dirpath : ".", 0x0C);
+            print("\n", 0x0C);
+        } else {
+            // Walk the flat node table: a node belongs to the tree rooted at
+            // `start` iff following its parent chain reaches `start`.
+            extern void write_serial_string(const char*);
+            for (int i = 0; i < MAX_NODES; i++) {
+                if (!fs_nodes[i].in_use) continue;
+                int cur = i;
+                int under = 0;
+                for (int hop = 0; cur >= 0 && cur < MAX_NODES && hop < 64; hop++) {
+                    if (cur == start) { under = 1; break; }
+                    cur = fs_nodes[cur].parent;
+                }
+                if (!under) continue;
+                if (have_pattern && !wild_match(pattern, fs_nodes[i].name)) continue;
+                char path[MAX_PATH];
+                if (vfs_get_abs_path(i, path, MAX_PATH) < 0) continue;
+                print(path, 0x0F);
+                print("\n", 0x0F);
+                write_serial_string("[SH] find ");
+                write_serial_string(path);
+                write_serial_string("\n");
+            }
         }
     }
     // --- UNKNOWN ---
