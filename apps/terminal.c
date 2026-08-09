@@ -95,7 +95,7 @@ static const char* builtins[] = {
     "edit", "nano",
     "sh", "source", "export", "unalias", "ps", "kill",
     "echo", "beep", "tone", "sleep", "date", "color", "lock",
-    "uname", "whoami", "hostname", "env", "seq", "wc", "type", "yes",
+    "uname", "whoami", "passwd", "hostname", "env", "seq", "wc", "type", "yes",
     "printf", "sort", "uniq", "tee", "find",
     "run", "snake", "taskmgr", "flappy", "doom", "lspci", "man",
     "ping", "host", "grep", "shutdown", "reboot", "alias", "history", 0

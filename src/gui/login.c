@@ -7,6 +7,7 @@
 #include "../include/timer.h"
 #include "../include/rtc.h"
 #include "../include/font8x16.h"
+#include "../include/passwd.h"
 
 // ---- Instrument-console palette (warm charcoal + phosphor amber) ----
 // Mectov is a hand-built OS, so the gate should read as a machine console:
@@ -278,7 +279,10 @@ static void draw_login(int pass_len, int shake, int err, int cap_lock) {
 }
 
 int gui_login() {
-    const char* pass = "mectov123";
+    // Password comes from /etc/passwd (see sys_get_password); the hardcoded
+    // default is only a fallback for a fresh disk with no file yet.
+    char pass[PASSWD_MAX_LEN + 1];
+    sys_get_password(pass, (int)sizeof(pass));
     char input[32];
     int idx = 0, shake = 0, err = 0, cap_lock_active = 0;
     int locked = 1;                 // Windows-style: dismiss with any key/click

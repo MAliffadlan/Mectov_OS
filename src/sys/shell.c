@@ -19,6 +19,7 @@
 #include "../include/rtc.h"
 #include "../include/task.h"
 #include "../include/ext2.h"
+#include "../include/passwd.h"
 #include "../include/serial.h"  // write_serial_string/hex (job diagnostics)
 
 // OS_VERSION lives in utils.h (single source of truth shared with /proc).
@@ -320,7 +321,7 @@ const char* cmd_list[] = {
     "sh","source","export","alias","unalias","history","ps","kill",
     "jobs","fg","bg",
     "echo","beep","tone","sleep","date","color","lock",
-    "uname","whoami","hostname","env","seq","wc","type","yes",
+    "uname","whoami","passwd","hostname","env","seq","wc","type","yes",
     "printf","sort","uniq","tee","find",
     "run","snake","taskmgr","flappy","doom","lspci","man",
     "ping","host","fetch","grep",
@@ -741,7 +742,7 @@ static void run_cmd_internal() {
         print("======================================================================\n", 0x0B);
         print(" SYSTEM  : ", 0x0B); print("mfetch, date, color, clear, mem, memstat, kmemstats, uptime, lock, ps, kill\n", 0x0F);
         print(" FILE VFS: ", 0x0B); print("ls, cd, pwd, mkdir, touch, cat, head, tree, rm, rmdir, cp, mv, df\n", 0x0F);
-        print(" IDENTITY: ", 0x0B); print("uname [-a], whoami, hostname, env, seq [FIRST] LAST\n", 0x0F);
+        print(" IDENTITY: ", 0x0B); print("uname [-a], whoami, passwd [OLD] NEW, hostname, env, seq [FIRST] LAST\n", 0x0F);
         print(" EDITOR  : ", 0x0B); print("nano, edit\n", 0x0F);
         print(" SHELL   : ", 0x0B); print("export [NAME=VAL], alias [NAME=VAL], unalias, history, sh\n", 0x0F);
         print(" JOBS    : ", 0x0B); print("cmd & (background), jobs, fg [n], bg [n], kill [%n]\n", 0x0F);
@@ -1089,6 +1090,34 @@ static void run_cmd_internal() {
     else if (strcmp(cmd_b, "whoami") == 0) {
         // Single-user OS: always root (matches the $USER default).
         print("root\n", 0x0F);
+    }
+    // --- PASSWD (change the login password in /etc/passwd) ---
+    // The terminal sends whole commands (no echo-off prompting), so POSIX
+    // style is two args: `passwd <current> <new>`. Verification goes through
+    // sys_get_password, so the hardcoded default is accepted until the file
+    // exists — first change bootstraps it.
+    else if (strncmp(cmd_b, "passwd", 6) == 0 &&
+             (cmd_b[6] == ' ' || cmd_b[6] == '\0')) {
+        char* p = cmd_b + 6;
+        char* old = next_token(&p);
+        char* new = next_token(&p);
+        if (!old || !new) {
+            print("passwd: usage: passwd <current> <new>\n", 0x0C);
+        } else {
+            char cur[PASSWD_MAX_LEN + 1];
+            sys_get_password(cur, (int)sizeof(cur));
+            if (strcmp(old, cur) != 0) {
+                print("passwd: current password incorrect\n", 0x0C);
+            } else if (new[0] == '\0') {
+                print("passwd: new password cannot be empty\n", 0x0C);
+            } else if (sys_set_password(new) == 0) {
+                print("Password updated.\n", 0x0A);
+            } else {
+                print("passwd: failed to write ", 0x0C);
+                print(PASSWD_PATH, 0x0C);
+                print("\n", 0x0C);
+            }
+        }
     }
     // --- HOSTNAME ---
     else if (strcmp(cmd_b, "hostname") == 0) {
@@ -2255,6 +2284,8 @@ static void run_cmd_internal() {
             print("uname [-a] — Print OS name (or full kernel banner)\n", 0x0B);
         } else if (strcmp(topic, "whoami") == 0) {
             print("whoami — Print the current user (root)\n", 0x0B);
+        } else if (strcmp(topic, "passwd") == 0) {
+            print("passwd [current] [new] — Change the login password (stored in /etc/passwd)\n", 0x0B);
         } else if (strcmp(topic, "hostname") == 0) {
             print("hostname — Print the machine hostname\n", 0x0B);
         } else if (strcmp(topic, "env") == 0) {
