@@ -15,7 +15,30 @@
 static spinlock_t task_lock = SPINLOCK_INIT;
 
 #define MAX_TASKS 64
-#define KERNEL_STACK_SIZE 16384
+#define KERNEL_STACK_SIZE TASK_KSTACK_SIZE  // defined in task.h (shared with /proc)
+// Kernel stacks live in their own page-aligned arena: one 20KB slot per task
+// — a 4KB guard page (unmapped in every page directory) below a 16KB stack.
+// An overflow faults on the guard page and the #PF handler (idt.c) panics
+// with a clear message instead of silently corrupting the stack or the page
+// tables. Slots are exactly 5 pages, so with the array 4KB-aligned every
+// slot — and therefore every guard page — is page-aligned. User address
+// spaces inherit the unmapped guards when they clone the kernel page tables
+// (vmm_create_address_space copies PTEs verbatim from the boot directory).
+#define KERNEL_STACK_GUARD 4096
+#define KERNEL_STACK_SLOT  (KERNEL_STACK_SIZE + KERNEL_STACK_GUARD)
+static uint8_t kstacks[MAX_TASKS][KERNEL_STACK_SLOT] __attribute__((aligned(4096)));
+
+// Top of task tid's kernel stack (one past the last byte, i.e. the initial
+// ESP for iret / the TSS.esp0 value).
+static inline uint32_t kstack_top(int tid) {
+    return (uint32_t)(uintptr_t)&kstacks[tid][KERNEL_STACK_GUARD] + KERNEL_STACK_SIZE;
+}
+
+void task_install_stack_guards(uint32_t page_dir);  // defined below init_tasking
+// Address of task tid's guard page (first 4KB of its slot).
+static inline uint32_t kstack_guard(int tid) {
+    return (uint32_t)(uintptr_t)&kstacks[tid][0];
+}
 // USER_STACK_SIZE now lives in vmm.h — the Ring 3 stack is mapped into the
 // task's own address space, not carved out of this struct.
 
@@ -34,7 +57,11 @@ static void task_dead_park(void) {
 
 typedef struct {
     uint32_t esp;          // Saved stack pointer (points to register frame)
-    uint8_t  kernel_stack[KERNEL_STACK_SIZE] __attribute__((aligned(16)));
+    uint32_t stack_watermark; // Peak kernel-stack bytes used (scheduler samples
+                              // esp at each preemption; 100% of TASK_KSTACK_SIZE
+                              // means the guard page is one push away).
+    // NB: the kernel stack itself is NOT inline here — it lives in the
+    // page-aligned kstacks[] arena above, with a guard page below it.
     int      state;        // 0=free, 1=running, 2=ready, 3=sleep, 4=blocked, 5=zombie
     uint8_t  ring;         // 0 = kernel task, 3 = user task
     // === NEW FIELDS (add-on, safe defaults) ===
@@ -263,7 +290,7 @@ static int create_idle_task(int cpu) {
     tasks[tid].rq_cpu = -1;
 
     // Ring 0 interrupt frame -> ap_idle() (same layout as create_task).
-    uint32_t* stack = (uint32_t*)&tasks[tid].kernel_stack[KERNEL_STACK_SIZE];
+    uint32_t* stack = (uint32_t*)kstack_top(tid);
     *(--stack) = 0x202;      // EFLAGS (IF=1)
     *(--stack) = 0x08;       // CS (kernel code)
     *(--stack) = (uint32_t)(uintptr_t)&ap_idle;
@@ -273,6 +300,7 @@ static int create_idle_task(int cpu) {
     *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
     *(--stack) = 0x10;       // DS (kernel data)
     tasks[tid].esp = (uint32_t)stack;
+    tasks[tid].stack_watermark = 0;
 
     num_tasks++;
     tasks[tid].state = TASK_STATE_READY;
@@ -342,10 +370,56 @@ void init_tasking() {
         if (lapic_id == (smp_bsp_lapic_id & 15)) continue;
         create_idle_task(lapic_id & 15);
     }
+
+    // Unmap every task's kernel-stack guard page in the boot page directory.
+    // This must run after paging_init() and before any user address space is
+    // created: vmm_create_address_space() clones the boot directory's PTEs
+    // verbatim, so every later (and forked) address space inherits the holes.
+    task_install_stack_guards(tasks[0].page_dir);
+    write_serial_string("[K] stack guards installed\n");
 }
 
 uint32_t tasks_get_boot_cr3(void) {
     return tasks[0].page_dir;
+}
+
+// ============================================================
+// Kernel stack guard pages
+// ============================================================
+// Each task's 16KB kernel stack sits above a 4KB guard page that is unmapped
+// in every page directory. task_is_stack_guard() lets the #PF handler
+// (idt.c) tell a stack overflow from any other fault and panic with a clear
+// message instead of corrupting memory silently.
+int task_is_stack_guard(uint32_t addr) {
+    uint32_t base = (uint32_t)(uintptr_t)&kstacks[0][0];
+    if (addr < base) return 0;
+    uint32_t off = addr - base;
+    if (off >= (uint32_t)MAX_TASKS * KERNEL_STACK_SLOT) return 0;
+    return (off % KERNEL_STACK_SLOT) < KERNEL_STACK_GUARD;
+}
+
+uint32_t task_stack_top(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    return kstack_top(tid);
+}
+
+// Clear the guard-page PTE of every task in the given page directory. Called
+// once for the boot directory at init; cloned directories already inherit the
+// cleared entries (see init_tasking). invlpg keeps the current TLB coherent
+// if this runs on the active directory.
+void task_install_stack_guards(uint32_t page_dir) {
+    uint32_t* pd = (uint32_t*)(uintptr_t)(page_dir & 0xFFFFF000);
+    for (int tid = 0; tid < MAX_TASKS; tid++) {
+        uint32_t va = kstack_guard(tid);
+        uint32_t pd_idx = va >> 22;
+        uint32_t pt_idx = (va >> 12) & 0x3FF;
+        if (!(pd[pd_idx] & PAGE_PRESENT)) continue;
+        uint32_t* pt = (uint32_t*)(uintptr_t)(pd[pd_idx] & 0xFFFFF000);
+        if (pt[pt_idx] & PAGE_PRESENT) {
+            pt[pt_idx] = 0;
+            __asm__ __volatile__("invlpg (%0)" : : "r"(va));
+        }
+    }
 }
 
 // Create a Ring 0 (kernel) task
@@ -375,7 +449,7 @@ int create_task(void (*entry)()) {
             task_set_launch_arg(i, "sys_kernel");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
             
-            uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
+            uint32_t* stack = (uint32_t*)kstack_top(i);
             
             // Ring 0 interrupt frame
             *(--stack) = 0x202;      // EFLAGS (IF=1)
@@ -388,6 +462,7 @@ int create_task(void (*entry)()) {
             *(--stack) = 0x10;       // DS (kernel data)
             
             tasks[i].esp = (uint32_t)stack;
+            tasks[i].stack_watermark = 0;
             tasks[i].rq_cpu = -1;
             tasks[i].is_idle = 0;
             num_tasks++;
@@ -550,8 +625,16 @@ uint32_t schedule(uint32_t esp) {
     }
 
     // 2. Save the preempted frame; RUNNING -> READY (stays on our runqueue).
+    //    The esp we just got is the deepest point of this tick (timer
+    //    interrupts land anywhere in the call stack), so fold it into the
+    //    per-task stack watermark — /proc/tasks shows how close to the
+    //    guard page each task has ever come.
     if (cur >= 0) {
         tasks[cur].esp = esp;
+        if (esp >= kstack_guard(cur) + KERNEL_STACK_GUARD && esp <= kstack_top(cur)) {
+            uint32_t used = kstack_top(cur) - esp;
+            if (used > tasks[cur].stack_watermark) tasks[cur].stack_watermark = used;
+        }
         if (tasks[cur].state == TASK_STATE_RUNNING) {
             tasks[cur].state = TASK_STATE_READY;
         }
@@ -593,7 +676,7 @@ uint32_t schedule(uint32_t esp) {
     // CRITICAL: TSS.esp0 must point at the TOP of the next task's kernel
     // stack. A Ring 3 interrupt on THIS CPU pushes its frame there; the TSS is
     // per-CPU, so a task migrating between cores still gets its own stack top.
-    tss_set_kernel_stack((uint32_t)&tasks[next].kernel_stack[KERNEL_STACK_SIZE]);
+    tss_set_kernel_stack(kstack_top(next));
 
     // Switch page directory if different.
     extern void vmm_switch_page_dir(uint32_t);
@@ -623,7 +706,7 @@ uint32_t schedule(uint32_t esp) {
                 }
                 tasks[next].state = TASK_STATE_RUNNING;
                 current_task[cid] = next;
-                tss_set_kernel_stack((uint32_t)&tasks[next].kernel_stack[KERNEL_STACK_SIZE]);
+                tss_set_kernel_stack(kstack_top(next));
                 if (tasks[next].page_dir != 0) {
                     vmm_switch_page_dir(tasks[next].page_dir);
                 } else {
@@ -815,7 +898,7 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
                 }
             }
             
-            uint32_t* stack = (uint32_t*)&tasks[i].kernel_stack[KERNEL_STACK_SIZE];
+            uint32_t* stack = (uint32_t*)kstack_top(i);
 
             // Ring 3 interrupt frame
             *(--stack) = 0x23;       // SS
@@ -830,6 +913,7 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             *(--stack) = 0x23;       // DS
             
             tasks[i].esp = (uint32_t)stack;
+            tasks[i].stack_watermark = 0;
             tasks[i].rq_cpu = -1;
             tasks[i].is_idle = 0;
             num_tasks++;
@@ -1096,12 +1180,12 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         // Byte-copy the parent's kernel stack, then patch the child's saved
         // syscall frame. The parent is inside the fork syscall with IF=0
         // (interrupt gate), so the stack cannot contain nested IRQ frames.
-        memcpy(tasks[i].kernel_stack, tasks[parent].kernel_stack, KERNEL_STACK_SIZE);
+        memcpy(&kstacks[i][KERNEL_STACK_GUARD], &kstacks[parent][KERNEL_STACK_GUARD], KERNEL_STACK_SIZE);
         // CRITICAL: locate the frame at the TOP of the kernel stack, not at
         // tasks[parent].esp. The fork syscall (int 0x80) always pushes its
         // registers_t frame at TSS.esp0 (= kernel stack top), and the parent
         // is INSIDE that syscall right now — so the frame is deterministically
-        // at &kernel_stack[KERNEL_STACK_SIZE] - sizeof(registers_t).
+        // at kstack_top(parent) - sizeof(registers_t).
         //
         // tasks[parent].esp is the LAST preemption frame, which is only
         // guaranteed to sit at the stack top when the parent was interrupted
@@ -1111,8 +1195,11 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         // garbage frame whose ds field makes the child's first context-switch
         // epilogue (mov %eax,%ds) take a #GP. KVM's speed makes that window
         // reachable; TCG's slowness masked it.
-        uint32_t off = KERNEL_STACK_SIZE - sizeof(registers_t);
-        tasks[i].esp = (uint32_t)&tasks[i].kernel_stack[0] + off;
+        // The frame sits at the TOP of the stack (kstack_top is one past the
+        // last byte; the memcpy above preserved the parent's top-of-stack
+        // frame at the same offset in the child's stack).
+        tasks[i].esp = kstack_top(i) - sizeof(registers_t);
+        tasks[i].stack_watermark = 0;
 
         registers_t* fr = (registers_t*)tasks[i].esp;
 
@@ -1424,7 +1511,7 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
     }
 
     // Fresh Ring 3 interrupt frame at the top of the child's kernel stack.
-    uint32_t* stack = (uint32_t*)&tasks[child].kernel_stack[KERNEL_STACK_SIZE];
+    uint32_t* stack = (uint32_t*)kstack_top(child);
     *(--stack) = 0x23;       // SS
     *(--stack) = user_esp;   // ESP
     *(--stack) = 0x202;      // EFLAGS
@@ -1436,6 +1523,7 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
     *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
     *(--stack) = 0x23;       // DS
     tasks[child].esp = (uint32_t)stack;
+    tasks[child].stack_watermark = 0;
 
     num_tasks++;
     tasks[child].state = TASK_STATE_READY;
@@ -1786,6 +1874,7 @@ int get_task_info(int tid, task_info_t* info) {
     info->ring = tasks[tid].ring;
     info->priority = tasks[tid].priority;
     info->sleep_ticks = tasks[tid].sleep_ticks;
+    info->stack_watermark = tasks[tid].stack_watermark;
     return 1;
 }
 
@@ -1797,6 +1886,7 @@ int task_enum(int after, task_info_t* info) {
         info->ring = tasks[i].ring;
         info->priority = tasks[i].priority;
         info->sleep_ticks = tasks[i].sleep_ticks;
+        info->stack_watermark = tasks[i].stack_watermark;
         return i;
     }
     return -1;

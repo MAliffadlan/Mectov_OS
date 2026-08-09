@@ -15,5 +15,8 @@ void write_serial(char a);
 void write_serial_string(const char* str);
 void write_serial_buffer(const char* buf, int size);
 void write_serial_hex(uint32_t val);
+// Exception-context write: takes serial_lock if free, otherwise writes raw
+// (deadlock-free). Only for the #PF/#DF/exception paths.
+void write_serial_try(const char* buf, int size);
 
 #endif

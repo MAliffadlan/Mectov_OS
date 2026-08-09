@@ -1164,7 +1164,9 @@ static int vfs_proc_read(const char* name, char* buf, int max_size) {
     int len = 0;
 
     if (strcmp(name, "tasks") == 0) {
-        proc_add(buf, &len, max_size, "  PID STATE    RING PRI  PGRP SESS NAME\n");
+        // STK% = peak kernel-stack bytes used / TASK_KSTACK_SIZE. 100% means
+        // the task has come within a push of its guard page (overflow = panic).
+        proc_add(buf, &len, max_size, "  PID STATE    RING PRI  PGRP SESS STK% NAME\n");
         task_info_t info;
         int tid = -1;
         while ((tid = task_enum(tid, &info)) >= 0) {
@@ -1179,6 +1181,9 @@ static int vfs_proc_read(const char* name, char* buf, int max_size) {
             proc_field(buf, &len, max_size, task_get_pgrp(info.id), 4);
             proc_add(buf, &len, max_size, "  ");
             proc_field(buf, &len, max_size, task_get_session(info.id), 4);
+            proc_add(buf, &len, max_size, "  ");
+            proc_field(buf, &len, max_size,
+                       (info.stack_watermark * 100) / TASK_KSTACK_SIZE, 4);
             proc_add(buf, &len, max_size, "  ");
             const char* nm = task_get_launch_arg(info.id);
             if (nm[0] == '\0') proc_add(buf, &len, max_size, "kernel");

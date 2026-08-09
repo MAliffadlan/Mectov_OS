@@ -23,6 +23,7 @@ typedef struct gdt_ptr_struct gdt_ptr_t;
 
 void init_gdt();
 void tss_set_kernel_stack(uint32_t stack);
+void gdt_set_df_cr3(uint32_t cr3);   // #DF task-gate TSS page tables (post-paging)
 extern uint32_t user_stack[1024];
 
 #endif

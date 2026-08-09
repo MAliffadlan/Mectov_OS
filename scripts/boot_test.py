@@ -21,7 +21,9 @@ import time
 SERIAL_LOG = "/tmp/mectov_ci_serial.log"
 MON_SOCK = "/tmp/mectov_ci_monitor.sock"
 
-LOGIN_KEYS = ["m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
+# The Windows-style lock screen eats the first keypress to dismiss it, so a
+# leading space is sent before the password keys.
+LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 
 
 def wait_for_in_file(path, needle, timeout):

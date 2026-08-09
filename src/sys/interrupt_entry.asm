@@ -56,6 +56,25 @@ irq_common_stub:
 ; ============================================================
 ; ISR Common Stub — used by CPU exceptions (no scheduler)
 ; ============================================================
+; Runs on a dedicated per-CPU exception stack so a corrupt or overflowed
+; kernel stack — the very thing a #PF/#DF reports — cannot prevent the
+; handler from running. Without this, a deep stack overflow that hits a
+; guard page faults while the #PF handler itself is running on the same bad
+; stack and the CPU triple-faults (a silent reset) before anything can
+; print. The original ESP is saved on the fault stack and restored before
+; iret, so handled faults (e.g. COW page promotion) resume exactly as
+; before. The stack is per-CPU (indexed by LAPIC ID): ordinary faults like
+; COW page promotion fire constantly on every core, so a single shared
+; buffer would have two CPUs clobbering each other's saved ESP under load.
+section .bss
+align 16
+global fault_stacks
+global fault_stack_tops
+fault_stacks:   resb 4096 * 16      ; 4KB exception stack per CPU (max 16)
+fault_stack_tops:
+                resd 16             ; top pointer of each CPU's stack (filled by C)
+section .text
+
 isr_common_stub:
     pushad
     mov ax, ds
@@ -66,9 +85,40 @@ isr_common_stub:
     mov fs, ax
     mov gs, ax
 
-    push esp
+    ; Switch to THIS CPU's fault stack, passing the ORIGINAL ESP (the
+    ; register frame) to the handler. LAPIC ID register is identity-mapped
+    ; (apic.c) and its ID sits in bits 31:24; cid == apic_id & 15 matches
+    ; task.c's get_cid().
+    ;
+    ; NESTED FAULT: if the handler itself faults (e.g. a COW promotion inside
+    ; the #PF handler touching another COW page), this stub re-enters while
+    ; ESP is already somewhere on THIS CPU's fault stack. Unconditionally
+    ; switching to the top again would push the nested frame over the outer
+    ; handler's saved-ESP slot and corrupt the stack (eventually a #DF). So
+    ; switch only when ESP is outside [top-4096, top): a nested fault keeps
+    ; its current ESP and pushes deeper, exactly like a normal stack.
+    mov eax, [0xFEE00020]           ; LAPIC ID register
+    shr eax, 24
+    and eax, 15
+    mov edx, [fault_stack_tops + eax*4] ; top of this CPU's fault stack
+    mov ecx, esp                    ; original ESP (register frame)
+    lea ebx, [edx - 4096]           ; bottom of this CPU's fault stack
+    cmp ecx, ebx
+    jb  isr_use_fault_stack         ; ESP below the stack => normal fault
+    cmp ecx, edx
+    jae isr_use_fault_stack         ; ESP above the top => normal fault
+    jmp isr_keep_stack              ; ESP inside => nested fault, keep it
+isr_use_fault_stack:
+    mov esp, edx
+isr_keep_stack:
+    push ecx
+
+    push ecx
     call isr_handler
     add esp, 4
+
+    pop ecx
+    mov esp, ecx
 
     pop eax
     mov ds, ax

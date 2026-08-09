@@ -24,7 +24,9 @@ import time
 SERIAL_LOG = "/tmp/mectov_fork_serial.log"
 MON_SOCK = "/tmp/mectov_fork_monitor.sock"
 
-LOGIN_KEYS = ["m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
+# The Windows-style lock screen eats the first keypress to dismiss it, so a
+# leading space is sent before the password keys.
+LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 # `run /apps/forkdemo.mct` + Enter, as scancode names understood by sendkey
 RUN_KEYS = ["r", "u", "n", "spc", "slash", "a", "p", "p", "s",
             "slash", "f", "o", "r", "k", "d", "e", "m", "o", "dot", "m", "c", "t", "ret"]

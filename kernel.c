@@ -22,6 +22,7 @@
 #include "src/include/task.h"
 #include "src/include/pci.h"
 #include "src/include/serial.h"
+#include "src/include/gdt.h"
 
 // Forward declaration
 extern void init_double_buffer(void);
@@ -134,6 +135,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     init_mem(mem_size);
     write_serial_string("[K] paging\n");
     paging_init(fb_p, fb_s);
+    // CR3 is now live: point the #DF task-gate TSS at the kernel page tables
+    // so a double-fault task switch can actually run its handler.
+    {
+        uint32_t cr3;
+        __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3));
+        gdt_set_df_cr3(cr3);
+    }
     
     write_serial_string("[K] acpi\n");
     extern void acpi_init(void);

@@ -93,3 +93,28 @@ void write_serial_hex(uint32_t val) {
     spin_unlock(&serial_lock);
     __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
 }
+
+// ---- Exception-context serial (deadlock-free) ----
+// The #PF handler (COW promotion, guard-page overflow) runs on the dedicated
+// fault stack with IF=0 and MUST be able to log even when the interrupted
+// pre-exception context already holds serial_lock — otherwise an exception
+// fired mid-log spins forever on its own lock and silently freezes every core
+// (all of them cli + spin on serial_lock). A panic line garbled at the
+// boundary beats a system that hangs with no output at all.
+static void serial_putc_locked_raw(char a) {
+    int timeout = 100000;
+    while (is_transmit_empty() == 0 && timeout > 0) timeout--;
+    if (timeout > 0) outb(MODEM_PORT, a);
+}
+
+// Write one atomic line if the lock is free; fall back to raw (unlocked)
+// writes when it is not. Only the exception path calls this.
+void write_serial_try(const char* buf, int size) {
+    if (!buf || size <= 0) return;
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    int took = spin_try_lock(&serial_lock);
+    for (int i = 0; i < size; i++) serial_putc_locked_raw(buf[i]);
+    if (took) spin_unlock(&serial_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+}

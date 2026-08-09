@@ -57,6 +57,15 @@ typedef struct {
 #define SA_RESTART  1
 #define SA_NODEFER  2
 
+// Kernel stack guard pages: every task's 16KB kernel stack sits above a 4KB
+// unmapped guard page; a stack overflow faults on it and the #PF handler
+// panics with a clear message (see task.c). TASK_KSTACK_SIZE is the usable
+// stack size (shared with /proc/tasks, which shows peak usage as a % of it).
+#define TASK_KSTACK_SIZE 16384
+int task_is_stack_guard(uint32_t addr);       // 1 if addr is in any guard page
+uint32_t task_stack_top(int tid);             // top of task tid's kernel stack
+void task_install_stack_guards(uint32_t page_dir); // unmap guards in a page dir
+
 // sigprocmask operations (POSIX how values)
 #define SIG_BLOCK    0
 #define SIG_UNBLOCK  1
@@ -212,6 +221,7 @@ typedef struct {
     int ring;
     int priority;
     int sleep_ticks;
+    int stack_watermark;  // peak kernel-stack bytes used (see task.c scheduler)
 } task_info_t;
 
 int get_task_info(int tid, task_info_t* info);

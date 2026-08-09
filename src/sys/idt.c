@@ -39,6 +39,20 @@ extern void irq11();
 extern void irq12();
 extern void idt_flush(uint32_t);
 
+// Per-CPU exception stacks (interrupt_entry.asm): one 4KB stack per CPU so
+// a corrupt kernel stack cannot prevent a #PF/#DF handler from running, and
+// concurrent faults on different cores (e.g. COW promotion under fork load)
+// never clobber each other's saved ESP. Each CPU's top must be set before
+// any interrupt can fire; idt_init() runs before interrupts are enabled.
+extern uint32_t fault_stacks[];
+extern uint32_t fault_stack_tops[];
+
+void idt_init_fault_stacks(void) {
+    for (int i = 0; i < 16; i++) {
+        fault_stack_tops[i] = (uint32_t)(uintptr_t)fault_stacks + (i + 1) * 4096;
+    }
+}
+
 static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[num].base_lo = base & 0xFFFF;
     idt[num].base_hi = (base >> 16) & 0xFFFF;
@@ -54,7 +68,27 @@ static void overflow_handler(registers_t* regs) {
     write_serial_string("[INT4] Overflow (ignored)\n");
 }
 
+// Atomic-line helpers for the exception path. Every line is built into a
+// local buffer and emitted with ONE write_serial_try() call: locked when the
+// lock is free (no interleaving with other CPUs), raw when it is not (the
+// pre-exception context already holds serial_lock — spinning would freeze the
+// whole system).
+static char* str_append(char* p, const char* s) {
+    while (*s) *p++ = *s++;
+    return p;
+}
+
+static char* hex_append(char* p, uint32_t v) {
+    *p++ = '0'; *p++ = 'x';
+    for (int i = 28; i >= 0; i -= 4) {
+        int n = (int)((v >> i) & 0xF);
+        *p++ = (char)(n < 10 ? '0' + n : 'A' + (n - 10));
+    }
+    return p;
+}
+
 void idt_init() {
+    idt_init_fault_stacks();
     idt_ptr.limit = sizeof(idt_entry_t) * 256 - 1;
     idt_ptr.base  = (uint32_t)&idt;
     memset(&idt, 0, sizeof(idt_entry_t) * 256);
@@ -100,7 +134,13 @@ void idt_init() {
     idt_set_gate(5,  (uint32_t)isr5,  0x08, 0x8E);  // #BR Bound Range Exceeded
     idt_set_gate(6,  (uint32_t)isr6,  0x08, 0x8E);  // #UD Invalid Opcode
     idt_set_gate(7,  (uint32_t)isr7,  0x08, 0x8E);  // #NM Device Not Available
-    idt_set_gate(8,  (uint32_t)isr8,  0x08, 0x8E);  // #DF Double Fault
+    // #DF Double Fault as a TASK GATE (selector 0x30 = the dedicated df_tss
+    // in gdt.c). A stack overflow usually faults mid-push, so the CPU cannot
+    // push the #DF frame on the corrupt stack and would triple-fault before
+    // any interrupt-gate handler ran; the hardware task switch never touches
+    // the old stack (state goes into the old TSS) and runs df_task_handler on
+    // its own stack + CR3, which prints a clean panic and halts.
+    idt_set_gate(8,  0,          0x30, 0x85);  // #DF Double Fault (task gate)
     idt_set_gate(9,  (uint32_t)isr9,  0x08, 0x8E);  // Coprocessor Segment Overrun
     idt_set_gate(10, (uint32_t)isr10, 0x08, 0x8E);  // #TS Invalid TSS
     idt_set_gate(11, (uint32_t)isr11, 0x08, 0x8E);  // #NP Segment Not Present
@@ -196,20 +236,52 @@ void isr_handler(registers_t *r) {
     // EIP/CS and hlt — fine, but the dedicated banner makes the failure
     // mode obvious in serial logs).
     if (r->int_no == 8) {
-        uint32_t eip = r->eip, cs = r->cs;
-        write_serial_string("\n[PANIC] DOUBLE FAULT (int 8) at EIP=");
-        write_serial_hex(eip);
-        write_serial_string(" CS=");
-        write_serial_hex(cs);
-        write_serial_string(" — kernel stack corruption, halting\n");
-        print("\n[KERNEL PANIC] Double Fault — kernel stack corrupted\n", 0x0C);
+        char buf[96];
+        char* p = buf;
+        p = str_append(p, "\n[PANIC] DOUBLE FAULT (int 8) at EIP=");
+        p = hex_append(p, r->eip);
+        p = str_append(p, " CS=");
+        p = hex_append(p, r->cs);
+        p = str_append(p, " - kernel stack corruption, halting\n");
+        write_serial_try(buf, (int)(p - buf));
+        print("\n[KERNEL PANIC] Double Fault - kernel stack corrupted\n", 0x0C);
         for(;;) __asm__("hlt");
     }
 
     if (r->int_no == 14) {
         uint32_t faulting_address;
         __asm__ __volatile__("mov %%cr2, %0" : "=r"(faulting_address));
-        
+
+        // ---- Kernel stack overflow detection ----
+        // The 4KB page below every task's kernel stack is unmapped; a fault
+        // into one means the stack ran past its end. The register frame (and
+        // often the page tables) are already corrupted, so the only safe
+        // action is a clear panic. In the worst case the CPU faults while
+        // pushing the #PF frame itself and we get a #DF instead — that has
+        // its own banner above.
+        extern int task_is_stack_guard(uint32_t addr);
+        if (task_is_stack_guard(faulting_address)) {
+            extern int get_current_task(void);
+            extern uint32_t task_stack_top(int tid);
+            int ctid = get_current_task();
+            char buf[128];
+            char* p = buf;
+            p = str_append(p, "\n[PANIC] KERNEL STACK OVERFLOW at ");
+            p = hex_append(p, faulting_address);
+            p = str_append(p, " task ");
+            p = hex_append(p, (uint32_t)ctid);
+            p = str_append(p, " esp0=");
+            p = hex_append(p, task_stack_top(ctid));
+            p = str_append(p, " EIP=");
+            p = hex_append(p, r->eip);
+            p = str_append(p, " CS=");
+            p = hex_append(p, r->cs);
+            p = str_append(p, "\n");
+            write_serial_try(buf, (int)(p - buf));
+            print("\n[KERNEL PANIC] Kernel stack overflow - halting\n", 0x0C);
+            for(;;) __asm__("hlt");
+        }
+
         uint32_t cr3_val;
         __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3_val));
         
@@ -233,18 +305,26 @@ void isr_handler(registers_t *r) {
                         pt[pt_idx] = old_paddr | flags;
                         __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
                         
-                        write_serial_string("[COW] Promoted sole-owned page to writable at ");
-                        write_serial_hex(faulting_address);
-                        write_serial_string("\n");
+                        // Exception context (fault stack, IF=0): atomic try-write
+                        // so logging can never self-deadlock on serial_lock.
+                        char b1[96];
+                        char* q1 = b1;
+                        q1 = str_append(q1, "[COW] Promoted sole-owned page to writable at ");
+                        q1 = hex_append(q1, faulting_address);
+                        q1 = str_append(q1, "\n");
+                        write_serial_try(b1, (int)(q1 - b1));
                         return; // Resume execution
                     }
                     
                     // Duplicate page
                     uint32_t new_paddr = frame_alloc();
                     if (new_paddr == 0) {
-                        write_serial_string("[COW] OOM during COW fault at ");
-                        write_serial_hex(faulting_address);
-                        write_serial_string(" — falling through to kill task\n");
+                        char b2[96];
+                        char* q2 = b2;
+                        q2 = str_append(q2, "[COW] OOM during COW fault at ");
+                        q2 = hex_append(q2, faulting_address);
+                        q2 = str_append(q2, " - falling through to kill task\n");
+                        write_serial_try(b2, (int)(q2 - b2));
                         // Falls through to the unhandled-exception path below,
                         // which calls task_exit() for Ring 3 or panics for Ring 0.
                     } else {
@@ -258,13 +338,16 @@ void isr_handler(registers_t *r) {
                         frame_free(old_paddr);
                         __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
                         
-                        write_serial_string("[COW] Duplicated page at ");
-                        write_serial_hex(faulting_address);
-                        write_serial_string(" (Old: ");
-                        write_serial_hex(old_paddr);
-                        write_serial_string(" -> New: ");
-                        write_serial_hex(new_paddr);
-                        write_serial_string(")\n");
+                        char b3[128];
+                        char* q3 = b3;
+                        q3 = str_append(q3, "[COW] Duplicated page at ");
+                        q3 = hex_append(q3, faulting_address);
+                        q3 = str_append(q3, " (Old: ");
+                        q3 = hex_append(q3, old_paddr);
+                        q3 = str_append(q3, " -> New: ");
+                        q3 = hex_append(q3, new_paddr);
+                        q3 = str_append(q3, ")\n");
+                        write_serial_try(b3, (int)(q3 - b3));
                         return; // Resume execution
                     }
                 }
@@ -294,14 +377,17 @@ void isr_handler(registers_t *r) {
                     // Clear the page to 0 (important for security & determinism)
                     memset((void*)(faulting_address & 0xFFFFF000), 0, 4096);
                     
-                    write_serial_string("[VMM] Demand Paged addr ");
-                    write_serial_hex(faulting_address);
-                    write_serial_string(" for TID ");
-                    write_serial_hex(tid);
-                    write_serial_string("\n");
+                    char b4[96];
+                    char* q4 = b4;
+                    q4 = str_append(q4, "[VMM] Demand Paged addr ");
+                    q4 = hex_append(q4, faulting_address);
+                    q4 = str_append(q4, " for TID ");
+                    q4 = hex_append(q4, tid);
+                    q4 = str_append(q4, "\n");
+                    write_serial_try(b4, (int)(q4 - b4));
                     return; // Resume execution, instruction will restart
                 } else {
-                    write_serial_string("[VMM] OUT OF MEMORY during Demand Paging!\n");
+                    write_serial_try("[VMM] OUT OF MEMORY during Demand Paging!\n", (int)strlen("[VMM] OUT OF MEMORY during Demand Paging!\n"));
                 }
             }
         }
@@ -311,53 +397,82 @@ void isr_handler(registers_t *r) {
         isr_t handler = interrupt_handlers[r->int_no];
         handler(r);
     } else {
-        // Unhandled exception
-        write_serial_string("\n[EXCEPTION] int_no=");
-        write_serial_hex(r->int_no);
-        write_serial_string(" CS=");
-        write_serial_hex(r->cs);
-        write_serial('\n');
+        // Unhandled exception — one atomic line (try-write, deadlock-free).
+        {
+            char buf[160];
+            char* p = buf;
+            p = str_append(p, "\n[EXCEPTION] int_no=");
+            p = hex_append(p, r->int_no);
+            p = str_append(p, " CS=");
+            p = hex_append(p, r->cs);
+            p = str_append(p, " err=");
+            p = hex_append(p, r->err_code);
+            p = str_append(p, " EIP=");
+            p = hex_append(p, r->eip);
+            p = str_append(p, " EFL=");
+            p = hex_append(p, r->eflags);
+            p = str_append(p, " DS=");
+            p = hex_append(p, r->ds);
+            p = str_append(p, " EAx=");
+            p = hex_append(p, r->eax);
+            p = str_append(p, " ECx=");
+            p = hex_append(p, r->ecx);
+            p = str_append(p, " EDx=");
+            p = hex_append(p, r->edx);
+            p = str_append(p, "\n");
+            write_serial_try(buf, (int)(p - buf));
+        }
         
         uint32_t cs = r->cs;
         if ((cs & 3) == 3) {
             // Ring 3 crash - clean up windows, then kill the task
-            write_serial_string("[CRASH] Ring 3 crash, killing task\n");
             extern int get_current_task(void);
             extern void wm_cleanup_task(int tid);
             int crashed_tid = get_current_task();
-            write_serial_string("[CRASH] Task ID: ");
-            write_serial_hex(crashed_tid);
-            write_serial('\n');
+            {
+                char buf[96];
+                char* p = buf;
+                p = str_append(p, "[CRASH] Ring 3 crash, killing task ");
+                p = hex_append(p, (uint32_t)crashed_tid);
+                p = str_append(p, "\n");
+                write_serial_try(buf, (int)(p - buf));
+            }
             if (r->int_no == 14) {
                 uint32_t cr2;
                 __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
-                write_serial_string("PF addr: ");
-                write_serial_hex(cr2);
-                write_serial_string(" err=");
-                write_serial_hex(r->err_code);
-                write_serial_string("\n");
+                char buf[96];
+                char* p = buf;
+                p = str_append(p, "PF addr: ");
+                p = hex_append(p, cr2);
+                p = str_append(p, " err=");
+                p = hex_append(p, r->err_code);
+                p = str_append(p, "\n");
+                write_serial_try(buf, (int)(p - buf));
             }
-            write_serial_string("EIP: ");
-            write_serial_hex(r->eip);
-            write_serial_string(" ESP: ");
-            write_serial_hex(r->useresp);
-            write_serial_string(" EBP: ");
-            write_serial_hex(r->ebp);
-            write_serial_string("\n");
-            write_serial_string("EAX: ");
-            write_serial_hex(r->eax);
-            write_serial_string(" EBX: ");
-            write_serial_hex(r->ebx);
-            write_serial_string(" ECX: ");
-            write_serial_hex(r->ecx);
-            write_serial_string(" EDX: ");
-            write_serial_hex(r->edx);
-            write_serial_string("\n");
-            uint32_t cr3_val;
-            __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3_val));
-            write_serial_string("CR3: ");
-            write_serial_hex(cr3_val);
-            write_serial_string("\n");
+            {
+                char buf[160];
+                char* p = buf;
+                p = str_append(p, "EIP: ");
+                p = hex_append(p, r->eip);
+                p = str_append(p, " ESP: ");
+                p = hex_append(p, r->useresp);
+                p = str_append(p, " EBP: ");
+                p = hex_append(p, r->ebp);
+                p = str_append(p, " EAX: ");
+                p = hex_append(p, r->eax);
+                p = str_append(p, " EBX: ");
+                p = hex_append(p, r->ebx);
+                p = str_append(p, " ECX: ");
+                p = hex_append(p, r->ecx);
+                p = str_append(p, " EDX: ");
+                p = hex_append(p, r->edx);
+                p = str_append(p, " CR3: ");
+                uint32_t cr3_val;
+                __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3_val));
+                p = hex_append(p, cr3_val);
+                p = str_append(p, "\n");
+                write_serial_try(buf, (int)(p - buf));
+            }
             // The new task_exit_with_code() handles full cleanup (WM + VMM)
             // and records a SIGSEGV-style exit status for the parent.
             extern void task_exit_with_code(int code);
@@ -375,18 +490,28 @@ void isr_handler(registers_t *r) {
             if (r->int_no == 14) {
                 uint32_t cr2;
                 __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
-                write_serial_string("PF addr: ");
-                write_serial_hex(cr2);
-                write_serial_string("\n");
+                {
+                    char buf[96];
+                    char* p = buf;
+                    p = str_append(p, "PF addr: ");
+                    p = hex_append(p, cr2);
+                    p = str_append(p, "\n");
+                    write_serial_try(buf, (int)(p - buf));
+                }
                 print(" (Page Fault at ", 0x0C);
                 p_int(cr2, 0x0C);
                 print(")", 0x0C);
             }
-            write_serial_string("EIP: ");
-            write_serial_hex(r->eip);
-            write_serial_string(" CS: ");
-            write_serial_hex(r->cs);
-            write_serial_string("\n");
+            {
+                char buf[96];
+                char* p = buf;
+                p = str_append(p, "EIP: ");
+                p = hex_append(p, r->eip);
+                p = str_append(p, " CS: ");
+                p = hex_append(p, r->cs);
+                p = str_append(p, "\n");
+                write_serial_try(buf, (int)(p - buf));
+            }
 
             print("\n  EIP=", 0x0C); p_int(r->eip, 0x0C);
             print("  CS=",  0x0C); p_int(r->cs, 0x0C);

@@ -32,6 +32,10 @@ OBJ_DIR = obj
 # List of source files
 SRCS = $(wildcard $(SRC_DIR)/drivers/*.c) \
        $(wildcard $(SRC_DIR)/sys/*.c) \
+       $(wildcard $(SRC_DIR)/sys/shell/*.c) \
+       $(wildcard $(SRC_DIR)/sys/shell/builtins/*/*.c) \
+       $(wildcard $(SRC_DIR)/sys/shell/job/*.c) \
+       $(wildcard $(SRC_DIR)/sys/shell/script/*.c) \
        $(wildcard $(SRC_DIR)/apps/*.c) \
        $(wildcard $(SRC_DIR)/gui/*.c) \
        kernel.c
@@ -84,13 +88,13 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
 
 all: $(OBJ_DIR) myos.bin
 
-$(OBJ_DIR):
-	mkdir -p $(OBJ_DIR)
-	mkdir -p $(OBJ_DIR)/src/drivers
-	mkdir -p $(OBJ_DIR)/src/sys
-	mkdir -p $(OBJ_DIR)/src/apps
-	mkdir -p $(OBJ_DIR)/src/gui
-	mkdir -p $(OBJ_DIR)/doom
+.PHONY: obj-dirs
+# obj/ itself is not phony (it is a real directory), but its rule must run
+# every time: once obj/ exists make would otherwise consider it up-to-date
+# and skip creating newly added subdirectories.
+$(OBJ_DIR): obj-dirs
+obj-dirs:
+	@mkdir -p $(sort $(dir $(OBJS)))
 
 $(OBJ_DIR)/boot.o: boot.asm | $(OBJ_DIR)
 	$(AS) $(ASFLAGS) $< -o $@

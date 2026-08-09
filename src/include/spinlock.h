@@ -24,6 +24,18 @@ static inline void spin_lock(spinlock_t* lock) {
     }
 }
 
+// Non-blocking acquire: returns 1 if the lock was taken, 0 if it was already
+// held (by any CPU). Used by the exception path, where spinning on a lock
+// held by the interrupted (pre-exception) context would deadlock the system.
+static inline int spin_try_lock(spinlock_t* lock) {
+    uint32_t val = 1;
+    __asm__ __volatile__("xchg %0, %1"
+                         : "=r"(val), "+m"(lock->locked)
+                         : "0"(val)
+                         : "memory");
+    return val == 0;
+}
+
 static inline void spin_unlock(spinlock_t* lock) {
     // Memory barrier to ensure all previous writes are visible before unlocking
     __asm__ __volatile__("": : :"memory");
