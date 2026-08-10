@@ -10,6 +10,10 @@ void cmd_sleep(void) {
             // the help text and stays scheduler-driven.
             uint64_t ticks64 = (uint64_t)seconds * 1000u;
             if (ticks64 > 0x7FFFFFFF) ticks64 = 0x7FFFFFFF;
+            // Drop shell_lock while parked: a killed shell must not strand
+            // the lock (kernel locking audit v38.4).
+            shell_lock_release_for_block();
             task_sleep((int)ticks64);
+            shell_lock_reacquire();
         }
 }

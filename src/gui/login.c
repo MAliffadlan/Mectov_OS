@@ -311,7 +311,8 @@ int gui_login() {
         }
 
         // ---- State machine ----
-        uint8_t sc = k_get_scancode();
+        uint8_t kbd_mods = 0;
+        uint8_t sc = k_get_scancode_ex(&kbd_mods);
         if (sc != 0 && sc < 0x80) {
             if (locked) {
                 // Any key dismisses the lock screen. The dismissing press is
@@ -320,7 +321,7 @@ int gui_login() {
                 if (sc == 0x3A) cap_lock_active = !cap_lock_active;
                 locked = 0;
             } else {
-                char c = scancode_to_char(sc);
+                char c = scancode_to_char_mods(sc, kbd_mods);
                 if (sc == 0x3A) { cap_lock_active = !cap_lock_active; }
 
                 if (c == '\n') {

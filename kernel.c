@@ -346,7 +346,12 @@ void kernel_main(uint32_t magic, uint32_t addr) {
 
         extern volatile int doom_fullscreen;
         if (!doom_fullscreen) {
-            uint8_t sc = k_get_scancode();
+            // Resolve the character against the modifier snapshot captured at
+            // feed time: the live shift_p may already have the shift RELEASE
+            // applied (the whole shift-<key> sequence is fed in one IRQ), so
+            // reading it here turns "shift-7" into '7'. See keyboard.c.
+            uint8_t kbd_mods = 0;
+            uint8_t sc = k_get_scancode_ex(&kbd_mods);
             if (sc != 0) {
                 // F12 = break into the in-kernel GDB stub (see gdb_stub.c)
                 if (sc == 0x58) {
@@ -383,7 +388,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                     // focused window as a normal character. Ctrl+Shift+C is
                     // deliberately NOT consumed — it falls through to the
                     // window so the terminal can use it for clipboard copy.
-                    if (keyboard_ctrl_held && !shift_p && sc == 0x2E) {
+                    if ((kbd_mods & 2) && !(kbd_mods & 1) && sc == 0x2E) {
                         extern int term_app_running;
                         extern int term_app_task_id;
                         extern int task_signal_group(int root_tid, int sig);
@@ -419,7 +424,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                             write_serial_string("[JOBS] Ctrl+C -> ^C (no fg app)\n");
                         }
                         needs_redraw = 1;
-                    } else if (keyboard_ctrl_held && !shift_p && sc == 0x2C) {
+                    } else if ((kbd_mods & 2) && !(kbd_mods & 1) && sc == 0x2C) {
                         // Ctrl+Z (no Shift) suspends the terminal's foreground app
                         // (SIGTSTP to the whole job tree). Unlike Ctrl+C the
                         // job survives: it is registered as a stopped job so
@@ -455,7 +460,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                         wm_alt_tab_start();
                         needs_redraw = 1;
                     } else if (sc < 0x80 || sc == 0xE0) {
-                        char c = scancode_to_char(sc);
+                        char c = scancode_to_char_mods(sc, kbd_mods);
                         wm_handle_key(c, sc);
                         needs_redraw = 1;
                     }

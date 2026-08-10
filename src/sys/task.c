@@ -96,6 +96,10 @@ typedef struct {
 static task_t tasks[MAX_TASKS];
 static int current_task[16] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 static inline int get_cid() { extern uint32_t smp_lapic_addr; return smp_lapic_addr ? (apic_get_id() & 15) : 0; }
+
+// Exported CPU-id accessor for lock ownership keys in other subsystems
+// (vfs.c, wm.c). Same semantics as the internal get_cid().
+int task_get_cid(void) { return get_cid(); }
 static int num_tasks = 0;
 static int boot_current_dir = 0;
 // Foreground process group of the controlling terminal (set by the shell via

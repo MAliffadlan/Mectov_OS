@@ -42,7 +42,18 @@ uint32_t vmm_setup_user_stack(uint32_t page_dir, uint32_t stack_top);
 // Free a page directory (for task cleanup)
 void vmm_free_address_space(uint32_t page_dir);
 
-// Frame management stubs
+// ---- Physical frame allocator (single source of truth) ----
+// One bitmap + refcount pair, owned by vmm.c, sized for PHYS_MAX_PAGES but
+// bounded at runtime by phys_init(total_pages) — the RAM size detected from
+// the multiboot header in kernel_main/init_mem. The old hardcoded 128MB
+// bitmap in vmm.c and the write-only mem_bitmap in mem.c are gone; every
+// physical-frame decision reads this one structure.
+#define PHYS_MAX_PAGES (512 * 256)  // 512MB / 4KB ceiling for static bitmaps
+
+void phys_init(uint32_t total_pages);                    // called from init_mem
+void phys_reserve_region(uint32_t start, uint32_t len);  // mark MMIO (fb, ...) used
+uint32_t phys_get_used_pages(void);                      // reserved + allocated
+uint32_t phys_get_zero_page(void);                       // shared zero frame (pinned)
 uint32_t frame_alloc(void);
 void frame_free(uint32_t paddr);
 extern uint8_t frame_ref_count[];

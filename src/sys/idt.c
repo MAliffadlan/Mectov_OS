@@ -220,6 +220,33 @@ uint32_t irq_handler(uint32_t esp) {
 #include "../include/vmm.h"
 #include "../include/mem.h"
 
+// Lazy zero-fill for a demand-paged Ring 3 page (heap or user stack). A
+// WRITE fault gets a private zeroed frame mapped RW; a READ fault maps the
+// shared zero page read-only with the PAGE_COW marker so the first write
+// duplicates it. Returns 1 when the fault is resolved (resume the faulting
+// instruction), 0 when no frame could be produced (fall through to kill).
+// Runs in exception context (fault stack, IF=0) — logging is try-write only.
+static int demand_map_zero(uint32_t cr3_val, uint32_t addr, uint32_t err_code) {
+    uint32_t phys;
+    if (err_code & 2) {  // write fault -> private zeroed frame
+        phys = frame_alloc();
+        if (phys == 0) return 0;
+        vmm_map_page(cr3_val, addr, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+        memset((void*)(addr & 0xFFFFF000), 0, 4096);
+    } else {  // read fault -> shared zero page (RO + COW marker)
+        phys = phys_get_zero_page();
+        if (phys == 0) return 0;
+        vmm_map_page(cr3_val, addr, phys, PAGE_PRESENT | PAGE_USER | PAGE_COW);
+    }
+    char b[96];
+    char* q = b;
+    q = str_append(q, "[VMM] demand paged ");
+    q = hex_append(q, addr);
+    q = str_append(q, (err_code & 2) ? " (write, private frame)\n" : " (read, shared zero)\n");
+    write_serial_try(b, (int)(q - b));
+    return 1;
+}
+
 void isr_handler(registers_t *r) {
     // GDB stub: single-step (int 1) and breakpoint (int 3) traps are
     // consumed here when the debugger is active, so they never reach the
@@ -297,8 +324,16 @@ void isr_handler(registers_t *r) {
                 if (entry & PAGE_COW) {
                     uint32_t old_paddr = entry & 0xFFFFF000;
                     
-                    // Sole ownership optimization
-                    if (frame_ref_count[old_paddr / 4096] == 1) {
+                    // Sole ownership optimization. The refcount read is locked
+                    // against frame_alloc/frame_free on other cores (kernel
+                    // locking audit): an unlocked read could observe a torn
+                    // count mid-update and wrongly promote a still-shared page.
+                    extern void vmm_lock_acquire_irq(void);
+                    extern void vmm_lock_release_irq(void);
+                    vmm_lock_acquire_irq();
+                    int sole_owner = (frame_ref_count[old_paddr / 4096] == 1);
+                    vmm_lock_release_irq();
+                    if (sole_owner) {
                         uint32_t flags = entry & 0xFFF;
                         flags |= PAGE_RW;
                         flags &= ~PAGE_COW;
@@ -362,7 +397,7 @@ void isr_handler(registers_t *r) {
                 return; // Resume execution, instruction will restart
             }
         }
-        // --- NEW: Demand Paging for Ring 3 Heap ---
+        // --- Demand Paging for Ring 3 Heap (lazy zero-fill) ---
         if ((r->cs & 3) == 3 && faulting_address >= 0x08000000 && faulting_address < 0x20000000) {
             extern int get_current_task(void);
             extern uint32_t task_get_heap_ptr(int tid);
@@ -370,25 +405,31 @@ void isr_handler(registers_t *r) {
             uint32_t max_heap = task_get_heap_ptr(tid);
             
             if (faulting_address < max_heap) {
-                // Address is within the reserved heap space! Map it.
-                uint32_t phys = frame_alloc();
-                if (phys) {
-                    vmm_map_page(cr3_val, faulting_address, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER);
-                    // Clear the page to 0 (important for security & determinism)
-                    memset((void*)(faulting_address & 0xFFFFF000), 0, 4096);
-                    
-                    char b4[96];
-                    char* q4 = b4;
-                    q4 = str_append(q4, "[VMM] Demand Paged addr ");
-                    q4 = hex_append(q4, faulting_address);
-                    q4 = str_append(q4, " for TID ");
-                    q4 = hex_append(q4, tid);
-                    q4 = str_append(q4, "\n");
-                    write_serial_try(b4, (int)(q4 - b4));
+                // Address is within the reserved heap space. A write gets a
+                // private zeroed frame; a read maps the shared zero page
+                // (RO + COW) so untouched heap costs no private frames.
+                if (demand_map_zero(cr3_val, faulting_address, r->err_code)) {
                     return; // Resume execution, instruction will restart
-                } else {
-                    write_serial_try("[VMM] OUT OF MEMORY during Demand Paging!\n", (int)strlen("[VMM] OUT OF MEMORY during Demand Paging!\n"));
                 }
+                write_serial_try("[VMM] OUT OF MEMORY during Heap Demand Paging!\n", (int)strlen("[VMM] OUT OF MEMORY during Heap Demand Paging!\n"));
+            }
+        }
+
+        // --- Demand Paging for Ring 3 User Stack (lazy zero-fill) ---
+        // Each task's stack occupies [TOP-(tid+2)*SIZE, TOP-(tid+1)*SIZE) in
+        // its address space (task.c uses the same slot discipline). The page
+        // below that range is the guard page and stays permanently unmapped,
+        // so a genuine stack overflow faults there and kills the task instead
+        // of corrupting whatever sits underneath.
+        if ((r->cs & 3) == 3) {
+            extern int get_current_task(void);
+            int stid = get_current_task();
+            uint32_t s_top = USER_STACK_TOP - ((uint32_t)stid + 1) * USER_STACK_SIZE;
+            if (faulting_address >= (s_top - USER_STACK_SIZE) && faulting_address < s_top) {
+                if (demand_map_zero(cr3_val, faulting_address, r->err_code)) {
+                    return; // Resume execution, instruction will restart
+                }
+                write_serial_try("[VMM] OUT OF MEMORY during Stack Demand Paging!\n", (int)strlen("[VMM] OUT OF MEMORY during Stack Demand Paging!\n"));
             }
         }
     }

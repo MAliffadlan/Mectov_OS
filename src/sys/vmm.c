@@ -10,24 +10,32 @@ static spinlock_t vmm_lock = SPINLOCK_INIT;
 // ============================================================
 // Virtual Memory Manager — Layer di atas existing identity paging
 // ============================================================
-// Existing paging (mem.c) identity-maps 0–128MB.
+// Existing paging (mem.c) identity-maps 0..RAM (up to PHYS_MAX_PAGES*4KB).
 // VMM adds physical frame tracking + per-process page directories
 // WITHOUT touching the existing static page tables.
 //
 // page_dir = 0 → use global identity map (existing behavior)
 // page_dir = any other value → use that page directory
 //
-// Frame bitmap: tracks which 4KB physical frames are in use
+// Physical frame tracking (single source of truth): the bitmap/refcount
+// below is sized for PHYS_MAX_PAGES but its usable range is set once by
+// phys_init() with the multiboot-detected RAM size (init_mem → phys_init),
+// so a machine with 256MB or 512MB gets allocatable frames above 128MB.
 // ============================================================
 
-#define TOTAL_PHYSICAL_MB 128
-#define TOTAL_PHYSICAL_PAGES (TOTAL_PHYSICAL_MB * 256)  // 128MB / 4KB = 32768
-#define FRAME_BITMAP_SIZE (TOTAL_PHYSICAL_PAGES / 8)
-
 // One static bitmap for the whole system
-static uint8_t frame_bitmap[FRAME_BITMAP_SIZE];
-uint8_t frame_ref_count[TOTAL_PHYSICAL_PAGES];
+static uint8_t frame_bitmap[PHYS_MAX_PAGES / 8];
+uint8_t frame_ref_count[PHYS_MAX_PAGES];
+static uint32_t phys_total_pages = 0;   // actual RAM / 4KB, from multiboot
 static int vmm_initialized = 0;
+
+// Shared zero page for lazy zero-fill (heap + user stack demand paging).
+// Every demand-paged page maps here READ-ONLY until the first write COW-
+// duplicates it into a private frame, so processes that allocate but barely
+// touch memory share a single frame instead of one zeroed frame each.
+// Pinned: refcount 255 (never sole-owner, so a single process can never get
+// a writable alias) and frame_free() ignores it outright.
+static uint32_t phys_zero_page = 0;
 
 // Kernel + heap region (first 48MB) is reserved; the define lives in mem.h so
 // task.c (mmap/munmap frame checks) shares the same bound.
@@ -42,24 +50,88 @@ static int bitmap_test(int idx) {
     return (frame_bitmap[idx / 8] >> (idx % 8)) & 1;
 }
 
-void vmm_init(void) {
-    if (vmm_initialized) return;
-    vmm_initialized = 1;
-    
-    // Clear bitmap & ref count
-    memset(frame_bitmap, 0, FRAME_BITMAP_SIZE);
-    memset(frame_ref_count, 0, TOTAL_PHYSICAL_PAGES);
-    
-    // Reserve kernel region (first 32MB)
-    for (int i = 0; i < KERNEL_RESERVED_PAGES; i++) {
+// Called exactly once, from init_mem(), with the RAM size reported by the
+// multiboot header. This is the single point that decides how many physical
+// frames exist; everything else (frame_alloc/frame_free bounds, /proc/meminfo,
+// identity map in mem.c) derives from it.
+void phys_init(uint32_t total_pages) {
+    if (phys_total_pages != 0) return;  // already initialized
+    phys_total_pages = total_pages;
+    if (phys_total_pages > PHYS_MAX_PAGES) phys_total_pages = PHYS_MAX_PAGES;
+
+    memset(frame_bitmap, 0, sizeof(frame_bitmap));
+    memset(frame_ref_count, 0, sizeof(frame_ref_count));
+
+    // Reserve the kernel + heap region (first 48MB)
+    for (uint32_t i = 0; i < KERNEL_RESERVED_PAGES && i < phys_total_pages; i++) {
         bitmap_set(i);
         frame_ref_count[i] = 1;
     }
-    
-    write_serial_string("[VMM] Initialized. ");
-    write_serial_string("Reserved ");
+
+    write_serial_string("[PHYS] allocator: ");
+    write_serial_hex(phys_total_pages * 4096);
+    write_serial_string(" bytes RAM, ");
     write_serial_hex(KERNEL_RESERVED_PAGES * 4096);
-    write_serial_string(" bytes for kernel.\n");
+    write_serial_string(" reserved for kernel.\n");
+
+    // Grab one frame for the shared zero page and pin it. Runs before paging
+    // is enabled (paging_init is later), so direct physical access is fine.
+    for (uint32_t i = KERNEL_RESERVED_PAGES; i < phys_total_pages; i++) {
+        if (!bitmap_test(i)) {
+            phys_zero_page = i * 4096;
+            bitmap_set(i);
+            frame_ref_count[i] = 255;  // pinned: never sole-owner, never freed
+            memset((void*)(uintptr_t)phys_zero_page, 0, 4096);
+            write_serial_string("[PHYS] shared zero page @ ");
+            write_serial_hex(phys_zero_page);
+            write_serial_string("\n");
+            break;
+        }
+    }
+}
+
+// The shared zero page (0 if the allocator could not reserve one).
+uint32_t phys_get_zero_page(void) { return phys_zero_page; }
+
+// Mark a physical region (e.g. the framebuffer, MMIO) as in use so the
+// allocator never hands it out. Called from paging_init() with the framebuffer
+// address/size once they are known. Safe to call before/after phys_init.
+void phys_reserve_region(uint32_t start, uint32_t len) {
+    if (start == 0 || len == 0) return;
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&vmm_lock);
+    uint32_t first = start / 4096;
+    uint32_t last = (start + len + 4095) / 4096;
+    if (last > phys_total_pages) last = phys_total_pages;
+    for (uint32_t i = first; i < last; i++) {
+        bitmap_set(i);
+        frame_ref_count[i] = 1;
+    }
+    spin_unlock(&vmm_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+}
+
+// Real used-frame count (reserved kernel region + live allocations) for
+// /proc/meminfo — replaces the old `24MB + heap_used` approximation.
+uint32_t phys_get_used_pages(void) {
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&vmm_lock);
+    uint32_t used = 0;
+    for (uint32_t i = 0; i < phys_total_pages; i++)
+        if (frame_ref_count[i] > 0) used++;
+    spin_unlock(&vmm_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+    return used;
+}
+
+void vmm_init(void) {
+    if (vmm_initialized) return;
+    vmm_initialized = 1;
+    // Frame tracking is set up earlier by phys_init() (called from init_mem
+    // with the multiboot RAM size); this only marks the VMM address-space
+    // layer as ready.
 }
 
 // Allocate one physical frame. Returns physical address or 0.
@@ -68,11 +140,19 @@ void vmm_init(void) {
 // Disabling interrupts while holding the lock prevents the scheduler from
 // preempting the holder (task.c convention), and restoring eflags keeps the
 // caller's original IF state intact when this is nested in a cli section.
+// IRQ/exception-context accessors for vmm_lock: the #PF (COW) handler runs
+// with IF=0 on the per-CPU fault stack and needs a consistent view of
+// frame_ref_count vs concurrent frame_alloc/frame_free on other cores. Plain
+// spin is correct here (exception context, IF=0); a user fault never happens
+// while the same CPU holds vmm_lock, so no self-deadlock.
+void vmm_lock_acquire_irq(void) { spin_lock(&vmm_lock); }
+void vmm_lock_release_irq(void) { spin_unlock(&vmm_lock); }
+
 uint32_t frame_alloc(void) {
     uint32_t eflags;
     __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
     spin_lock(&vmm_lock);
-    for (int i = KERNEL_RESERVED_PAGES; i < TOTAL_PHYSICAL_PAGES; i++) {
+    for (uint32_t i = KERNEL_RESERVED_PAGES; i < phys_total_pages; i++) {
         if (!bitmap_test(i)) {
             bitmap_set(i);
             frame_ref_count[i] = 1;
@@ -89,11 +169,12 @@ uint32_t frame_alloc(void) {
 
 void frame_free(uint32_t paddr) {
     if (paddr == 0) return;
+    if (paddr == phys_zero_page) return;  // pinned shared zero page, never freed
     uint32_t eflags;
     __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
     spin_lock(&vmm_lock);
-    int idx = paddr / 4096;
-    if (idx >= KERNEL_RESERVED_PAGES && idx < TOTAL_PHYSICAL_PAGES) {
+    uint32_t idx = paddr / 4096;
+    if (idx >= KERNEL_RESERVED_PAGES && idx < phys_total_pages) {
         if (frame_ref_count[idx] > 0) {
             frame_ref_count[idx]--;
             if (frame_ref_count[idx] == 0) {
@@ -123,12 +204,11 @@ void frame_free(uint32_t paddr) {
 
 // Zero a page (helper since we don't have a generic zero-phys-page)
 static void zero_phys_page(uint32_t paddr) {
-    // Temporarily identity-map if not already, then memset
-    // Since we use identity mapping 0→128MB, if paddr < 128MB, just use direct pointer
-    if (paddr < (TOTAL_PHYSICAL_MB * 1024 * 1024)) {
+    // The kernel identity map covers 0..RAM, so every allocatable frame is
+    // directly addressable. Anything outside that range is a caller bug.
+    if (paddr < (phys_total_pages * 4096)) {
         memset((void*)(uintptr_t)paddr, 0, 4096);
     } else {
-        // Need to map temporarily — for now assert not happening
         write_serial_string("[VMM] zero_phys_page: paddr out of range!\n");
     }
 }
@@ -320,23 +400,13 @@ int vmm_map_page(uint32_t page_dir, uint32_t vaddr, uint32_t paddr, uint32_t fla
 uint32_t vmm_setup_user_stack(uint32_t page_dir, uint32_t stack_top) {
     if (page_dir == 0) return 0;  // a Ring 3 task needs a private address space
 
-    uint32_t stack_bottom = stack_top - USER_STACK_SIZE;
-    for (uint32_t i = 0; i < USER_STACK_PAGES; i++) {
-        uint32_t va = stack_bottom + i * 4096;
-        uint32_t paddr = frame_alloc();
-        if (paddr == 0) {
-            write_serial_string("[VMM] user stack: out of frames\n");
-            return 0;
-        }
-        // Zero through the kernel identity map before the page is ever visible
-        // to Ring 3, so a new task cannot read what the previous owner left.
-        zero_phys_page(paddr);
-        if (vmm_map_page(page_dir, va, paddr, PAGE_PRESENT | PAGE_RW | PAGE_USER) != 0) {
-            frame_free(paddr);
-            write_serial_string("[VMM] user stack: map failed\n");
-            return 0;
-        }
-    }
+    // Demand-paged: no frames are mapped eagerly. The #PF handler lazily
+    // backs each page on first access (write faults get a private zeroed
+    // frame, read faults the shared zero page), so a task that uses a few
+    // hundred bytes of stack costs a few hundred bytes, not 16 frames. The
+    // page below the task's stack range stays permanently unmapped as a guard
+    // page — an overflow faults there and kills the task instead of silently
+    // corrupting whatever sits underneath.
     return stack_top;
 }
 
@@ -349,7 +419,7 @@ int vmm_unmap_page(uint32_t page_dir, uint32_t vaddr) {
         uint32_t cr3_val;
         __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3_val));
         uint32_t* cur_pd = (uint32_t*)(uintptr_t)(cr3_val & 0xFFFFF000);
-        if ((cur_pd[pd_idx] & PAGE_PRESENT) && pd_idx < 32) {
+        if ((cur_pd[pd_idx] & PAGE_PRESENT) && pd_idx < mem_identity_tables()) {
             uint32_t pt_paddr = cur_pd[pd_idx] & 0xFFFFF000;
             uint32_t* pt = (uint32_t*)(uintptr_t)pt_paddr;
             pt[pt_idx] = 0;

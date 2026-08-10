@@ -28,6 +28,8 @@
 #include "../../include/rtl8139.h"
 #include "../../include/timer.h"
 #include "../../include/loader.h"
+#include "../../include/spinlock.h"
+#include "../../include/task.h"
 #include "../../include/rtc.h"
 #include "../../include/task.h"
 #include "../../include/ext2.h"
@@ -72,6 +74,16 @@ extern int hist_next_slot;
 // One text line (offset+length into a buffer) — used by split_lines and the
 // sort/uniq commands.
 typedef struct { int off; int len; } sh_line_t;
+
+// ---- shell lock (kernel locking audit v38.4) ----
+// Serializes shell command execution (SYS_EXEC_CMD) across terminals.
+extern spinlock_t shell_lock;
+void shell_lock_acquire(void);
+void shell_lock_release(void);
+// Drop/reacquire across blocking ops (sleep/waitpid) so a killed shell task
+// never strands the lock.
+void shell_lock_release_for_block(void);
+void shell_lock_reacquire(void);
 
 // ---- job control (job/job.c) ----
 #define MAX_JOBS 16

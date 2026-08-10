@@ -42,4 +42,28 @@ static inline void spin_unlock(spinlock_t* lock) {
     lock->locked = 0;
 }
 
+// ---- irqsave helpers (process context) ----
+//
+// Rule: process context (syscalls, main loop, shell) takes a shared lock with
+// spin_lock_irqsave() and releases with spin_unlock_irqrestore(). IRQ and
+// exception context (IF already 0 on x86) uses the plain spin_lock()/unlock().
+// A holder always has IF=0, so a timer IRQ can never re-enter the same lock on
+// this core (no self-deadlock), and a cross-CPU holder is never preemptible.
+//
+// eflags is saved/restored in full (pushfl/popfl), so nested acquisition
+// inside an existing cli section preserves the caller's IF state — the same
+// pattern the kernel previously hand-rolled at every call site. The restore
+// clobbers "cc" so the compiler does not rely on condition codes across it.
+static inline uint32_t spin_lock_irqsave(spinlock_t* lock) {
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; popl %0; cli" : "=g"(eflags) : : "memory");
+    spin_lock(lock);
+    return eflags;
+}
+
+static inline void spin_unlock_irqrestore(spinlock_t* lock, uint32_t eflags) {
+    spin_unlock(lock);
+    __asm__ __volatile__("pushl %0; popfl" : : "g"(eflags) : "memory", "cc");
+}
+
 #endif

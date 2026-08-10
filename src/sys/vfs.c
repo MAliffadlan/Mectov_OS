@@ -14,6 +14,36 @@
 #include "../include/ext2.h"
 #include "../include/fd.h"
 #include "../include/task.h"
+#include "../include/spinlock.h"
+
+// ---- Reentrant irqsave lock (kernel locking audit v38.4) ----
+//
+// Protects the node table (fs_nodes[]), sector allocation, and the on-disk
+// image (vfs_save/load) from concurrent syscalls on different cores. Public
+// VFS functions call each other (e.g. vfs_write_file -> vfs_get_node), so the
+// lock tracks owner (cpu,tid) + depth: a nested call on the same task is a
+// no-op. Process context only — nothing touches VFS from an IRQ. Ordering:
+// task_lock > fd_lock > vfs_lock > ata_lock.
+static spinlock_t vfs_lock = SPINLOCK_INIT;
+static uint32_t vfs_eflags;
+static int vfs_lock_owner = -1;
+static int vfs_lock_depth = 0;
+
+static void vfs_lock_acquire(void) {
+    int tid = get_current_task();
+    int key = (task_get_cid() << 16) | (tid & 0xFFFF);
+    if (vfs_lock_owner == key) { vfs_lock_depth++; return; }
+    vfs_eflags = spin_lock_irqsave(&vfs_lock);
+    vfs_lock_owner = key;
+    vfs_lock_depth = 1;
+}
+
+static void vfs_lock_release(void) {
+    if (vfs_lock_depth > 1) { vfs_lock_depth--; return; }
+    vfs_lock_depth = 0;
+    vfs_lock_owner = -1;
+    spin_unlock_irqrestore(&vfs_lock, vfs_eflags);
+}
 
 extern global_fd_t global_fds[MAX_GLOBAL_FDS];
 
@@ -296,6 +326,11 @@ void vfs_init() {
         extern uint8_t _binary_mmapdemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/mmapdemo.mct", (const char*)_binary_mmapdemo_mct_start, _binary_mmapdemo_mct_end - _binary_mmapdemo_mct_start);
 
+        // lazy zero page + heap/stack demand-paging demo
+        extern uint8_t _binary_demandtest_mct_start[];
+        extern uint8_t _binary_demandtest_mct_end[];
+        changed += vfs_update_file_if_needed("apps/demandtest.mct", (const char*)_binary_demandtest_mct_start, _binary_demandtest_mct_end - _binary_demandtest_mct_start);
+
         // Ctrl+C interrupt demo (infinite loop)
         extern uint8_t _binary_looper_mct_start[];
         extern uint8_t _binary_looper_mct_end[];
@@ -440,6 +475,12 @@ void vfs_init() {
     extern uint8_t _binary_mmapdemo_mct_end[];
     vfs_create_file("apps/mmapdemo.mct");
     vfs_write_file("apps/mmapdemo.mct", (const char*)_binary_mmapdemo_mct_start, _binary_mmapdemo_mct_end - _binary_mmapdemo_mct_start);
+
+    // lazy zero page + heap/stack demand-paging demo
+    extern uint8_t _binary_demandtest_mct_start[];
+    extern uint8_t _binary_demandtest_mct_end[];
+    vfs_create_file("apps/demandtest.mct");
+    vfs_write_file("apps/demandtest.mct", (const char*)_binary_demandtest_mct_start, _binary_demandtest_mct_end - _binary_demandtest_mct_start);
 
     // Ctrl+C interrupt demo (infinite loop)
     extern uint8_t _binary_looper_mct_start[];
@@ -615,7 +656,7 @@ void vfs_init() {
 // the allocator below both depend on VFS_DATA_START / VFS_DISK_SECTORS).
 
 // Magic signature: 8 bytes + 2 bytes version + 6 bytes reserved = 16 bytes in sector 0
-void vfs_save() {
+static void vfs_save_unlocked() {
     unsigned char meta[512];
     memset(meta, 0, 512);
     
@@ -644,8 +685,13 @@ void vfs_save() {
         ata_write_sector(VFS_NODE_START + i, p + (i * 512));
     }
 }
+void vfs_save() {
+    vfs_lock_acquire();
+    vfs_save_unlocked();
+    vfs_lock_release();
+}
 
-int vfs_load() {
+static int vfs_load_unlocked() {
     unsigned char meta[512];
     ata_read_sector(VFS_MAGIC_SECTOR, meta);
     
@@ -698,11 +744,17 @@ int vfs_load() {
     
     return 1;
 }
+int vfs_load() {
+    vfs_lock_acquire();
+    int r = vfs_load_unlocked();
+    vfs_lock_release();
+    return r;
+}
 
 // --- Resolusi Path ---
 
 // Resolve relative/absolute path menjadi absolute path string
-void vfs_resolve_path(const char* path, char* resolved, int buf_size) {
+static void vfs_resolve_path_unlocked(const char* path, char* resolved, int buf_size) {
     if (!path || path[0] == '\0') {
         // Default: current directory
         vfs_get_abs_path(get_current_dir(), resolved, buf_size);
@@ -770,9 +822,14 @@ void vfs_resolve_path(const char* path, char* resolved, int buf_size) {
     }
     resolved[i] = '\0';
 }
+void vfs_resolve_path(const char* path, char* resolved, int buf_size) {
+    vfs_lock_acquire();
+    vfs_resolve_path_unlocked(path,  resolved,  buf_size);
+    vfs_lock_release();
+}
 
 // Dapatkan absolute path dari node index
-int vfs_get_abs_path(int node_idx, char* buf, int buf_size) {
+static int vfs_get_abs_path_unlocked(int node_idx, char* buf, int buf_size) {
     if (node_idx < 0 || node_idx >= MAX_NODES || !fs_nodes[node_idx].in_use) {
         strcpy(buf, "?");
         return -1;
@@ -805,9 +862,15 @@ int vfs_get_abs_path(int node_idx, char* buf, int buf_size) {
     buf[i] = '\0';
     return i;
 }
+int vfs_get_abs_path(int node_idx, char* buf, int buf_size) {
+    vfs_lock_acquire();
+    int r = vfs_get_abs_path_unlocked(node_idx,  buf,  buf_size);
+    vfs_lock_release();
+    return r;
+}
 
 // Cari node berdasarkan path. Return node index atau -1.
-int vfs_get_node(const char* path) {
+static int vfs_get_node_unlocked(const char* path) {
     if (!path || path[0] == '\0') return get_current_dir();
     
     char resolved[MAX_PATH];
@@ -848,9 +911,15 @@ int vfs_get_node(const char* path) {
     
     return cur;
 }
+int vfs_get_node(const char* path) {
+    vfs_lock_acquire();
+    int r = vfs_get_node_unlocked(path);
+    vfs_lock_release();
+    return r;
+}
 
 // Cari di dalam satu directory
-int vfs_find_in_dir(const char* name, int dir_node) {
+static int vfs_find_in_dir_unlocked(const char* name, int dir_node) {
     if (dir_node < 0 || dir_node >= MAX_NODES) return -1;
     if (!fs_nodes[dir_node].in_use || (fs_nodes[dir_node].type != FS_DIR && fs_nodes[dir_node].type != FS_EXT2_DIR)) return -1;
     
@@ -867,10 +936,16 @@ int vfs_find_in_dir(const char* name, int dir_node) {
     }
     return -1;
 }
+int vfs_find_in_dir(const char* name, int dir_node) {
+    vfs_lock_acquire();
+    int r = vfs_find_in_dir_unlocked(name,  dir_node);
+    vfs_lock_release();
+    return r;
+}
 
 // --- Create / Delete Nodes ---
 
-int vfs_create_node(const char* name, fs_type_t type, int parent) {
+static int vfs_create_node_unlocked(const char* name, fs_type_t type, int parent) {
     // Validate parent
     if (parent < 0 || parent >= MAX_NODES) return -1;
     if (!fs_nodes[parent].in_use || (fs_nodes[parent].type != FS_DIR && fs_nodes[parent].type != FS_EXT2_DIR)) return -1;
@@ -917,8 +992,14 @@ int vfs_create_node(const char* name, fs_type_t type, int parent) {
     
     return -1; // Full
 }
+int vfs_create_node(const char* name, fs_type_t type, int parent) {
+    vfs_lock_acquire();
+    int r = vfs_create_node_unlocked(name,  type,  parent);
+    vfs_lock_release();
+    return r;
+}
 
-int vfs_mkdir(const char* path) {
+static int vfs_mkdir_unlocked(const char* path) {
     // Find parent directory
     char parent_path[MAX_PATH];
     char dirname[MAX_FILENAME];
@@ -945,8 +1026,14 @@ int vfs_mkdir(const char* path) {
     
     return vfs_create_node(dirname, FS_DIR, parent);
 }
+int vfs_mkdir(const char* path) {
+    vfs_lock_acquire();
+    int r = vfs_mkdir_unlocked(path);
+    vfs_lock_release();
+    return r;
+}
 
-int vfs_create_file(const char* path) {
+static int vfs_create_file_unlocked(const char* path) {
     char parent_path[MAX_PATH];
     char filename[MAX_FILENAME];
     
@@ -969,6 +1056,12 @@ int vfs_create_file(const char* path) {
     
     return vfs_create_node(filename, FS_FILE, parent);
 }
+int vfs_create_file(const char* path) {
+    vfs_lock_acquire();
+    int r = vfs_create_file_unlocked(path);
+    vfs_lock_release();
+    return r;
+}
 
 // Remove the on-disk ext2 object behind a VFS node (if any). Must run while
 // the node is still in_use so parent/name lookups stay valid.
@@ -982,7 +1075,7 @@ static void vfs_remove_ext2_entry(int node) {
     ext2_remove_entry(fs_nodes[p].ext2_inode, fs_nodes[node].name);
 }
 
-int vfs_delete_node(const char* path) {
+static int vfs_delete_node_unlocked(const char* path) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
     if (node == 0) return -3; // Cannot delete root
@@ -1046,6 +1139,12 @@ int vfs_delete_node(const char* path) {
     vfs_save();
     return 0;
 }
+int vfs_delete_node(const char* path) {
+    vfs_lock_acquire();
+    int r = vfs_delete_node_unlocked(path);
+    vfs_lock_release();
+    return r;
+}
 
 // --- Read / Write File Data ---
 
@@ -1055,7 +1154,7 @@ int vfs_delete_node(const char* path) {
 //   Untuk file kecil (< 512 bytes), cukup 1 sektor.
 //   Sektor terakhir berisi data file (tidak harus full 512 bytes).
 
-int vfs_rename(const char* old_path, const char* new_path) {
+static int vfs_rename_unlocked(const char* old_path, const char* new_path) {
     int node = vfs_get_node(old_path);
     if (node < 0) return -1;
     if (node == 0) return -3; // Cannot rename root
@@ -1116,6 +1215,12 @@ int vfs_rename(const char* old_path, const char* new_path) {
     
     vfs_save();
     return 0;
+}
+int vfs_rename(const char* old_path, const char* new_path) {
+    vfs_lock_acquire();
+    int r = vfs_rename_unlocked(old_path,  new_path);
+    vfs_lock_release();
+    return r;
 }
 
 // ============================================================
@@ -1206,6 +1311,44 @@ static int vfs_proc_read(const char* name, char* buf, int max_size) {
         proc_itoa(num, get_used_memory() / 1024);
         proc_add(buf, &len, max_size, num);
         proc_add(buf, &len, max_size, " KB\n");
+        // Kernel heap allocator state (heap hardening v38.4).
+        extern void kmalloc_get_stats(kmalloc_stats_t* s);
+        kmalloc_stats_t hs;
+        kmalloc_get_stats(&hs);
+        proc_add(buf, &len, max_size, "HeapUsed: ");
+        proc_itoa(num, hs.heap_used);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " B\nHeapAlloc: ");
+        proc_itoa(num, hs.allocated);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " B\nHeapFree: ");
+        proc_itoa(num, hs.free_bytes);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " B (largest ");
+        proc_itoa(num, hs.largest_free);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, ", ");
+        proc_itoa(num, hs.free_blocks);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " free)\nHeapBlocks: ");
+        proc_itoa(num, hs.blocks);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " live, ");
+        proc_itoa(num, hs.allocs);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " allocs, ");
+        proc_itoa(num, hs.frees);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " frees\nHeapOOM: ");
+        proc_itoa(num, hs.oom_count);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, "\nHeapCorrupt: ");
+        proc_itoa(num, hs.canary_failures);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " canary, ");
+        proc_itoa(num, hs.magic_failures);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " magic\n");
     } else if (strcmp(name, "cpuinfo") == 0) {
         char num[16];
         proc_add(buf, &len, max_size, "processor\t: 0\n");
@@ -1237,7 +1380,7 @@ static int vfs_proc_read(const char* name, char* buf, int max_size) {
 // appended ONLY when there is room left over — callers such as load_mct_app()
 // pass max_size == the exact file size and need every one of those bytes, so
 // the data must never be clamped to max_size - 1 to make space for it.
-int vfs_read_file(const char* path, char* buf, int max_size) {
+static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
     if (max_size <= 0) return -1;
@@ -1303,6 +1446,12 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
     if (size < max_size) buf[size] = '\0';
     return size;
 }
+int vfs_read_file(const char* path, char* buf, int max_size) {
+    vfs_lock_acquire();
+    int r = vfs_read_file_unlocked(path,  buf,  max_size);
+    vfs_lock_release();
+    return r;
+}
 
 static int vfs_alloc_sectors(int sectors_needed, int exclude_node) {
     // VFS_DATA_START begins at 257 (1 magic + 256 node sectors with the
@@ -1347,7 +1496,7 @@ static int vfs_alloc_sectors(int sectors_needed, int exclude_node) {
     return -1; // Disk Full / Out of contiguous space
 }
 
-int vfs_write_file(const char* path, const char* data, int size) {
+static int vfs_write_file_unlocked(const char* path, const char* data, int size) {
     extern void write_serial_string(const char*);
     write_serial_string("[VFS] write: ");
     write_serial_string(path);
@@ -1419,10 +1568,16 @@ int vfs_write_file(const char* path, const char* data, int size) {
     if (!vfs_seeding) vfs_save();
     return size;
 }
+int vfs_write_file(const char* path, const char* data, int size) {
+    vfs_lock_acquire();
+    int r = vfs_write_file_unlocked(path,  data,  size);
+    vfs_lock_release();
+    return r;
+}
 
 // --- Find path with parent resolution ---
 
-int vfs_find_path(const char* path, int* parent_dir) {
+static int vfs_find_path_unlocked(const char* path, int* parent_dir) {
     char resolved[MAX_PATH];
     vfs_resolve_path(path, resolved, MAX_PATH);
     
@@ -1484,9 +1639,15 @@ int vfs_find_path(const char* path, int* parent_dir) {
     
     return -1; // Last component not found
 }
+int vfs_find_path(const char* path, int* parent_dir) {
+    vfs_lock_acquire();
+    int r = vfs_find_path_unlocked(path,  parent_dir);
+    vfs_lock_release();
+    return r;
+}
 
 // Get parent path from a path string
-int vfs_get_parent(const char* path, char* parent_path, int buf_size) {
+static int vfs_get_parent_unlocked(const char* path, char* parent_path, int buf_size) {
     if (!path || path[0] == '\0') return -1;
     
     int len = strlen(path);
@@ -1523,10 +1684,16 @@ int vfs_get_parent(const char* path, char* parent_path, int buf_size) {
     
     return strlen(parent_path);
 }
+int vfs_get_parent(const char* path, char* parent_path, int buf_size) {
+    vfs_lock_acquire();
+    int r = vfs_get_parent_unlocked(path,  parent_path,  buf_size);
+    vfs_lock_release();
+    return r;
+}
 
 // --- Listing ---
 
-void vfs_list_dir(int dir_node, void (*print_fn)(const char*, unsigned char)) {
+static void vfs_list_dir_unlocked(int dir_node, void (*print_fn)(const char*, unsigned char)) {
     int count = 0;
     for (int i = 0; i < MAX_NODES; i++) {
         if (!fs_nodes[i].in_use) continue;
@@ -1570,8 +1737,13 @@ void vfs_list_dir(int dir_node, void (*print_fn)(const char*, unsigned char)) {
         print_fn("  (empty)\n", 0x07);
     }
 }
+void vfs_list_dir(int dir_node, void (*print_fn)(const char*, unsigned char)) {
+    vfs_lock_acquire();
+    vfs_list_dir_unlocked(dir_node, print_fn);
+    vfs_lock_release();
+}
 
-void vfs_tree(int dir_node, int depth, void (*print_fn)(const char*, unsigned char)) {
+static void vfs_tree_unlocked(int dir_node, int depth, void (*print_fn)(const char*, unsigned char)) {
     for (int i = 0; i < MAX_NODES; i++) {
         if (!fs_nodes[i].in_use) continue;
         if (fs_nodes[i].parent != dir_node) continue;
@@ -1588,23 +1760,46 @@ void vfs_tree(int dir_node, int depth, void (*print_fn)(const char*, unsigned ch
         }
     }
 }
+void vfs_tree(int dir_node, int depth, void (*print_fn)(const char*, unsigned char)) {
+    vfs_lock_acquire();
+    vfs_tree_unlocked(dir_node, depth, print_fn);
+    vfs_lock_release();
+}
 
 // --- Helper Functions ---
 
-int vfs_is_dir(int node) {
+static int vfs_is_dir_unlocked(int node) {
     if (node < 0 || node >= MAX_NODES) return 0;
     return fs_nodes[node].in_use && (fs_nodes[node].type == FS_DIR || fs_nodes[node].type == FS_EXT2_DIR);
 }
+int vfs_is_dir(int node) {
+    vfs_lock_acquire();
+    int r = vfs_is_dir_unlocked(node);
+    vfs_lock_release();
+    return r;
+}
 
-int vfs_is_file(int node) {
+static int vfs_is_file_unlocked(int node) {
     if (node < 0 || node >= MAX_NODES) return 0;
     return fs_nodes[node].in_use && (fs_nodes[node].type == FS_FILE || fs_nodes[node].type == FS_EXT2_FILE);
 }
+int vfs_is_file(int node) {
+    vfs_lock_acquire();
+    int r = vfs_is_file_unlocked(node);
+    vfs_lock_release();
+    return r;
+}
 
-int vfs_get_node_count() {
+static int vfs_get_node_count_unlocked() {
     int count = 0;
     for (int i = 0; i < MAX_NODES; i++) {
         if (fs_nodes[i].in_use) count++;
     }
     return count;
+}
+int vfs_get_node_count() {
+    vfs_lock_acquire();
+    int r = vfs_get_node_count_unlocked();
+    vfs_lock_release();
+    return r;
 }

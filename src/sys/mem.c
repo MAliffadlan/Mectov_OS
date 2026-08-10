@@ -1,42 +1,81 @@
 #include "../include/mem.h"
+#include "../include/vmm.h"
 #include "../include/vga.h"
 #include "../include/utils.h"
+#include "../include/serial.h"
 #include "../include/spinlock.h"
 
 static spinlock_t heap_lock = SPINLOCK_INIT;
 
+// ---- Heap hardening (kernel locking/heap audit v38.4) ----
+//
+// Every allocation carries a header MAGIC and a trailing 4-byte CANARY:
+//   [ block_meta (magic,size,free,next) ][ payload size bytes ][ canary ]
+// kfree() verifies the magic (a pointer that never came from kmalloc, or a
+// double free, is caught before it corrupts the free list) and the canary (a
+// buffer overflow past the payload is caught at free time). Either failure
+// prints a clear [KERNEL PANIC] and halts instead of silently corrupting
+// memory. OOM returns NULL cleanly and is counted (callers that ignore the
+// NULL are their own problem, but the allocator never hangs or loops).
+#define HEAP_MAGIC_ALLOC 0xA110CA8Eu
+#define HEAP_MAGIC_FREE  0xF2EEF2EEu
+#define HEAP_CANARY      0xCA5CA5E5u
+
+// Headers + trailing canary. A block occupies META_SIZE + payload bytes.
+#define META_SIZE (sizeof(block_meta) + 4)
+
+// Allocator counters, read by /proc/meminfo via kmalloc_get_stats().
+static uint32_t heap_allocs = 0, heap_frees = 0;
+static uint32_t heap_oom = 0;
+static uint32_t heap_canary_failures = 0, heap_magic_failures = 0;
+
+// Print a clear message and halt. Never returns. Used for heap corruption the
+// allocator detects (bad magic, canary stomped) — the alternative was silent
+// free-list corruption that crashed far from the cause.
+static void heap_panic(const char* what, uint32_t addr, uint32_t caller_ra) {
+    write_serial_string("\n[KERNEL PANIC] HEAP CORRUPTION: ");
+    write_serial_string(what);
+    write_serial_string(" @ 0x");
+    write_serial_hex(addr);
+    write_serial_string(" from ");
+    write_serial_hex(caller_ra);
+    write_serial_string("\n");
+    extern void print(const char* s, unsigned char color);
+    print("\n[KERNEL PANIC] Heap corruption: ", 0x0C);
+    print(what, 0x0C);
+    print("\n", 0x0C);
+    for (;;) __asm__ volatile("hlt");
+}
+
 
 static uint32_t page_directory[1024] __attribute__((aligned(4096)));
-static uint32_t page_tables[64][1024] __attribute__((aligned(4096)));  // 64 × 4MB = 256MB identity map
+static uint32_t page_tables[128][1024] __attribute__((aligned(4096)));  // 128 × 4MB = 512MB identity map
 static uint32_t fb_page_tables[2][1024] __attribute__((aligned(4096))); 
 
-static uint8_t *mem_bitmap = NULL;
+// total_pages is the SINGLE source of truth for physical RAM: kernel_main
+// reads it from the multiboot header, init_mem stores it, phys_init (vmm.c)
+// sizes the frame allocator from it, and paging_init identity-maps it.
 static uint32_t total_pages = 0;
-static uint32_t used_pages = 0;
+static uint32_t identity_tables = 8;  // how many 4MB tables paging_init mapped
 
 void init_mem(uint32_t mem_size) {
     total_pages = mem_size / PAGE_SIZE;
-    mem_bitmap = (uint8_t*)kmalloc((total_pages / 8) + 1);
-    used_pages = 0;
-    if (mem_bitmap) {
-        memset(mem_bitmap, 0, (total_pages / 8) + 1);
-    }
-    uint32_t reserved_pages = 0x3000000 / PAGE_SIZE; // 48MB reserved for kernel/stack/heap
-    if (reserved_pages > total_pages) reserved_pages = total_pages;
-    for (uint32_t i = 0; i < reserved_pages; i++) {
-        if (mem_bitmap) mem_bitmap[i / 8] |= (1 << (i % 8));
-        used_pages++;
-    }
+    if (total_pages > PHYS_MAX_PAGES) total_pages = PHYS_MAX_PAGES;
+    // Physical frame allocator gets the same multiboot-derived size. The old
+    // write-only mem_bitmap here was dead code; the real bitmap lives in vmm.c
+    // and is initialized right here, so there is exactly one source of truth.
+    phys_init(total_pages);
 }
 
 void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     (void)fb_size;
     memset(page_directory, 0, sizeof(page_directory));
     
-    // Map available physical memory
+    // Map available physical memory (up to the 512MB ceiling)
     uint32_t num_tables = (total_pages + 1023) / 1024;
     if (num_tables == 0) num_tables = 8;
-    if (num_tables > 64) num_tables = 64;
+    if (num_tables > 128) num_tables = 128;
+    identity_tables = num_tables;
 
     // KERNEL-ONLY: no PAGE_USER here. This map covers kernel .text, .data,
     // .bss (including the task table), the kmalloc heap and the page tables
@@ -65,6 +104,12 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
         }
     }
 
+    // Keep the framebuffer out of the physical frame allocator: with the
+    // bitmap now sized from the multiboot RAM report, the fb (which sits at
+    // ~4GB on QEMU, but can be lower on real hardware) must never be handed
+    // out as a free frame.
+    phys_reserve_region(fb_paddr, fb_size);
+
     // Map APIC (0xFEE00000) and IOAPIC (0xFEC00000)
     // They both fall into the same 4MB page directory entry (0x3FB, which is 1019)
     static uint32_t apic_page_table[1024] __attribute__((aligned(4096)));
@@ -92,10 +137,8 @@ void page_map(uint32_t vaddr, uint32_t paddr, uint32_t flags) {
     uint32_t pd_idx = vaddr >> 22;
     uint32_t pt_idx = (vaddr >> 12) & 0x3FF;
     
-    // We reuse the static page tables for the first 128MB.
-    // If we map outside, we need dynamically allocated tables, but for now we just 
-    // update the static table entries.
-    if (pd_idx < 32) {
+    // Update the static identity-map tables (covers 0..RAM, up to 512MB).
+    if (pd_idx < identity_tables) {
         page_tables[pd_idx][pt_idx] = (paddr & 0xFFFFF000) | flags;
         // Keep the PDE kernel-only unless this mapping explicitly asked to be
         // user-reachable — see the note in paging_init().
@@ -107,12 +150,11 @@ void page_map(uint32_t vaddr, uint32_t paddr, uint32_t flags) {
 
 
 typedef struct block_meta {
-    uint32_t size;
+    uint32_t magic;   // HEAP_MAGIC_ALLOC (live) / HEAP_MAGIC_FREE (free)
+    uint32_t size;    // payload bytes (4-aligned)
     int free;
     struct block_meta *next;
 } block_meta;
-
-#define META_SIZE sizeof(block_meta)
 
 static void *global_base = NULL;
 static uint32_t heap_used = 0;
@@ -135,6 +177,7 @@ static block_meta *request_space(block_meta* last, uint32_t size) {
     heap_used += size + META_SIZE;
     
     if (last) last->next = block;
+    block->magic = HEAP_MAGIC_ALLOC;
     block->size = size;
     block->next = NULL;
     block->free = 0;
@@ -155,6 +198,8 @@ void* kmalloc(uint32_t size) {
         if (block) {
             global_base = block;
             result = (void*)(block + 1);
+        } else {
+            heap_oom++;
         }
     } else {
         block_meta *last = global_base;
@@ -163,21 +208,41 @@ void* kmalloc(uint32_t size) {
             block = request_space(last, size);
             if (block) {
                 result = (void*)(block + 1);
+            } else {
+                heap_oom++;
             }
         } else {
+            // A free block found in the list must carry the FREE magic; anything
+            // else means the free list itself was corrupted (heap overflow from
+            // a neighbouring allocation, or a wild kfree).
+            if (block->magic != HEAP_MAGIC_FREE) {
+                heap_magic_failures++;
+                heap_panic("free-list header corrupted", (uint32_t)block,
+                           (uint32_t)__builtin_return_address(0));
+            }
             // Block splitting to save memory and reduce internal fragmentation
             if (block->size >= size + META_SIZE + 4) {
                 block_meta *new_block = (block_meta*)((uint8_t*)block + META_SIZE + size);
+                new_block->magic = HEAP_MAGIC_FREE;
                 new_block->size = block->size - size - META_SIZE;
                 new_block->free = 1;
                 new_block->next = block->next;
-                
+                // The new free block gets its own canary at its payload end.
+                *(uint32_t*)((uint8_t*)new_block + sizeof(block_meta) + new_block->size) = HEAP_CANARY;
+
                 block->size = size;
                 block->next = new_block;
             }
+            block->magic = HEAP_MAGIC_ALLOC;
             block->free = 0;
             result = (void*)(block + 1);
         }
+    }
+
+    if (result) {
+        // Stamp the canary after the payload so kfree() can detect overruns.
+        *(uint32_t*)((uint8_t*)result + ((block_meta*)result - 1)->size) = HEAP_CANARY;
+        heap_allocs++;
     }
 
     spin_unlock(&heap_lock);
@@ -193,13 +258,34 @@ void kfree(void* p) {
     spin_lock(&heap_lock);
 
     block_meta *block = (block_meta*)p - 1;
+
+    // Magic check: a pointer that never came from kmalloc, or a second kfree
+    // of the same block, fails here — before we deref/rewrite arbitrary
+    // memory. (A live block carries ALLOC magic; a free one carries FREE.)
+    if (block->magic != HEAP_MAGIC_ALLOC) {
+        heap_magic_failures++;
+        heap_panic("kfree of non-allocated pointer (double free or bad pointer)",
+                   (uint32_t)p, (uint32_t)__builtin_return_address(0));
+    }
+
+    // Canary check: a write past the payload (buffer overflow) stomped it.
+    if (*(uint32_t*)((uint8_t*)p + block->size) != HEAP_CANARY) {
+        heap_canary_failures++;
+        heap_panic("heap overflow detected (canary overwritten)",
+                   (uint32_t)p, (uint32_t)__builtin_return_address(0));
+    }
+
+    block->magic = HEAP_MAGIC_FREE;
     block->free = 1;
+    heap_frees++;
 
     // Forward coalescing: merge with next block if it's also free
     while (block->next && block->next->free) {
         block->size += META_SIZE + block->next->size;
         block->next = block->next->next;
     }
+    // Moved the payload end; re-stamp the canary.
+    *(uint32_t*)((uint8_t*)block + sizeof(block_meta) + block->size) = HEAP_CANARY;
 
     // Backward coalescing: find previous block and merge if free
     if (global_base != block) {
@@ -208,6 +294,7 @@ void kfree(void* p) {
         if (prev && prev->free) {
             prev->size += META_SIZE + block->size;
             prev->next = block->next;
+            *(uint32_t*)((uint8_t*)prev + sizeof(block_meta) + prev->size) = HEAP_CANARY;
         }
     }
 
@@ -305,5 +392,49 @@ void kmalloc_stats(void (*print_fn)(const char*, unsigned char)) {
 }
 
 unsigned int get_total_memory() { return total_pages * 4096; }
-unsigned int get_used_memory() { return (24 * 1024 * 1024) + heap_used; }
+
+// Real numbers from the unified frame allocator (vmm.c), not the old
+// `24MB + heap_used` approximation which ignored actual frame usage.
+unsigned int get_used_memory() { return phys_get_used_pages() * 4096; }
 unsigned int get_free_memory() { return get_total_memory() - get_used_memory(); }
+
+// How many 4MB identity-map tables are present (for vmm.c bounds checks).
+uint32_t mem_identity_tables(void) { return identity_tables; }
+
+// Snapshot the allocator state for /proc/meminfo. Walks the block list under
+// the heap lock so the numbers are consistent (a concurrent alloc/free can
+// otherwise produce a torn read).
+void kmalloc_get_stats(kmalloc_stats_t* s) {
+    if (!s) return;
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&heap_lock);
+
+    s->heap_base = 0x1800000;
+    s->heap_used = heap_used;
+    s->allocated = 0;
+    s->free_bytes = 0;
+    s->blocks = 0;
+    s->free_blocks = 0;
+    s->largest_free = 0;
+    block_meta* curr = global_base;
+    while (curr) {
+        if (curr->free) {
+            s->free_bytes += curr->size;
+            s->free_blocks++;
+            if (curr->size > s->largest_free) s->largest_free = curr->size;
+        } else {
+            s->allocated += curr->size;
+            s->blocks++;
+        }
+        curr = curr->next;
+    }
+    s->allocs = heap_allocs;
+    s->frees = heap_frees;
+    s->oom_count = heap_oom;
+    s->canary_failures = heap_canary_failures;
+    s->magic_failures = heap_magic_failures;
+
+    spin_unlock(&heap_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+}

@@ -39,13 +39,24 @@ spinlock_t gui_canvas_lock = SPINLOCK_INIT;
 // taking the lock to prevent scheduler deadlocks!"). A lock holder must be
 // non-preemptible, or the main loop can spin forever on a lock whose holder
 // will only run again when the main loop itself schedules it.
-void gui_lock(void) {
-    __asm__ volatile("cli");
+//
+// irqsave/irqrestore, NOT a bare cli/sti pair: gui_lock() is called from
+// inside larger irqsave sections (e.g. wm_draw_all holds wm_lock with IF=0
+// and win_draw_cb draws under it). An unconditional `sti` in gui_unlock
+// would re-enable interrupts while the OUTER lock is still held, letting a
+// timer IRQ preempt the holder and deadlock any waiter (a task spinning on
+// wm_lock owned by the preempted main loop). Restoring the saved eflags
+// keeps the outer section's IF=0 intact. Returns the saved eflags, which
+// the caller must pass back to gui_unlock().
+uint32_t gui_lock(void) {
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
     spin_lock(&gui_canvas_lock);
+    return eflags;
 }
-void gui_unlock(void) {
+void gui_unlock(uint32_t eflags) {
     spin_unlock(&gui_canvas_lock);
-    __asm__ volatile("sti");
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
 }
 
 extern int validate_user_ptr(const void* ptr, uint32_t size);
@@ -87,9 +98,18 @@ win_event_queue_t win_queues[MAX_WINDOWS];
 win_canvas_t win_canvases[MAX_WINDOWS];
 
 int get_win_index(int wid) {
+    // wm_lock: the window table is shared with the main loop's draw/raise and
+    // task teardown's wm_cleanup_task on other cores (kernel locking audit).
+    // Reentrant — callers that already hold it (draw path) are unaffected.
+    extern void wm_lock_acquire(void);
+    extern void wm_lock_release(void);
+    wm_lock_acquire();
+    int idx = -1;
     for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (wm_wins[i].visible && wm_wins[i].id == wid) return i;
+        if (wm_wins[i].visible && wm_wins[i].id == wid) { idx = i; break; }
     }
+    wm_lock_release();
+    if (idx >= 0) return idx;
     
     // Debug print
     write_serial_string("get_win_index failed for wid=");
@@ -112,7 +132,7 @@ int get_win_index(int wid) {
 void push_event(int wid, int type, int x, int y, int key) {
     int idx = get_win_index(wid);
     if (idx < 0) return;
-    gui_lock();
+    uint32_t g_ef = gui_lock();
     int t = win_queues[idx].tail;
     int next = (t + 1) % MAX_EVENTS;
     if (next != win_queues[idx].head) {
@@ -122,7 +142,7 @@ void push_event(int wid, int type, int x, int y, int key) {
         win_queues[idx].events[t].key = key;
         win_queues[idx].tail = next;
     }
-    gui_unlock();
+    gui_unlock(g_ef);
 }
 
 void win_draw_cb(int id, int cx, int cy, int cw, int ch) {
@@ -130,7 +150,7 @@ void win_draw_cb(int id, int cx, int cy, int cw, int ch) {
     // Replay Display List
     int idx = get_win_index(id);
     if (idx < 0) return;
-    gui_lock();
+    uint32_t g_ef = gui_lock();
     for (int i = 0; i < win_canvases[idx].count; i++) {
         draw_cmd_t* cmd = &win_canvases[idx].cmds[i];
         if (cmd->type == 1) { // rect
@@ -139,7 +159,7 @@ void win_draw_cb(int id, int cx, int cy, int cw, int ch) {
             draw_string_px(cx + cmd->x, cy + cmd->y, cmd->text, cmd->color, 0xFFFFFFFF);
         }
     }
-    gui_unlock();
+    gui_unlock(g_ef);
     // We don't push a Paint event every frame, we let the app decide when to update.
 }
 void win_key_cb(int id, char c, uint8_t sc) {
@@ -301,17 +321,21 @@ extern uint32_t handle_syscall_proc(registers_t* regs);
 extern uint32_t handle_syscall_ipc(registers_t* regs);
 
 static void syscall_handler(registers_t* regs) {
-    // The 0x80 gate is a TRAP gate now (isr128 sti's before calling us), so
-    // handlers run with IF=1 by default. Most of them touch shared state
-    // (VFS nodes, WM windows, fd table, event queues) that is not locked — a
-    // timer interrupt in the middle of, say, SYS_GET_EVENT lets the keyboard
-    // IRQ push into the same queue and drop keystrokes. So default to
-    // non-preemptible (IF=0) exactly like the old interrupt gate; blocking
-    // syscalls (SYS_SLEEP / SYS_WAITPID / SYS_YIELD) re-enable IF themselves
-    // and stay genuinely preemptible while parked.
-    __asm__ volatile("cli");
-
+    // The 0x80 gate is a TRAP gate (isr128 sti's before calling us), so
+    // handlers run with IF=1 by default — syscalls are PREEMPTIBLE and SMP
+    // cores can run different syscalls in parallel (kernel locking audit
+    // v38.4). Every shared structure the handlers touch is protected by its
+    // own irqsave lock (VFS, fd table, GUI canvas/queues, kbd, clipboard,
+    // IPC, shell, task table, ...), so a timer interrupt mid-syscall can
+    // schedule another task without corrupting state.
+    //
+    // Two exceptions keep a local cli(): SYS_EXEC and SYS_SIGRETURN rewrite
+    // the task's register frame / address space in place and are cheap.
+    // SYS_FORK and SYS_THREAD_CREATE take their own cli internally.
     uint32_t call_no = regs->eax;   // captured before handlers overwrite eax
+    if (call_no == SYS_EXEC || call_no == SYS_SIGRETURN) {
+        __asm__ volatile("cli");
+    }
     switch (regs->eax) {
         case SYS_OPEN:
         case SYS_READ:

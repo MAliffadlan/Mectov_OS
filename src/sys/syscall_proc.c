@@ -487,6 +487,15 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             
             extern char cmd_b[CMD_BUF_SIZE];
             extern int b_idx;
+            // Serialize shell command execution across terminals: the shell's
+            // global state (cmd_b, env, aliases, history) is shared, so two
+            // terminals on two cores must not run ex_cmd() concurrently
+            // (kernel locking audit v38.4). ex_cmd() internally drops the lock
+            // across blocking ops (sleep/waitpid) so a killed shell never
+            // strands it.
+            extern void shell_lock_acquire(void);
+            extern void shell_lock_release(void);
+            shell_lock_acquire();
             int len2 = 0;
             while (cmd_str[len2] && len2 < CMD_BUF_SIZE - 1) {
                 cmd_b[len2] = cmd_str[len2];
@@ -503,6 +512,7 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             extern void vga_flush_ipc(void);
             vga_flush_ipc();
             stdout_ipc_qid = saved_qid;
+            shell_lock_release();
             regs->eax = 0;
             break;
         }

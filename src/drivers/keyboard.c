@@ -3,14 +3,29 @@
 #include "../include/idt.h"
 #include "../include/vga.h"
 #include "../include/mouse.h"   // mouse_feed_byte()
+#include "../include/spinlock.h"
 
 int shift_p = 0, caps_a = 0;
 int keyboard_ctrl_held = 0;
 int keyboard_alt_held = 0;
 
+// kbd_lock protects the scancode ring buffer (kbd_buffer/kbd_mods/head/tail)
+// and the ESC latch. Producer is the PS/2 IRQ (plain spin_lock — IF already
+// 0); consumers are the main loop and SYS_GET_KEY (spin_lock_irqsave).
+static spinlock_t kbd_lock = SPINLOCK_INIT;
+
 // Scancode Buffer (Gudang Antrean)
 #define KBD_BUFFER_SIZE 2048
 static uint8_t kbd_buffer[KBD_BUFFER_SIZE];
+// Per-byte modifier snapshot taken WHEN THE KEY WAS FED, parallel to
+// kbd_buffer. The 8042 drain can feed a whole key sequence (shift-down, key,
+// key-up, shift-up) in ONE IRQ, so the live shift_p/ctrl/alt flags are already
+// back to their post-sequence values by the time a slow consumer (main loop,
+// terminal) pops the key byte. Resolving the character against the LIVE flags
+// then yields the unshifted key ("shift-7" typed as '7'). Each entry carries
+// the modifier state that was active when the key was pressed: bit0=shift,
+// bit1=ctrl, bit2=alt.
+static uint8_t kbd_mods[KBD_BUFFER_SIZE];
 static volatile uint32_t kbd_head = 0;
 static volatile uint32_t kbd_tail = 0;
 
@@ -21,13 +36,15 @@ static volatile uint32_t kbd_tail = 0;
 static volatile int esc_pressed = 0;
 
 int keyboard_take_esc(void) {
-    if (!esc_pressed) return 0;
+    uint32_t ef = spin_lock_irqsave(&kbd_lock);
+    int r = esc_pressed;
     esc_pressed = 0;
-    return 1;
+    spin_unlock_irqrestore(&kbd_lock, ef);
+    return r;
 }
 
 static void keyboard_feed_byte(uint8_t scancode) {
-    // Update modifier state
+    // Update modifier state (plain ints; atomic, see header comment)
     if (scancode == 0x01) esc_pressed = 1;              // ESC press
     else if (scancode == 0x2A || scancode == 0x36) shift_p = 1;
     else if (scancode == 0xAA || scancode == 0xB6) shift_p = 0;
@@ -37,12 +54,16 @@ static void keyboard_feed_byte(uint8_t scancode) {
     else if (scancode == 0x38) keyboard_alt_held = 1;   // Left Alt press
     else if (scancode == 0xB8) keyboard_alt_held = 0;   // Left Alt release
 
-    // Push to buffer
+    // IRQ context: IF is already 0, plain spin is correct.
+    uint8_t mods = (shift_p ? 1 : 0) | (keyboard_ctrl_held ? 2 : 0) | (keyboard_alt_held ? 4 : 0);
+    spin_lock(&kbd_lock);
     uint32_t next = (kbd_head + 1) % KBD_BUFFER_SIZE;
     if (next != kbd_tail) {
         kbd_buffer[kbd_head] = scancode;
+        kbd_mods[kbd_head] = mods;
         kbd_head = next;
     }
+    spin_unlock(&kbd_lock);
 }
 
 // Drain the 8042 output buffer, routing every byte to the device it came from.
@@ -81,20 +102,44 @@ void init_keyboard() {
 }
 
 // Ambil scancode dari antrean (Non-blocking)
-uint8_t k_get_scancode() {
-    if (kbd_head == kbd_tail) return 0;
-    uint8_t scancode = kbd_buffer[kbd_tail];
-    kbd_tail = (kbd_tail + 1) % KBD_BUFFER_SIZE;
+// Pop the next scancode, plus the modifier snapshot that was active when it
+// was fed. Consumers that resolve a CHARACTER (scancode_to_char) MUST use
+// this snapshot: the live shift_p may already reflect the shift RELEASE by
+// the time the key byte is popped (the whole sequence is fed in one IRQ).
+uint8_t k_get_scancode_ex(uint8_t* mods_out) {
+    uint32_t ef = spin_lock_irqsave(&kbd_lock);
+    uint8_t scancode = 0;
+    if (kbd_head != kbd_tail) {
+        scancode = kbd_buffer[kbd_tail];
+        if (mods_out) *mods_out = kbd_mods[kbd_tail];
+        kbd_tail = (kbd_tail + 1) % KBD_BUFFER_SIZE;
+    } else if (mods_out) {
+        *mods_out = 0;
+    }
+    spin_unlock_irqrestore(&kbd_lock, ef);
     return scancode;
 }
 
-char scancode_to_char(uint8_t s) {
+uint8_t k_get_scancode() {
+    return k_get_scancode_ex(NULL);
+}
+
+// Resolve a scancode to a character using the modifier snapshot captured at
+// feed time (see k_get_scancode_ex). `mods` bit0 = shift held at press.
+char scancode_to_char_mods(uint8_t s, uint8_t mods) {
     static unsigned char m_n[] = { 0, 0x1B, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' ', 0 };
     static unsigned char m_s[] = { 0, 0x1B, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '\"', '~', 0, '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ', 0 };
     if (s < 58) {
         char c = m_n[s], cs = m_s[s]; int isl = (c >= 'a' && c <= 'z');
-        if (shift_p) return (isl && caps_a) ? c : cs;
+        if (mods & 1) return (isl && caps_a) ? c : cs;
         else return (isl && caps_a) ? cs : c;
     }
     return 0;
+}
+
+char scancode_to_char(uint8_t s) {
+    // Legacy API: resolves against the LIVE shift flag (correct only when the
+    // consumer pops the key before the release byte is fed — see the race
+    // documented above). New code should use k_get_scancode_ex + mods.
+    return scancode_to_char_mods(s, shift_p ? 1 : 0);
 }

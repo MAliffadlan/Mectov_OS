@@ -13,8 +13,8 @@
 #include "../include/spinlock.h"
 
 extern spinlock_t gui_canvas_lock;
-extern void gui_lock(void);
-extern void gui_unlock(void);
+extern uint32_t gui_lock(void);
+extern void gui_unlock(uint32_t eflags);
 
 extern int validate_user_ptr(const void* ptr, uint32_t size);
 extern int safe_strlen(const char* s, int max);
@@ -70,12 +70,14 @@ uint32_t handle_syscall_gui(registers_t* regs) {
             
             int idx = get_win_index(wid);
             if (idx >= 0) {
+                uint32_t g_ef = gui_lock();
                 if (win_canvases[idx].pending_count < MAX_DRAW_CMDS) {
                     draw_cmd_t* cmd = &win_canvases[idx].pending_cmds[win_canvases[idx].pending_count++];
                     cmd->type = 1; cmd->x = x; cmd->y = y; cmd->w = w; cmd->h = h; cmd->color = color;
                 } else {
                     write_serial_string("SYS_DRAW_RECT: Full\n");
                 }
+                gui_unlock(g_ef);
             } else {
                 extern int get_current_task(void);
                 int tid = get_current_task();
@@ -100,6 +102,7 @@ uint32_t handle_syscall_gui(registers_t* regs) {
             
             int idx = get_win_index(wid);
             if (idx >= 0) {
+                uint32_t g_ef = gui_lock();
                 if (win_canvases[idx].pending_count < MAX_DRAW_CMDS) {
                     draw_cmd_t* cmd = &win_canvases[idx].pending_cmds[win_canvases[idx].pending_count++];
                     cmd->type = 2; cmd->x = x; cmd->y = y; cmd->color = color;
@@ -107,6 +110,7 @@ uint32_t handle_syscall_gui(registers_t* regs) {
                     while (text[i] && i < 127) { cmd->text[i] = text[i]; i++; }
                     cmd->text[i] = '\0';
                 }
+                gui_unlock(g_ef);
             }
             regs->eax = 0;
             break;
@@ -136,17 +140,21 @@ uint32_t handle_syscall_gui(registers_t* regs) {
                 break;
             }
 
+            uint8_t kbd_mods = 0;
             uint8_t sc = 0;
             if (term_app_running && me == term_app_task_id) {
                 sc = term_app_pop_key();
             } else {
-                sc = k_get_scancode();
+                sc = k_get_scancode_ex(&kbd_mods);
             }
             
             if (sc == 0 || sc >= 0x80) {
                 regs->eax = 0; // No key or key release
             } else {
-                regs->eax = (uint32_t)scancode_to_char(sc);
+                // Resolve against the feed-time modifier snapshot (see
+                // keyboard.c): the live shift_p can already be cleared by the
+                // shift-release byte when a slow consumer pops the key.
+                regs->eax = (uint32_t)scancode_to_char_mods(sc, kbd_mods);
             }
             break;
         }
@@ -180,12 +188,23 @@ uint32_t handle_syscall_gui(registers_t* regs) {
 
             int idx = get_win_index(wid);
             if (idx >= 0) {
-                wm_wins[idx].owner_ring = 3; // From syscall -> Ring 3
-                wm_wins[idx].owner_task = get_current_task(); // Track owner for crash recovery
+                uint32_t g_ef = gui_lock();
                 win_queues[idx].head = 0;
                 win_queues[idx].tail = 0;
                 win_canvases[idx].count = 0;
                 win_canvases[idx].pending_count = 0;
+                gui_unlock(g_ef);
+                // Owner fields live in the window table; write them under
+                // wm_lock (same lock get_win_index/wm_* use) so the read side
+                // never sees a half-updated slot. Ordering: wm_lock > gui_lock
+                // is preserved — gui_lock is released above before we re-take
+                // wm_lock.
+                extern void wm_lock_acquire(void);
+                extern void wm_lock_release(void);
+                wm_lock_acquire();
+                wm_wins[idx].owner_ring = 3; // From syscall -> Ring 3
+                wm_wins[idx].owner_task = get_current_task(); // Track owner for crash recovery
+                wm_lock_release();
                 // Force an initial paint event so the app knows it can draw
                 push_event(wid, 1, 0, 0, 0);
             }
@@ -202,11 +221,11 @@ uint32_t handle_syscall_gui(registers_t* regs) {
                 }
                 int h = win_queues[idx].head;
                 if (h != win_queues[idx].tail) {
-                    gui_lock();
+                    uint32_t g_ef = gui_lock();
                     gui_event_t* ev_ptr = (gui_event_t*)regs->ecx;
                     *ev_ptr = win_queues[idx].events[h];
                     win_queues[idx].head = (h + 1) % MAX_EVENTS;
-                    gui_unlock();
+                    gui_unlock(g_ef);
                     regs->eax = 1;
                 } else {
                     regs->eax = 0;
@@ -224,13 +243,13 @@ uint32_t handle_syscall_gui(registers_t* regs) {
             if (idx >= 0) {
                 // Swap pending display list to active display list!
                 // Locked against win_draw_cb() replay on the BSP (SMP).
-                gui_lock();
+                uint32_t g_ef = gui_lock();
                 for (int i = 0; i < win_canvases[idx].pending_count; i++) {
                     win_canvases[idx].cmds[i] = win_canvases[idx].pending_cmds[i];
                 }
                 win_canvases[idx].count = win_canvases[idx].pending_count;
                 win_canvases[idx].pending_count = 0; // Reset for next frame
-                gui_unlock();
+                gui_unlock(g_ef);
                 
                 // Composite WM: trigger a redraw for this window's buffer
                 wm_wins[idx].buffer_dirty = 1;

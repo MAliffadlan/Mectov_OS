@@ -3,6 +3,9 @@
 
 #include "types.h"
 
+// Current CPU id (LAPIC id & 15); used by per-CPU code and lock ownership keys.
+int task_get_cid(void);
+
 // Priority levels
 #define PRIORITY_REALTIME   2
 #define PRIORITY_INTERACTIVE 1

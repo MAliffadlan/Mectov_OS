@@ -2,6 +2,18 @@
 #include "../include/task.h"
 #include "../include/vfs.h"
 #include "../include/mem.h"
+#include "../include/spinlock.h"
+
+// fd_lock protects the shared descriptor tables (global_fds[], pipes[]) from
+// concurrent syscalls on different cores. Process context (syscall, main
+// loop, fork under task_lock) acquires with irqsave; the pipe block/yield
+// points release the lock before `sti; hlt` so a waiting reader/writer never
+// holds the table while parked (a killed peer could otherwise strand the
+// lock). Ordering: task_lock > fd_lock > vfs_lock > ata_lock.
+static spinlock_t fd_lock = SPINLOCK_INIT;
+static uint32_t fd_eflags;
+static void fd_lock_acquire(void) { fd_eflags = spin_lock_irqsave(&fd_lock); }
+static void fd_lock_release(void) { spin_unlock_irqrestore(&fd_lock, fd_eflags); }
 
 global_fd_t global_fds[MAX_GLOBAL_FDS];
 
@@ -54,9 +66,10 @@ int do_sys_open(const char* path, int mode) {
     (void)mode;
     int node = vfs_get_node(path);
     if (node < 0) return -1;
-    
+
+    fd_lock_acquire();
     int gfd = alloc_global_fd();
-    if (gfd < 0) return -1;
+    if (gfd < 0) { fd_lock_release(); return -1; }
     
     global_fds[gfd].vfs_node = node;
     global_fds[gfd].type = vfs_is_dir(node) ? FD_TYPE_NONE : FD_TYPE_FILE; // simplistic check
@@ -64,51 +77,68 @@ int do_sys_open(const char* path, int mode) {
     int lfd = task_map_fd(gfd);
     if (lfd < 0) {
         global_fds[gfd].in_use = 0;
+        fd_lock_release();
         return -1;
     }
+    fd_lock_release();
     return lfd;
 }
 
 int do_sys_read(int fd, char* buf, int size) {
     int tid = get_current_task();
     if (tid < 0) return -1;
+
+    fd_lock_acquire();
     int gfd = task_get_fd(tid, fd);
-    if (gfd < 0 || !global_fds[gfd].in_use) return -1;
+    if (gfd < 0 || !global_fds[gfd].in_use) { fd_lock_release(); return -1; }
     
     if (global_fds[gfd].type == FD_TYPE_FILE || global_fds[gfd].type == FD_TYPE_DEV) {
         // vfs_read_file doesn't take offset yet, but ideally it should
         // For simplicity we just use vfs_read_file which reads from start.
         // We need the path.
         char path[256];
-        if (vfs_get_abs_path(global_fds[gfd].vfs_node, path, 256) < 0) return -1;
-        return vfs_read_file(path, buf, size);
+        if (vfs_get_abs_path(global_fds[gfd].vfs_node, path, 256) < 0) { fd_lock_release(); return -1; }
+        int r = vfs_read_file(path, buf, size);
+        fd_lock_release();
+        return r;
     } else if (global_fds[gfd].type == FD_TYPE_PIPE_READ) {
         int p = global_fds[gfd].pipe_id;
         int read_bytes = 0;
+        // The lock stays held through the loop; only the block/yield point
+        // drops it (so a parked reader never strands the table) and re-acquires
+        // afterwards, re-fetching the descriptor in case it was closed.
         while (read_bytes < size) {
             if (pipes[p].read_pos != pipes[p].write_pos) {
                 buf[read_bytes++] = pipes[p].buffer[pipes[p].read_pos++];
                 if (pipes[p].read_pos >= PIPE_BUF_SIZE) pipes[p].read_pos = 0;
             } else {
                 if (pipes[p].closed_write) break; // EOF
-                // block / yield
+                fd_lock_release();
                 __asm__ volatile("sti; hlt");
+                fd_lock_acquire();
+                gfd = task_get_fd(tid, fd);
+                if (gfd < 0 || !global_fds[gfd].in_use) { fd_lock_release(); return read_bytes; }
+                p = global_fds[gfd].pipe_id;
             }
         }
+        fd_lock_release();
         return read_bytes;
     }
+    fd_lock_release();
     return -1;
 }
 
 int do_sys_write(int fd, const char* buf, int size) {
     int tid = get_current_task();
     if (tid < 0) return -1;
+
+    fd_lock_acquire();
     int gfd = task_get_fd(tid, fd);
-    if (gfd < 0 || !global_fds[gfd].in_use) return -1;
+    if (gfd < 0 || !global_fds[gfd].in_use) { fd_lock_release(); return -1; }
     
     if (global_fds[gfd].type == FD_TYPE_FILE || global_fds[gfd].type == FD_TYPE_DEV) {
         char path[256];
-        if (vfs_get_abs_path(global_fds[gfd].vfs_node, path, 256) < 0) return -1;
+        if (vfs_get_abs_path(global_fds[gfd].vfs_node, path, 256) < 0) { fd_lock_release(); return -1; }
         // vfs_write_file() always writes from the START of the file, so a
         // second write(1, ...) from an app would clobber the first. Track an
         // offset per descriptor and append: read the existing content, splice
@@ -120,12 +150,13 @@ int do_sys_write(int fd, const char* buf, int size) {
         if (r < 0) r = 0;
         oldsz = r;
         if (off + size > 4095) size = 4095 - off;
-        if (size <= 0) return 0;
+        if (size <= 0) { fd_lock_release(); return 0; }
         for (int i = 0; i < size; i++) whole[off + i] = buf[i];
         int newsz = (off + size > oldsz) ? off + size : oldsz;
         whole[newsz] = '\0';
         int w = vfs_write_file(path, whole, newsz);
         if (w >= 0) global_fds[gfd].offset = off + size;
+        fd_lock_release();
         return (w >= 0) ? size : w;
     } else if (global_fds[gfd].type == FD_TYPE_PIPE_WRITE) {
         int p = global_fds[gfd].pipe_id;
@@ -136,12 +167,20 @@ int do_sys_write(int fd, const char* buf, int size) {
                 pipes[p].buffer[pipes[p].write_pos] = buf[written++];
                 pipes[p].write_pos = next_write;
             } else {
-                // Pipe full, yield
+                // Pipe full: drop the lock, yield, re-acquire (writer may run
+                // on another core; re-fetch the fd in case it was closed).
+                fd_lock_release();
                 __asm__ volatile("sti; hlt");
+                fd_lock_acquire();
+                gfd = task_get_fd(tid, fd);
+                if (gfd < 0 || !global_fds[gfd].in_use) { fd_lock_release(); return written; }
+                p = global_fds[gfd].pipe_id;
             }
         }
+        fd_lock_release();
         return written;
     }
+    fd_lock_release();
     return -1;
 }
 
@@ -174,11 +213,14 @@ static void fd_release_global(int gfd) {
 int do_sys_close(int fd) {
     int tid = get_current_task();
     if (tid < 0) return -1;
+
+    fd_lock_acquire();
     int gfd = task_get_fd(tid, fd);
-    if (gfd < 0 || !global_fds[gfd].in_use) return -1;
+    if (gfd < 0 || !global_fds[gfd].in_use) { fd_lock_release(); return -1; }
 
     task_set_fd(tid, fd, -1);
     fd_release_global(gfd);
+    fd_lock_release();
     return 0;
 }
 
@@ -193,8 +235,9 @@ int do_sys_dup2_tid(int tid, int oldfd, int newfd) {
     if (newfd < 0 || newfd >= MAX_FDS_PER_TASK) return -1;
     if (oldfd == newfd) return newfd;
 
+    fd_lock_acquire();
     int ogfd = task_get_fd(tid, oldfd);
-    if (ogfd < 0 || !global_fds[ogfd].in_use) return -1;
+    if (ogfd < 0 || !global_fds[ogfd].in_use) { fd_lock_release(); return -1; }
 
     // Close the target slot first (POSIX semantics).
     int ngfd = task_get_fd(tid, newfd);
@@ -207,6 +250,7 @@ int do_sys_dup2_tid(int tid, int oldfd, int newfd) {
     // close of the original does not yank the copy away.
     global_fds[ogfd].ref_count++;
     task_set_fd(tid, newfd, ogfd);
+    fd_lock_release();
     return newfd;
 }
 
@@ -233,11 +277,13 @@ void task_rewire_fds(int tid, int in_fd, int out_fd) {
     for (int j = 0; j < MAX_FDS_PER_TASK; j++) {
         if (j == 0 && in_fd >= 0) continue;    // wired stdin stays
         if (j == 1 && out_fd >= 0) continue;   // wired stdout stays
+        fd_lock_acquire();
         int gfd = task_get_fd(tid, j);
         if (gfd >= 0) {
             task_set_fd(tid, j, -1);
             if (gfd < MAX_GLOBAL_FDS && global_fds[gfd].in_use) fd_release_global(gfd);
         }
+        fd_lock_release();
     }
 }
 
@@ -246,14 +292,17 @@ void task_rewire_fds(int tid, int in_fd, int out_fd) {
 // whose writer task died blocked on a pipe that was never closed.
 void task_close_all_fds(int tid) {
     for (int i = 0; i < MAX_FDS_PER_TASK; i++) {
+        fd_lock_acquire();
         int gfd = task_get_fd(tid, i);
-        if (gfd < 0) continue;
+        if (gfd < 0) { fd_lock_release(); continue; }
         task_set_fd(tid, i, -1);
         if (gfd < MAX_GLOBAL_FDS && global_fds[gfd].in_use) fd_release_global(gfd);
+        fd_lock_release();
     }
 }
 
 int do_sys_pipe(int pipefd[2]) {
+    fd_lock_acquire();
     int p = -1;
     for (int i = 0; i < MAX_PIPES; i++) {
         if (!pipes[i].in_use) {
@@ -265,15 +314,15 @@ int do_sys_pipe(int pipefd[2]) {
             break;
         }
     }
-    if (p < 0) return -1;
+    if (p < 0) { fd_lock_release(); return -1; }
     
     int g_read = alloc_global_fd();
-    if (g_read < 0) { pipes[p].in_use = 0; return -1; }
+    if (g_read < 0) { pipes[p].in_use = 0; fd_lock_release(); return -1; }
     global_fds[g_read].type = FD_TYPE_PIPE_READ;
     global_fds[g_read].pipe_id = p;
     
     int g_write = alloc_global_fd();
-    if (g_write < 0) { global_fds[g_read].in_use = 0; pipes[p].in_use = 0; return -1; }
+    if (g_write < 0) { global_fds[g_read].in_use = 0; pipes[p].in_use = 0; fd_lock_release(); return -1; }
     global_fds[g_write].type = FD_TYPE_PIPE_WRITE;
     global_fds[g_write].pipe_id = p;
     
@@ -281,15 +330,20 @@ int do_sys_pipe(int pipefd[2]) {
     pipefd[1] = task_map_fd(g_write);
     
     if (pipefd[0] < 0 || pipefd[1] < 0) {
-        // Cleanup on error. do_sys_close() with a negative lfd is a silent no-op,
-        // so the global fds and pipe slot must be released explicitly for the
-        // fd(s) whose local mapping failed.
-        if (pipefd[0] >= 0) do_sys_close(pipefd[0]);
-        else global_fds[g_read].in_use = 0;
-        if (pipefd[1] >= 0) do_sys_close(pipefd[1]);
-        else global_fds[g_write].in_use = 0;
+        // Cleanup on error — outside the lock so the do_sys_close() calls can
+        // acquire fd_lock themselves. A failed mapping must release the global
+        // fds and pipe slot explicitly for the fd(s) that never got mapped.
+        int r0 = pipefd[0], r1 = pipefd[1];
+        fd_lock_release();
+        if (r0 >= 0) do_sys_close(r0);
+        else { fd_lock_acquire(); global_fds[g_read].in_use = 0; fd_lock_release(); }
+        if (r1 >= 0) do_sys_close(r1);
+        else { fd_lock_acquire(); global_fds[g_write].in_use = 0; fd_lock_release(); }
+        fd_lock_acquire();
         pipes[p].in_use = 0;
+        fd_lock_release();
         return -1;
     }
+    fd_lock_release();
     return 0;
 }

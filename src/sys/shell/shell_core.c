@@ -14,6 +14,72 @@
 
 #include "shell_internal.h"
 
+// ---- Reentrant irqsave lock (kernel locking audit v38.4) ----
+//
+// The shell's global state (cmd_b, env, aliases, history, stdin buffer) is
+// shared by every terminal: two terminals on two cores can run ex_cmd()
+// concurrently (SYS_EXEC_CMD), so shell command execution must serialize.
+// Reentrant because run_script() -> ex_cmd() nests inside SYS_EXEC_CMD's own
+// ex_cmd(). Ordering: task_lock > shell_lock > fd_lock > vfs_lock > ata_lock.
+//
+// shell_lock_release_for_block()/shell_lock_reacquire() drop the lock across
+// blocking operations (sleep, waitpid): a shell task killed while parked must
+// not strand the lock and hang every other terminal. Reacquire restores the
+// saved depth so nested holders' release accounting stays balanced.
+spinlock_t shell_lock = SPINLOCK_INIT;
+static uint32_t shell_eflags;
+static int shell_lock_owner = -1;
+static int shell_lock_depth = 0;
+static int shell_saved_depth = 0;
+// Set by shell_lock_release_for_block() on the owning task, cleared by
+// shell_lock_reacquire(). A forked BACKGROUND child (task_fork_kernel copies
+// the shell's task) must not release/re-acquire the parent's lock — it is a
+// different task that does not own it, and dying with it re-acquired would
+// strand the lock and hang every terminal on the next command.
+static int shell_block_released = 0;
+
+void shell_lock_acquire(void) {
+    int tid = get_current_task();
+    int key = (task_get_cid() << 16) | (tid & 0xFFFF);
+    if (shell_lock_owner == key) { shell_lock_depth++; return; }
+    shell_eflags = spin_lock_irqsave(&shell_lock);
+    shell_lock_owner = key;
+    shell_lock_depth = 1;
+}
+
+void shell_lock_release(void) {
+    if (shell_lock_depth > 1) { shell_lock_depth--; return; }
+    shell_lock_depth = 0;
+    shell_lock_owner = -1;
+    spin_unlock_irqrestore(&shell_lock, shell_eflags);
+}
+
+void shell_lock_release_for_block(void) {
+    if (shell_lock_owner < 0) return;
+    // Only the owning task may drop the lock. A forked background child is a
+    // separate task sharing these globals; releasing the parent's lock here
+    // and re-acquiring it below would strand the lock when the child exits.
+    int tid = get_current_task();
+    int key = (task_get_cid() << 16) | (tid & 0xFFFF);
+    if (shell_lock_owner != key) return;
+    shell_saved_depth = shell_lock_depth;
+    shell_lock_depth = 0;
+    shell_lock_owner = -1;
+    shell_block_released = 1;
+    spin_unlock_irqrestore(&shell_lock, shell_eflags);
+}
+
+void shell_lock_reacquire(void) {
+    if (!shell_block_released) return;
+    shell_block_released = 0;
+    int tid = get_current_task();
+    int key = (task_get_cid() << 16) | (tid & 0xFFFF);
+    shell_eflags = spin_lock_irqsave(&shell_lock);
+    shell_lock_owner = key;
+    shell_lock_depth = (shell_saved_depth > 0) ? shell_saved_depth : 1;
+    shell_saved_depth = 0;
+}
+
 // OS_VERSION lives in utils.h (single source of truth shared with /proc).
 
 // --- Command buffer & state ---
@@ -957,7 +1023,11 @@ void ex_cmd() {
                             if (out_fd >= 0) do_sys_close(out_fd);
                             if (child > 0) {
                                 int st = -1;
+                                // Drop shell_lock while parked in waitpid: a
+                                // killed shell must not strand the lock.
+                                shell_lock_release_for_block();
                                 task_waitpid(child, &st, 0);
+                                shell_lock_reacquire();
                                 print("app ", 0x0A); print(apath, 0x0A);
                                 print(" finished (redirected)\n", 0x0A);
                                 write_serial_string("[JOBS] redir app done\n");
@@ -1168,8 +1238,11 @@ void ex_cmd() {
                             do_sys_close(pfd[0]);
                             do_sys_close(pfd[1]);
                             int st = -1;
+                            // Drop shell_lock across the waits (see above).
+                            shell_lock_release_for_block();
                             task_waitpid(cl, &st, 0);
                             task_waitpid(cr, &st, 0);
+                            shell_lock_reacquire();
                             print("[pipeline] both sides done\n", 0x0A);
                             write_serial_string("[JOBS] real pipeline ok\n");
                             b_idx = 0;

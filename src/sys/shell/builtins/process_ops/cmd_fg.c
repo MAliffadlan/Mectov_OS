@@ -22,7 +22,10 @@ void cmd_fg(void) {
                     write_serial_hex(t);
                     write_serial_string("\n");
                 }
+                // Drop shell_lock while parked (kernel locking audit v38.4).
+                shell_lock_release_for_block();
                 int r = task_waitpid(t, &st, 0);
+                shell_lock_reacquire();
                 if (r >= 0) {
                     print("[", 0x0E); p_int(num, 0x0E); print("] Done", 0x0A);
                     print(" (exit ", 0x07); p_int(st, 0x07); print(")\n", 0x07);

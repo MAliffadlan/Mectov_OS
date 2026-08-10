@@ -3,6 +3,37 @@
 #include "../include/utils.h"
 #include "../include/taskbar.h"
 #include "../include/serial.h"
+#include "../include/spinlock.h"
+#include "../include/task.h"   // get_current_task / task_get_cid
+
+// ---- Reentrant irqsave lock (kernel locking audit v38.4) ----
+//
+// Protects the window table (wm_wins[]), focus, and z-order from concurrent
+// access: the main loop draws/raises/focuses, GUI syscalls open/close windows,
+// and task teardown calls wm_cleanup_task() — potentially on different cores.
+// Public functions call each other and the draw path re-enters via
+// win_draw_cb -> get_win_index, so the lock is reentrant (owner cpu,tid + depth).
+// Ordering: task_lock > wm_lock > gui_lock.
+static spinlock_t wm_lock = SPINLOCK_INIT;
+static uint32_t wm_eflags;
+static int wm_lock_owner = -1;
+static int wm_lock_depth = 0;
+
+void wm_lock_acquire(void) {
+    int tid = get_current_task();
+    int key = (task_get_cid() << 16) | (tid & 0xFFFF);
+    if (wm_lock_owner == key) { wm_lock_depth++; return; }
+    wm_eflags = spin_lock_irqsave(&wm_lock);
+    wm_lock_owner = key;
+    wm_lock_depth = 1;
+}
+
+void wm_lock_release(void) {
+    if (wm_lock_depth > 1) { wm_lock_depth--; return; }
+    wm_lock_depth = 0;
+    wm_lock_owner = -1;
+    spin_unlock_irqrestore(&wm_lock, wm_eflags);
+}
 
 #define SNAP_THRESHOLD  10      // px from edge to trigger snap
 #define SNAP_AREA_W     (int)(fb_width / 2)  // half width for left/right snap
@@ -42,7 +73,7 @@ static int next_id = 1;
 static void* wm_free_list[64];
 static int wm_free_count = 0;
 
-void wm_defer_free(void* p) {
+static void wm_defer_free_unlocked(void* p) {
     if (!p) return;
     if (wm_free_count >= 64) {
         write_serial_string("[WM] wm_free_list full, leaking a window buffer\n");
@@ -50,11 +81,21 @@ void wm_defer_free(void* p) {
     }
     wm_free_list[wm_free_count++] = p;
 }
+void wm_defer_free(void* p) {
+    wm_lock_acquire();
+    wm_defer_free_unlocked(p);
+    wm_lock_release();
+}
 
-void wm_flush_frees(void) {
+static void wm_flush_frees_unlocked(void) {
     extern void kfree(void*);
     for (int i = 0; i < wm_free_count; i++) kfree(wm_free_list[i]);
     wm_free_count = 0;
+}
+void wm_flush_frees(void) {
+    wm_lock_acquire();
+    wm_flush_frees_unlocked();
+    wm_lock_release();
 }
 
 void wm_init() {
@@ -79,7 +120,7 @@ static void z_remove(int idx) {
     }
 }
 
-void wm_raise(int id) {
+static void wm_raise_unlocked(int id) {
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (wm_wins[i].visible && wm_wins[i].id == id) {
             z_remove(i);
@@ -93,13 +134,18 @@ void wm_raise(int id) {
         }
     }
 }
+void wm_raise(int id) {
+    wm_lock_acquire();
+    wm_raise_unlocked(id);
+    wm_lock_release();
+}
 
 // ---- Minimize / restore ----
 // These own BOTH halves of the operation: the state change and the damage it
 // causes. Do not set .minimized directly from a call site — draw_one() skips
 // minimized windows, so nothing will ever repaint over the pixels the window
 // left behind and it stays painted on screen as a ghost.
-void wm_minimize(int id) {
+static void wm_minimize_unlocked(int id) {
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (!wm_wins[i].visible || wm_wins[i].id != id) continue;
         if (wm_wins[i].minimized) return; // already hidden, nothing to erase
@@ -123,8 +169,13 @@ void wm_minimize(int id) {
         return;
     }
 }
+void wm_minimize(int id) {
+    wm_lock_acquire();
+    wm_minimize_unlocked(id);
+    wm_lock_release();
+}
 
-void wm_restore(int id) {
+static void wm_restore_unlocked(int id) {
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (wm_wins[i].visible && wm_wins[i].id == id) {
             wm_wins[i].minimized = 0;
@@ -133,8 +184,13 @@ void wm_restore(int id) {
         }
     }
 }
+void wm_restore(int id) {
+    wm_lock_acquire();
+    wm_restore_unlocked(id);
+    wm_lock_release();
+}
 
-void wm_focus_next(void) {
+static void wm_focus_next_unlocked(void) {
     if (wm_zcount <= 1) return;
     
     // Circularly rotate z-order to cycle focus: move top to bottom
@@ -156,24 +212,39 @@ void wm_focus_next(void) {
     extern volatile int needs_redraw;
     needs_redraw = 1;
 }
+void wm_focus_next(void) {
+    wm_lock_acquire();
+    wm_focus_next_unlocked();
+    wm_lock_release();
+}
 
 int alt_tab_active = 0;
 int alt_tab_selected_idx = 0;
 
-void wm_alt_tab_start(void) {
+static void wm_alt_tab_start_unlocked(void) {
     if (wm_zcount <= 1) return;
     alt_tab_active = 1;
     alt_tab_selected_idx = 1; // Highlight the second window by default
     extern void mark_dirty(int, int, int, int);
     mark_dirty(0, 0, fb_width, fb_height); // Show HUD card cleanly
 }
+void wm_alt_tab_start(void) {
+    wm_lock_acquire();
+    wm_alt_tab_start_unlocked();
+    wm_lock_release();
+}
 
-void wm_alt_tab_next(void) {
+static void wm_alt_tab_next_unlocked(void) {
     if (!alt_tab_active || wm_zcount <= 1) return;
     alt_tab_selected_idx = (alt_tab_selected_idx + 1) % wm_zcount;
 }
+void wm_alt_tab_next(void) {
+    wm_lock_acquire();
+    wm_alt_tab_next_unlocked();
+    wm_lock_release();
+}
 
-void wm_alt_tab_end(void) {
+static void wm_alt_tab_end_unlocked(void) {
     if (!alt_tab_active) return;
     alt_tab_active = 0;
     
@@ -193,6 +264,11 @@ void wm_alt_tab_end(void) {
     // Select the highlighted window: HUD lists windows from top to bottom
     int target_idx = wm_zorder[wm_zcount - 1 - alt_tab_selected_idx];
     wm_restore(wm_wins[target_idx].id);
+}
+void wm_alt_tab_end(void) {
+    wm_lock_acquire();
+    wm_alt_tab_end_unlocked();
+    wm_lock_release();
 }
 
 // Alt-tab HUD icon. Delegates to the shared draw_app_icon() (from taskbar.c)
@@ -269,7 +345,7 @@ static void wm_draw_alt_tab_hud(void) {
 }
 
 // ---- Open / Close ----
-int wm_open(int x, int y, int w, int h, const char* title,
+static int wm_open_unlocked(int x, int y, int w, int h, const char* title,
             WinDrawFn draw_fn, WinKeyFn key_fn, WinTickFn tick_fn, WinMouseFn mouse_fn) {
     // Reject absurd geometry: content_buffer is kmalloc(cw2*ch2*4) in draw_one,
     // so an int overflow here (e.g. w=h=65539) turned a tiny allocation into a
@@ -326,16 +402,29 @@ int wm_open(int x, int y, int w, int h, const char* title,
     }
     return -1; // no slot
 }
+int wm_open(int x, int y, int w, int h, const char* title,
+            WinDrawFn draw_fn, WinKeyFn key_fn, WinTickFn tick_fn, WinMouseFn mouse_fn) {
+    wm_lock_acquire();
+    int r = wm_open_unlocked(x, y, w, h, title, draw_fn, key_fn, tick_fn, mouse_fn);
+    wm_lock_release();
+    return r;
+}
 
-int wm_is_open(int id) {
+static int wm_is_open_unlocked(int id) {
     if (id < 0) return 0;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (wm_wins[i].visible && wm_wins[i].id == id) return 1;
     }
     return 0;
 }
+int wm_is_open(int id) {
+    wm_lock_acquire();
+    int r = wm_is_open_unlocked(id);
+    wm_lock_release();
+    return r;
+}
 
-void wm_invalidate(int id) {
+static void wm_invalidate_unlocked(int id) {
     if (id < 0) return;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (wm_wins[i].visible && wm_wins[i].id == id) {
@@ -344,8 +433,13 @@ void wm_invalidate(int id) {
         }
     }
 }
+void wm_invalidate(int id) {
+    wm_lock_acquire();
+    wm_invalidate_unlocked(id);
+    wm_lock_release();
+}
 
-void wm_close(int id) {
+static void wm_close_unlocked(int id) {
     write_serial_string("WM_CLOSE called for id=");
     write_serial_hex(id);
     write_serial('\n');
@@ -379,6 +473,11 @@ void wm_close(int id) {
             return;
         }
     }
+}
+void wm_close(int id) {
+    wm_lock_acquire();
+    wm_close_unlocked(id);
+    wm_lock_release();
 }
 
 // ---- Aero Snap logic ----
@@ -452,7 +551,7 @@ static void wm_btn_geom(const WmWin* w, int* close_x, int* max_x, int* min_x, in
 // Pure-mouse-move tracking for titlebar button hover states. Called from the
 // main loop on every mouse move (no button). Clears hover when the pointer is
 // not over any visible window's titlebar buttons.
-void wm_track_mouse(int mx, int my) {
+static void wm_track_mouse_unlocked(int mx, int my) {
     // Hover states are fully recomputed on every move; anything not explicitly
     // set below is already cleared here, so hovers can never go stale.
     for (int i = 0; i < MAX_WINDOWS; i++) {
@@ -477,6 +576,11 @@ void wm_track_mouse(int mx, int my) {
         }
         break;
     }
+}
+void wm_track_mouse(int mx, int my) {
+    wm_lock_acquire();
+    wm_track_mouse_unlocked(mx, my);
+    wm_lock_release();
 }
 
 static void draw_one(int idx) {
@@ -672,14 +776,19 @@ static void draw_one(int idx) {
     }
 }
 
-void wm_draw_all() {
+static void wm_draw_all_unlocked() {
     wm_flush_frees(); // release closed-window buffers (main-loop context only)
     for (int z = 0; z < wm_zcount; z++) draw_one(wm_zorder[z]);
     wm_draw_alt_tab_hud();
 }
+void wm_draw_all() {
+    wm_lock_acquire();
+    wm_draw_all_unlocked();
+    wm_lock_release();
+}
 
 // ---- Mouse handling ----
-int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
+static int wm_handle_mouse_unlocked(int mx, int my, int btn, int pbtn) {
     int click = btn && !pbtn;   // rising edge
     int release = !btn && pbtn; // falling edge
 
@@ -903,9 +1012,15 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
     }
     return 0;
 }
+int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
+    wm_lock_acquire();
+    int r = wm_handle_mouse_unlocked(mx, my, btn, pbtn);
+    wm_lock_release();
+    return r;
+}
 
 // ---- Scroll wheel handling ----
-void wm_handle_scroll(int mx, int my, int delta) {
+static void wm_handle_scroll_unlocked(int mx, int my, int delta) {
     // Hit test front-to-back: find the window under the cursor
     for (int z = wm_zcount - 1; z >= 0; z--) {
         int idx = wm_zorder[z];
@@ -923,23 +1038,38 @@ void wm_handle_scroll(int mx, int my, int delta) {
         }
     }
 }
+void wm_handle_scroll(int mx, int my, int delta) {
+    wm_lock_acquire();
+    wm_handle_scroll_unlocked(mx, my, delta);
+    wm_lock_release();
+}
 
-void wm_handle_key(char c, uint8_t sc) {
+static void wm_handle_key_unlocked(char c, uint8_t sc) {
     if (wm_focused < 0) return;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (wm_wins[i].visible && wm_wins[i].id == wm_focused && wm_wins[i].key_fn)
             wm_wins[i].key_fn(wm_wins[i].id, c, sc);
     }
 }
+void wm_handle_key(char c, uint8_t sc) {
+    wm_lock_acquire();
+    wm_handle_key_unlocked(c, sc);
+    wm_lock_release();
+}
 
-void wm_tick_all() {
+static void wm_tick_all_unlocked() {
     for (int i = 0; i < MAX_WINDOWS; i++)
         if (wm_wins[i].visible && wm_wins[i].tick_fn)
             wm_wins[i].tick_fn(wm_wins[i].id);
 }
+void wm_tick_all() {
+    wm_lock_acquire();
+    wm_tick_all_unlocked();
+    wm_lock_release();
+}
 
 // Close all windows owned by a specific task (crash recovery)
-void wm_cleanup_task(int tid) {
+static void wm_cleanup_task_unlocked(int tid) {
     extern volatile int doom_fullscreen;
     doom_fullscreen = 0; // Restore normal rendering if DOOM task exits
 
@@ -978,8 +1108,13 @@ void wm_cleanup_task(int tid) {
     extern volatile int needs_redraw;
     needs_redraw = 1;
 }
+void wm_cleanup_task(int tid) {
+    wm_lock_acquire();
+    wm_cleanup_task_unlocked(tid);
+    wm_lock_release();
+}
 
-void wm_reset_session(void) {
+static void wm_reset_session_unlocked(void) {
     // First close windows owned by user tasks so their lifecycle cleanup runs
     // through the same path used by task_exit()/task_kill().
     int cleaned_tasks[MAX_WINDOWS];
@@ -1025,4 +1160,9 @@ void wm_reset_session(void) {
 
     extern volatile int needs_redraw;
     needs_redraw = 1;
+}
+void wm_reset_session(void) {
+    wm_lock_acquire();
+    wm_reset_session_unlocked();
+    wm_lock_release();
 }
