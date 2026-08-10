@@ -51,6 +51,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/wallpaper.o \
        $(OBJ_DIR)/gcalc_mct.o \
        $(OBJ_DIR)/hello_mct.o \
+       $(OBJ_DIR)/keyshow_mct.o \
        $(OBJ_DIR)/clock_mct.o \
        $(OBJ_DIR)/snake_mct.o \
        $(OBJ_DIR)/sysinfo_mct.o \
@@ -116,6 +117,9 @@ $(OBJ_DIR)/gcalc_mct.o: gcalc.mct | $(OBJ_DIR)
 $(OBJ_DIR)/hello_mct.o: hello.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
+$(OBJ_DIR)/keyshow_mct.o: keyshow.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
 MCT_LIBC_H = apps/lib/libc.h
 
 gcalc.mct: apps/gcalc.c $(MCT_LIBC_H)
@@ -123,6 +127,9 @@ gcalc.mct: apps/gcalc.c $(MCT_LIBC_H)
 
 hello.mct: apps/hello.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/hello.c hello.mct
+
+keyshow.mct: apps/keyshow.c
+	python3 scripts/build_mct.py apps/keyshow.c keyshow.mct
 
 clock.mct: apps/clock.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/clock.c clock.mct

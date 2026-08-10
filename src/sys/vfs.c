@@ -77,6 +77,10 @@ extern uint8_t _binary_hello_mct_start[];
 extern uint8_t _binary_hello_mct_end[];
 static uint32_t hello_mct_size() { return (uint32_t)(_binary_hello_mct_end - _binary_hello_mct_start); }
 
+// Embedded binary for keyshow.mct
+extern uint8_t _binary_keyshow_mct_start[];
+extern uint8_t _binary_keyshow_mct_end[];
+
 fs_node_t fs_nodes[MAX_NODES];
 
 // --- Internal helpers ---
@@ -281,9 +285,12 @@ void vfs_init() {
         extern uint8_t _binary_apps_music_wav_end[];
         changed += vfs_update_file_if_needed("apps/music.wav", (const char*)_binary_apps_music_wav_start, _binary_apps_music_wav_end - _binary_apps_music_wav_start);
 
-        extern uint8_t _binary_hello_mct_start[];
-        extern uint8_t _binary_hello_mct_end[];
-        changed += vfs_update_file_if_needed("apps/hello.mct", (const char*)_binary_hello_mct_start, _binary_hello_mct_end - _binary_hello_mct_start);
+    extern uint8_t _binary_hello_mct_start[];
+    extern uint8_t _binary_hello_mct_end[];
+    changed += vfs_update_file_if_needed("apps/hello.mct", (const char*)_binary_hello_mct_start, _binary_hello_mct_end - _binary_hello_mct_start);
+    extern uint8_t _binary_keyshow_mct_start[];
+    extern uint8_t _binary_keyshow_mct_end[];
+    changed += vfs_update_file_if_needed("apps/keyshow.mct", (const char*)_binary_keyshow_mct_start, _binary_keyshow_mct_end - _binary_keyshow_mct_start);
 
         extern uint8_t _binary_sysinfo_mct_start[];
         extern uint8_t _binary_sysinfo_mct_end[];
@@ -552,6 +559,10 @@ void vfs_init() {
     // Inject hello.mct
     vfs_create_file("apps/hello.mct");
     vfs_write_file("apps/hello.mct", (const char*)_binary_hello_mct_start, hello_mct_size());
+
+    // Inject keyshow.mct
+    vfs_create_file("apps/keyshow.mct");
+    vfs_write_file("apps/keyshow.mct", (const char*)_binary_keyshow_mct_start, _binary_keyshow_mct_end - _binary_keyshow_mct_start);
 
     // Inject clock.mct
     extern uint8_t _binary_clock_mct_start[];

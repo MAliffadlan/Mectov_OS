@@ -46,6 +46,11 @@ int cmd_run(void) {
                     
                     extern int term_app_running;
                     extern int term_app_task_id;
+                    extern void term_app_key_clear(void);
+                    // Drop any keys queued for a previous foreground app so
+                    // the new app starts with a clean buffer (single-consumer
+                    // keyboard, v38.9).
+                    term_app_key_clear();
                     term_app_running = 1;
                     term_app_task_id = res;
                     task_set_fg_pgrp(res);   // foreground group owns the terminal

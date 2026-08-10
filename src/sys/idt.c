@@ -347,7 +347,12 @@ void isr_handler(registers_t *r) {
                         q1 = str_append(q1, "[COW] Promoted sole-owned page to writable at ");
                         q1 = hex_append(q1, faulting_address);
                         q1 = str_append(q1, "\n");
-                        write_serial_try(b1, (int)(q1 - b1));
+                        // Routine diagnostic: skip when the serial lock is
+                        // contended so this log never garbles another core's
+                        // locked line with raw bytes (seen: "fork: child"
+                        // split under real SMP). Panic/error paths should
+                        // keep write_serial_try's raw fallback.
+                        write_serial_if_free(b1, (int)(q1 - b1));
                         return; // Resume execution
                     }
                     
@@ -382,7 +387,9 @@ void isr_handler(registers_t *r) {
                         q3 = str_append(q3, " -> New: ");
                         q3 = hex_append(q3, new_paddr);
                         q3 = str_append(q3, ")\n");
-                        write_serial_try(b3, (int)(q3 - b3));
+                        // Routine diagnostic: skip when serial lock is
+                        // contended (same rationale as above).
+                        write_serial_if_free(b3, (int)(q3 - b3));
                         return; // Resume execution
                     }
                 }

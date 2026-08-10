@@ -518,6 +518,9 @@ static void task_cleanup(int tid) {
     if (term_app_running && term_app_task_id == tid) {
         term_app_running = 0;
         term_app_task_id = -1;
+        // Drop queued keys for the dead app (single-consumer keyboard v38.9)
+        extern void term_app_key_clear(void);
+        term_app_key_clear();
         // The foreground group died: give the terminal back to the shell's
         // group (the task that spawned the app — the app itself has its own
         // pgrp == its own tid, so reading the app's pgrp would hand the
@@ -1282,11 +1285,31 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         spin_unlock(&task_lock);
         __asm__ volatile("sti");
 
-        write_serial_string("[TASK] fork: child tid=");
-        write_serial_hex(i);
-        write_serial_string(" pd=");
-        write_serial_hex(new_pd);
-        write_serial_string("\n");
+        // Single locked buffer write: the COW #PF handler on another core
+        // falls back to raw writes when serial_lock is busy, which interleaves
+        // bytes into any multi-call log line. A single write_serial_string
+        // with a formatted buffer prints the whole fork marker atomically.
+        {
+            char bf[80];
+            char* bp = bf;
+            char* be = bf + sizeof(bf) - 1;
+            const char* _s = "[TASK] fork: child tid=";
+            while (*_s && bp < be) *bp++ = *_s++;
+            *bp++ = '0'; *bp++ = 'x';
+            for (int _j = 28; _j >= 0 && bp + 1 < be; _j -= 4) {
+                int nib = (i >> _j) & 0xF;
+                *bp++ = (nib < 10) ? '0' + nib : 'A' + nib - 10;
+            }
+            _s = " pd=";
+            while (*_s && bp < be) *bp++ = *_s++;
+            *bp++ = '0'; *bp++ = 'x';
+            for (int _j = 28; _j >= 0 && bp + 1 < be; _j -= 4) {
+                int nib = (new_pd >> _j) & 0xF;
+                *bp++ = (nib < 10) ? '0' + nib : 'A' + nib - 10;
+            }
+            *bp++ = '\n'; *bp = '\0';
+            write_serial_string(bf);
+        }
         return i;
     }
 

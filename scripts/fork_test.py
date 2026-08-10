@@ -62,6 +62,10 @@ def main():
     ap.add_argument("--iso", default="mectov.iso")
     ap.add_argument("--disk", default="disk.img")
     ap.add_argument("--ext2", default="ext2.img")
+    ap.add_argument("--kvm", action="store_true",
+                    help="run with -enable-kvm (real timing, mandatory SMP "
+                         "regression: the keyboard single-consumer race only "
+                         "reproduces under KVM 4-core, not TCG)")
     args = ap.parse_args()
 
     for p in (SERIAL_LOG, MON_SOCK):
@@ -70,7 +74,7 @@ def main():
         except FileNotFoundError:
             pass
 
-    qemu = subprocess.Popen([
+    qemu_cmd = [
         "qemu-system-i386",
         "-vga", "std",
         "-cdrom", args.iso,
@@ -82,7 +86,10 @@ def main():
         "-drive", f"file={args.disk},format=raw,index=0,media=disk",
         "-drive", f"file={args.ext2},format=raw,index=1,media=disk",
         "-monitor", f"unix:{MON_SOCK},server,nowait",
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ]
+    if args.kvm:
+        qemu_cmd.insert(1, "-enable-kvm")
+    qemu = subprocess.Popen(qemu_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     try:
         if not wait_for_in_file(SERIAL_LOG, "[K] login", args.timeout):

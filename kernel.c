@@ -453,6 +453,8 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                             // to the terminal so the user can type jobs/bg/fg.
                             term_app_running = 0;
                             term_app_task_id = -1;
+                            extern void term_app_key_clear(void);
+                            term_app_key_clear();
                             shell_register_stopped_job(fg_tid);
                         }
                         needs_redraw = 1;
@@ -461,7 +463,21 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                         needs_redraw = 1;
                     } else if (sc < 0x80 || sc == 0xE0) {
                         char c = scancode_to_char_mods(sc, kbd_mods);
-                        wm_handle_key(c, sc);
+                        // Single-consumer keyboard (v38.9): the main loop is
+                        // the ONLY reader of kbd_buffer. When a foreground app
+                        // owns the terminal, keys are queued to its buffer
+                        // (SYS_GET_KEY pops them) instead of the focused
+                        // window — the terminal must not swallow the app's
+                        // keystrokes as its own input. Otherwise forward to
+                        // the focused window as usual.
+                        extern int term_app_running;
+                        extern int term_app_task_id;
+                        extern void term_app_push_key(unsigned char);
+                        if (term_app_running && term_app_task_id > 0) {
+                            if (c != 0) term_app_push_key((unsigned char)c);
+                        } else {
+                            wm_handle_key(c, sc);
+                        }
                         needs_redraw = 1;
                     }
                 }

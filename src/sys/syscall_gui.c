@@ -140,22 +140,19 @@ uint32_t handle_syscall_gui(registers_t* regs) {
                 break;
             }
 
-            uint8_t kbd_mods = 0;
-            uint8_t sc = 0;
+            // Single-consumer keyboard (v38.9): the main loop (task 0) is the
+            // only reader of kbd_buffer and resolves keys with the feed-time
+            // modifier snapshot. While a foreground app owns the terminal it
+            // queues the resolved char here; SYS_GET_KEY pops it. This
+            // replaces the old direct k_get_scancode_ex() read, which raced
+            // with the main loop on SMP and lost keys nondeterministically.
+            // Only the foreground app may read the terminal; anything else
+            // gets 0 (background tasks are stopped by SIGTTIN above).
+            uint8_t k = 0;
             if (term_app_running && me == term_app_task_id) {
-                sc = term_app_pop_key();
-            } else {
-                sc = k_get_scancode_ex(&kbd_mods);
+                k = term_app_pop_key();
             }
-            
-            if (sc == 0 || sc >= 0x80) {
-                regs->eax = 0; // No key or key release
-            } else {
-                // Resolve against the feed-time modifier snapshot (see
-                // keyboard.c): the live shift_p can already be cleared by the
-                // shift-release byte when a slow consumer pops the key.
-                regs->eax = (uint32_t)scancode_to_char_mods(sc, kbd_mods);
-            }
+            regs->eax = (uint32_t)k;
             break;
         }
 

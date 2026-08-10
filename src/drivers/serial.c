@@ -122,3 +122,25 @@ void write_serial_try(const char* buf, int size) {
     if (took) spin_unlock(&serial_lock);
     __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
 }
+
+// Diagnostic variant for the exception path: writes the line ONLY when the
+// serial lock is free, otherwise drops it entirely. Routine per-fault logs
+// (COW page duplication, demand-paging) must not garble another core's
+// locked line by interleaving raw bytes into it — under real SMP that turns
+// every "fork: child tid=" marker into unreadable noise. Panic/error paths
+// keep write_serial_try()'s raw fallback so they always print. Returns 1 if
+// the line was written atomically, 0 if it was dropped.
+int write_serial_if_free(const char* buf, int size) {
+    if (!buf || size <= 0) return 0;
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    int took = spin_try_lock(&serial_lock);
+    if (!took) {
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return 0;
+    }
+    for (int i = 0; i < size; i++) serial_putc_locked(buf[i]);
+    spin_unlock(&serial_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+    return 1;
+}

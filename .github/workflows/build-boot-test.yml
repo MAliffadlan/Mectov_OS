@@ -57,3 +57,13 @@ jobs:
       - name: Boot test in QEMU (no KVM)
         run: |
           python3 scripts/boot_test.py --timeout 240
+
+      - name: Fork + jobcontrol regressions (TCG)
+        run: |
+          python3 scripts/fork_test.py --timeout 240
+          python3 scripts/jobcontrol_test.py --timeout 240
+
+      - name: Fork KVM 4-core — mandatory SMP keyboard regression
+        run: |
+          # GitHub ubuntu-latest runners have /dev/kvm available.
+          python3 scripts/fork_test.py --kvm --timeout 240
