@@ -131,6 +131,7 @@ void cmd_mem(void);
 void cmd_kmemstats(void);
 void cmd_memstat(void);
 void cmd_uptime(void);
+void cmd_dmesg(void);
 void cmd_vfsinfo(void);
 void cmd_cd(void);
 void cmd_pwd(void);

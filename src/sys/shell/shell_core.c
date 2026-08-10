@@ -253,7 +253,7 @@ void expand_alias(char* out, const char* in, int max_len) {
 // Command list (tab completion) + history + prompt + tab completion
 // ============================================================
 const char* cmd_list[] = {
-    "help","clear","mfetch","mem","memstat","kmemstats","uptime","vfsinfo",
+    "help","clear","mfetch","mem","memstat","kmemstats","uptime","dmesg","vfsinfo",
     "ls","cd","pwd","mkdir","touch","cat","head","tree","rm","rmdir","cp","mv","df",
     "edit","nano",
     "sh","source","export","alias","unalias","history","ps","kill",
@@ -691,6 +691,8 @@ else if (strcmp(cmd_b, "kmemstats") == 0) { cmd_kmemstats(); }
 else if (strcmp(cmd_b, "memstat") == 0) { cmd_memstat(); }
 // --- UPTIME ---
 else if (strcmp(cmd_b, "uptime") == 0) { cmd_uptime(); }
+// --- DMESG ---
+else if (strcmp(cmd_b, "dmesg") == 0) { cmd_dmesg(); }
 // --- VFS INFO ---
 else if (strcmp(cmd_b, "vfsinfo") == 0) { cmd_vfsinfo(); }
 // --- CD ---

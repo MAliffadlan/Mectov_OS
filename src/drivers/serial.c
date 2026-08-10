@@ -1,6 +1,7 @@
 #include "../include/serial.h"
 #include "../include/io.h"
 #include "../include/spinlock.h"
+#include "../include/klog.h"
 
 // Fase 3 (per-CPU scheduler): serial output now originates from every core, so
 // a bare write interleaves byte-by-byte between CPUs and garbles every log
@@ -10,7 +11,9 @@
 static spinlock_t serial_lock = SPINLOCK_INIT;
 
 // Raw single-char write (no lock) — only call while holding serial_lock.
+// Every byte is also captured in the kernel log ring buffer (dmesg).
 static void serial_putc_locked(char a) {
+    klog_putc(a);
     int timeout = 100000;
     while (is_transmit_empty() == 0 && timeout > 0) timeout--;
     if (timeout > 0) outb(MODEM_PORT, a);
@@ -102,6 +105,7 @@ void write_serial_hex(uint32_t val) {
 // (all of them cli + spin on serial_lock). A panic line garbled at the
 // boundary beats a system that hangs with no output at all.
 static void serial_putc_locked_raw(char a) {
+    klog_putc(a);
     int timeout = 100000;
     while (is_transmit_empty() == 0 && timeout > 0) timeout--;
     if (timeout > 0) outb(MODEM_PORT, a);

@@ -200,7 +200,10 @@ void vfs_init() {
         }
         
         // Virtual /proc filesystem: FS_PROC nodes whose content is generated
-        // on the fly at read time (tasks, meminfo, cpuinfo, uptime, version).
+        // on the fly at read time (tasks, meminfo, cpuinfo, uptime, version,
+        // dmesg). The directory itself may already exist on disk, so create
+        // only the nodes that are missing — a fresh /proc gets all of them,
+        // an upgraded disk gets just the new ones (e.g. dmesg).
         if (vfs_get_node("/proc") < 0) {
             int proc_node = vfs_create_node("proc", FS_DIR, 0);
             if (proc_node >= 0) {
@@ -209,7 +212,18 @@ void vfs_init() {
                 vfs_create_node("cpuinfo", FS_PROC, proc_node);
                 vfs_create_node("uptime", FS_PROC, proc_node);
                 vfs_create_node("version", FS_PROC, proc_node);
+                vfs_create_node("dmesg", FS_PROC, proc_node);
                 write_serial_string("[VFS] created /proc nodes\n");
+            }
+        } else {
+            // /proc exists but may predate a node added later (e.g. dmesg).
+            // Add missing nodes so an upgraded disk gains them without a
+            // full disk rebuild. vfs_create_node is idempotent per name;
+            // get_node first to avoid duplicates on repeat boots.
+            int proc_node = vfs_get_node("/proc");
+            if (vfs_get_node("/proc/dmesg") < 0) {
+                vfs_create_node("dmesg", FS_PROC, proc_node);
+                write_serial_string("[VFS] added /proc/dmesg node\n");
             }
         }
         
@@ -637,6 +651,7 @@ void vfs_init() {
         vfs_create_node("cpuinfo", FS_PROC, proc_node);
         vfs_create_node("uptime", FS_PROC, proc_node);
         vfs_create_node("version", FS_PROC, proc_node);
+        vfs_create_node("dmesg", FS_PROC, proc_node);
         write_serial_string("[VFS] created /proc nodes\n");
     }
     
@@ -1379,6 +1394,27 @@ static int vfs_proc_read(const char* name, char* buf, int max_size) {
         proc_add(buf, &len, max_size, "MectovOS version ");
         proc_add(buf, &len, max_size, OS_VERSION);
         proc_add(buf, &len, max_size, " (i686, SMP)\n");
+    } else if (strcmp(name, "dmesg") == 0) {
+        // Kernel message ring buffer: the same text that goes to the serial
+        // port, captured in memory by serial.c (klog_putc). Read back the
+        // newest bytes, oldest first. /proc/dmesg is capped by the caller's
+        // buffer, so a small read returns a prefix — like a real dmesg tail.
+        extern int klog_snapshot(char* dst, int max);
+        extern int klog_bytes(void);
+        int total = klog_bytes();
+        char num[16];
+        proc_add(buf, &len, max_size, "-- kernel log: ");
+        proc_itoa(num, total);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " bytes captured (newest "
+                                      "KLOG_SIZE preserved) --\n");
+        // Snapshot as much as fits after the header. vfs_read_file appends
+        // the NUL itself, so leave room for it.
+        int room = max_size - len - 1;
+        if (room > 0) {
+            int n = klog_snapshot(buf + len, room);
+            if (n > 0) len += n;
+        }
     } else {
         proc_add(buf, &len, max_size, "no such /proc file\n");
     }
