@@ -331,6 +331,11 @@ void vfs_init() {
         extern uint8_t _binary_demandtest_mct_end[];
         changed += vfs_update_file_if_needed("apps/demandtest.mct", (const char*)_binary_demandtest_mct_start, _binary_demandtest_mct_end - _binary_demandtest_mct_start);
 
+        // SIGSEGV delivery test (NULL dereference)
+        extern uint8_t _binary_segvtest_mct_start[];
+        extern uint8_t _binary_segvtest_mct_end[];
+        changed += vfs_update_file_if_needed("apps/segvtest.mct", (const char*)_binary_segvtest_mct_start, _binary_segvtest_mct_end - _binary_segvtest_mct_start);
+
         // Ctrl+C interrupt demo (infinite loop)
         extern uint8_t _binary_looper_mct_start[];
         extern uint8_t _binary_looper_mct_end[];
@@ -481,6 +486,12 @@ void vfs_init() {
     extern uint8_t _binary_demandtest_mct_end[];
     vfs_create_file("apps/demandtest.mct");
     vfs_write_file("apps/demandtest.mct", (const char*)_binary_demandtest_mct_start, _binary_demandtest_mct_end - _binary_demandtest_mct_start);
+
+    // SIGSEGV delivery test (NULL dereference)
+    extern uint8_t _binary_segvtest_mct_start[];
+    extern uint8_t _binary_segvtest_mct_end[];
+    vfs_create_file("apps/segvtest.mct");
+    vfs_write_file("apps/segvtest.mct", (const char*)_binary_segvtest_mct_start, _binary_segvtest_mct_end - _binary_segvtest_mct_start);
 
     // Ctrl+C interrupt demo (infinite loop)
     extern uint8_t _binary_looper_mct_start[];

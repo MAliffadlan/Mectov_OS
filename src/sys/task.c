@@ -1847,6 +1847,51 @@ int task_deliver_signals(void* frame) {
     return 0;
 }
 
+// Deliver a synchronous fault signal (SIGSEGV, ...) to the CURRENT task from
+// exception context (the isr_handler path in idt.c — an unresolvable user
+// #PF/#GP/#UD, interrupt gate, IF=0). Reuses the normal delivery machinery:
+// a user-installed handler gets its sigframe pushed and EIP/USERESP rewritten
+// so the handler runs; the default action (no handler, or SIG_IGN — a
+// synchronous fault cannot be meaningfully ignored) terminates the task with
+// exit status 128+sig and parks the frame so we never iret a dead task's user
+// context. Returns 1 (frame always rewritten: handler or park).
+int task_fault_signal(int sig, void* frame) {
+    registers_t* r = (registers_t*)frame;
+    if ((r->cs & 3) != 3) return 0;
+    int tid = get_current_task();
+    if (tid <= 0 || tid >= MAX_TASKS) return 0;
+    if (sig <= 0 || sig >= SIG_MAX) return 0;
+
+    // Exception context: interrupts already disabled (interrupt gate), and
+    // terminate_task/task_deliver_signals require task_lock + IF=0.
+    spin_lock(&task_lock);
+
+    void* h = tasks[tid].signal_handlers[sig];
+    if (h == NULL || h == SIG_IGN_SENTINEL) {
+        // Default action: terminate (SIG_IGN on a fault is treated as kill).
+        terminate_task(tid, 128 + sig);
+        r->eip = (uint32_t)(uintptr_t)&task_dead_park;
+        r->cs  = 0x08;
+        r->ds  = 0x10;
+        spin_unlock(&task_lock);
+        return 1;
+    }
+
+    // Handler installed: mark pending and deliver right now. If delivery
+    // fails (e.g. a fault inside an already-running handler — sig_frame_esp
+    // set — or a broken user stack), terminate rather than re-fault forever.
+    tasks[tid].pending_signals |= (1u << sig);
+    int delivered = task_deliver_signals(frame);
+    if (!delivered) {
+        terminate_task(tid, 128 + sig);
+        r->eip = (uint32_t)(uintptr_t)&task_dead_park;
+        r->cs  = 0x08;
+        r->ds  = 0x10;
+    }
+    spin_unlock(&task_lock);
+    return 1;
+}
+
 // Reap zombies whose parent is gone or that outlived the timeout. Called from
 // the BSP main loop once per second as a safety net for parents that launch
 // children but never call waitpid() (e.g. the terminal's `run`).

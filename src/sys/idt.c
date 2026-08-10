@@ -466,14 +466,20 @@ void isr_handler(registers_t *r) {
         
         uint32_t cs = r->cs;
         if ((cs & 3) == 3) {
-            // Ring 3 crash - clean up windows, then kill the task
+            // Ring 3 fault. If the task installed a SIGSEGV handler it runs
+            // (frame rewritten by task_fault_signal; the faulting instruction
+            // is re-executed when the handler returns, so a handler that
+            // fixes the cause — or exits — makes progress); otherwise the
+            // default action terminates the task with exit status 128+SIGSEGV
+            // after full cleanup (WM + VMM + fd). Never iret back into the
+            // faulting user instruction when killing: task_fault_signal parks
+            // the frame in the kernel.
             extern int get_current_task(void);
-            extern void wm_cleanup_task(int tid);
             int crashed_tid = get_current_task();
             {
                 char buf[96];
                 char* p = buf;
-                p = str_append(p, "[CRASH] Ring 3 crash, killing task ");
+                p = str_append(p, "[CRASH] Ring 3 fault, task ");
                 p = hex_append(p, (uint32_t)crashed_tid);
                 p = str_append(p, "\n");
                 write_serial_try(buf, (int)(p - buf));
@@ -514,10 +520,13 @@ void isr_handler(registers_t *r) {
                 p = str_append(p, "\n");
                 write_serial_try(buf, (int)(p - buf));
             }
-            // The new task_exit_with_code() handles full cleanup (WM + VMM)
-            // and records a SIGSEGV-style exit status for the parent.
-            extern void task_exit_with_code(int code);
-            task_exit_with_code(128 + SIGSEGV);
+            // Deliver SIGSEGV through the normal signal path: a user handler
+            // runs (frame rewritten to enter it), the default action kills
+            // with 128+SIGSEGV (frame parked). Either way we must NOT return
+            // into the faulting instruction unless the handler took over.
+            extern int task_fault_signal(int sig, void* frame);
+            task_fault_signal(SIGSEGV, r);
+            return;
         } else {
             // Kernel crash
             print("\n[KERNEL PANIC] Unhandled Exception: ", 0x0C);

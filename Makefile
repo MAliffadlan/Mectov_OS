@@ -68,6 +68,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/shmdemo_mct.o \
        $(OBJ_DIR)/mmapdemo_mct.o \
        $(OBJ_DIR)/demandtest_mct.o \
+       $(OBJ_DIR)/segvtest_mct.o \
        $(OBJ_DIR)/looper_mct.o \
        $(OBJ_DIR)/crashme_mct.o \
        $(OBJ_DIR)/winman_mct.o \
@@ -183,6 +184,9 @@ mmapdemo.mct: apps/mmapdemo.c $(MCT_LIBC_H)
 demandtest.mct: apps/demandtest.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/demandtest.c demandtest.mct
 
+segvtest.mct: apps/segvtest.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/segvtest.c segvtest.mct
+
 looper.mct: apps/looper.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/looper.c looper.mct
 
@@ -272,6 +276,9 @@ $(OBJ_DIR)/mmapdemo_mct.o: mmapdemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/demandtest_mct.o: demandtest.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 demandtest.mct $(OBJ_DIR)/demandtest_mct.o
+
+$(OBJ_DIR)/segvtest_mct.o: segvtest.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 segvtest.mct $(OBJ_DIR)/segvtest_mct.o
 
 $(OBJ_DIR)/looper_mct.o: looper.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 looper.mct $(OBJ_DIR)/looper_mct.o

@@ -140,6 +140,11 @@ void task_reap_zombies(void);
 // is patched to park in the kernel instead of iret'ing back to user code.
 // Returns 1 if anything was delivered, 0 otherwise.
 int task_deliver_signals(void* frame);
+// Deliver a synchronous fault signal (e.g. SIGSEGV from an unresolvable user
+// #PF) to the CURRENT task from exception context. Rewrites `frame` so a
+// user-installed handler runs, or terminates the task (128+sig) on default
+// action. Returns 1 when the frame was rewritten (handler or park).
+int task_fault_signal(int sig, void* frame);
 void task_set_signal_handler(int tid, int sig, void* h);
 void* task_get_signal_handler(int tid, int sig);
 // sigaction core: handler + sa_mask + flags. Backward-compatible with
