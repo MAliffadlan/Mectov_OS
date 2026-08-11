@@ -2,12 +2,73 @@
 #include "../include/vga.h"
 #include "../include/io.h"
 #include "../include/apic.h"
+#include "../include/rtc.h"
 #include "../include/serial.h"   // write_serial() (locked — multi-CPU safe)
 
 // volatile: written by the IRQ0 handler, read by wait loops in thread context.
 // Without it the compiler may hoist the load out of a polling loop and spin on
 // a stale value forever. (syscall.c already declared it extern volatile.)
 volatile uint32_t timer_ticks = 0;
+
+// Measured PIT tick rate in ticks/second, calibrated against the CMOS RTC.
+// The PIT is programmed for 1000 Hz, but under QEMU TCG the emulated timer can
+// run several times faster than wall clock, so an 800-tick "0.8 second" window
+// actually becomes a fraction of a second of real time — double-clicks and
+// similar UI timeouts miss under TCG (and CI, which runs the boot tests with
+// TCG). GUIs should scale their time windows by ticks_per_sec / 1000.
+volatile uint32_t ticks_per_sec = 1000;
+
+// Calibrate ticks_per_sec by counting PIT ticks across a full RTC second
+// boundary. Called once at boot (BSP, single-threaded, interrupts enabled).
+// Falls back to 1000 if the RTC is unavailable or the measurement is bogus.
+void timer_calibrate_ticks_per_sec(void) {
+    rtc_time_t t = rtc_read_time();
+    uint32_t sec = t.second;
+    // Wait for the next second boundary so the measurement starts on one.
+    uint32_t guard = 0;
+    while (rtc_read_time().second == sec && guard++ < 100000) { }
+    uint32_t t0 = timer_ticks;
+    sec = rtc_read_time().second;
+    guard = 0;
+    while (rtc_read_time().second == sec && guard++ < 100000) { }
+    uint32_t t1 = timer_ticks;
+    uint32_t rate = t1 - t0;
+    // Sanity: a real 1 s window; tolerate 50 Hz .. 100 kHz so a broken RTC
+    // (constant seconds) can never produce a nonsense value.
+    if (rate >= 50 && rate <= 100000) {
+        ticks_per_sec = rate;
+        write_serial_string("[TIMER] ticks_per_sec=");
+        write_serial_hex(rate);
+        write_serial('\n');
+    }
+}
+
+// Rolling tick-rate calibration, called from the main loop. The QEMU TCG
+// virtual clock does not run at a constant multiple of wall time — it can be
+// slower at boot and faster once the desktop is busy — so a one-shot boot
+// measurement is not enough for GUI timeouts. Re-measuring once per RTC
+// second keeps ticks_per_sec tracking the live rate. Cheap: one CMOS read
+// per second.
+void timer_update_rate_if_second(void) {
+    static uint32_t last_sec = 0xFFFFFFFF;
+    static uint32_t last_ticks = 0;
+    rtc_time_t t = rtc_read_time();
+    if (last_sec == 0xFFFFFFFF) {
+        last_sec = t.second;
+        last_ticks = timer_ticks;
+        return;
+    }
+    int delta = (int)t.second - (int)last_sec;
+    if (delta < 0) delta += 60;          // RTC seconds wrap at 60
+    if (delta >= 1) {
+        if (delta == 1) {                 // only trust exact 1 s windows
+            uint32_t rate = timer_ticks - last_ticks;
+            if (rate >= 50 && rate <= 100000) ticks_per_sec = rate;
+        }
+        last_sec = t.second;
+        last_ticks = timer_ticks;
+    }
+}
 
 // Which CPU am I? IRQ0 is broadcast to every core (see ioapic_init), but only
 // the BSP owns the global tick counter / GUI heartbeat — the APs only need the

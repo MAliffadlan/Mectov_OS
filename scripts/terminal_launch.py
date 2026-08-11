@@ -129,15 +129,23 @@ def launch_terminal(mon, serial_log, dump_path, attempts=6):
             continue
         verified_once = True
         print(f"[launch] attempt {attempt + 1}: cursor verified on icon, clicking")
-        # Several quick click pairs: the desktop launches on any two clicks
-        # on the icon within 800 ticks, so one pair is virtually certain to
-        # land in the window. (Extra clicks after launch are harmless.)
-        for _ in range(6):
+        # Double-click with a 150ms hold. The desktop detects clicks by polling
+        # mouse_btn vs its previous value in the main loop, so a too-short blip
+        # can be missed when the guest is slow (TCG under CI), and a too-long
+        # hold drags the icon / overshoots the double-click window. The kernel
+        # scales the window to a real 0.8s via ticks_per_sec, so the pair just
+        # needs to be under that in wall time (here ~0.56s). Extra clicks after
+        # launch are harmless.
+        for _ in range(5):
             mon("mouse_button 1")
-            time.sleep(0.05)
+            time.sleep(0.15)
             mon("mouse_button 0")
             time.sleep(0.05)
-        if wait_for_in_file(serial_log, "[LOADER] start", 6):
-            return True
+            mon("mouse_button 1")
+            time.sleep(0.15)
+            mon("mouse_button 0")
+            time.sleep(0.05)
+            if wait_for_in_file(serial_log, "[LOADER] start", 2):
+                return True
     print(f"[launch] terminal did not launch (verified_once={verified_once})")
     return False

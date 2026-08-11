@@ -210,6 +210,14 @@ void kernel_main(uint32_t magic, uint32_t addr) {
 
     // Removed dummy task creation
 
+    // Calibrate the PIT tick rate against the CMOS RTC (wall clock). Under
+    // QEMU TCG the emulated timer runs faster than real time, so the desktop's
+    // double-click window (800 ms in ticks) must be scaled or it collapses to
+    // a fraction of a second — GUI timeouts would miss under TCG / CI.
+    write_serial_string("[K] cal\n");
+    extern void timer_calibrate_ticks_per_sec(void);
+    timer_calibrate_ticks_per_sec();
+
     write_serial_string("[K] mouse\n");
     init_mouse();
     write_serial_string("[K] startup_logo\n");
@@ -246,6 +254,12 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     uint32_t last_frame_tick = 0;
 
     while (1) {
+        // Keep the PIT tick rate calibrated against the RTC wall clock: the
+        // desktop's double-click window is scaled by ticks_per_sec, and the
+        // TCG virtual clock rate can drift, so re-measure once per second.
+        extern void timer_update_rate_if_second(void);
+        timer_update_rate_if_second();
+
         // Snapshot mouse state with interrupts off: x/y/btn are written by
         // IRQ12 and reading them separately can tear (x from one update, y
         // from the next), producing a wrong hit-test for a frame.

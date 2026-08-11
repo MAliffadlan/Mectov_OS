@@ -337,6 +337,16 @@ static int drag_start_y = 0;
 static int last_clicked_icon = -1;
 static uint32_t last_click_tick = 0;
 
+// Double-click window in PIT ticks: 800 ms of wall time. The PIT is nominally
+// 1000 Hz but under QEMU TCG the emulated clock runs faster than real time
+// (measured up to ~3x locally, more under CI), so a fixed 800 ticks would be
+// far shorter in real seconds. Scale by the calibrated ticks_per_sec.
+static uint32_t double_click_window_ticks(void) {
+    extern volatile uint32_t ticks_per_sec;
+    uint32_t w = (ticks_per_sec * 8) / 10;   // 800 ms
+    return (w >= 200) ? w : 800;             // sane floor / uncalibrated fallback
+}
+
 // True while an icon drag is in flight. The kernel uses this to keep routing
 // mouse events to the desktop even when the cursor crosses into the taskbar,
 // so the release is handled here (snap-back/save) instead of being eaten by
@@ -439,7 +449,7 @@ void desktop_handle_mouse(int mx, int my, int btn, int pbtn) {
                 drag_start_y = ic->y;
 
                 // Double click detection directly on mouse down to bypass drag coordinate jumps
-                if (i == last_clicked_icon && (now - last_click_tick) < 800) {
+                if (i == last_clicked_icon && (now - last_click_tick) < double_click_window_ticks()) {
                     if (ic->action) {
                         ic->action();
                     }
