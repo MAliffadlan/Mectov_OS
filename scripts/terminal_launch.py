@@ -71,6 +71,38 @@ def cursor_at(path, x, y):
     return True
 
 
+def find_cursor_position(path):
+    """Scan a PPM dump for the arrow cursor; return its tip (x,y) or None.
+
+    The tip column is dark (0x111111) with the white fill on the diagonal
+    below-right (one pixel wider per row), so we scan dark pixels and
+    confirm the diagonal.
+    """
+    try:
+        w, h, pix = _load_ppm(path)
+    except (OSError, AssertionError):
+        return None
+
+    def px(px_, py_):
+        o = (py_ * w + px_) * 3
+        return pix[o], pix[o + 1], pix[o + 2]
+
+    WHITE = (255, 255, 255)
+    DARK = (17, 17, 17)
+    for y in range(h - 24):
+        for x in range(w - 16):
+            if px(x, y) != DARK:
+                continue
+            good = True
+            for k in range(1, 6):
+                if px(x + k, y + k) != WHITE:
+                    good = False
+                    break
+            if good:
+                return (x, y)
+    return None
+
+
 def launch_terminal(mon, serial_log, dump_path, attempts=6):
     """Double-click the Terminal desktop icon; True if it launched.
 
@@ -78,7 +110,8 @@ def launch_terminal(mon, serial_log, dump_path, attempts=6):
     once `[LOADER] start` appears in serial_log (the terminal app
     loading). Retries from the corner with screendump verification.
     """
-    for _ in range(attempts):
+    verified_once = False
+    for attempt in range(attempts):
         # Reset to the top-left corner: idempotent once clamped at (0,0).
         for _ in range(4):
             mon("mouse_move -127 -127")
@@ -90,7 +123,12 @@ def launch_terminal(mon, serial_log, dump_path, attempts=6):
         mon("screendump " + dump_path)
         time.sleep(0.4)
         if not cursor_at(dump_path, ICON_X, ICON_Y):
+            pos = find_cursor_position(dump_path)
+            print(f"[launch] attempt {attempt + 1}: cursor NOT on icon"
+                  + (f" (found at {pos})" if pos else " (cursor not found in dump)"))
             continue
+        verified_once = True
+        print(f"[launch] attempt {attempt + 1}: cursor verified on icon, clicking")
         # Several quick click pairs: the desktop launches on any two clicks
         # on the icon within 800 ticks, so one pair is virtually certain to
         # land in the window. (Extra clicks after launch are harmless.)
@@ -101,4 +139,5 @@ def launch_terminal(mon, serial_log, dump_path, attempts=6):
             time.sleep(0.05)
         if wait_for_in_file(serial_log, "[LOADER] start", 6):
             return True
+    print(f"[launch] terminal did not launch (verified_once={verified_once})")
     return False
