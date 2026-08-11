@@ -347,6 +347,11 @@ void vfs_init() {
         extern uint8_t _binary_mmapdemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/mmapdemo.mct", (const char*)_binary_mmapdemo_mct_start, _binary_mmapdemo_mct_end - _binary_mmapdemo_mct_start);
 
+        // file-backed mmap demo (mmap_file + msync)
+        extern uint8_t _binary_mmapfiledemo_mct_start[];
+        extern uint8_t _binary_mmapfiledemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/mmapfiledemo.mct", (const char*)_binary_mmapfiledemo_mct_start, _binary_mmapfiledemo_mct_end - _binary_mmapfiledemo_mct_start);
+
         // lazy zero page + heap/stack demand-paging demo
         extern uint8_t _binary_demandtest_mct_start[];
         extern uint8_t _binary_demandtest_mct_end[];
@@ -501,6 +506,12 @@ void vfs_init() {
     extern uint8_t _binary_mmapdemo_mct_end[];
     vfs_create_file("apps/mmapdemo.mct");
     vfs_write_file("apps/mmapdemo.mct", (const char*)_binary_mmapdemo_mct_start, _binary_mmapdemo_mct_end - _binary_mmapdemo_mct_start);
+
+    // file-backed mmap demo (mmap_file + msync)
+    extern uint8_t _binary_mmapfiledemo_mct_start[];
+    extern uint8_t _binary_mmapfiledemo_mct_end[];
+    vfs_create_file("apps/mmapfiledemo.mct");
+    vfs_write_file("apps/mmapfiledemo.mct", (const char*)_binary_mmapfiledemo_mct_start, _binary_mmapfiledemo_mct_end - _binary_mmapfiledemo_mct_start);
 
     // lazy zero page + heap/stack demand-paging demo
     extern uint8_t _binary_demandtest_mct_start[];
@@ -1509,6 +1520,48 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
     int r = vfs_read_file_unlocked(path,  buf,  max_size);
     vfs_lock_release();
     return r;
+}
+
+// Offset-aware read by node index WITHOUT vfs_lock. Used by the mmap
+// page-fault handler: a user fault can fire while the SAME CPU is inside a
+// VFS call (e.g. SYS_READ copying into an mmap'd user buffer), so taking
+// vfs_lock here would self-deadlock. We take only ata_lock (innermost in the
+// task > fd > vfs > ata ordering), which is never held while the holder waits
+// on anything we need — bounded waits only. Plain FS_FILE nodes only.
+int vfs_read_file_offset(int node, int offset, char* buf, int len) {
+    if (node < 0 || node >= MAX_NODES) return -1;
+    if (!fs_nodes[node].in_use) return -1;
+    if (fs_nodes[node].type != FS_FILE) return -1;
+    if (offset < 0 || len <= 0) return -1;
+
+    int size = fs_nodes[node].size;
+    if (offset >= size) return 0;
+    if (len > size - offset) len = size - offset;
+    if (len <= 0) return 0;
+
+    int sector = fs_nodes[node].data_sector + (offset / 512);
+    if (sector < 0 || sector >= VFS_DISK_SECTORS) return -1;
+    // Clamp so a corrupt node can never walk off the disk image.
+    int max_readable = (VFS_DISK_SECTORS - sector) * 512;
+    if (len > max_readable) len = max_readable;
+
+    int in_off = offset % 512;
+    int remaining = len;
+    int done = 0;
+    while (remaining > 0) {
+        unsigned char tmp[512];
+        ata_read_sector((unsigned int)sector++, tmp);
+        int chunk = remaining > 512 ? 512 : remaining;
+        if (in_off > 0) {
+            chunk = 512 - in_off;
+            if (chunk > remaining) chunk = remaining;
+        }
+        memcpy(buf + done, tmp + in_off, chunk);
+        done += chunk;
+        remaining -= chunk;
+        in_off = 0;
+    }
+    return len;
 }
 
 static int vfs_alloc_sectors(int sectors_needed, int exclude_node) {

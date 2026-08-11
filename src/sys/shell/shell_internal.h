@@ -160,6 +160,7 @@ void cmd_df(void);
 void cmd_shutdown(void);
 void cmd_reboot(void);
 void cmd_lspci(void);
+void cmd_ipconfig(void);
 void cmd_snake(void);
 void cmd_flappy(void);
 void cmd_doom(void);

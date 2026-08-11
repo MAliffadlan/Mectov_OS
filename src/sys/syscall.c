@@ -613,6 +613,19 @@ static void syscall_handler(registers_t* regs) {
             regs->eax = task_munmap((uint32_t)regs->ebx);
             break;
         }
+        // ----- SYS_MMAP_FILE (93): map an open VFS file, pages fault in -----
+        // ----- from disk lazily; dirty pages write back on msync/munmap -----
+        case SYS_MMAP_FILE: {
+            extern uint32_t task_mmap_file(int fd, int flags);
+            regs->eax = task_mmap_file((int)regs->ebx, (int)regs->ecx);
+            break;
+        }
+        // ----- SYS_MSYNC (94): flush dirty pages of a file mapping back -----
+        case SYS_MSYNC: {
+            extern uint32_t task_msync(uint32_t addr);
+            regs->eax = task_msync((uint32_t)regs->ebx);
+            break;
+        }
         // ----- SYS_DUP2 (84): duplicate a file descriptor -----
         case SYS_DUP2: {
             extern int do_sys_dup2(int oldfd, int newfd);

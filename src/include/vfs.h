@@ -59,6 +59,11 @@ int vfs_delete_node(const char* path);
 int vfs_rename(const char* old_path, const char* new_path);
 int vfs_write_file(const char* path, const char* data, int size);
 int vfs_read_file(const char* path, char* buf, int max_size);
+// Offset-aware read by node index WITHOUT taking vfs_lock (callers that
+// already hold it, or that cannot block — e.g. the mmap page-fault handler —
+// use this; it takes only ata_lock, the innermost lock). Plain FS_FILE nodes
+// only. Returns bytes read or -1.
+int vfs_read_file_offset(int node, int offset, char* buf, int len);
 
 // Resolusi path
 void vfs_resolve_path(const char* path, char* resolved, int buf_size);

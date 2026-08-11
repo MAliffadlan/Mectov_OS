@@ -5,12 +5,17 @@
 #include "../include/serial.h"
 
 
-// Our IP: 10.0.2.15 (QEMU default guest IP with -net user)
-uint8_t my_ip[4]       = {10, 0, 2, 15};
-// Gateway: 10.0.2.2 (QEMU default gateway)
-uint8_t gateway_ip[4]  = {10, 0, 2, 2};
-uint8_t gateway_mac[6] = {0, 0, 0, 0, 0, 0};
+// Static defaults (QEMU slirp layout). A successful DHCP exchange overwrites
+// all of these at runtime — see the DHCP client section below. `net_ready` is
+// only set once the gateway's MAC is resolved via ARP, whatever the source of
+// the config.
+uint8_t my_ip[4]        = {10, 0, 2, 15};
+uint8_t gateway_ip[4]   = {10, 0, 2, 2};
+uint8_t gateway_mac[6]  = {0, 0, 0, 0, 0, 0};
+uint8_t dns_server_ip[4] = {10, 0, 2, 3};
+uint8_t netmask_ip[4]   = {255, 255, 255, 0};
 int     net_ready       = 0;
+int     dhcp_bound      = 0;
 static char pending_dns_domain[128] = {0};
 static uint8_t pending_tcp_ip[4] = {0, 0, 0, 0};
 static uint16_t pending_tcp_port = 0;
@@ -263,9 +268,14 @@ void net_udp_peer(uint8_t* ip_out, uint16_t* port_out) {
     *port_out = udp_last_src_port;
 }
 
-// UDP send
-static void net_send_udp(uint8_t* target_ip, uint16_t src_port, uint16_t dst_port, void* payload, uint32_t payload_len) {
-    if (!net_ready) return;
+// Raw UDP send with arbitrary source/destination IPs and an explicit
+// destination MAC — DHCP needs 0.0.0.0 -> 255.255.255.255 broadcast BEFORE
+// the stack is configured, so this path has no net_ready gate. Normal traffic
+// funnels through net_send_udp() below.
+static void net_send_udp_raw(uint8_t* src_ip, uint8_t* dst_ip, uint8_t* dst_mac,
+                             uint16_t src_port, uint16_t dst_port,
+                             void* payload, uint32_t payload_len) {
+    if (!rtl_present || payload_len > 1400) return;
 
     uint8_t pkt[1500];
     ip_header_t* ip = (ip_header_t*)pkt;
@@ -282,8 +292,8 @@ static void net_send_udp(uint8_t* target_ip, uint16_t src_port, uint16_t dst_por
     ip->ttl        = 64;
     ip->protocol   = IP_PROTO_UDP;
     ip->checksum   = 0;
-    memcpy(ip->src_ip, my_ip, 4);
-    memcpy(ip->dst_ip, target_ip, 4);
+    memcpy(ip->src_ip, src_ip, 4);
+    memcpy(ip->dst_ip, dst_ip, 4);
     ip->checksum   = ip_checksum(ip, sizeof(ip_header_t));
 
     udp->src_port = htons(src_port);
@@ -293,7 +303,13 @@ static void net_send_udp(uint8_t* target_ip, uint16_t src_port, uint16_t dst_por
 
     memcpy(pkt + sizeof(ip_header_t) + sizeof(udp_header_t), payload, payload_len);
 
-    net_send_eth(gateway_mac, ETH_TYPE_IP, pkt, total);
+    net_send_eth(dst_mac, ETH_TYPE_IP, pkt, total);
+}
+
+// UDP send (normal path: from our IP, out via the gateway MAC)
+static void net_send_udp(uint8_t* target_ip, uint16_t src_port, uint16_t dst_port, void* payload, uint32_t payload_len) {
+    if (!net_ready) return;
+    net_send_udp_raw(my_ip, target_ip, gateway_mac, src_port, dst_port, payload, payload_len);
 }
 
 // TCP segment send helper (per-connection)
@@ -581,9 +597,9 @@ void net_send_dns_query(const char* domain) {
     // QCLASS = 1 (IN)
     payload[qpos++] = 0; payload[qpos++] = 1;
 
-    // Use QEMU virtual DNS server (10.0.2.3) which proxies to host resolver
-    uint8_t dns_server[4] = {10, 0, 2, 3};
-    net_send_udp(dns_server, 12345, 53, payload, qpos);
+    // DNS server: the configured one (DHCP option 6, else the QEMU slirp
+    // default 10.0.2.3) which proxies to the host resolver.
+    net_send_udp(dns_server_ip, 12345, 53, payload, qpos);
 }
 
 static void net_handle_dns(uint8_t* data, uint32_t len) {
@@ -674,6 +690,229 @@ static void net_handle_dns(uint8_t* data, uint32_t len) {
     }
 }
 
+// ============================================================
+// DHCP client (RFC 2131) — discover/offer/request/ack over UDP broadcast
+// ============================================================
+// On boot we have no address yet, so DISCOVER/REQUEST go out as UDP broadcast
+// (0.0.0.0:68 -> 255.255.255.255:67, Ethernet FF:FF:FF:FF:FF:FF) via
+// net_send_udp_raw — before net_ready is set. The server's OFFER/ACK may come
+// back broadcast too, so the RX path accepts broadcast (and 0.0.0.0) frames
+// while unbound. On ACK the runtime config (my_ip / gateway / DNS / netmask)
+// is overwritten and the gateway MAC is re-resolved via ARP (which is what
+// sets net_ready). If no server answers after a few retries we fall back to
+// the static defaults, so networking still works without a DHCP server.
+// The state machine is driven from net_poll() (main loop, inside its cli
+// window); the IRQ path only parses and records OFFER/ACK data.
+
+typedef struct __attribute__((packed)) {
+    uint8_t  op;            // 1 = BOOTREQUEST, 2 = BOOTREPLY
+    uint8_t  htype;         // 1 = Ethernet
+    uint8_t  hlen;          // 6
+    uint8_t  hops;
+    uint32_t xid;
+    uint16_t secs;
+    uint16_t flags;         // 0x8000 = broadcast response requested
+    uint8_t  ciaddr[4];     // client IP (bound state)
+    uint8_t  yiaddr[4];     // 'your' (offered) IP
+    uint8_t  siaddr[4];     // server IP
+    uint8_t  giaddr[4];     // relay agent IP
+    uint8_t  chaddr[16];    // client hardware address
+    char     sname[64];
+    char     file[128];
+    uint8_t  magic[4];      // 0x63 0x82 0x53 0x63
+    // options follow
+} dhcp_packet_t;
+
+#define DHCP_STATE_IDLE    0
+#define DHCP_STATE_DISCOVER 1
+#define DHCP_STATE_REQUEST  2
+#define DHCP_STATE_BOUND    3
+
+static int  dhcp_state = DHCP_STATE_IDLE;
+static uint32_t dhcp_xid = 0;
+static uint32_t dhcp_last_send_tick = 0;
+static int  dhcp_retries = 0;
+static uint8_t dhcp_offered_ip[4] = {0, 0, 0, 0};
+static uint8_t dhcp_server_id[4]  = {0, 0, 0, 0};
+static uint8_t dhcp_router[4]     = {0, 0, 0, 0};
+static uint8_t dhcp_dns[4]        = {0, 0, 0, 0};
+static uint8_t dhcp_mask[4]       = {0, 0, 0, 0};
+
+#define DHCP_RETRY_MS    1000
+#define DHCP_MAX_RETRIES 3
+
+static void dhcp_send_discover(void);
+static void dhcp_send_request(void);
+
+// Append a 3-byte option (type, len, single byte value) to a DHCP message.
+static int dhcp_opt3(uint8_t* p, int o, uint8_t type, uint8_t val) {
+    p[o++] = type; p[o++] = 1; p[o++] = val;
+    return o;
+}
+
+// Append an N-byte option (type, len, bytes).
+static int dhcp_optN(uint8_t* p, int o, uint8_t type, const uint8_t* bytes, int n) {
+    p[o++] = type; p[o++] = (uint8_t)n;
+    for (int i = 0; i < n; i++) p[o++] = bytes[i];
+    return o;
+}
+
+// Send one DHCP message broadcast. requested_ip/server_id are used by
+// REQUEST (RFC 2131 section 4.3.2); NULL for DISCOVER.
+static void dhcp_send_msg(uint8_t msg_type, const uint8_t* requested_ip, const uint8_t* server_id) {
+    uint8_t pkt[1500];
+    memset(pkt, 0, sizeof(pkt));
+    dhcp_packet_t* d = (dhcp_packet_t*)pkt;
+
+    d->op    = 1; // BOOTREQUEST
+    d->htype = 1;
+    d->hlen  = 6;
+    d->xid   = htonl(dhcp_xid);
+    d->flags = htons(0x8000); // server must broadcast its reply
+    memcpy(d->chaddr, rtl_mac, 6);
+    d->magic[0] = 0x63; d->magic[1] = 0x82; d->magic[2] = 0x53; d->magic[3] = 0x63;
+
+    int o = sizeof(dhcp_packet_t);
+    o = dhcp_opt3(pkt, o, 53, msg_type);                    // message type
+    if (msg_type == DHCP_REQUEST) {
+        if (requested_ip) o = dhcp_optN(pkt, o, 50, requested_ip, 4);  // req. IP
+        if (server_id)    o = dhcp_optN(pkt, o, 54, server_id, 4);     // server id
+    } else {
+        // Parameter request list: subnet mask (1), router (3), DNS (6)
+        pkt[o++] = 55; pkt[o++] = 3; pkt[o++] = 1; pkt[o++] = 3; pkt[o++] = 6;
+    }
+    pkt[o++] = 255; // end option
+
+    uint8_t bcast_mac[6]  = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    uint8_t zero_ip[4]    = {0, 0, 0, 0};
+    uint8_t bcast_ip[4]   = {255, 255, 255, 255};
+    net_send_udp_raw(zero_ip, bcast_ip, bcast_mac, DHCP_CLIENT_PORT, DHCP_SERVER_PORT, pkt, (uint32_t)o);
+}
+
+static void dhcp_send_discover(void) {
+    write_serial_string("[DHCP] DISCOVER xid=");
+    write_serial_hex(dhcp_xid);
+    write_serial_string("\n");
+    dhcp_send_msg(DHCP_DISCOVER, NULL, NULL);
+}
+
+static void dhcp_send_request(void) {
+    write_serial_string("[DHCP] REQUEST xid=");
+    write_serial_hex(dhcp_xid);
+    write_serial_string("\n");
+    dhcp_send_msg(DHCP_REQUEST, dhcp_offered_ip, dhcp_server_id);
+}
+
+// Apply an OFFER/ACK's option set to the running config (only non-zero
+// entries override the static defaults).
+static void dhcp_apply_config(const uint8_t* yiaddr) {
+    memcpy(my_ip, yiaddr, 4);
+    if (dhcp_router[0] || dhcp_router[1] || dhcp_router[2] || dhcp_router[3]) {
+        memcpy(gateway_ip, dhcp_router, 4);
+    }
+    if (dhcp_dns[0] || dhcp_dns[1] || dhcp_dns[2] || dhcp_dns[3]) {
+        memcpy(dns_server_ip, dhcp_dns, 4);
+    }
+    if (dhcp_mask[0] || dhcp_mask[1] || dhcp_mask[2] || dhcp_mask[3]) {
+        memcpy(netmask_ip, dhcp_mask, 4);
+    }
+    dhcp_bound = 1;
+    dhcp_state = DHCP_STATE_BOUND;
+}
+
+// Parse an incoming BOOTREPLY. Runs from the RX path (IRQ or net_poll, both
+// with IF=0) — only touches globals and may send the REQUEST, exactly like
+// the existing ARP-reply path.
+static void dhcp_handle(uint8_t* data, uint32_t len) {
+    if (len < sizeof(dhcp_packet_t)) return;
+    dhcp_packet_t* d = (dhcp_packet_t*)data;
+    if (d->op != 2) return;                        // BOOTREPLY
+    if (d->magic[0] != 0x63 || d->magic[1] != 0x82 ||
+        d->magic[2] != 0x53 || d->magic[3] != 0x63) return;
+    if (ntohl(d->xid) != dhcp_xid) return;         // not our transaction
+    if (memcmp(d->chaddr, rtl_mac, 6) != 0) return; // for another client
+
+    // Walk the options.
+    uint8_t msg_type = 0;
+    int o = sizeof(dhcp_packet_t);
+    while (o < (int)len && o < 1500) {
+        uint8_t t = data[o++];
+        if (t == 255) break;                       // END
+        if (t == 0) continue;                      // PAD
+        if (o >= (int)len) break;
+        uint8_t n = data[o++];
+        if (o + n > (int)len) break;
+        if (t == 53 && n >= 1) msg_type = data[o];
+        else if (t == 1 && n >= 4) memcpy(dhcp_mask, data + o, 4);
+        else if (t == 3 && n >= 4) memcpy(dhcp_router, data + o, 4);
+        else if (t == 6 && n >= 4) memcpy(dhcp_dns, data + o, 4);
+        else if (t == 54 && n >= 4) memcpy(dhcp_server_id, data + o, 4);
+        o += n;
+    }
+
+    write_serial_string("[DHCP] reply type=");
+    write_serial_hex(msg_type);
+    write_serial_string(" yiaddr=");
+    write_serial_hex((d->yiaddr[0] << 24) | (d->yiaddr[1] << 16) | (d->yiaddr[2] << 8) | d->yiaddr[3]);
+    write_serial_string("\n");
+
+    if (msg_type == DHCP_OFFER && dhcp_state == DHCP_STATE_DISCOVER) {
+        memcpy(dhcp_offered_ip, d->yiaddr, 4);
+        dhcp_state = DHCP_STATE_REQUEST;
+        dhcp_retries = 0;
+        dhcp_last_send_tick = get_ticks();
+        dhcp_send_request();
+    } else if (msg_type == DHCP_ACK && dhcp_state == DHCP_STATE_REQUEST) {
+        dhcp_apply_config(d->yiaddr);
+        write_serial_string("[DHCP] ACK — bound ");
+        write_serial_hex((my_ip[0] << 24) | (my_ip[1] << 16) | (my_ip[2] << 8) | my_ip[3]);
+        write_serial_string(" gw=");
+        write_serial_hex((gateway_ip[0] << 24) | (gateway_ip[1] << 16) | (gateway_ip[2] << 8) | gateway_ip[3]);
+        write_serial_string(" dns=");
+        write_serial_hex((dns_server_ip[0] << 24) | (dns_server_ip[1] << 16) | (dns_server_ip[2] << 8) | dns_server_ip[3]);
+        write_serial_string("\n");
+        // Resolve the (possibly new) gateway MAC — its ARP reply is what
+        // flips net_ready and dispatches any queued DNS/TCP operations.
+        net_send_arp_request(gateway_ip);
+    } else if (msg_type == DHCP_NAK && dhcp_state == DHCP_STATE_REQUEST) {
+        write_serial_string("[DHCP] NAK — restarting discovery\n");
+        dhcp_state = DHCP_STATE_IDLE;
+        dhcp_retries = 0;
+    }
+}
+
+// Give up on DHCP and use the static defaults (also re-resolves the gateway
+// MAC so networking comes up exactly as it did before DHCP existed).
+static void dhcp_fallback_static(void) {
+    write_serial_string("[DHCP] no server after ");
+    write_serial_hex(DHCP_MAX_RETRIES + 1);
+    write_serial_string(" tries — static config\n");
+    dhcp_state = DHCP_STATE_BOUND;   // stop the retry loop
+    net_send_arp_request(gateway_ip);
+}
+
+// Drive the client state machine. Called from net_poll() inside its cli
+// window so the IRQ RX path can never interleave a parse with a retry.
+static void dhcp_tick(void) {
+    if (!rtl_present) return;
+    if (dhcp_state == DHCP_STATE_IDLE) {
+        dhcp_state = DHCP_STATE_DISCOVER;
+        dhcp_retries = 0;
+        dhcp_last_send_tick = get_ticks();
+        dhcp_send_discover();
+    } else if (dhcp_state == DHCP_STATE_DISCOVER || dhcp_state == DHCP_STATE_REQUEST) {
+        if (get_ticks() - dhcp_last_send_tick >= DHCP_RETRY_MS) {
+            dhcp_retries++;
+            if (dhcp_retries > DHCP_MAX_RETRIES) {
+                dhcp_fallback_static();
+                return;
+            }
+            dhcp_last_send_tick = get_ticks();
+            if (dhcp_state == DHCP_STATE_DISCOVER) dhcp_send_discover();
+            else dhcp_send_request();
+        }
+    }
+}
 
 // Handle incoming TCP
 static void net_handle_tcp(ip_header_t* ip, uint8_t* tcp_data, uint32_t tcp_len) {
@@ -869,6 +1108,13 @@ static void net_handle_udp(ip_header_t* ip, uint8_t* udp_data, uint32_t udp_len)
         return;
     }
 
+    // DHCP replies (OFFER/ACK/NAK) land on our client port 68. Ignored once
+    // bound — the xid/chaddr checks in dhcp_handle keep strays out regardless.
+    if (dst_port == DHCP_CLIENT_PORT && dhcp_state != DHCP_STATE_BOUND) {
+        dhcp_handle(udp_data + sizeof(udp_header_t), payload_len);
+        return;
+    }
+
     // Application datagram: deliver to the bound UDP socket, if any.
     // NOTE: no cli/sti here — this runs inside net_irq_handler (IF already
     // cleared by the interrupt gate) or net_poll (which we wrap in cli/sti).
@@ -905,11 +1151,20 @@ static void net_handle_ip(uint8_t* data, uint32_t len) {
     // which previously fed a ~4GB memcpy in net_handle_icmp.
     if (ihl < sizeof(ip_header_t) || ihl > total) return;
 
-    // Check if it's for us
+    // Check if it's for us. Before DHCP binds us we have no address, so the
+    // server's OFFER/ACK can arrive as a broadcast (255.255.255.255 — we set
+    // the broadcast flag) or to 0.0.0.0; accept those while unbound only.
     if (ip->dst_ip[0] != my_ip[0] || ip->dst_ip[1] != my_ip[1] ||
         ip->dst_ip[2] != my_ip[2] || ip->dst_ip[3] != my_ip[3]) {
-        write_serial_string("[NET] net_handle_ip: discarded because dst_ip is not for us\n");
-        return;
+        int unbound = dhcp_state != DHCP_STATE_BOUND;
+        int bcast = (ip->dst_ip[0] == 255 && ip->dst_ip[1] == 255 &&
+                     ip->dst_ip[2] == 255 && ip->dst_ip[3] == 255);
+        int zero  = (ip->dst_ip[0] == 0 && ip->dst_ip[1] == 0 &&
+                     ip->dst_ip[2] == 0 && ip->dst_ip[3] == 0);
+        if (!unbound || (!bcast && !zero)) {
+            write_serial_string("[NET] net_handle_ip: discarded because dst_ip is not for us\n");
+            return;
+        }
     }
 
 
@@ -944,10 +1199,15 @@ static void net_handle_frame(uint8_t* frame, uint32_t len) {
     }
 }
 
-// Initialize networking: send ARP request to find gateway
+// Initialize networking: start the DHCP client. dhcp_tick() (driven from
+// net_poll) sends the first DISCOVER; if no server answers, the static
+// defaults take over exactly as before (ARP -> net_ready).
 void net_init(void) {
     if (!rtl_present) return;
-    net_send_arp_request(gateway_ip);
+    write_serial_string("[NET] init: starting DHCP client\n");
+    dhcp_xid = (uint32_t)get_ticks() * 2654435761u + 0x4D4354u; // odd-ish xid
+    dhcp_state = DHCP_STATE_IDLE;
+    dhcp_tick();
 }
 
 // Poll for incoming packets (call from main loop — fallback for the shell's
@@ -968,6 +1228,10 @@ void net_poll(void) {
         write_serial_string("\n");
         net_handle_frame(buf, (uint32_t)len);
     }
+
+    // DHCP state machine (retries/fallback). Same cli window: a DISCOVER/REQUEST
+    // retry must not race the IRQ path parsing an OFFER/ACK.
+    dhcp_tick();
 
     // TCP retransmit + connect timeout sweep. Runs inside the same cli/sti
     // window as the RX drain so the IRQ path can never interleave.

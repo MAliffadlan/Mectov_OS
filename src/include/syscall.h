@@ -154,6 +154,13 @@ typedef struct {
 #define SYS_MUNMAP      83  // EBX=base VA (from mmap) -> 1 or 0
 #define SYS_DUP2        84  // EBX=oldfd, ECX=newfd -> newfd or -1
 
+// File-backed mmap: SYS_MMAP_FILE maps an open VFS FILE fd into the address
+// space (pages fault in lazily FROM THE DISK on first access); dirty pages
+// write back to the file on SYS_MSYNC and SYS_MUNMAP. The mapping keeps its
+// own node reference, so the fd may be closed right after mmap.
+#define SYS_MMAP_FILE   93  // EBX=fd, ECX=flags(MMAP_FILE_SHARED) -> base VA or 0
+#define SYS_MSYNC       94  // EBX=base VA (from mmap_file) -> 1 written/0 failed
+
 // Signal numbers (POSIX subset; SIGKILL and SIGSTOP cannot be caught or
 // ignored, SIGCONT resumes a stopped task)
 #define SIGINT   2
@@ -181,6 +188,21 @@ static inline void* sys_mmap(uint32_t size) {
 static inline int sys_munmap(void* addr) {
     int ret;
     __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MUNMAP), "b"(addr));
+    return ret;
+}
+// File-backed mmap of an open file fd (flags: MMAP_FILE_SHARED). The mapping
+// survives closing the fd; dirty pages write back on msync/munmap. Raw asm
+// (the generic syscall() helper is declared below this point).
+static inline void* sys_mmap_file(int fd, int flags) {
+    void* ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MMAP_FILE), "b"(fd), "c"(flags));
+    return ret;
+}
+// Flush dirty pages of a file-backed mapping back to its file. Returns 1 if
+// everything was written (or there was nothing to write), 0 on failure.
+static inline int sys_msync(void* addr) {
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MSYNC), "b"(addr));
     return ret;
 }
 #define SYS_VMM_ALLOC      30  // EBX=vaddr, ECX=flags → return vaddr or 0

@@ -50,3 +50,36 @@ Syscall handling is refactored into domain-specific sub-handlers to keep the ker
 | `31` | `SYS_NET_RECV` | `syscall_net` | Receive incoming network packet |
 | `32` | `SYS_DNS_LOOKUP` | `syscall_net` | Resolve domain name to IP address |
 | `33` | `SYS_TCP_CONNECT` | `syscall_net` | Establish TCP stream connection |
+
+> Note: the table above predates the modern syscall split — the authoritative
+> numbering lives in `src/include/syscall.h` (current numbers differ; e.g. 82 =
+> `SYS_MMAP`, 83 = `SYS_MUNMAP`). New syscalls are added there.
+
+---
+
+## 🗺️ File-Backed mmap (`SYS_MMAP_FILE` 93 / `SYS_MSYNC` 94)
+
+`SYS_MMAP_FILE` maps an open VFS `FILE` fd into the task's mmap window
+(`0x40000000..0x80000000`), completing the Unix memory model: a file lives in
+memory and its pages are demand-paged *from the disk*.
+
+- **Lazy fault-in**: no bytes are read at mmap time. Each page faults in on
+  first access; the `#PF` handler reads that page's sectors straight off the
+  ATA disk via `vfs_read_file_offset()` — an *unlocked* offset-aware reader
+  that takes only `ata_lock` (innermost). A user fault can fire while the
+  same CPU holds `vfs_lock` (e.g. `SYS_READ` copying into an mmap'd buffer),
+  so the fault path must never take `vfs_lock` itself.
+- **Dirty tracking**: pages fault in read-only; the first write faults again
+  (RO→RW upgrade), marks the page dirty in a per-region kmalloc'd bitmap, and
+  remaps it writable. The bitmap is per-task: fork() deep-copies it, since
+  file-backed pages carry `PAGE_SHARED` and stay shared (never COW'd).
+- **Write-back**: `SYS_MSYNC` and `SYS_MUNMAP` flush dirty pages back to the
+  file with a whole-file read-modify-write (files ≤ disk size). The file's
+  CURRENT size is the write-back bound: bytes written past EOF are dropped
+  (POSIX — a MAP_SHARED mapping never grows a file; growth comes from
+  write()/ftruncate), and a concurrent writer is never clobbered. The mapping
+  records the VFS node itself, so closing the fd after mmap is legal.
+- **Fork**: file-backed PTEs are `PAGE_SHARED` so `vmm_clone_address_space`
+  leaves them shared between parent and child (true MAP_SHARED semantics);
+  exec/exit discard mappings without writeback (POSIX-style).
+- Demo: `run /apps/mmapfiledemo.mct` (see `apps/mmapfiledemo.c`).

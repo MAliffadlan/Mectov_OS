@@ -356,6 +356,13 @@ int gui_login() {
             }
         }
 
+        // Drain the NIC so the DHCP client can complete (or time out into the
+        // static fallback) before the user even logs in — the main loop's
+        // net_poll() does not run until after gui_login() returns. Same task-0
+        // context as the main loop, so no new RX/TX contention.
+        extern void net_poll(void);
+        net_poll();
+
         __asm__ __volatile__ ("hlt");
     }
 }

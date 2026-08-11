@@ -11,6 +11,7 @@
 #include "../include/fd.h"    // global_fds[] for fork fd sharing
 #include "../include/utils.h" // memcpy/memset
 #include "../include/loader.h" // loader_image_t for exec()
+#include "../include/vfs.h"   // fs_nodes[] + offset reads for file-backed mmap
 
 static spinlock_t task_lock = SPINLOCK_INIT;
 
@@ -94,6 +95,7 @@ typedef struct {
 } task_t;
 
 static task_t tasks[MAX_TASKS];
+static void mmap_free_dirty_bitmaps(int tid);  // defined in the mmap section
 static int current_task[16] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 static inline int get_cid() { extern uint32_t smp_lapic_addr; return smp_lapic_addr ? (apic_get_id() & 15) : 0; }
 
@@ -555,6 +557,10 @@ static void task_cleanup(int tid) {
         shm_task_exit(tid);
     }
 
+    // 3b. Drop file-backed mmap dirty bitmaps (no writeback on death: a dead
+    //     task's changes are lost, matching anonymous discard semantics).
+    mmap_free_dirty_bitmaps(tid);
+
     // 4. Free address space (if it's not the kernel's) — but only when this is
     //    the LAST task still using it. Sibling threads of one process share the
     //    same page_dir; freeing it when one of them exits would yank the memory
@@ -886,6 +892,7 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             tasks[i].sig_frame_esp = 0;
             tasks[i].zombie_since = 0;
             tasks[i].shm_bits = 0;
+            mmap_free_dirty_bitmaps(i);  // reused slot: drop any stale bitmaps
             for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[i].mmap_regions[j].base = 0;
             for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
             // Inherit the caller's fd table (POSIX spawn semantics). The shell's
@@ -1261,6 +1268,26 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         // faulted pages become COW, unfaulted ones stay demand-paged).
         memcpy(tasks[i].mmap_regions, tasks[parent].mmap_regions,
                sizeof(tasks[i].mmap_regions));
+        // File-backed regions keep SHARED frames across fork (their PTEs carry
+        // PAGE_SHARED, so the clone never COWs them) but each task owns its
+        // own dirty bitmap — a fresh copy of the parent's, so either task can
+        // msync/munmap and free its own without yanking the other's.
+        for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+            if (tasks[i].mmap_regions[j].base != 0 &&
+                tasks[i].mmap_regions[j].map_flags == MMAP_FILE_SHARED) {
+                uint32_t npages = tasks[i].mmap_regions[j].size / 4096;
+                uint8_t* d = kmalloc((npages + 7) / 8);
+                if (d) {
+                    memcpy(d, tasks[i].mmap_regions[j].dirty, (npages + 7) / 8);
+                    tasks[i].mmap_regions[j].dirty = d;
+                } else {
+                    // OOM: drop the mapping from the child rather than share
+                    // the parent's bitmap (double-free on munmap). The frames
+                    // stay mapped and are freed at exit via refcounts.
+                    memset(&tasks[i].mmap_regions[j], 0, sizeof(mmap_region_t));
+                }
+            }
+        }
 
         // Share the parent's open fds: bump each global refcount so a close in
         // one process does not yank the descriptor from the other.
@@ -1383,7 +1410,10 @@ int task_exec(const char* path, const char* arg, void* frame) {
     // ---- Rewire the task state to the new image ----
     tasks[tid].page_dir = img.page_dir;
     tasks[tid].heap_ptr = img.heap_start;
-    // A fresh address space has no mmap regions.
+    // A fresh address space has no mmap regions. Drop the old image's
+    // file-backed dirty bitmaps first (exec discards mappings without
+    // writeback, POSIX-style).
+    mmap_free_dirty_bitmaps(tid);
     for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[tid].mmap_regions[j].base = 0;
 
     // Reset signal state per POSIX: caught handlers revert to default, ignored
@@ -1510,6 +1540,7 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
     tasks[child].shm_bits = 0;
     tasks[child].heap_ptr = img.heap_start;
     tasks[child].current_dir = tasks[current_task[cid]].current_dir;
+    mmap_free_dirty_bitmaps(child);  // fresh spawn: never inherit stale bitmaps
     for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[child].mmap_regions[j].base = 0;
     for (int j = 0; j < SIG_MAX; j++) tasks[child].signal_handlers[j] = NULL;
 
@@ -2002,6 +2033,55 @@ void task_set_shm_bits(int tid, uint32_t bits) {
 // mmap() — reserve a VA range now, materialize frames on fault
 // ============================================================
 
+// Free every file-backed dirty bitmap a task holds. Called when an address
+// space is discarded (exec, task death) — no writeback: a dead task's
+// changes are lost, matching anonymous-mapping discard semantics.
+static void mmap_free_dirty_bitmaps(int tid) {
+    for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+        if (tasks[tid].mmap_regions[j].dirty) {
+            kfree(tasks[tid].mmap_regions[j].dirty);
+            tasks[tid].mmap_regions[j].dirty = NULL;
+        }
+    }
+}
+
+// Find a free region slot and the lowest gap in [MMAP_BASE, MMAP_END) that
+// fits `size`. Returns 1 with *slot/*base set, 0 on failure. Shared by the
+// anonymous and file-backed mmap paths.
+static int mmap_region_alloc(int tid, uint32_t size, int* slot, uint32_t* base) {
+    int s = -1;
+    for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+        if (tasks[tid].mmap_regions[j].base == 0) { s = j; break; }
+    }
+    if (s < 0) {
+        write_serial_string("[MMAP] too many regions for TID ");
+        write_serial_hex(tid);
+        write_serial_string("\n");
+        return 0;
+    }
+    uint32_t cursor = MMAP_BASE;
+    for (;;) {
+        int fits = 1;
+        for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+            uint32_t b = tasks[tid].mmap_regions[j].base;
+            if (b == 0) continue;
+            uint32_t e = b + tasks[tid].mmap_regions[j].size;
+            if (cursor < e && (cursor + size) > b) { fits = 0; break; }
+        }
+        if (fits) break;
+        cursor = ((cursor + size + 0xFFF) & ~0xFFFu) + 4096;
+        if (cursor >= MMAP_END) {
+            write_serial_string("[MMAP] no VA space left for TID ");
+            write_serial_hex(tid);
+            write_serial_string("\n");
+            return 0;
+        }
+    }
+    *slot = s;
+    *base = cursor;
+    return 1;
+}
+
 // Reserve a page-aligned range in the task's mmap VA window (MMAP_BASE..
 // MMAP_END). No physical frames are committed — the page fault handler
 // (task_mmap_handle_fault) lazily maps a fresh zeroed frame per page on first
@@ -2014,92 +2094,255 @@ uint32_t task_mmap_reserve(uint32_t size) {
 
     size = (size + 0xFFF) & ~0xFFFu;
     if (size == 0) size = 4096;
-    // The window is MMAP_BASE..MMAP_END; a mapping larger than the window
-    // (or one that would wrap cursor+size past 2^32) can never fit.
     if (size > (MMAP_END - MMAP_BASE)) return 0;
 
-    // Find a free slot for the new mapping.
-    int slot = -1;
-    for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
-        if (tasks[tid].mmap_regions[j].base == 0) { slot = j; break; }
-    }
-    if (slot < 0) {
-        write_serial_string("[MMAP] too many regions for TID ");
-        write_serial_hex(tid);
-        write_serial_string("\n");
-        return 0;
-    }
+    int slot;
+    uint32_t base;
+    if (!mmap_region_alloc(tid, size, &slot, &base)) return 0;
 
-    // Best-fit a gap between existing regions, starting from MMAP_BASE.
-    // Sort by base would be cleaner; with <=8 regions a linear scan is fine:
-    // find the lowest free gap that fits.
-    uint32_t cursor = MMAP_BASE;
-    for (;;) {
-        int fits = 1;
-        for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
-            uint32_t b = tasks[tid].mmap_regions[j].base;
-            if (b == 0) continue;
-            uint32_t e = b + tasks[tid].mmap_regions[j].size;
-            // Overlap if cursor < e && cursor + size > b
-            if (cursor < e && (cursor + size) > b) { fits = 0; break; }
-        }
-        if (fits) break;
-        // Move cursor past the region that overlaps.
-        cursor = ((cursor + size + 0xFFF) & ~0xFFFu) + 4096;
-        if (cursor >= MMAP_END) {
-            write_serial_string("[MMAP] no VA space left for TID ");
-            write_serial_hex(tid);
-            write_serial_string("\n");
-            return 0;
-        }
-    }
-
-    tasks[tid].mmap_regions[slot].base = cursor;
+    tasks[tid].mmap_regions[slot].base = base;
     tasks[tid].mmap_regions[slot].size = size;
+    tasks[tid].mmap_regions[slot].file_size = 0;
+    tasks[tid].mmap_regions[slot].vfs_node = -1;
+    tasks[tid].mmap_regions[slot].map_flags = 0;
+    tasks[tid].mmap_regions[slot].dirty = NULL;
 
     write_serial_string("[MMAP] reserved ");
-    write_serial_hex(cursor);
+    write_serial_hex(base);
     write_serial_string(" size=");
     write_serial_hex(size);
     write_serial_string(" for TID ");
     write_serial_hex(tid);
     write_serial_string("\n");
-    return cursor;
+    return base;
 }
 
-// Handle a page fault inside a reserved mmap region: allocate a zeroed frame
-// and map it writable. Returns 1 if handled (resume), 0 if not ours.
-int task_mmap_handle_fault(uint32_t addr, uint32_t cr3) {
+// Map an open VFS FILE fd into the task's mmap window. No bytes are read yet:
+// each page faults in FROM THE DISK on first access (task_mmap_handle_fault).
+// The mapping records the VFS node itself, so closing the fd afterwards is
+// legal. Flags: MMAP_FILE_SHARED (dirty pages write back on msync/munmap).
+// Returns the base VA or 0 on failure.
+uint32_t task_mmap_file(int fd, int flags) {
+    int cid = get_cid();
+    if (current_task[cid] < 0) return 0;
+    int tid = current_task[cid];
+    if (flags != MMAP_FILE_SHARED) return 0;
+
+    // Resolve the fd to a VFS node. Only plain FS_FILE nodes can back a
+    // mapping (ext2/proc/dev are rejected for now).
+    extern global_fd_t global_fds[];
+    int gfd = task_get_fd(tid, fd);
+    if (gfd < 0 || gfd >= MAX_GLOBAL_FDS || !global_fds[gfd].in_use) return 0;
+    if (global_fds[gfd].type != FD_TYPE_FILE) return 0;
+    int node = global_fds[gfd].vfs_node;
+    if (node < 0 || node >= MAX_NODES || !fs_nodes[node].in_use) return 0;
+    if (fs_nodes[node].type != FS_FILE) return 0;
+
+    uint32_t file_size = (fs_nodes[node].size > 0) ? (uint32_t)fs_nodes[node].size : 0;
+    uint32_t size = (file_size + 0xFFF) & ~0xFFFu;
+    if (size == 0) size = 4096;
+    if (size > (MMAP_END - MMAP_BASE)) return 0;
+
+    int slot;
+    uint32_t base;
+    if (!mmap_region_alloc(tid, size, &slot, &base)) return 0;
+
+    uint32_t npages = size / 4096;
+    uint8_t* dirty = kmalloc((npages + 7) / 8);
+    if (!dirty) return 0;
+    memset(dirty, 0, (npages + 7) / 8);
+
+    tasks[tid].mmap_regions[slot].base = base;
+    tasks[tid].mmap_regions[slot].size = size;
+    tasks[tid].mmap_regions[slot].file_size = file_size;
+    tasks[tid].mmap_regions[slot].vfs_node = node;
+    tasks[tid].mmap_regions[slot].map_flags = MMAP_FILE_SHARED;
+    tasks[tid].mmap_regions[slot].dirty = dirty;
+
+    write_serial_string("[MMAP] file map ");
+    write_serial_hex(base);
+    write_serial_string(" size=");
+    write_serial_hex(size);
+    write_serial_string(" node=");
+    write_serial_hex((uint32_t)node);
+    write_serial_string(" file_size=");
+    write_serial_hex(file_size);
+    write_serial_string(" for TID ");
+    write_serial_hex(tid);
+    write_serial_string("\n");
+    return base;
+}
+
+// Write every dirty page of a file-backed mapping back to its VFS file. Runs
+// in syscall context (msync/munmap), so the locked VFS paths are fine. The
+// file's CURRENT size is the write-back bound: bytes a task wrote past EOF
+// (pages beyond the original file size) are dropped, matching POSIX — a
+// MAP_SHARED mapping never grows a file by itself; growth comes from write()
+// ftruncate. A concurrent writer that grew the file since mmap is therefore
+// not clobbered either.
+static int mmap_flush_file(mmap_region_t* r) {
+    uint32_t npages = r->size / 4096;
+    int any = 0;
+    for (uint32_t i = 0; i < npages; i++) {
+        if (r->dirty[i / 8] & (1u << (i % 8))) { any = 1; break; }
+    }
+    if (!any) return 1;
+
+    uint32_t file_size = 0;
+    if (r->vfs_node >= 0 && r->vfs_node < MAX_NODES && fs_nodes[r->vfs_node].in_use) {
+        file_size = (uint32_t)fs_nodes[r->vfs_node].size;
+    }
+    if (file_size == 0) {
+        // File is gone or empty: nothing can be persisted. Drop the dirty
+        // marks (the bytes are lost, like an unlinked mapping's contents).
+        memset(r->dirty, 0, (npages + 7) / 8);
+        return 1;
+    }
+
+    char path[256];
+    if (vfs_get_abs_path(r->vfs_node, path, 256) < 0) return 0;
+    char* buf = kmalloc(file_size);
+    if (!buf) return 0;
+    // Start from the current on-disk content so bytes never written through
+    // this mapping (another fd, another process) are preserved.
+    int cur = vfs_read_file(path, buf, (int)file_size);
+    if (cur < 0) cur = 0;
+    for (uint32_t i = 0; i < npages; i++) {
+        if (r->dirty[i / 8] & (1u << (i % 8))) {
+            uint32_t off = i * 4096;
+            if (off >= file_size) continue;  // past EOF: never persisted
+            uint32_t copylen = 4096;
+            if (copylen > file_size - off) copylen = file_size - off;
+            memcpy(buf + off, (void*)(uintptr_t)(r->base + off), copylen);
+        }
+    }
+    int w = vfs_write_file(path, buf, (int)file_size);
+    kfree(buf);
+    if (w < 0) return 0;
+    memset(r->dirty, 0, (npages + 7) / 8);
+    write_serial_string("[MMAP] flushed ");
+    write_serial_hex(r->base);
+    write_serial_string(" size=");
+    write_serial_hex(file_size);
+    write_serial_string("\n");
+    return 1;
+}
+
+// Flush dirty pages of a file-backed mapping back to its file (msync).
+// Returns 1 on success (or nothing to write), 0 on failure.
+uint32_t task_msync(uint32_t addr) {
     int cid = get_cid();
     if (current_task[cid] < 0) return 0;
     int tid = current_task[cid];
 
     for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
-        uint32_t b = tasks[tid].mmap_regions[j].base;
-        if (b == 0) continue;
-        if (addr >= b && addr < b + tasks[tid].mmap_regions[j].size) {
-            uint32_t phys = frame_alloc();
-            if (phys == 0) {
-                write_serial_string("[MMAP] OOM on fault at ");
-                write_serial_hex(addr);
-                write_serial_string("\n");
-                return 0;  // let it become a crash
-            }
-            vmm_map_page(cr3, addr & ~0xFFFu, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER);
-            memset((void*)(uintptr_t)(addr & ~0xFFFu), 0, 4096);
-            write_serial_string("[MMAP] demand paged ");
-            write_serial_hex(addr & ~0xFFFu);
-            write_serial_string(" for TID ");
-            write_serial_hex(tid);
-            write_serial_string("\n");
-            return 1;
-        }
+        mmap_region_t* r = &tasks[tid].mmap_regions[j];
+        if (r->base != addr) continue;
+        if (r->map_flags != MMAP_FILE_SHARED) return 1; // nothing to sync
+        write_serial_string("[MMAP] msync ");
+        write_serial_hex(addr);
+        write_serial_string("\n");
+        return mmap_flush_file(r);
     }
     return 0;
 }
 
-// Unmap a reserved region: free any frames already faulted in, then release
-// the reservation. addr must be the exact base returned by mmap().
+// Handle a page fault inside a reserved mmap region. Anonymous mappings get a
+// fresh zeroed frame mapped writable. File-backed mappings pull the page's
+// bytes straight off the disk (vfs_read_file_offset — no vfs_lock, so a fault
+// taken while another path holds vfs_lock cannot self-deadlock) and map the
+// page read-only; the FIRST WRITE then faults again, marks the page dirty and
+// upgrades it to writable — that RO→RW transition is the dirty tracker.
+// File pages carry PAGE_SHARED so fork() leaves them shared, never COW'd.
+// Returns 1 if handled (resume), 0 if not ours.
+int task_mmap_handle_fault(uint32_t addr, uint32_t cr3, uint32_t err) {
+    int cid = get_cid();
+    if (current_task[cid] < 0) return 0;
+    int tid = current_task[cid];
+    int write_fault = (err & 2) != 0;
+
+    for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+        mmap_region_t* r = &tasks[tid].mmap_regions[j];
+        uint32_t b = r->base;
+        if (b == 0) continue;
+        if (addr < b || addr >= b + r->size) continue;
+
+        uint32_t va = addr & ~0xFFFu;
+        uint32_t pd_idx = va >> 22;
+        uint32_t pt_idx = (va >> 12) & 0x3FF;
+        uint32_t* pd = (uint32_t*)(uintptr_t)cr3;
+
+        // Page already present: only a write to a read-only file page needs
+        // action (mark dirty + upgrade to writable). A present page can never
+        // be missing its entry, so this early-out is just the RO→RW upgrade
+        // for file pages and a safety net for everything else.
+        if ((pd[pd_idx] & PAGE_PRESENT) && (pd[pd_idx] & 0xFFFFF000)) {
+            uint32_t* pt = (uint32_t*)(uintptr_t)(pd[pd_idx] & 0xFFFFF000);
+            if (pt[pt_idx] & PAGE_PRESENT) {
+                if (write_fault && !(pt[pt_idx] & PAGE_RW)) {
+                    if (r->map_flags == MMAP_FILE_SHARED) {
+                        uint32_t page = (va - b) / 4096;
+                        r->dirty[page / 8] |= (uint8_t)(1u << (page % 8));
+                    }
+                    pt[pt_idx] |= PAGE_RW;
+                    __asm__ __volatile__("invlpg (%0)" : : "r"(va));
+                }
+                return 1;
+            }
+        }
+
+        uint32_t phys = frame_alloc();
+        if (phys == 0) {
+            write_serial_string("[MMAP] OOM on fault at ");
+            write_serial_hex(addr);
+            write_serial_string("\n");
+            return 0;  // let it become a crash
+        }
+
+        if (r->map_flags == MMAP_FILE_SHARED) {
+            // Lazy file backing: zero the frame, then read THIS page's bytes
+            // from the disk at the matching file offset.
+            memset((void*)(uintptr_t)phys, 0, 4096);
+            uint32_t off = va - b;
+            if (off < r->file_size) {
+                int take = r->file_size - off;
+                if (take > 4096) take = 4096;
+                int got = vfs_read_file_offset(r->vfs_node, (int)off, (char*)(uintptr_t)phys, take);
+                if (got < 0) {
+                    frame_free(phys);
+                    write_serial_string("[MMAP] file read failed on fault\n");
+                    return 0;
+                }
+            }
+            uint32_t flags = PAGE_PRESENT | PAGE_USER | PAGE_SHARED;
+            if (write_fault) {
+                flags |= PAGE_RW;
+                uint32_t page = (va - b) / 4096;
+                r->dirty[page / 8] |= (uint8_t)(1u << (page % 8));
+            }
+            vmm_map_page(cr3, va, phys, flags);
+            write_serial_string("[MMAP] file paged ");
+            write_serial_hex(va);
+            write_serial_string("\n");
+            return 1;
+        }
+
+        // Anonymous: zero-filled writable frame, as before.
+        vmm_map_page(cr3, va, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+        memset((void*)(uintptr_t)va, 0, 4096);
+        write_serial_string("[MMAP] demand paged ");
+        write_serial_hex(va);
+        write_serial_string(" for TID ");
+        write_serial_hex(tid);
+        write_serial_string("\n");
+        return 1;
+    }
+    return 0;
+}
+
+// Unmap a reserved region: flush dirty pages to the backing file (file
+// mappings), free any frames already faulted in, then release the
+// reservation. addr must be the exact base returned by mmap()/mmap_file().
 uint32_t task_munmap(uint32_t addr) {
     int cid = get_cid();
     if (current_task[cid] < 0) return 0;
@@ -2107,8 +2350,19 @@ uint32_t task_munmap(uint32_t addr) {
     uint32_t page_dir = tasks[tid].page_dir;
 
     for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
-        if (tasks[tid].mmap_regions[j].base != addr) continue;
-        uint32_t size = tasks[tid].mmap_regions[j].size;
+        mmap_region_t* r = &tasks[tid].mmap_regions[j];
+        if (r->base != addr) continue;
+        uint32_t size = r->size;
+
+        // File-backed: write dirty pages back to the file before dropping
+        // the frames, then free the dirty bitmap.
+        if (r->map_flags == MMAP_FILE_SHARED) {
+            mmap_flush_file(r);
+            if (r->dirty) {
+                kfree(r->dirty);
+                r->dirty = NULL;
+            }
+        }
 
         // Free every frame that was faulted in. The page fault handler maps
         // exactly the pages in [base, base+size), so walk the PTEs.
@@ -2127,8 +2381,7 @@ uint32_t task_munmap(uint32_t addr) {
             }
         }
 
-        tasks[tid].mmap_regions[j].base = 0;
-        tasks[tid].mmap_regions[j].size = 0;
+        memset(r, 0, sizeof(*r));
         write_serial_string("[MMAP] unmapped ");
         write_serial_hex(addr);
         write_serial_string(" for TID ");

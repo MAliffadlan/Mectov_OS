@@ -50,6 +50,9 @@ iso/
 __pycache__/
 *.pyc
 
+# Freebuff desktop app state
+.freebuff/
+
 # IDE & Editor configs
 .vscode/
 .idea/

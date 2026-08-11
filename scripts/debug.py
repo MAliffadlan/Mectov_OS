@@ -87,6 +87,7 @@ SYSCALLS = {
     43:"SYS_NET_STATUS", 44:"SYS_SET_STDOUT_IPC", 45:"SYS_EXEC_CMD",
     46:"SYS_GET_TASKS", 47:"SYS_GET_WINDOWS", 48:"SYS_KILL_TASK",
     49:"SYS_GET_LAUNCH_ARG", 50:"SYS_CREATE_FILE", 51:"SYS_LOAD_LIBRARY",
+    93:"SYS_MMAP_FILE", 94:"SYS_MSYNC",
 }
 
 # ══════════════════════════════════════════════════════════════════════════════

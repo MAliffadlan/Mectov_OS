@@ -151,13 +151,30 @@ typedef struct __attribute__((packed)) {
 #define ICMP_ECHO_REQUEST 8
 #define ICMP_ECHO_REPLY   0
 
-// Our network config
+// Our network config. Static defaults (QEMU slirp) until a DHCP ACK
+// overwrites them at runtime (see dhcp_* below).
 extern uint8_t my_ip[4];
 extern uint8_t gateway_ip[4];
 extern uint8_t gateway_mac[6];
+extern uint8_t dns_server_ip[4];
+extern uint8_t netmask_ip[4];
 extern int     net_ready;
 extern int     ping_replied;
 extern uint32_t ping_rtt;
+
+// DHCP client state: 1 once a DHCP ACK bound us (vs. static fallback).
+extern int     dhcp_bound;
+
+// DHCP ports (RFC 2131)
+#define DHCP_SERVER_PORT 67
+#define DHCP_CLIENT_PORT 68
+
+// DHCP message types (option 53)
+#define DHCP_DISCOVER 1
+#define DHCP_OFFER    2
+#define DHCP_REQUEST  3
+#define DHCP_ACK      5
+#define DHCP_NAK      6
 
 extern int     dns_resolved;
 extern uint8_t dns_resolved_ip[4];

@@ -397,10 +397,12 @@ void isr_handler(registers_t *r) {
         }
         // --- Demand Paging for mmap() regions ---
         // Reserved mmap ranges live at 0x40000000..0x80000000 with no frames;
-        // lazily map a zeroed frame per page on first access.
+        // lazily map a zeroed frame per page on first access. err_code tells
+        // the handler whether this is a write fault (file-backed mappings map
+        // pages RO and mark them dirty + RW on the first write).
         if ((r->cs & 3) == 3 && faulting_address >= MMAP_BASE && faulting_address < MMAP_END) {
-            extern int task_mmap_handle_fault(uint32_t addr, uint32_t cr3);
-            if (task_mmap_handle_fault(faulting_address, cr3_val)) {
+            extern int task_mmap_handle_fault(uint32_t addr, uint32_t cr3, uint32_t err);
+            if (task_mmap_handle_fault(faulting_address, cr3_val, r->err_code)) {
                 return; // Resume execution, instruction will restart
             }
         }

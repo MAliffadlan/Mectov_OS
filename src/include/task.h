@@ -37,15 +37,27 @@ int task_get_cid(void);
 #define SIG_MAX  32
 
 // mmap() regions per task (demand paged): the region is reserved in VA space
-// with no physical frames; a page fault inside it lazily maps a fresh zeroed
-// frame. Max 8 concurrent mappings per task.
+// with no physical frames; a page fault inside it lazily materializes a frame
+// — zero-filled for anonymous mappings, or file bytes read straight off the
+// disk for file-backed mappings (see task_mmap_file). File-backed mappings
+// are MAP_SHARED-style: the first write to a page marks it dirty (tracked via
+// the RO→RW fault) and msync()/munmap() writes dirty pages back to the file.
+// Max 8 concurrent mappings per task.
 #define MMAP_MAX_REGIONS 8
 #define MMAP_BASE        0x40000000u  // user VA region for mmap (above heap/shm)
 #define MMAP_END         0x80000000u
 
+// mmap flags (SYS_MMAP_FILE). Only shared file-backed mappings exist today:
+// dirty pages write back to the VFS file on msync()/munmap().
+#define MMAP_FILE_SHARED 1
+
 typedef struct {
-    uint32_t base;   // page-aligned start VA (0 = free slot)
-    uint32_t size;   // page-aligned size in bytes
+    uint32_t base;      // page-aligned start VA (0 = free slot)
+    uint32_t size;      // page-aligned size in bytes
+    uint32_t file_size; // file length at map time (bytes); 0 for anonymous
+    int      vfs_node;  // VFS node backing a file mapping (-1 = anonymous)
+    uint32_t map_flags; // 0 = anonymous, MMAP_FILE_SHARED = file-backed
+    uint8_t* dirty;     // per-page dirty bitmap (kmalloc'd, file mappings)
 } mmap_region_t;
 
 // Sentinel stored in signal_handlers[] for "ignore this signal". User space
