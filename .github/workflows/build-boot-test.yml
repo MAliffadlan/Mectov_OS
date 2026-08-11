@@ -70,5 +70,12 @@ jobs:
 
       - name: Fork KVM 4-core — mandatory SMP keyboard regression
         run: |
-          # GitHub ubuntu-latest runners have /dev/kvm available.
-          python3 scripts/fork_test.py --kvm --timeout 240
+          # Most GitHub-hosted ubuntu-latest runners expose /dev/kvm; guard
+          # anyway so a KVM-less runner skips with a warning instead of
+          # burning the full boot timeout. On failure fork_test dumps the
+          # serial log tail to distinguish a QEMU startup error from a hang.
+          if [ -e /dev/kvm ] && [ -r /dev/kvm ]; then
+            python3 scripts/fork_test.py --kvm --timeout 240
+          else
+            echo "::warning::/dev/kvm not available on this runner — skipping the KVM regression"
+          fi

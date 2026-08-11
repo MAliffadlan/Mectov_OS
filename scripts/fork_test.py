@@ -94,6 +94,16 @@ def main():
     try:
         if not wait_for_in_file(SERIAL_LOG, "[K] login", args.timeout):
             print("[FAIL] kernel never reached login screen")
+            # Diagnostics: dump the serial tail so a QEMU startup failure
+            # (e.g. KVM unavailable) vs. a mid-boot hang is distinguishable.
+            try:
+                with open(SERIAL_LOG, "r", errors="replace") as f:
+                    tail = f.read().splitlines()[-25:]
+                print(f"--- serial log tail ({len(tail)} lines) ---")
+                for line in tail:
+                    print(line[:130])
+            except OSError:
+                print("(serial log missing or empty — QEMU likely failed to start)")
             return 1
         print("[OK] booted to login screen")
 
