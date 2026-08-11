@@ -161,6 +161,29 @@ typedef struct {
 #define SYS_MMAP_FILE   93  // EBX=fd, ECX=flags(MMAP_FILE_SHARED) -> base VA or 0
 #define SYS_MSYNC       94  // EBX=base VA (from mmap_file) -> 1 written/0 failed
 
+// POSIX file positioning & metadata
+#define SYS_LSEEK       95  // EBX=fd, ECX=offset, EDX=whence(SEEK_*) -> new offset or -1
+#define SYS_FSTAT       96  // EBX=fd, ECX=stat_t* -> 0 or -1
+
+// Open flags (SYS_OPEN mode / third arg)
+#define O_APPEND        8   // write always appends at end of file
+
+// lseek whence values
+#define SEEK_SET        0
+#define SEEK_CUR        1
+#define SEEK_END        2
+
+// File metadata returned by SYS_FSTAT (type mirrors fs_type_t: 0=file,
+// 1=dir, 2=dev, 3=ext2 file, 4=ext2 dir, 5=proc)
+typedef struct {
+    int size;           // File size in bytes (files only)
+    int type;           // fs_type_t value
+    int node_idx;       // VFS node index
+    int parent;         // Parent node index (-1 = root)
+    int data_sector;    // Starting ATA sector (files only)
+    char name[32];      // Node name
+} stat_t;
+
 // Signal numbers (POSIX subset; SIGKILL and SIGSTOP cannot be caught or
 // ignored, SIGCONT resumes a stopped task)
 #define SIGINT   2
@@ -252,6 +275,23 @@ static inline void sys_print(const char* msg, int color) {
 
 static inline int sys_open(const char* filename) {
     return syscall(SYS_OPEN, (int)filename, 0, 0);
+}
+
+// Open with flags (O_APPEND); the kernel stores them on the descriptor.
+static inline int sys_open_mode(const char* filename, int mode) {
+    return syscall(SYS_OPEN, (int)filename, mode, 0);
+}
+
+// POSIX lseek: whence is SEEK_SET(0)/SEEK_CUR(1)/SEEK_END(2). Returns the
+// new offset, or -1 on error (bad fd, non-seekable, negative result).
+static inline int sys_lseek(int fd, int offset, int whence) {
+    return syscall(SYS_LSEEK, fd, offset, whence);
+}
+
+// POSIX fstat: fills stat_t {size, type, node_idx, parent, data_sector,
+// name} for an open file descriptor. Returns 0 or -1.
+static inline int sys_fstat(int fd, stat_t* st) {
+    return syscall(SYS_FSTAT, fd, (int)st, 0);
 }
 
 static inline int sys_read(int fd, char* buf, int size) {

@@ -69,6 +69,8 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/shmdemo_mct.o \
        $(OBJ_DIR)/mmapdemo_mct.o \
        $(OBJ_DIR)/mmapfiledemo_mct.o \
+       $(OBJ_DIR)/lseekfiledemo_mct.o \
+       $(OBJ_DIR)/rusthello_mct.o \
        $(OBJ_DIR)/demandtest_mct.o \
        $(OBJ_DIR)/segvtest_mct.o \
        $(OBJ_DIR)/looper_mct.o \
@@ -192,6 +194,14 @@ mmapdemo.mct: apps/mmapdemo.c $(MCT_LIBC_H)
 mmapfiledemo.mct: apps/mmapfiledemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/mmapfiledemo.c mmapfiledemo.mct
 
+lseekfiledemo.mct: apps/lseekfiledemo.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/lseekfiledemo.c lseekfiledemo.mct
+
+# Rust Ring 3 app: freestanding no_std, built via rustc (build_rust_mct.py
+# finds rustc in ~/.cargo/bin when it is not on PATH).
+rusthello.mct: apps/rusthello.rs scripts/build_rust_mct.py
+	python3 scripts/build_rust_mct.py apps/rusthello.rs rusthello.mct
+
 demandtest.mct: apps/demandtest.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/demandtest.c demandtest.mct
 
@@ -287,6 +297,12 @@ $(OBJ_DIR)/mmapdemo_mct.o: mmapdemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/mmapfiledemo_mct.o: mmapfiledemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 mmapfiledemo.mct $(OBJ_DIR)/mmapfiledemo_mct.o
+
+$(OBJ_DIR)/lseekfiledemo_mct.o: lseekfiledemo.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 lseekfiledemo.mct $(OBJ_DIR)/lseekfiledemo_mct.o
+
+$(OBJ_DIR)/rusthello_mct.o: rusthello.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 rusthello.mct $(OBJ_DIR)/rusthello_mct.o
 
 $(OBJ_DIR)/demandtest_mct.o: demandtest.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 demandtest.mct $(OBJ_DIR)/demandtest_mct.o

@@ -63,7 +63,6 @@ int task_map_fd(int global_fd) {
 }
 
 int do_sys_open(const char* path, int mode) {
-    (void)mode;
     int node = vfs_get_node(path);
     if (node < 0) return -1;
 
@@ -73,6 +72,7 @@ int do_sys_open(const char* path, int mode) {
     
     global_fds[gfd].vfs_node = node;
     global_fds[gfd].type = vfs_is_dir(node) ? FD_TYPE_NONE : FD_TYPE_FILE; // simplistic check
+    global_fds[gfd].flags = mode;   // O_APPEND etc.
     
     int lfd = task_map_fd(gfd);
     if (lfd < 0) {
@@ -93,11 +93,21 @@ int do_sys_read(int fd, char* buf, int size) {
     if (gfd < 0 || !global_fds[gfd].in_use) { fd_lock_release(); return -1; }
     
     if (global_fds[gfd].type == FD_TYPE_FILE || global_fds[gfd].type == FD_TYPE_DEV) {
-        // vfs_read_file doesn't take offset yet, but ideally it should
-        // For simplicity we just use vfs_read_file which reads from start.
-        // We need the path.
+        int node = global_fds[gfd].vfs_node;
+        if (fs_nodes[node].type == FS_FILE) {
+            // Offset-aware read at the descriptor's position, then advance it
+            // (POSIX sequential read). vfs_read_file_offset takes only
+            // ata_lock — safe under fd_lock, matching the existing pattern.
+            int off = global_fds[gfd].offset;
+            int r = vfs_read_file_offset(node, off, buf, size);
+            if (r >= 0) global_fds[gfd].offset = off + r;
+            fd_lock_release();
+            return r;
+        }
+        // Non-FS_FILE nodes (dev/proc): legacy whole read from the start,
+        // no offset semantics.
         char path[256];
-        if (vfs_get_abs_path(global_fds[gfd].vfs_node, path, 256) < 0) { fd_lock_release(); return -1; }
+        if (vfs_get_abs_path(node, path, 256) < 0) { fd_lock_release(); return -1; }
         int r = vfs_read_file(path, buf, size);
         fd_lock_release();
         return r;
@@ -149,6 +159,9 @@ int do_sys_write(int fd, const char* buf, int size) {
         int r = vfs_read_file(path, whole, 4095);
         if (r < 0) r = 0;
         oldsz = r;
+        // O_APPEND: every write lands at the end of the file, regardless of
+        // the descriptor offset (POSIX).
+        if (global_fds[gfd].flags & O_APPEND) off = oldsz;
         if (off + size > 4095) size = 4095 - off;
         if (size <= 0) { fd_lock_release(); return 0; }
         for (int i = 0; i < size; i++) whole[off + i] = buf[i];
@@ -182,6 +195,67 @@ int do_sys_write(int fd, const char* buf, int size) {
     }
     fd_lock_release();
     return -1;
+}
+
+// POSIX lseek: reposition a file descriptor's read/write offset. whence is
+// SEEK_SET(0) absolute, SEEK_CUR(1) relative to the current offset,
+// SEEK_END(2) relative to the end of the file. Returns the new offset, or -1
+// on error (bad fd, non-file descriptor, or a negative result). Pipes are
+// not seekable.
+int do_sys_lseek(int fd, int offset, int whence) {
+    int tid = get_current_task();
+    if (tid < 0) return -1;
+
+    fd_lock_acquire();
+    int gfd = task_get_fd(tid, fd);
+    if (gfd < 0 || !global_fds[gfd].in_use) { fd_lock_release(); return -1; }
+    if (global_fds[gfd].type != FD_TYPE_FILE && global_fds[gfd].type != FD_TYPE_DEV) {
+        fd_lock_release(); return -1;
+    }
+
+    int node = global_fds[gfd].vfs_node;
+    int filesz = fs_nodes[node].in_use ? fs_nodes[node].size : 0;
+    int newoff;
+    switch (whence) {
+        case SEEK_SET: newoff = offset; break;
+        case SEEK_CUR: newoff = global_fds[gfd].offset + offset; break;
+        case SEEK_END: newoff = filesz + offset; break;
+        default: fd_lock_release(); return -1;
+    }
+    if (newoff < 0) { fd_lock_release(); return -1; }  // EINVAL
+
+    global_fds[gfd].offset = newoff;
+    fd_lock_release();
+    return newoff;
+}
+
+// POSIX fstat: fill a stat_t with the metadata of an open file descriptor's
+// VFS node. Works for file/device descriptors; pipes are not stat-able.
+int do_sys_fstat(int fd, stat_t* out) {
+    int tid = get_current_task();
+    if (tid < 0) return -1;
+
+    fd_lock_acquire();
+    int gfd = task_get_fd(tid, fd);
+    if (gfd < 0 || !global_fds[gfd].in_use) { fd_lock_release(); return -1; }
+    if (global_fds[gfd].type != FD_TYPE_FILE && global_fds[gfd].type != FD_TYPE_DEV) {
+        fd_lock_release(); return -1;
+    }
+
+    int node = global_fds[gfd].vfs_node;
+    if (!fs_nodes[node].in_use) { fd_lock_release(); return -1; }
+    out->size = fs_nodes[node].size;
+    out->type = (int)fs_nodes[node].type;
+    out->node_idx = node;
+    out->parent = fs_nodes[node].parent;
+    out->data_sector = fs_nodes[node].data_sector;
+    for (int i = 0; i < MAX_FILENAME; i++) {
+        out->name[i] = fs_nodes[node].name[i];
+        if (!fs_nodes[node].name[i]) break;
+    }
+    out->name[MAX_FILENAME - 1] = '\0';
+    fd_lock_release();
+    return 0;
 }
 
 // Release one global FD: drop its refcount and free the slot (and any pipe it

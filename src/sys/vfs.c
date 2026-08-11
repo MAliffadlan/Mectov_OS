@@ -352,6 +352,16 @@ void vfs_init() {
         extern uint8_t _binary_mmapfiledemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/mmapfiledemo.mct", (const char*)_binary_mmapfiledemo_mct_start, _binary_mmapfiledemo_mct_end - _binary_mmapfiledemo_mct_start);
 
+        // lseek/fstat/O_APPEND demo
+        extern uint8_t _binary_lseekfiledemo_mct_start[];
+        extern uint8_t _binary_lseekfiledemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/lseekfiledemo.mct", (const char*)_binary_lseekfiledemo_mct_start, _binary_lseekfiledemo_mct_end - _binary_lseekfiledemo_mct_start);
+
+        // first Rust Ring 3 app (no_std freestanding)
+        extern uint8_t _binary_rusthello_mct_start[];
+        extern uint8_t _binary_rusthello_mct_end[];
+        changed += vfs_update_file_if_needed("apps/rusthello.mct", (const char*)_binary_rusthello_mct_start, _binary_rusthello_mct_end - _binary_rusthello_mct_start);
+
         // lazy zero page + heap/stack demand-paging demo
         extern uint8_t _binary_demandtest_mct_start[];
         extern uint8_t _binary_demandtest_mct_end[];
@@ -512,6 +522,18 @@ void vfs_init() {
     extern uint8_t _binary_mmapfiledemo_mct_end[];
     vfs_create_file("apps/mmapfiledemo.mct");
     vfs_write_file("apps/mmapfiledemo.mct", (const char*)_binary_mmapfiledemo_mct_start, _binary_mmapfiledemo_mct_end - _binary_mmapfiledemo_mct_start);
+
+    // lseek/fstat/O_APPEND demo
+    extern uint8_t _binary_lseekfiledemo_mct_start[];
+    extern uint8_t _binary_lseekfiledemo_mct_end[];
+    vfs_create_file("apps/lseekfiledemo.mct");
+    vfs_write_file("apps/lseekfiledemo.mct", (const char*)_binary_lseekfiledemo_mct_start, _binary_lseekfiledemo_mct_end - _binary_lseekfiledemo_mct_start);
+
+    // first Rust Ring 3 app (no_std freestanding)
+    extern uint8_t _binary_rusthello_mct_start[];
+    extern uint8_t _binary_rusthello_mct_end[];
+    vfs_create_file("apps/rusthello.mct");
+    vfs_write_file("apps/rusthello.mct", (const char*)_binary_rusthello_mct_start, _binary_rusthello_mct_end - _binary_rusthello_mct_start);
 
     // lazy zero page + heap/stack demand-paging demo
     extern uint8_t _binary_demandtest_mct_start[];

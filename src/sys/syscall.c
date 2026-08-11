@@ -348,6 +348,8 @@ static void syscall_handler(registers_t* regs) {
         case SYS_MKDIR:
         case SYS_RENAME_FILE:
         case SYS_PIPE:
+        case SYS_LSEEK:
+        case SYS_FSTAT:
             regs->eax = handle_syscall_vfs(regs);
             break;
 

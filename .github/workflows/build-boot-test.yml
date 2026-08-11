@@ -26,6 +26,11 @@ jobs:
             python3-pil \
             e2fsprogs
 
+      - name: Install Rust (for apps/rusthello.rs)
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          ~/.cargo/bin/rustup target add i686-unknown-uefi
+
       - name: Build kernel
         run: |
           make clean_all

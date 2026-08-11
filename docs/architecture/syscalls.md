@@ -83,3 +83,30 @@ memory and its pages are demand-paged *from the disk*.
   leaves them shared between parent and child (true MAP_SHARED semantics);
   exec/exit discard mappings without writeback (POSIX-style).
 - Demo: `run /apps/mmapfiledemo.mct` (see `apps/mmapfiledemo.c`).
+
+---
+
+## 📍 POSIX File Positioning & Metadata (`SYS_LSEEK` 95 / `SYS_FSTAT` 96)
+
+Completes the file I/O model next to file-backed mmap: descriptors now track a
+read/write **offset**, reads honor it, writes can **append**, and apps can
+query metadata without re-resolving a path.
+
+- **Offset-aware reads**: `SYS_READ` no longer starts from byte 0 every time.
+  The fd layer reads at the descriptor's current offset via
+  `vfs_read_file_offset()` (the unlocked offset reader built for mmap faults
+  — takes only `ata_lock`, safe under `fd_lock`) and advances the offset by
+  the bytes read, POSIX-style. `FS_FILE` nodes get full offset semantics;
+  dev/proc nodes keep the legacy whole-read path.
+- **`SYS_LSEEK`**: `SEEK_SET`/`SEEK_CUR`/`SEEK_END` reposition the
+  descriptor offset and return the new value. Negative results and non-file
+  descriptors (pipes) return -1; seeking a pipe is rejected.
+- **`O_APPEND`**: `SYS_OPEN`'s third argument (mode) is now stored on the
+  descriptor. Writes on an `O_APPEND` fd always land at the end of the file
+  regardless of the current offset — matching POSIX.
+- **`SYS_FSTAT`**: fills a `stat_t {size, type, node_idx, parent,
+  data_sector, name}` from the fd's VFS node — no path resolution needed, no
+  race on rename. `type` mirrors `fs_type_t` (0=file, 1=dir, 2=dev).
+- Writes remain whole-file read-modify-write (files ≤ 4 KB), with the
+  descriptor offset / O_APPEND selecting the splice point.
+- Demo: `run /apps/lseekfiledemo.mct` (see `apps/lseekfiledemo.c`).

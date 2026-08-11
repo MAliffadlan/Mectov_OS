@@ -61,7 +61,7 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
-            regs->eax = (uint32_t)do_sys_open(filename, 0);
+            regs->eax = (uint32_t)do_sys_open(filename, (int)regs->ecx);
             break;
         }
 
@@ -107,6 +107,27 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
         case SYS_CLOSE: {
             int fd = (int)regs->ebx;
             regs->eax = (uint32_t)do_sys_close(fd);
+            break;
+        }
+
+        // ----- SYS_LSEEK (95): reposition a file descriptor's offset -----
+        case SYS_LSEEK: {
+            int fd = (int)regs->ebx;
+            int offset = (int)regs->ecx;
+            int whence = (int)regs->edx;
+            regs->eax = (uint32_t)do_sys_lseek(fd, offset, whence);
+            break;
+        }
+
+        // ----- SYS_FSTAT (96): file metadata by descriptor -----
+        case SYS_FSTAT: {
+            int fd = (int)regs->ebx;
+            stat_t* st = (stat_t*)regs->ecx;
+            if (!validate_user_ptr(st, sizeof(stat_t))) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            regs->eax = (uint32_t)do_sys_fstat(fd, st);
             break;
         }
 

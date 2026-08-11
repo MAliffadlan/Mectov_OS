@@ -88,6 +88,7 @@ SYSCALLS = {
     46:"SYS_GET_TASKS", 47:"SYS_GET_WINDOWS", 48:"SYS_KILL_TASK",
     49:"SYS_GET_LAUNCH_ARG", 50:"SYS_CREATE_FILE", 51:"SYS_LOAD_LIBRARY",
     93:"SYS_MMAP_FILE", 94:"SYS_MSYNC",
+    95:"SYS_LSEEK", 96:"SYS_FSTAT",
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
