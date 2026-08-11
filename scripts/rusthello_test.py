@@ -100,19 +100,35 @@ def main():
             return 1
         print("[OK] logged in, desktop running")
 
+        # Open the Terminal via icon double-click. The OS cursor starts at
+        # (400,300); drive it to the top-left corner (0,0) with small -127
+        # moves (the kernel clamps at the corner, so repeated negative moves
+        # are idempotent there), then one packet to the icon center (60,64).
+        # Retry from the corner: a dropped PS/2 packet under slow TCG would
+        # otherwise leave the cursor at an unknown spot. Moves stay one packet
+        # each with gaps so the 16-byte PS/2 buffer never overflows (a burst of
+        # huge deltas floods it and corrupts packet alignment).
         time.sleep(1.5)
-        for dx, dy in [(-100, -80), (-100, -80), (-100, -76), (-40, 0)]:
-            mon_cmd(f"mouse_move {dx} {dy}")
-            time.sleep(0.1)
-        time.sleep(0.5)
+        launched = False
         for _ in range(4):
-            mon_cmd("mouse_button 1")
-            time.sleep(0.05)
-            mon_cmd("mouse_button 0")
-            time.sleep(0.05)
-        time.sleep(0.3)
-
-        if not wait_for_in_file(SERIAL_LOG, "[LOADER] start", 20):
+            for _ in range(4):
+                mon_cmd("mouse_move -127 -127")
+                time.sleep(0.25)
+            time.sleep(0.3)
+            mon_cmd("mouse_move 60 64")
+            time.sleep(0.3)
+            # Several quick click pairs: the desktop launches on any two clicks
+            # on the icon within 800 ticks, so one pair is virtually certain to
+            # land in the window. (Extra clicks after launch are harmless.)
+            for _ in range(4):
+                mon_cmd("mouse_button 1")
+                time.sleep(0.05)
+                mon_cmd("mouse_button 0")
+                time.sleep(0.05)
+            if wait_for_in_file(SERIAL_LOG, "[LOADER] start", 6):
+                launched = True
+                break
+        if not launched:
             print("[FAIL] terminal did not launch (icon double-click missed?)")
             return 1
         print("[OK] terminal launched")
