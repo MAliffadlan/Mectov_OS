@@ -495,6 +495,12 @@ void vfs_init() {
     vfs_create_file("apps/gcalc.mct");
     vfs_write_file("apps/gcalc.mct", (const char*)_binary_gcalc_mct_start, gcalc_mct_size());
 
+    // Fork demo (process model: fork/waitpid/signals)
+    extern uint8_t _binary_forkdemo_mct_start[];
+    extern uint8_t _binary_forkdemo_mct_end[];
+    vfs_create_file("apps/forkdemo.mct");
+    vfs_write_file("apps/forkdemo.mct", (const char*)_binary_forkdemo_mct_start, _binary_forkdemo_mct_end - _binary_forkdemo_mct_start);
+
     // Exec demo apps
     extern uint8_t _binary_execdemo_mct_start[];
     extern uint8_t _binary_execdemo_mct_end[];
@@ -602,6 +608,20 @@ void vfs_init() {
     extern uint8_t _binary_clock_mct_end[];
     vfs_create_file("apps/clock.mct");
     vfs_write_file("apps/clock.mct", (const char*)_binary_clock_mct_start, _binary_clock_mct_end - _binary_clock_mct_start);
+
+    // Volume / media player / music (optional sound apps)
+    extern uint8_t _binary_volume_mct_start[];
+    extern uint8_t _binary_volume_mct_end[];
+    vfs_create_file("apps/volume.mct");
+    vfs_write_file("apps/volume.mct", (const char*)_binary_volume_mct_start, _binary_volume_mct_end - _binary_volume_mct_start);
+    extern uint8_t _binary_mplayer_mct_start[];
+    extern uint8_t _binary_mplayer_mct_end[];
+    vfs_create_file("apps/mplayer.mct");
+    vfs_write_file("apps/mplayer.mct", (const char*)_binary_mplayer_mct_start, _binary_mplayer_mct_end - _binary_mplayer_mct_start);
+    extern uint8_t _binary_apps_music_wav_start[];
+    extern uint8_t _binary_apps_music_wav_end[];
+    vfs_create_file("apps/music.wav");
+    vfs_write_file("apps/music.wav", (const char*)_binary_apps_music_wav_start, _binary_apps_music_wav_end - _binary_apps_music_wav_start);
 
     // Inject snake.mct
     extern uint8_t _binary_snake_mct_start[];
