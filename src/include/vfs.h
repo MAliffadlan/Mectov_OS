@@ -24,7 +24,7 @@
 #define VFS_DISK_SECTORS  2048 // total sectors on the 1MB image
 #define VFS_LAYOUT_VERSION 2
 
-typedef enum { FS_FILE, FS_DIR, FS_DEV, FS_EXT2_FILE, FS_EXT2_DIR, FS_PROC } fs_type_t;
+typedef enum { FS_FILE, FS_DIR, FS_DEV, FS_EXT2_FILE, FS_EXT2_DIR, FS_FAT32_FILE, FS_FAT32_DIR, FS_PROC } fs_type_t;
 
 typedef struct {
     char name[MAX_FILENAME];

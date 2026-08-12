@@ -14,6 +14,12 @@ if [ ! -f "ext2.img" ]; then
     mkfs.ext2 -F ext2.img > /dev/null 2>&1
 fi
 
+if [ ! -f "fat32.img" ]; then
+    echo "[!] Membuat fat32.img baru..."
+    dd if=/dev/zero of=fat32.img bs=1M count=16 2>/dev/null
+    mkfs.fat -F 32 -S 512 fat32.img > /dev/null 2>&1
+fi
+
 # Rebuild kernel (akan mengompilasi semua MCT dinamis secara bersih)
 make
 
@@ -74,7 +80,8 @@ qemu-system-i386 -enable-kvm -cpu host \
     -net nic,model=rtl8139 -net user \
     -chardev socket,id=char0,host=127.0.0.1,port=45454,server=on,wait=off,logfile=serial_debug.log -serial chardev:char0 \
     -drive file=disk.img,format=raw,index=0,media=disk \
-    -drive file=ext2.img,format=raw,index=1,media=disk
+    -drive file=ext2.img,format=raw,index=1,media=disk \
+    -drive file=fat32.img,format=raw,index=3,media=disk
 
 echo "[*] Menghentikan Mectov Web Gateway Proxy..."
 kill $GATEWAY_PID 2>/dev/null

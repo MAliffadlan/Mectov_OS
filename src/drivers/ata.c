@@ -9,36 +9,48 @@
 static spinlock_t ata_lock = SPINLOCK_INIT;
 static uint32_t ata_eflags;
 
-int ata_wait_bsy() { 
+// Channel selection: drives 0-1 live on the primary channel (ports 0x1F0),
+// drives 2-3 on the secondary (ports 0x170). The master/slave bit comes from
+// the drive's parity (0/2 = master, 1/3 = slave).
+static uint16_t ata_base_port(int drive) {
+    return (drive & 2) ? 0x170 : 0x1F0;
+}
+
+int ata_wait_bsy_drive(int drive) { 
+    uint16_t base = ata_base_port(drive);
     int timeout = 100000;
-    while((inb(0x1F7) & 0x80) && --timeout > 0);
+    while((inb(base + 7) & 0x80) && --timeout > 0);
     return timeout > 0 ? 0 : -1;
 }
-int ata_wait_drq() { 
+int ata_wait_drq_drive(int drive) { 
+    uint16_t base = ata_base_port(drive);
     int timeout = 100000;
-    while(!(inb(0x1F7) & 0x08) && --timeout > 0) {
+    while(!(inb(base + 7) & 0x08) && --timeout > 0) {
         // Check for error
-        if (inb(0x1F7) & 0x01) return -1;
+        if (inb(base + 7) & 0x01) return -1;
     }
     return timeout > 0 ? 0 : -1;
 }
+int ata_wait_bsy() { return ata_wait_bsy_drive(0); }
+int ata_wait_drq() { return ata_wait_drq_drive(0); }
 
 volatile int hdd_activity = 0;
 
 int ata_read_sector_drive(int drive, unsigned int lba, unsigned char* b) {
+    uint16_t base = ata_base_port(drive);
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10;
-    if (ata_wait_bsy() < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; } 
-    outb(0x1F6, (drive ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F)); 
-    outb(0x1F2, 1); 
-    outb(0x1F3, (unsigned char)lba);
-    outb(0x1F4, (unsigned char)(lba >> 8)); 
-    outb(0x1F5, (unsigned char)(lba >> 16)); 
-    outb(0x1F7, 0x20);
-    if (ata_wait_bsy() < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; } 
-    if (ata_wait_drq() < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
+    if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; } 
+    outb(base + 6, ((drive & 1) ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F)); 
+    outb(base + 2, 1); 
+    outb(base + 3, (unsigned char)lba);
+    outb(base + 4, (unsigned char)(lba >> 8)); 
+    outb(base + 5, (unsigned char)(lba >> 16)); 
+    outb(base + 7, 0x20);
+    if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; } 
+    if (ata_wait_drq_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
     for (int i = 0; i < 256; i++) { 
-        unsigned short word = inw(0x1F0); 
+        unsigned short word = inw(base); 
         b[i * 2] = (unsigned char)word; 
         b[i * 2 + 1] = (unsigned char)(word >> 8); 
     }
@@ -50,15 +62,16 @@ void ata_read_sector(unsigned int lba, unsigned char* b) {
     ata_read_sector_drive(0, lba, b);
 }
 int ata_write_sector_drive(int drive, unsigned int lba, unsigned char* b) {
+    uint16_t base = ata_base_port(drive);
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10; // set activity frames
-    if (ata_wait_bsy() < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
-    outb(0x1F6, (drive ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F)); outb(0x1F2, 1); outb(0x1F3, (unsigned char)lba);
-    outb(0x1F4, (unsigned char)(lba >> 8)); outb(0x1F5, (unsigned char)(lba >> 16)); outb(0x1F7, 0x30);
-    if (ata_wait_bsy() < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
-    if (ata_wait_drq() < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
-    for (int i = 0; i < 256; i++) { unsigned short word = b[i * 2] | (b[i * 2 + 1] << 8); outw(0x1F0, word); }
-    outb(0x1F7, 0xE7); ata_wait_bsy();
+    if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
+    outb(base + 6, ((drive & 1) ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F)); outb(base + 2, 1); outb(base + 3, (unsigned char)lba);
+    outb(base + 4, (unsigned char)(lba >> 8)); outb(base + 5, (unsigned char)(lba >> 16)); outb(base + 7, 0x30);
+    if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
+    if (ata_wait_drq_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
+    for (int i = 0; i < 256; i++) { unsigned short word = b[i * 2] | (b[i * 2 + 1] << 8); outw(base, word); }
+    outb(base + 7, 0xE7); ata_wait_bsy_drive(drive);
     spin_unlock_irqrestore(&ata_lock, ata_eflags);
     return 0;
 }

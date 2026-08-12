@@ -70,6 +70,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/mmapdemo_mct.o \
        $(OBJ_DIR)/mmapfiledemo_mct.o \
        $(OBJ_DIR)/lseekfiledemo_mct.o \
+       $(OBJ_DIR)/fat32demo_mct.o \
        $(OBJ_DIR)/rusthello_mct.o \
        $(OBJ_DIR)/demandtest_mct.o \
        $(OBJ_DIR)/segvtest_mct.o \
@@ -197,6 +198,9 @@ mmapfiledemo.mct: apps/mmapfiledemo.c $(MCT_LIBC_H)
 lseekfiledemo.mct: apps/lseekfiledemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/lseekfiledemo.c lseekfiledemo.mct
 
+fat32demo.mct: apps/fat32demo.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/fat32demo.c fat32demo.mct
+
 # Rust Ring 3 app: freestanding no_std, built via rustc (build_rust_mct.py
 # finds rustc in ~/.cargo/bin when it is not on PATH).
 rusthello.mct: apps/rusthello.rs scripts/build_rust_mct.py
@@ -300,6 +304,9 @@ $(OBJ_DIR)/mmapfiledemo_mct.o: mmapfiledemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/lseekfiledemo_mct.o: lseekfiledemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 lseekfiledemo.mct $(OBJ_DIR)/lseekfiledemo_mct.o
+
+$(OBJ_DIR)/fat32demo_mct.o: fat32demo.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 fat32demo.mct $(OBJ_DIR)/fat32demo_mct.o
 
 $(OBJ_DIR)/rusthello_mct.o: rusthello.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 rusthello.mct $(OBJ_DIR)/rusthello_mct.o

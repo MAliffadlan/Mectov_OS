@@ -176,6 +176,35 @@ static int vfs_update_file_if_needed(const char* path, const char* data, int siz
 // runtime writes (shell echo > file, etc.) still save immediately.
 static int vfs_seeding = 0;
 
+// Drop every VFS node under `node` (in_use = 0) WITHOUT touching the on-disk
+// filesystem — used at mount time so a removable/external filesystem (FAT32)
+// is re-built from its real disk contents every boot instead of trusting
+// stale nodes persisted in the MECTOVFS node table. The mount point itself
+// is kept.
+static void vfs_clear_children(int node) {
+    if (node < 0 || node >= MAX_NODES) return;
+    int changed;
+    do {
+        changed = 0;
+        for (int i = 0; i < MAX_NODES; i++) {
+            if (!fs_nodes[i].in_use) continue;
+            int p = fs_nodes[i].parent;
+            int is_descendant = 0;
+            while (p >= 0) {
+                if (p == node) { is_descendant = 1; break; }
+                if (!fs_nodes[p].in_use) break;
+                p = fs_nodes[p].parent;
+            }
+            if (is_descendant) {
+                fs_nodes[i].in_use = 0;
+                fs_nodes[i].size = 0;
+                fs_nodes[i].data_sector = 0;
+                changed = 1;
+            }
+        }
+    } while (changed);
+}
+
 void vfs_init() {
     write_serial_string("[VFS] init start\n");
     vfs_seeding = 1;
@@ -357,6 +386,11 @@ void vfs_init() {
         extern uint8_t _binary_lseekfiledemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/lseekfiledemo.mct", (const char*)_binary_lseekfiledemo_mct_start, _binary_lseekfiledemo_mct_end - _binary_lseekfiledemo_mct_start);
 
+        // FAT32 demo app (exercises the drive-3 FAT32 filesystem)
+        extern uint8_t _binary_fat32demo_mct_start[];
+        extern uint8_t _binary_fat32demo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/fat32demo.mct", (const char*)_binary_fat32demo_mct_start, _binary_fat32demo_mct_end - _binary_fat32demo_mct_start);
+
         // first Rust Ring 3 app (no_std freestanding)
         extern uint8_t _binary_rusthello_mct_start[];
         extern uint8_t _binary_rusthello_mct_end[];
@@ -451,6 +485,31 @@ void vfs_init() {
             }
         }
         
+        // Phase 3: FAT32 on Drive 3 (secondary slave — drive 2 is the CD-ROM)
+        extern int fat32_init(int drive);
+        extern void fat32_populate_vfs(uint32_t root_cluster, int vfs_parent_node);
+        extern uint32_t fat32_root_cluster(void);
+        write_serial_string("[VFS] fat32_init...\n");
+        if (fat32_init(3) == 0) {
+            write_serial_string("[VFS] fat32 ok\n");
+            int fat_node = vfs_get_node("fat32");
+            if (fat_node < 0) {
+                fat_node = vfs_create_node("fat32", FS_FAT32_DIR, 0);
+            } else {
+                // The mount point must be fat32-backed: create/write/delete
+                // hooks only fire under an FS_FAT32_DIR parent.
+                fs_nodes[fat_node].type = FS_FAT32_DIR;
+            }
+            if (fat_node >= 0) {
+                // FAT32 is an external, mutable volume: rebuild the whole
+                // subtree from the disk every boot (stale persisted nodes
+                // from an older image must not survive).
+                vfs_clear_children(fat_node);
+                fs_nodes[fat_node].data_sector = (int)fat32_root_cluster();
+                fat32_populate_vfs(fat32_root_cluster(), fat_node);
+            }
+        }
+        
         // We always start at root (dir 0) when booting
         set_current_dir(0);
         
@@ -534,6 +593,11 @@ void vfs_init() {
     extern uint8_t _binary_lseekfiledemo_mct_end[];
     vfs_create_file("apps/lseekfiledemo.mct");
     vfs_write_file("apps/lseekfiledemo.mct", (const char*)_binary_lseekfiledemo_mct_start, _binary_lseekfiledemo_mct_end - _binary_lseekfiledemo_mct_start);
+
+    extern uint8_t _binary_fat32demo_mct_start[];
+    extern uint8_t _binary_fat32demo_mct_end[];
+    vfs_create_file("apps/fat32demo.mct");
+    vfs_write_file("apps/fat32demo.mct", (const char*)_binary_fat32demo_mct_start, _binary_fat32demo_mct_end - _binary_fat32demo_mct_start);
 
     // first Rust Ring 3 app (no_std freestanding)
     extern uint8_t _binary_rusthello_mct_start[];
@@ -732,6 +796,26 @@ void vfs_init() {
         if (ext2_node >= 0) {
             fs_nodes[ext2_node].ext2_inode = 2; // mount point = root dir inode
             ext2_populate_vfs(2, ext2_node);    // Inode 2 is the root directory
+        }
+    }
+    
+    // Phase 3: FAT32 on Drive 3 (secondary slave — drive 2 is the CD-ROM)
+    extern int fat32_init(int drive);
+    extern void fat32_populate_vfs(uint32_t root_cluster, int vfs_parent_node);
+    extern uint32_t fat32_root_cluster(void);
+    if (fat32_init(3) == 0) {
+        int fat_node = vfs_get_node("fat32");
+        if (fat_node < 0) {
+            fat_node = vfs_create_node("fat32", FS_FAT32_DIR, 0);
+        } else {
+            fs_nodes[fat_node].type = FS_FAT32_DIR;
+        }
+        if (fat_node >= 0) {
+            // FAT32 is an external, mutable volume: rebuild the whole subtree
+            // from the disk every boot (see vfs_clear_children).
+            vfs_clear_children(fat_node);
+            fs_nodes[fat_node].data_sector = (int)fat32_root_cluster();
+            fat32_populate_vfs(fat32_root_cluster(), fat_node);
         }
     }
     
@@ -1011,7 +1095,8 @@ int vfs_get_node(const char* path) {
 // Cari di dalam satu directory
 static int vfs_find_in_dir_unlocked(const char* name, int dir_node) {
     if (dir_node < 0 || dir_node >= MAX_NODES) return -1;
-    if (!fs_nodes[dir_node].in_use || (fs_nodes[dir_node].type != FS_DIR && fs_nodes[dir_node].type != FS_EXT2_DIR)) return -1;
+    if (!fs_nodes[dir_node].in_use || (fs_nodes[dir_node].type != FS_DIR &&
+        fs_nodes[dir_node].type != FS_EXT2_DIR && fs_nodes[dir_node].type != FS_FAT32_DIR)) return -1;
     
     char lc_name[MAX_FILENAME];
     strtolower(lc_name, name);
@@ -1038,7 +1123,8 @@ int vfs_find_in_dir(const char* name, int dir_node) {
 static int vfs_create_node_unlocked(const char* name, fs_type_t type, int parent) {
     // Validate parent
     if (parent < 0 || parent >= MAX_NODES) return -1;
-    if (!fs_nodes[parent].in_use || (fs_nodes[parent].type != FS_DIR && fs_nodes[parent].type != FS_EXT2_DIR)) return -1;
+    if (!fs_nodes[parent].in_use || (fs_nodes[parent].type != FS_DIR &&
+        fs_nodes[parent].type != FS_EXT2_DIR && fs_nodes[parent].type != FS_FAT32_DIR)) return -1;
     if (!name || name[0] == '\0') return -1;
     
     // Check name exists in parent
@@ -1068,6 +1154,22 @@ static int vfs_create_node_unlocked(const char* name, fs_type_t type, int parent
                 fs_nodes[i].type = (type == FS_DIR) ? FS_EXT2_DIR : FS_EXT2_FILE;
                 fs_nodes[i].ext2_inode = einode;
                 fs_nodes[i].size = (int)ext2_inode_size(einode);
+            }
+            // New object under a FAT32 directory: create the real dirent.
+            if (fs_nodes[parent].type == FS_FAT32_DIR &&
+                (type == FS_DIR || type == FS_FILE)) {
+                extern uint32_t fat32_create_entry(uint32_t parent_cluster,
+                                                   const char* name, int is_dir);
+                int is_dir = (type == FS_DIR);
+                uint32_t fcluster = fat32_create_entry(
+                    (uint32_t)fs_nodes[parent].data_sector, name, is_dir);
+                if (!fcluster) {
+                    write_serial_string("VFS: fat32 create entry failed\n");
+                    fs_nodes[i].in_use = 0;
+                    return -1;
+                }
+                fs_nodes[i].type = is_dir ? FS_FAT32_DIR : FS_FAT32_FILE;
+                fs_nodes[i].data_sector = (int)fcluster;
             }
             // Runtime creates persist immediately; seeding-time creates are
             // flushed once by vfs_init()'s final vfs_save() (see vfs_seeding).
@@ -1165,6 +1267,17 @@ static void vfs_remove_ext2_entry(int node) {
     ext2_remove_entry(fs_nodes[p].ext2_inode, fs_nodes[node].name);
 }
 
+// Remove the on-disk FAT32 dirent behind a VFS node (if any).
+static void vfs_remove_fat32_entry(int node) {
+    if (node < 0 || node >= MAX_NODES) return;
+    if (fs_nodes[node].type != FS_FAT32_FILE && fs_nodes[node].type != FS_FAT32_DIR) return;
+    int p = fs_nodes[node].parent;
+    if (p < 0 || p >= MAX_NODES) return;
+    if (fs_nodes[p].type != FS_FAT32_DIR) return;
+    extern int fat32_remove_entry(uint32_t parent_cluster, const char* name);
+    fat32_remove_entry((uint32_t)fs_nodes[p].data_sector, fs_nodes[node].name);
+}
+
 static int vfs_delete_node_unlocked(const char* path) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
@@ -1186,7 +1299,8 @@ static int vfs_delete_node_unlocked(const char* path) {
     }
     
     // Recursively delete children if directory (handle nested dirs)
-    if (fs_nodes[node].type == FS_DIR || fs_nodes[node].type == FS_EXT2_DIR) {
+    if (fs_nodes[node].type == FS_DIR || fs_nodes[node].type == FS_EXT2_DIR ||
+        fs_nodes[node].type == FS_FAT32_DIR) {
         // Delete deepest children first (multiple passes needed for nesting)
         int deleted;
         do {
@@ -1212,6 +1326,7 @@ static int vfs_delete_node_unlocked(const char* path) {
                     }
                     if (!has_children) {
                         vfs_remove_ext2_entry(i);
+                        vfs_remove_fat32_entry(i);
                         fs_nodes[i].in_use = 0;
                         fs_nodes[i].size = 0;
                         fs_nodes[i].data_sector = 0;
@@ -1223,6 +1338,7 @@ static int vfs_delete_node_unlocked(const char* path) {
     }
     
     vfs_remove_ext2_entry(node);
+    vfs_remove_fat32_entry(node);
     fs_nodes[node].in_use = 0;
     fs_nodes[node].size = 0;
     fs_nodes[node].data_sector = 0;
@@ -1294,6 +1410,20 @@ static int vfs_rename_unlocked(const char* old_path, const char* new_path) {
         }
         if (ext2_rename_entry(fs_nodes[old_p].ext2_inode, fs_nodes[node].name,
                               new_filename, fs_nodes[node].ext2_inode) != 0) {
+            return -5;
+        }
+    }
+    // FAT32-backed node: same-directory renames only (mirrors ext2).
+    int is_fat32 = (fs_nodes[node].type == FS_FAT32_FILE || fs_nodes[node].type == FS_FAT32_DIR);
+    if (is_fat32) {
+        int old_p = fs_nodes[node].parent;
+        if (old_p != new_parent || fs_nodes[old_p].type != FS_FAT32_DIR) {
+            return -5;
+        }
+        extern int fat32_rename_entry(uint32_t parent_cluster, const char* old_name,
+                                      const char* new_name);
+        if (fat32_rename_entry((uint32_t)fs_nodes[old_p].data_sector,
+                               fs_nodes[node].name, new_filename) != 0) {
             return -5;
         }
     }
@@ -1525,6 +1655,15 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
         return bytes;
     }
     
+    if (fs_nodes[node].type == FS_FAT32_FILE) {
+        extern int fat32_read_file(uint32_t first_cluster, char* buf, int max_size);
+        int sz = fs_nodes[node].size;
+        if (sz > max_size) sz = max_size;
+        int bytes = fat32_read_file((uint32_t)fs_nodes[node].data_sector, buf, sz);
+        if (bytes >= 0 && bytes < max_size) buf[bytes] = '\0';
+        return bytes;
+    }
+    
     if (fs_nodes[node].type != FS_FILE) return -2;
     
     int size = fs_nodes[node].size;
@@ -1673,6 +1812,24 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
             if (!vfs_seeding) vfs_save();
         }
         return r;
+    }
+
+    if (fs_nodes[node].type == FS_FAT32_FILE) {
+        extern int fat32_write_file(uint32_t first_cluster, const char* buf, int size);
+        extern int fat32_update_dirent(uint32_t parent_cluster, const char* name,
+                                       uint32_t first_cluster, uint32_t size);
+        int nc = fat32_write_file((uint32_t)fs_nodes[node].data_sector, data, size);
+        if (nc >= 0) {
+            int parent = fs_nodes[node].parent;
+            if (parent >= 0 && fs_nodes[parent].type == FS_FAT32_DIR) {
+                fat32_update_dirent((uint32_t)fs_nodes[parent].data_sector,
+                                    fs_nodes[node].name, (uint32_t)nc, (uint32_t)size);
+            }
+            fs_nodes[node].data_sector = nc;
+            fs_nodes[node].size = size;
+            if (!vfs_seeding) vfs_save();
+        }
+        return (nc >= 0) ? size : nc;
     }
 
     if (fs_nodes[node].type != FS_FILE) return -2;
@@ -1855,7 +2012,8 @@ static void vfs_list_dir_unlocked(int dir_node, void (*print_fn)(const char*, un
         count++;
         
         // Print file/dir icon
-        if (fs_nodes[i].type == FS_DIR || fs_nodes[i].type == FS_EXT2_DIR) {
+        if (fs_nodes[i].type == FS_DIR || fs_nodes[i].type == FS_EXT2_DIR ||
+            fs_nodes[i].type == FS_FAT32_DIR) {
             print_fn("[DIR]  ", 0x0B);
             print_fn(fs_nodes[i].name, 0x0B);
             print_fn("/\n", 0x0B);
@@ -1904,7 +2062,8 @@ static void vfs_tree_unlocked(int dir_node, int depth, void (*print_fn)(const ch
         // Print indent
         for (int d = 0; d < depth; d++) print_fn("  ", 0x0F);
         
-        if (fs_nodes[i].type == FS_DIR) {
+        if (fs_nodes[i].type == FS_DIR || fs_nodes[i].type == FS_EXT2_DIR ||
+            fs_nodes[i].type == FS_FAT32_DIR) {
             print_fn("[", 0x0B); print_fn(fs_nodes[i].name, 0x0B); print_fn("]\n", 0x0B);
             vfs_tree(i, depth + 1, print_fn);
         } else {
@@ -1923,7 +2082,8 @@ void vfs_tree(int dir_node, int depth, void (*print_fn)(const char*, unsigned ch
 
 static int vfs_is_dir_unlocked(int node) {
     if (node < 0 || node >= MAX_NODES) return 0;
-    return fs_nodes[node].in_use && (fs_nodes[node].type == FS_DIR || fs_nodes[node].type == FS_EXT2_DIR);
+    return fs_nodes[node].in_use && (fs_nodes[node].type == FS_DIR ||
+        fs_nodes[node].type == FS_EXT2_DIR || fs_nodes[node].type == FS_FAT32_DIR);
 }
 int vfs_is_dir(int node) {
     vfs_lock_acquire();

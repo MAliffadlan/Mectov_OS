@@ -22,6 +22,7 @@ jobs:
             grub-pc-bin \
             xorriso \
             mtools \
+            dosfstools \
             qemu-system-x86 \
             python3-pil \
             e2fsprogs
@@ -58,6 +59,8 @@ jobs:
           dd if=/dev/zero of=disk.img bs=512 count=2048 status=none
           dd if=/dev/zero of=ext2.img bs=1M count=2 status=none
           mkfs.ext2 -F ext2.img > /dev/null 2>&1
+          dd if=/dev/zero of=fat32.img bs=1M count=16 status=none
+          mkfs.fat -F 32 -S 512 fat32.img > /dev/null 2>&1
 
       - name: Boot test in QEMU (no KVM)
         run: |
@@ -79,3 +82,7 @@ jobs:
           else
             echo "::warning::/dev/kvm not available on this runner — skipping the KVM regression"
           fi
+
+      - name: FAT32 regression (drive 3, TCG)
+        run: |
+          python3 scripts/fat32_test.py --timeout 240

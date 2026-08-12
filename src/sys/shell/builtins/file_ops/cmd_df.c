@@ -42,4 +42,22 @@ void cmd_df(void) {
         } else {
             print("ext2           not mounted\n", 0x07);
         }
+        
+        // fat32 (drive 2)
+        extern int fat32_get_stats(uint32_t*, uint32_t*, uint32_t*);
+        uint32_t tcl = 0, fcl = 0, cbytes = 512;
+        if (fat32_get_stats(&tcl, &fcl, &cbytes) == 0 && tcl > 0) {
+            uint32_t total_kb = tcl * cbytes / 1024;
+            uint32_t free_kb = fcl * cbytes / 1024;
+            uint32_t used_kb = total_kb - free_kb;
+            uint32_t pct = used_kb * 100 / total_kb;
+            print("fat32          ", 0x0B);
+            p_int(total_kb, 0x0F); print("      ", 0x07);
+            p_int(used_kb, 0x0F); print("    ", 0x07);
+            p_int(free_kb, 0x0F); print("    ", 0x07);
+            p_int(pct, 0x0F); print("%  /fat32", 0x0F);
+            print("\n", 0x0F);
+        } else {
+            print("fat32          not mounted\n", 0x07);
+        }
 }
