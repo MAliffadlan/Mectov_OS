@@ -67,11 +67,13 @@ def mon_cmd(cmd):
 def ensure_fat32_image(path):
     """Create a FAT32 image with marker files if it doesn't already have them."""
     if os.path.exists(path):
-        # Recreate when the marker file is missing (fresh image needed).
+        # Recreate when any marker file is missing (fresh image needed). The
+        # LFN marker is the UTF-16LE bytes of "The quick bro" inside the
+        # long-name entry of "The quick brown fox.txt".
         with open(path, "rb") as f:
             f.seek(536 * 512)  # root dir cluster (first_data=536, root=2)
-            root = f.read(512)
-        if b"HELLO" in root:
+            root = f.read(1024)
+        if b"HELLO" in root and b"T\x00h\x00e\x00 \x00q\x00" in root:
             return 0
     with tempfile.TemporaryDirectory() as td:
         hello = os.path.join(td, "hello.txt")
@@ -84,6 +86,10 @@ def ensure_fat32_image(path):
             ["mcopy", "-i", path, hello, "::hello2.txt"],
             ["mmd", "-i", path, "::docs"],
             ["mcopy", "-i", path, hello, "::docs/note.txt"],
+            # Long file names (LFN entries): must round-trip through the driver.
+            ["mcopy", "-i", path, hello, "::The quick brown fox.txt"],
+            ["mmd", "-i", path, "::My Vacation Photos"],
+            ["mcopy", "-i", path, hello, "::My Vacation Photos/summer2026 beach.txt"],
         ]
         for s in steps:
             r = subprocess.run(s, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -195,6 +201,28 @@ def main():
             print("[FAIL] fat32demo did not exit 0")
             return 1
         print("[OK] demo exited 0")
+
+        # Interop: the OS created "/demo/long file name test.txt" with its own
+        # LFN writer — host mtools must see it by its full name and read the
+        # exact bytes back.
+        time.sleep(2)
+        lfn_dst = os.path.join(tempfile.gettempdir(), "lfn_out.txt")
+        try:
+            os.unlink(lfn_dst)
+        except FileNotFoundError:
+            pass
+        mc = subprocess.run(
+            ["mcopy", "-i", args.fat32, "::/demo/long file name test.txt", lfn_dst],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if mc.returncode != 0:
+            print("[FAIL] mtools cannot read the OS-written LFN file")
+            return 1
+        with open(lfn_dst, "rb") as f:
+            data = f.read()
+        if data != b"LONG NAME WRITE OK\n":
+            print(f"[FAIL] LFN content mismatch: {data!r}")
+            return 1
+        print("[OK] mtools reads the OS-written LFN file by its long name")
 
         time.sleep(5)
         if qemu.poll() is not None:

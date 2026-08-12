@@ -2,9 +2,12 @@
 //   1. Read /fat32/HELLO.TXT  (created on the image by mtools, 29 bytes)
 //   2. Read /fat32/hello2.txt (lowercase name -> case-insensitive resolve)
 //   3. Read /fat32/docs/note.txt (nested subdirectory)
-//   4. mkdir /fat32/demo + create /fat32/demo/write.txt + write + read back
-//   5. O_APPEND append -> size grows, old content preserved at the front
-//   6. Delete the file -> stat says gone
+//   4. Read LFN files: "/fat32/The quick brown fox.txt" and the long-named
+//      file inside "/fat32/My Vacation Photos" (mtools wrote LFN entries)
+//   5. mkdir /fat32/demo + create /fat32/demo/write.txt + write + read back
+//   6. O_APPEND append -> size grows, old content preserved at the front
+//   7. Create a long-named file from the OS (LFN write) + read back
+//   8. Delete the file -> stat says gone
 // All checks print to the serial console; "ALL TESTS PASSED" on success.
 #include "src/include/syscall.h"
 
@@ -60,7 +63,19 @@ void _start(void) {
     if (n == en && mem_eq(buf, expect, en))
         sys_print("fat32demo: [OK] read nested /fat32/docs/note.txt\n", 0x0A);
 
-    // --- 4. create dir + file, write, read back ---
+    // --- 4. LFN read: long names written by mtools ---
+    n = read_whole("/fat32/The quick brown fox.txt", buf, sizeof(buf));
+    CHECK(n == en && mem_eq(buf, expect, en),
+          "fat32demo: FAIL read LFN file\n");
+    if (n == en && mem_eq(buf, expect, en))
+        sys_print("fat32demo: [OK] read LFN '/fat32/The quick brown fox.txt'\n", 0x0A);
+    n = read_whole("/fat32/My Vacation Photos/summer2026 beach.txt", buf, sizeof(buf));
+    CHECK(n == en && mem_eq(buf, expect, en),
+          "fat32demo: FAIL read nested LFN file\n");
+    if (n == en && mem_eq(buf, expect, en))
+        sys_print("fat32demo: [OK] read nested LFN 'My Vacation Photos/summer2026 beach.txt'\n", 0x0A);
+
+    // --- 5. create dir + file, write, read back ---
     if (sys_mkdir("/fat32/demo") < 0) {
         // May already exist from a previous run — that's fine.
         sys_print("fat32demo: mkdir /fat32/demo (exists?)\n", 0x07);
@@ -89,7 +104,7 @@ void _start(void) {
             sys_print("fat32demo: [OK] created + wrote + read back file\n", 0x0A);
     }
 
-    // --- 5. O_APPEND: append without clobbering the front ---
+    // --- 6. O_APPEND: append without clobbering the front ---
     fd = sys_open_mode("/fat32/demo/write.txt", O_APPEND);
     if (fd < 0) {
         sys_print("fat32demo: FAIL open O_APPEND\n", 0x0C);
@@ -109,7 +124,32 @@ void _start(void) {
             sys_print("fat32demo: [OK] O_APPEND grew the file\n", 0x0A);
     }
 
-    // --- 6. delete the file -> stat says gone ---
+    // --- 7. create a long-named file from the OS (LFN write) + read back ---
+    sys_delete_file("/fat32/demo/long file name test.txt");  // clean slate
+    if (sys_create_file("/fat32/demo/long file name test.txt") < 0) {
+        sys_print("fat32demo: FAIL create LFN file\n", 0x0C);
+        fails++;
+    }
+    fd = sys_open("/fat32/demo/long file name test.txt");
+    if (fd < 0) {
+        sys_print("fat32demo: FAIL open LFN file\n", 0x0C);
+        fails++;
+    } else {
+        const char* lfn_payload = "LONG NAME WRITE OK\n";  // 18 bytes
+        int ln = slen(lfn_payload);
+        if (sys_write(fd, lfn_payload, ln) != ln) {
+            sys_print("fat32demo: FAIL write LFN file\n", 0x0C);
+            fails++;
+        }
+        sys_close(fd);
+        n = read_whole("/fat32/demo/long file name test.txt", buf, sizeof(buf));
+        CHECK(n == ln && mem_eq(buf, lfn_payload, ln),
+              "fat32demo: FAIL read back LFN file\n");
+        if (n == ln && mem_eq(buf, lfn_payload, ln))
+            sys_print("fat32demo: [OK] created + wrote + read long-named file\n", 0x0A);
+    }
+
+    // --- 8. delete the file -> stat says gone ---
     if (sys_delete_file("/fat32/demo/write.txt") < 0) {
         sys_print("fat32demo: FAIL delete write.txt\n", 0x0C);
         fails++;
@@ -120,6 +160,9 @@ void _start(void) {
     } else {
         sys_print("fat32demo: [OK] delete removed the file\n", 0x0A);
     }
+    // Note: the LFN file deliberately stays on disk — the test script reads
+    // the image with host mtools afterwards to prove OS-written LFN entries
+    // are visible to real tools. The next run starts from a clean slate.
 
     if (fails == 0) {
         sys_print("fat32demo: ALL TESTS PASSED\n", 0x0A);

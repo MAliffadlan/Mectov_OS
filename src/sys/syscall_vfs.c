@@ -57,7 +57,8 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
         // ----- SYS_OPEN (2): Open a VFS file/device -----
         case SYS_OPEN: {
             const char* filename = (const char*)regs->ebx;
-            if (safe_strlen(filename, MAX_FILENAME) < 0) {
+            // Full path, not a single component: cap at MAX_PATH.
+            if (safe_strlen(filename, MAX_PATH) < 0) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
@@ -171,7 +172,8 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
         }
         case SYS_CREATE_FILE: {
             const char* path = (const char*)regs->ebx;
-            if (safe_strlen(path, MAX_FILENAME) < 0) {
+            // Full path, not a single component: cap at MAX_PATH.
+            if (safe_strlen(path, MAX_PATH) < 0) {
                 regs->eax = (uint32_t)-1; break;
             }
             write_serial_string("[CREATE_FILE] ");
