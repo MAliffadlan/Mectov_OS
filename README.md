@@ -360,6 +360,8 @@ All syscalls are invoked via `int 0x80` (trap gate). Registers: `EAX` = number, 
 | SHM Demo | .mct | Two processes share a segment |
 | mmap Demo | .mct | Sparse 1 MiB mapping, lazy zero-fill |
 | mmap File Demo | .mct | File-backed mmap: fault pages in from disk, write back via msync/munmap |
+| lseek File Demo | .mct | SYS_LSEEK/SYS_FSTAT/O_APPEND on real files |
+| FAT32 Demo | .mct | FAT32 drive 3: read mtools files, create/write/append/delete in `/fat32` |
 | Sig Demo | .mct | sigaction/mask/SA_RESTART semantics |
 | BG Read | .mct | Background-group reader stopped by SIGTTIN |
 | SMP Stress | .mct | 8 children × 2 waves across 4 cores |
@@ -380,7 +382,7 @@ make clean && make        # build kernel + apps + ISO assets
 ./run.sh                  # KVM boot: 4 cores, gateway proxy, serial -> serial_debug.log
 ```
 
-`run.sh` boots `mectov.iso` with `-smp 4`, the RTL8139 NIC, SB16 audio, the ext2 drive, and streams the serial log to `serial_debug.log` (also copied to `log.txt`). The Web Gateway Proxy (`scripts/gateway.py`) gives the guest real internet access.
+`run.sh` boots `mectov.iso` with `-smp 4`, the RTL8139 NIC, SB16 audio, and three drives: `disk.img` (MECTOVFS, index 0), `ext2.img` (index 1) and `fat32.img` (a 16 MB FAT32 volume at index 3 — index 2 is the CD-ROM; created with `mkfs.fat` if missing), streaming the serial log to `serial_debug.log` (also copied to `log.txt`). The Web Gateway Proxy (`scripts/gateway.py`) gives the guest real internet access.
 
 ### Building User Applications
 ```bash
