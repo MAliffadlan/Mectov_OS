@@ -5,7 +5,7 @@
 
 // Single source of truth for the kernel release string (help banner, mfetch,
 // uname and /proc/version all read it).
-#define OS_VERSION "38.19"
+#define OS_VERSION "38.20"
 
 extern char cpu_brand[49];
 extern unsigned char boot_sec, boot_min, boot_hour;

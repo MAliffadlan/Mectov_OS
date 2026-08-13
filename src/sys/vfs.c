@@ -15,6 +15,7 @@
 #include "../include/fd.h"
 #include "../include/task.h"
 #include "../include/spinlock.h"
+#include "../include/pcache.h"
 
 // ---- Reentrant irqsave lock (kernel locking audit v38.4) ----
 //
@@ -196,6 +197,7 @@ static void vfs_clear_children(int node) {
                 p = fs_nodes[p].parent;
             }
             if (is_descendant) {
+                pcache_invalidate(i);
                 fs_nodes[i].in_use = 0;
                 fs_nodes[i].size = 0;
                 fs_nodes[i].data_sector = 0;
@@ -207,6 +209,7 @@ static void vfs_clear_children(int node) {
 
 void vfs_init() {
     write_serial_string("[VFS] init start\n");
+    pcache_init();
     vfs_seeding = 1;
     // Coba load dari disk
     if (vfs_load()) {
@@ -444,6 +447,11 @@ void vfs_init() {
         extern uint8_t _binary_fuzz_mct_end[];
         changed += vfs_update_file_if_needed("apps/fuzz.mct", (const char*)_binary_fuzz_mct_start, _binary_fuzz_mct_end - _binary_fuzz_mct_start);
 
+        // Page-cache benchmark (cold vs cached read timing — see scripts/iocache_test.py)
+        extern uint8_t _binary_iobench_mct_start[];
+        extern uint8_t _binary_iobench_mct_end[];
+        changed += vfs_update_file_if_needed("apps/iobench.mct", (const char*)_binary_iobench_mct_start, _binary_iobench_mct_end - _binary_iobench_mct_start);
+
         // Pipeline demo apps
         extern uint8_t _binary_pipegen_mct_start[];
         extern uint8_t _binary_pipegen_mct_end[];
@@ -671,6 +679,12 @@ void vfs_init() {
     extern uint8_t _binary_fuzz_mct_end[];
     vfs_create_file("apps/fuzz.mct");
     vfs_write_file("apps/fuzz.mct", (const char*)_binary_fuzz_mct_start, _binary_fuzz_mct_end - _binary_fuzz_mct_start);
+
+    // Page-cache benchmark
+    extern uint8_t _binary_iobench_mct_start[];
+    extern uint8_t _binary_iobench_mct_end[];
+    vfs_create_file("apps/iobench.mct");
+    vfs_write_file("apps/iobench.mct", (const char*)_binary_iobench_mct_start, _binary_iobench_mct_end - _binary_iobench_mct_start);
 
     // Pipeline demo apps
     extern uint8_t _binary_pipegen_mct_start[];
@@ -1162,6 +1176,9 @@ static int vfs_create_node_unlocked(const char* name, fs_type_t type, int parent
             fs_nodes[i].size = 0;
             fs_nodes[i].data_sector = 0;
             fs_nodes[i].in_use = 1;
+            // The slot may previously have held a deleted file with a stale
+            // cache entry — never let a new node serve another node's bytes.
+            pcache_invalidate(i);
             // New object under an ext2 directory: create it on the real
             // filesystem. Populate passes FS_EXT2_* types for objects that
             // already exist on disk, so those bypass this hook.
@@ -1350,6 +1367,7 @@ static int vfs_delete_node_unlocked(const char* path) {
                     if (!has_children) {
                         vfs_remove_ext2_entry(i);
                         vfs_remove_fat32_entry(i);
+                        pcache_invalidate(i);
                         fs_nodes[i].in_use = 0;
                         fs_nodes[i].size = 0;
                         fs_nodes[i].data_sector = 0;
@@ -1362,6 +1380,7 @@ static int vfs_delete_node_unlocked(const char* path) {
     
     vfs_remove_ext2_entry(node);
     vfs_remove_fat32_entry(node);
+    pcache_invalidate(node);
     fs_nodes[node].in_use = 0;
     fs_nodes[node].size = 0;
     fs_nodes[node].data_sector = 0;
@@ -1693,6 +1712,16 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
     if (size > max_size) size = max_size;
     if (size <= 0) { buf[0] = '\0'; return 0; }
     
+    // Page-cache fast path: the first read of a file primes the whole-file
+    // cache (pcache_insert below); every later read of the same file is then
+    // served from RAM instead of one PIO transfer per sector.
+    char* cached = pcache_lookup(node, fs_nodes[node].size);
+    if (cached) {
+        memcpy(buf, cached, size);
+        if (size < max_size) buf[size] = '\0';
+        return size;
+    }
+    
     int sector = fs_nodes[node].data_sector;
     if (sector <= 0 || sector >= VFS_DISK_SECTORS) { buf[0] = '\0'; return 0; }
     
@@ -1700,6 +1729,7 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
     // clamp so ata_read_sector never walks off the image.
     int max_readable = (VFS_DISK_SECTORS - sector) * 512;
     if (size > max_readable) size = max_readable;
+    if (size <= 0) { buf[0] = '\0'; return 0; }
     
     // Read sectors
     int remaining = size;
@@ -1713,6 +1743,12 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
         offset += chunk;
         remaining -= chunk;
     }
+    
+    // Prime the cache with the bytes just read — a second read of this file
+    // (cat, app relaunch, mmap fault) never touches the disk again.
+    // pcache_insert copies into its own buffer and skips files bigger than
+    // PCACHE_MAX_FILE.
+    pcache_insert(node, buf, size);
     
     // Only terminate if the data left room — size == max_size means the file
     // exactly filled the caller's buffer and buf[size] is one past the end.
@@ -1742,6 +1778,51 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
     if (offset >= size) return 0;
     if (len > size - offset) len = size - offset;
     if (len <= 0) return 0;
+
+    // Page-cache fast path (also serves the mmap fault path, which runs
+    // without vfs_lock — pcache_lock is a leaf below vfs_lock, so this never
+    // re-enters the lock the fault may have interrupted).
+    char* cached = pcache_lookup(node, size);
+    if (cached) {
+        memcpy(buf, cached + offset, len);
+        return len;
+    }
+
+    // Cold miss at offset 0: read the WHOLE file into the cache once, then
+    // serve the requested window from it. A subsequent read — even at a later
+    // offset (sequential fd reads, later mmap pages) — is then a RAM hit.
+    if (offset == 0 && size <= PCACHE_MAX_FILE) {
+        char* tmp = (char*)kmalloc(size);
+        if (tmp) {
+            int psector = fs_nodes[node].data_sector;
+            // Same clamp as the non-cached path: a corrupt node must never
+            // make the prime loop walk off the end of the disk image.
+            int prime_size = size;
+            int max_readable = (VFS_DISK_SECTORS - psector) * 512;
+            if (psector > 0 && psector < VFS_DISK_SECTORS && prime_size > max_readable)
+                prime_size = max_readable;
+            if (psector > 0 && psector < VFS_DISK_SECTORS && prime_size > 0) {
+                int remaining = prime_size;
+                int done = 0;
+                while (remaining > 0) {
+                    unsigned char t[512];
+                    ata_read_sector((unsigned int)psector++, t);
+                    int chunk = remaining > 512 ? 512 : remaining;
+                    memcpy(tmp + done, t, chunk);
+                    done += chunk;
+                    remaining -= chunk;
+                }
+                pcache_insert(node, tmp, prime_size);
+                cached = pcache_lookup(node, prime_size);
+                if (cached) {
+                    memcpy(buf, cached + offset, len);
+                    kfree(tmp);
+                    return len;
+                }
+            }
+            kfree(tmp);
+        }
+    }
 
     int sector = fs_nodes[node].data_sector + (offset / 512);
     if (sector < 0 || sector >= VFS_DISK_SECTORS) return -1;
@@ -1857,6 +1938,11 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
 
     if (fs_nodes[node].type != FS_FILE) return -2;
     
+    // Remember the node's on-disk record so vfs_save() can be skipped when a
+    // same-size in-place write leaves it unchanged (see below).
+    int old_size = fs_nodes[node].size;
+    int old_sector = fs_nodes[node].data_sector;
+    
     // Calculate how many sectors needed
     int sectors_needed = (size + 511) / 512;
     if (sectors_needed < 1) sectors_needed = 1;
@@ -1898,7 +1984,17 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
     }
     
     fs_nodes[node].size = size;
-    if (!vfs_seeding) vfs_save();
+    // Keep the page cache coherent: the cache mirrors the disk, so a
+    // successful write-through replaces the cached copy (or drops it when the
+    // file is now too big / empty to cache).
+    pcache_insert(node, data, size);
+    // The node table's on-disk record changed only when the size or the data
+    // sector moved. A same-size in-place rewrite leaves the persisted record
+    // identical — the file data itself was already written above — so skip
+    // the 256-sector vfs_save(), the dominant cost of small file writes.
+    if (!vfs_seeding && (size != old_size || fs_nodes[node].data_sector != old_sector)) {
+        vfs_save();
+    }
     return size;
 }
 int vfs_write_file(const char* path, const char* data, int size) {
