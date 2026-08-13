@@ -21,6 +21,9 @@ Welcome to the official technical documentation for **Mectov OS**, an x86 32-bit
 ### 3. User Interface & Window Manager (`docs/gui/`)
 * **[Window Manager & Desktop Shell](gui/window_manager.md)** — Double-buffered window compositor, Z-order layering, Aero Snap window docking, desktop squircle icons, and taskbar.
 
+### 4. Developer Guides (`docs/`)
+* **[Git/GitHub Authentication](git-auth.md)** — Set up SSH keys or Git Credential Manager for safe `git push` without exposing tokens in chat or config.
+
 ---
 
 ## 🛠️ Quick Build & Run Instructions
