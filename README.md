@@ -47,29 +47,43 @@ Mectov OS is a from-scratch i386 operating system with:
 - Per-CPU load sampling exposed to Ring 3: SysInfo renders four live utilization bars; the serial log prints `[LOAD] c0=.. c1=..` every 3 s.
 - `smpstress` forks 8 children (CPU burn + sleep + pipes + self-signals) in two parallel waves across all four cores — all 16 exit and are reaped.
 
-**Process model (v36.1–v36.6)**
+**Process model & signals (v36.1–v36.6, v38.5–v38.7)**
 - COW `fork()` with deterministic syscall-frame copying (the KVM fork-GPF fix), in-place `exec()` via live-frame patching, blocking `waitpid()` with WNOHANG.
-- POSIX signals with `SIGACTION`/`SIGPROCMASK`, handler sigframes on the user stack, `SA_RESTART` re-parking interrupted sleeps.
+- POSIX signals with `SIGACTION`/`SIGPROCMASK`, handler sigframes on the user stack, `SA_RESTART` re-parking interrupted sleeps — and unresolvable Ring 3 faults deliver `SIGSEGV` to user handlers instead of killing the task.
 - Process groups + sessions + controlling terminal: `setpgid`, `setsid`, `tcsetpgrp`; background readers get stopped by SIGTTIN; Ctrl+C/Ctrl+Z target the foreground group.
 - Real pipelines and redirection: `run A | run B`, `run A > file`, `run A < file` through dup2 + a per-task fd table.
 - Job control: Ctrl+Z stops, `jobs` lists, `bg` resumes, `fg` waits, `kill %1` terminates.
+- Demand paging for heap and stack: a shared lazy zero page + COW backs untouched pages, and an unmapped guard page catches stack overflow cleanly.
 
-**Shell toolkit (v36.9)**
-- POSIX-style builtins: `uname` (`-a` banner), `whoami`, `hostname`, `env` (lists exported vars), `seq [FIRST] LAST`, `head [-n N] [file|stdin]` — including pipes (`cat f | head -n 2`).
-- A single `OS_VERSION` constant shared by the help banner, `mfetch` and `uname`, so the release string can never drift (previously help still said v35.2 at v36.8).
-- Env/alias tables lazy-init in the Ring-3 terminal path with a shared module-level guard — `$USER` & friends now work there, and a second init can never wipe user-exported variables.
+**Shell & toolkit (v36.9, v37.x)**
+- POSIX-style builtins across three toolkit rounds: `uname`, `whoami`, `hostname`, `env`, `seq`, `head`, `wc`, `type`, `cat -n`, `yes`, `printf`, `sort`, `uniq`, `tee`, `find` — all pipe-aware.
+- Shell scripting: `for VAR in list`, `while true/false`, `$VAR` expansion, `break`, 4-level nesting; env vars + aliases + tab completion.
+- `passwd` stores the login password in `/etc/passwd` (single source, no hardcoded default); a single `OS_VERSION` constant keeps the help banner, `mfetch`, `uname` and login footer in sync.
 
-**Memory**
-- Frame-bitmap physical allocator, per-process address spaces, COW paging with frame reference counting, demand-paged `mmap()` (`0x40000000..0x80000000`, zero-fault), System V shared memory with `PAGE_SHARED`.
+**Memory & kernel hardening (v38.3–v38.8)**
+- Frame-bitmap physical allocator sized from the multiboot memory map (RAM above 128 MB usable; identity map to 512 MB), per-process address spaces, COW with frame refcounting, demand-paged `mmap()` (`0x40000000..0x80000000`), System V shared memory.
+- File-backed `mmap()` (`SYS_MMAP_FILE` + `SYS_MSYNC`): pages fault in from disk on demand, dirty pages write back on msync/munmap, `fork()` shares them MAP_SHARED-style.
+- 16 KB kernel stacks with a 4 KB guard page below each; vector 8 is a hardware task gate so an overflow prints `[PANIC] DOUBLE FAULT` instead of triple-faulting into a silent reboot.
+- Lock audit: per-structure irqsave spinlocks replaced global `cli()` — syscalls are preemptible and SMP parallelizes; heap gets magic + canary + redzone, clean panic on double-free, OOM returns NULL.
+- `dmesg` — a 64 KB in-memory kernel log ring (crash lines included) exposed via `dmesg` and `/proc/dmesg`.
 
-**Filesystems & storage**
-- ATA PIO driver, persistent VFS with auto-save, dual drives; secondary ext2 partition is fully writable (create/grow/truncate/rename/delete) with host-verified integrity.
+**Filesystems & storage (v37.0, v38.12, v38.15–v38.16)**
+- Persistent VFS with auto-save; a fully writable ext2 partition (host-verified `fsck.ext2` clean); a **FAT32 volume at `/fat32` (drive 3) with long file names (LFN) read AND written**, interoperable with host `mkfs.fat`/mtools both ways.
+- POSIX file positioning: `SYS_LSEEK` (`SEEK_SET/CUR/END`), `SYS_FSTAT`, honored `O_APPEND`; fd reads advance a real offset.
+- Virtual `/proc` generated live from kernel state: `/proc/tasks`, `/proc/meminfo`, `/proc/cpuinfo`, `/proc/uptime`, `/proc/version`, `/proc/dmesg`.
 
-**Network**
-- 8-slot multi-connection TCP with seq/ack, retransmit/timeout sweeps and a full FIN handshake; UDP bind/send/recv; DNS via the QEMU gateway; **a DHCP client (RFC 2131) that configures IP/gateway/DNS at runtime over UDP broadcast, with static fallback**; RTL8139 IRQ-driven RX (spinlock-guarded against the SMP TX race).
+**Network (v35.5, v38.11)**
+- 8-slot multi-connection TCP with seq/ack, retransmit/timeout sweeps and a full FIN handshake; UDP bind/send/recv; DNS via the QEMU gateway.
+- **DHCP client (RFC 2131)** configures IP/netmask/gateway/DNS at runtime over UDP broadcast, with static fallback (`ipconfig` prints the result); RTL8139 IRQ-driven RX (spinlock-guarded against the SMP TX race).
 
-**GUI & input**
-- Double-buffered WM with dirty-region tracking, Aero snap, 8-directional resize, traffic-light controls, scroll-wheel events (IntelliMouse), shared `ps2_drain()` arbitration so keyboard and mouse never steal each other's bytes.
+**GUI & input (v37.x–v38.x)**
+- Double-buffered WM: dirty-region tracking, Aero snap, 8-directional resize, traffic-light controls, scroll-wheel events (IntelliMouse), 16-window capacity, shared `ps2_drain()` arbitration so keyboard and mouse never steal each other's bytes.
+- Amber instrument-console identity: amber window chrome and taskbar, a Windows-style lock screen → password login, live RTC clock.
+- Smooth compositing: delta-copy VRAM presentation (~10× less MMIO traffic), truthful FPS HUD, tick-scaled 60 FPS cap — <1 ms/frame on KVM.
+
+**App runtime & tooling (v38.3, v38.13)**
+- `.mct` binary format + standard ELF32 loader + shared-library runtime (app binaries ~2 KB); the first **Rust** Ring 3 app (`apps/rusthello.rs`, `no_std`, same MCT1 format) proves the loader is language-agnostic.
+- The 3,384-line shell monolith split into a dispatcher + 72 per-command modules; in-kernel GDB stub (COM2, breakpoints, single-step, DWARF symbols).
 
 ---
 
