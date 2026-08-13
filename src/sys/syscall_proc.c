@@ -15,6 +15,7 @@
 #include "../include/task.h"   // SIG_MAX, SIG_IGN_SENTINEL, sigframe_t
 
 extern int validate_user_ptr(const void* ptr, uint32_t size);
+extern int validate_user_array_ptr(const void* ptr, uint32_t elem_size, int count);
 extern int safe_strlen(const char* s, int max);
 extern void print(const char* s, uint8_t color);
 
@@ -130,7 +131,10 @@ uint32_t handle_syscall_proc(registers_t* regs) {
         case SYS_GET_TASKS: {
             sys_task_info_t* array = (sys_task_info_t*)regs->ebx;
             int max_count = (int)regs->ecx;
-            if (!validate_user_ptr(array, sizeof(sys_task_info_t) * max_count)) { regs->eax = (uint32_t)-1; break; }
+            // validate_user_array_ptr bounds max_count and rejects the
+            // sizeof(sys_task_info_t) * max_count 32-bit overflow that could
+            // make the loop below write past the caller's mapped region at CPL 0.
+            if (!validate_user_array_ptr(array, sizeof(sys_task_info_t), max_count)) { regs->eax = (uint32_t)-1; break; }
             int count = 0;
             for (int i = 0; i < 64 && count < max_count; i++) { // MAX_TASKS is 64 in task.h
                 task_info_t info;
@@ -192,7 +196,47 @@ uint32_t handle_syscall_proc(registers_t* regs) {
         case SYS_KILL: {
             int pid = (int)regs->ebx;
             int sig = (int)regs->ecx;
-            if (pid <= 0) { regs->eax = (uint32_t)-1; break; }
+            if (pid <= 0 || sig <= 0 || sig >= SIG_MAX) { regs->eax = (uint32_t)-1; break; }
+            int caller = get_current_task();
+
+            // No UID model yet, so authorize by process relationship (POSIX
+            // kill's same-UID rule approximated with the process graph): a
+            // plain app may signal itself, its own descendants, or a task in
+            // its own process group. The whitelisted system apps (terminal /
+            // explorer / taskmgr) keep full access — they already hold
+            // SYS_KILL_TASK, and the kernel shell / Ctrl+C paths call
+            // task_signal directly and are unaffected.
+            if (!task_in_kernel_space(caller)) {
+                const char* launch_arg = task_get_launch_arg(caller);
+                if (!launch_arg_is(launch_arg, "terminal.mct") &&
+                    !launch_arg_is(launch_arg, "explorer.mct") &&
+                    !launch_arg_is(launch_arg, "taskmgr.mct")) {
+                    int allowed = (pid == caller);
+                    extern int task_get_parent(int);
+                    extern int task_get_pgrp(int);
+                    if (!allowed) {
+                        int p = task_get_parent(pid);
+                        int hops = 0;
+                        while (p > 0 && p < 64 && hops < 64 && p != pid) {  // MAX_TASKS is 64
+                            if (p == caller) { allowed = 1; break; }
+                            p = task_get_parent(p);
+                            hops++;
+                        }
+                    }
+                    if (!allowed && task_get_pgrp(pid) == task_get_pgrp(caller)) allowed = 1;
+                    if (!allowed) {
+                        write_serial_string("[SYS] SYS_KILL denied: caller=");
+                        write_serial_hex(caller);
+                        write_serial_string(" pid=");
+                        write_serial_hex(pid);
+                        write_serial_string(" sig=");
+                        write_serial_hex(sig);
+                        write_serial_string("\n");
+                        regs->eax = (uint32_t)-1;
+                        break;
+                    }
+                }
+            }
             extern int task_signal(int tid, int sig);
             regs->eax = (uint32_t)task_signal(pid, sig);
             break;
@@ -367,6 +411,20 @@ uint32_t handle_syscall_proc(registers_t* regs) {
                 break;
             }
             sigframe_t* f = (sigframe_t*)esp;
+
+            // The frame lives in USER memory and the app can rewrite it before
+            // calling SYS_SIGRETURN, so its CS/SS/EFLAGS are not trustworthy.
+            // An iret whose CS/SS are not Ring-3 selectors faults at CPL 0
+            // (kernel panic), and NT in EFLAGS makes the next iret attempt a
+            // hardware task switch. The kernel always saved 0x1B (user code)
+            // / 0x23 (user data), so require user selectors and clear NT + IOPL.
+            if ((f->saved_cs & 3) != 3 || (f->saved_ss & 3) != 3) {
+                task_set_sig_frame_esp(tid, 0);
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            uint32_t safe_eflags = f->saved_eflags & ~0x7000u; // clear NT(14) + IOPL(12..13)
+
             // Restore the pre-handler signal mask first: SA_RESTART re-parks
             // the task in SYS_SLEEP below, and that sleep must run under the
             // original mask (e.g. SIGKILL-able, signals delivered normally).
@@ -383,7 +441,7 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             regs->ebp  = f->saved_ebp;
             regs->eip  = f->saved_eip;
             regs->cs   = f->saved_cs;
-            regs->eflags = f->saved_eflags;
+            regs->eflags = safe_eflags;
             regs->useresp = f->saved_esp;
             regs->ss   = f->saved_ss;
             task_set_sig_frame_esp(tid, 0);

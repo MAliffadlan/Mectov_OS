@@ -83,6 +83,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/sigdemo_mct.o \
        $(OBJ_DIR)/smpstress_mct.o \
        $(OBJ_DIR)/bgread_mct.o \
+       $(OBJ_DIR)/fuzz_mct.o \
        $(OBJ_DIR)/libc_mct.o \
        $(OBJ_DIR)/calc_mct.o \
        $(OBJ_DIR)/volume_mct.o \
@@ -240,6 +241,9 @@ smpstress.mct: apps/smpstress.c $(MCT_LIBC_H)
 bgread.mct: apps/bgread.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/bgread.c bgread.mct
 
+fuzz.mct: apps/fuzz.c
+	python3 scripts/build_mct.py apps/fuzz.c fuzz.mct
+
 tcpserver.mct: apps/tcpserver.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/tcpserver.c tcpserver.mct
 
@@ -323,6 +327,9 @@ $(OBJ_DIR)/demandtest_mct.o: demandtest.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/segvtest_mct.o: segvtest.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 segvtest.mct $(OBJ_DIR)/segvtest_mct.o
+
+$(OBJ_DIR)/fuzz_mct.o: fuzz.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 fuzz.mct $(OBJ_DIR)/fuzz_mct.o
 
 $(OBJ_DIR)/looper_mct.o: looper.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 looper.mct $(OBJ_DIR)/looper_mct.o

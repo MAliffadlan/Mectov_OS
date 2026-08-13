@@ -90,3 +90,9 @@ jobs:
       - name: poll/select/getcwd/chdir/clock_gettime regression (TCG)
         run: |
           python3 scripts/pollselect_test.py --timeout 240
+
+      - name: Ring 3 syscall fuzzer regression (TCG)
+        run: |
+          # ~2000 random syscalls with garbage pointers/sizes/fds from Ring 3:
+          # the kernel must reject every one without panicking.
+          python3 scripts/fuzz_test.py --timeout 300

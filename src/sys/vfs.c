@@ -438,6 +438,12 @@ void vfs_init() {
         extern uint8_t _binary_bgread_mct_end[];
         changed += vfs_update_file_if_needed("apps/bgread.mct", (const char*)_binary_bgread_mct_start, _binary_bgread_mct_end - _binary_bgread_mct_start);
 
+        // Ring 3 syscall fuzzer (random + hostile syscall args; kernel must
+        // never panic — see scripts/fuzz_test.py)
+        extern uint8_t _binary_fuzz_mct_start[];
+        extern uint8_t _binary_fuzz_mct_end[];
+        changed += vfs_update_file_if_needed("apps/fuzz.mct", (const char*)_binary_fuzz_mct_start, _binary_fuzz_mct_end - _binary_fuzz_mct_start);
+
         // Pipeline demo apps
         extern uint8_t _binary_pipegen_mct_start[];
         extern uint8_t _binary_pipegen_mct_end[];
@@ -659,6 +665,12 @@ void vfs_init() {
     extern uint8_t _binary_bgread_mct_end[];
     vfs_create_file("apps/bgread.mct");
     vfs_write_file("apps/bgread.mct", (const char*)_binary_bgread_mct_start, _binary_bgread_mct_end - _binary_bgread_mct_start);
+
+    // Ring 3 syscall fuzzer
+    extern uint8_t _binary_fuzz_mct_start[];
+    extern uint8_t _binary_fuzz_mct_end[];
+    vfs_create_file("apps/fuzz.mct");
+    vfs_write_file("apps/fuzz.mct", (const char*)_binary_fuzz_mct_start, _binary_fuzz_mct_end - _binary_fuzz_mct_start);
 
     // Pipeline demo apps
     extern uint8_t _binary_pipegen_mct_start[];

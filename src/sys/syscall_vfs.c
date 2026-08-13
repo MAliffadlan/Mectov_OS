@@ -12,6 +12,7 @@
 #include "../include/fd.h"
 
 extern int validate_user_ptr(const void* ptr, uint32_t size);
+extern int validate_user_array_ptr(const void* ptr, uint32_t elem_size, int count);
 extern int safe_strlen(const char* s, int max);
 extern void print(const char* s, uint8_t color);
 
@@ -147,7 +148,10 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
             dir_entry_t* array = (dir_entry_t*)regs->ebx;
             int max_count = (int)regs->ecx;
             int parent_node = (int)regs->edx;
-            if (!validate_user_ptr(array, sizeof(dir_entry_t) * max_count)) {
+            // validate_user_array_ptr bounds max_count and rejects the
+            // sizeof(dir_entry_t) * max_count 32-bit overflow that could make
+            // the loop below write past the caller's mapped region at CPL 0.
+            if (!validate_user_array_ptr(array, sizeof(dir_entry_t), max_count)) {
                 regs->eax = (uint32_t)-1; break;
             }
             int count = 0;

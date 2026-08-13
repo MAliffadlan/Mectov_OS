@@ -247,7 +247,7 @@ static int user_page_ok(uint32_t pd_paddr, uint32_t va, uint32_t heap_top) {
     return 1;
 }
 
-static int validate_user_array_ptr(const void* ptr, uint32_t elem_size, int count) {
+int validate_user_array_ptr(const void* ptr, uint32_t elem_size, int count) {
     if (count <= 0 || elem_size == 0) return 0;
     uint64_t total = (uint64_t)elem_size * (uint64_t)count;
     if (total == 0 || total > USER_PTR_MAX_SIZE) return 0;
