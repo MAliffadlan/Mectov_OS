@@ -86,3 +86,7 @@ jobs:
       - name: FAT32 regression (drive 3, TCG)
         run: |
           python3 scripts/fat32_test.py --timeout 240
+
+      - name: poll/select/getcwd/chdir/clock_gettime regression (TCG)
+        run: |
+          python3 scripts/pollselect_test.py --timeout 240

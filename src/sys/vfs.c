@@ -386,6 +386,11 @@ void vfs_init() {
         extern uint8_t _binary_lseekfiledemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/lseekfiledemo.mct", (const char*)_binary_lseekfiledemo_mct_start, _binary_lseekfiledemo_mct_end - _binary_lseekfiledemo_mct_start);
 
+        // poll/select/getcwd/chdir/clock_gettime demo
+        extern uint8_t _binary_pollselectdemo_mct_start[];
+        extern uint8_t _binary_pollselectdemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/pollselectdemo.mct", (const char*)_binary_pollselectdemo_mct_start, _binary_pollselectdemo_mct_end - _binary_pollselectdemo_mct_start);
+
         // FAT32 demo app (exercises the drive-3 FAT32 filesystem)
         extern uint8_t _binary_fat32demo_mct_start[];
         extern uint8_t _binary_fat32demo_mct_end[];
@@ -593,6 +598,12 @@ void vfs_init() {
     extern uint8_t _binary_lseekfiledemo_mct_end[];
     vfs_create_file("apps/lseekfiledemo.mct");
     vfs_write_file("apps/lseekfiledemo.mct", (const char*)_binary_lseekfiledemo_mct_start, _binary_lseekfiledemo_mct_end - _binary_lseekfiledemo_mct_start);
+
+    // poll/select/getcwd/chdir/clock_gettime demo
+    extern uint8_t _binary_pollselectdemo_mct_start[];
+    extern uint8_t _binary_pollselectdemo_mct_end[];
+    vfs_create_file("apps/pollselectdemo.mct");
+    vfs_write_file("apps/pollselectdemo.mct", (const char*)_binary_pollselectdemo_mct_start, _binary_pollselectdemo_mct_end - _binary_pollselectdemo_mct_start);
 
     extern uint8_t _binary_fat32demo_mct_start[];
     extern uint8_t _binary_fat32demo_mct_end[];

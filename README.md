@@ -384,6 +384,7 @@ All syscalls are invoked via `int 0x80` (trap gate). Registers: `EAX` = number, 
 | mmap Demo | .mct | Sparse 1 MiB mapping, lazy zero-fill |
 | mmap File Demo | .mct | File-backed mmap: fault pages in from disk, write back via msync/munmap |
 | lseek File Demo | .mct | SYS_LSEEK/SYS_FSTAT/O_APPEND on real files |
+| Poll/Select Demo | .mct | POSIX poll()/select() over fds+pipes, getcwd/chdir, clock_gettime |
 | FAT32 Demo | .mct | FAT32 drive 3: read mtools files, create/write/append/delete in `/fat32` |
 | Sig Demo | .mct | sigaction/mask/SA_RESTART semantics |
 | BG Read | .mct | Background-group reader stopped by SIGTTIN |
@@ -439,6 +440,7 @@ The project is tested on QEMU under **both KVM (4-core)** and TCG:
 | `scripts/fork_test.py` | COW fork + waitpid + signals (TCG) |
 | `scripts/jobcontrol_test.py` | `sleep 2 &`, `jobs`, `bg`, `fg`, `kill %1` (TCG) |
 | `scripts/fat32_test.py` | FAT32 drive 3: mtools-created files, nested dir, create/write/read-back, O_APPEND, delete (TCG) |
+| `scripts/pollselect_test.py` | poll/select over files+pipes (incl. timeout, EOF/HUP, POLLNVAL), getcwd/chdir round-trip, clock_gettime monotonic (TCG) |
 | KVM regressions | fork, exec, pipe, redir, mmap, shm, sig, ctrlc, stop, job, bgread, tcp, smpstress (4 cores) |
 
 `kvm_smp_test.py` runs `smpstress` twice (16 children total) and asserts every child exits with the right code and the OS stays alive; `kvm_cpumon_test.py` verifies the per-core load sampler (`idle [0,0,0,0]` → stress `[50,40,46,30]`). The CI workflow (`.github/workflows/build-boot-test.yml`) runs the boot test on every push.

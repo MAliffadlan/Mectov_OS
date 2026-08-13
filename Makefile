@@ -70,6 +70,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/mmapdemo_mct.o \
        $(OBJ_DIR)/mmapfiledemo_mct.o \
        $(OBJ_DIR)/lseekfiledemo_mct.o \
+       $(OBJ_DIR)/pollselectdemo_mct.o \
        $(OBJ_DIR)/fat32demo_mct.o \
        $(OBJ_DIR)/rusthello_mct.o \
        $(OBJ_DIR)/demandtest_mct.o \
@@ -198,6 +199,9 @@ mmapfiledemo.mct: apps/mmapfiledemo.c $(MCT_LIBC_H)
 lseekfiledemo.mct: apps/lseekfiledemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/lseekfiledemo.c lseekfiledemo.mct
 
+pollselectdemo.mct: apps/pollselectdemo.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/pollselectdemo.c pollselectdemo.mct
+
 fat32demo.mct: apps/fat32demo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/fat32demo.c fat32demo.mct
 
@@ -304,6 +308,9 @@ $(OBJ_DIR)/mmapfiledemo_mct.o: mmapfiledemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/lseekfiledemo_mct.o: lseekfiledemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 lseekfiledemo.mct $(OBJ_DIR)/lseekfiledemo_mct.o
+
+$(OBJ_DIR)/pollselectdemo_mct.o: pollselectdemo.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 pollselectdemo.mct $(OBJ_DIR)/pollselectdemo_mct.o
 
 $(OBJ_DIR)/fat32demo_mct.o: fat32demo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 fat32demo.mct $(OBJ_DIR)/fat32demo_mct.o
