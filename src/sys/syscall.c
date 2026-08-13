@@ -635,6 +635,73 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_POLL (97): POSIX poll() over the fd table -----
+        case SYS_POLL: {
+            pollfd_t* fds = (pollfd_t*)regs->ebx;
+            int nfds = (int)regs->ecx;
+            int timeout = (int)regs->edx;
+            if (nfds < 0 || nfds > MAX_FDS_PER_TASK ||
+                (nfds > 0 && !validate_user_array_ptr(fds, sizeof(pollfd_t), nfds))) {
+                regs->eax = (uint32_t)-1; break;
+            }
+            extern int do_sys_poll(pollfd_t*, int, int);
+            regs->eax = (uint32_t)do_sys_poll(fds, nfds, timeout);
+            break;
+        }
+        // ----- SYS_SELECT (98): POSIX select() over the fd table -----
+        case SYS_SELECT: {
+            int nfds = (int)regs->ebx;
+            uint32_t* readfds = (uint32_t*)regs->ecx;
+            uint32_t* writefds = (uint32_t*)regs->edx;
+            uint32_t* exceptfds = (uint32_t*)regs->esi;
+            int timeout = (int)regs->edi;
+            if (nfds < 0 || nfds > MAX_FDS_PER_TASK ||
+                (readfds && !validate_user_ptr(readfds, sizeof(uint32_t))) ||
+                (writefds && !validate_user_ptr(writefds, sizeof(uint32_t))) ||
+                (exceptfds && !validate_user_ptr(exceptfds, sizeof(uint32_t)))) {
+                regs->eax = (uint32_t)-1; break;
+            }
+            extern int do_sys_select(int, uint32_t*, uint32_t*, uint32_t*, int);
+            regs->eax = (uint32_t)do_sys_select(nfds, readfds, writefds, exceptfds, timeout);
+            break;
+        }
+        // ----- SYS_GETCWD (99): absolute path of the working directory -----
+        case SYS_GETCWD: {
+            char* buf = (char*)regs->ebx;
+            int size = (int)regs->ecx;
+            if (size <= 0 || !validate_user_ptr(buf, size)) { regs->eax = (uint32_t)-1; break; }
+            char cwd[MAX_PATH];
+            if (vfs_get_abs_path(get_current_dir(), cwd, MAX_PATH) < 0) { regs->eax = (uint32_t)-1; break; }
+            int i = 0;
+            while (cwd[i] && i < size - 1) { buf[i] = cwd[i]; i++; }
+            buf[i] = '\0';
+            regs->eax = 0;
+            break;
+        }
+        // ----- SYS_CHDIR (100): change the working directory -----
+        case SYS_CHDIR: {
+            const char* path = (const char*)regs->ebx;
+            if (safe_strlen(path, MAX_PATH) < 0) { regs->eax = (uint32_t)-1; break; }
+            int node = vfs_get_node(path);
+            if (node < 0 || !vfs_is_dir(node)) { regs->eax = (uint32_t)-1; break; }
+            set_current_dir(node);
+            regs->eax = 0;
+            break;
+        }
+        // ----- SYS_CLOCK_GETTIME (101): monotonic uptime (CLOCK_MONOTONIC) -----
+        case SYS_CLOCK_GETTIME: {
+            int clock_id = (int)regs->ebx;
+            timespec_t* ts = (timespec_t*)regs->ecx;
+            if (clock_id != CLOCK_MONOTONIC || !validate_user_ptr(ts, sizeof(timespec_t))) {
+                regs->eax = (uint32_t)-1; break;
+            }
+            uint32_t us = timer_get_us();
+            ts->tv_sec = us / 1000000;
+            ts->tv_nsec = (us % 1000000) * 1000;
+            regs->eax = 0;
+            break;
+        }
+
         // ----- SYS_GET_PCI_INFO (36) -----
         case SYS_GET_PCI_INFO: {
             pci_device_t* array = (pci_device_t*)regs->ebx;

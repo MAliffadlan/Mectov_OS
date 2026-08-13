@@ -3,6 +3,7 @@
 #include "../include/vfs.h"
 #include "../include/mem.h"
 #include "../include/spinlock.h"
+#include "../include/timer.h"
 
 // fd_lock protects the shared descriptor tables (global_fds[], pipes[]) from
 // concurrent syscalls on different cores. Process context (syscall, main
@@ -256,6 +257,120 @@ int do_sys_fstat(int fd, stat_t* out) {
     out->name[MAX_FILENAME - 1] = '\0';
     fd_lock_release();
     return 0;
+}
+
+// Events a single fd reports RIGHT NOW (no blocking). Returns a subset of
+// POLLIN/POLLOUT/POLLHUP, or POLLNVAL if the fd is not open. Must be called
+// with fd_lock held (it reads the shared descriptor/pipe tables).
+static int fd_poll_events(int tid, int fd) {
+    int gfd = task_get_fd(tid, fd);
+    if (gfd < 0 || !global_fds[gfd].in_use) return POLLNVAL;
+
+    int rev = 0;
+    switch (global_fds[gfd].type) {
+        case FD_TYPE_FILE:
+        case FD_TYPE_DEV:
+            // Regular files and device/proc nodes never block: a read returns
+            // immediately (data or EOF) and a write is always accepted.
+            rev = POLLIN | POLLOUT;
+            break;
+        case FD_TYPE_PIPE_READ: {
+            int p = global_fds[gfd].pipe_id;
+            if (pipes[p].read_pos != pipes[p].write_pos) rev |= POLLIN;
+            else if (pipes[p].closed_write) rev |= POLLIN | POLLHUP; // EOF
+            break;
+        }
+        case FD_TYPE_PIPE_WRITE: {
+            int p = global_fds[gfd].pipe_id;
+            int next = (pipes[p].write_pos + 1) % PIPE_BUF_SIZE;
+            if (next != pipes[p].read_pos) rev |= POLLOUT; // space left
+            break;
+        }
+        default:
+            break;
+    }
+    return rev;
+}
+
+// POSIX poll(): scan the fds array, fill each revents, and return the number
+// of descriptors with pending events. timeout_ms semantics: 0 = return
+// immediately, >0 = wait up to that long (in ms, scaled by the calibrated
+// ticks_per_sec), <0 = block forever. The wait loop mirrors the pipe
+// read/write pattern: drop fd_lock, `sti; hlt` for one tick, re-check.
+int do_sys_poll(pollfd_t* fds, int nfds, int timeout_ms) {
+    int tid = get_current_task();
+    if (tid < 0) return -1;
+    if (nfds < 0 || nfds > MAX_FDS_PER_TASK) return -1;
+
+    uint32_t start = get_ticks();
+    int deadline = (timeout_ms < 0) ? -1
+        : (int)(start + ((uint64_t)timeout_ms * (uint64_t)ticks_per_sec) / 1000);
+
+    for (;;) {
+        int ready = 0;
+        fd_lock_acquire();
+        for (int i = 0; i < nfds; i++) {
+            int ev = fd_poll_events(tid, fds[i].fd);
+            if (ev == POLLNVAL) {
+                fds[i].revents = POLLNVAL;          // always reported
+                ready++;
+            } else {
+                // POLLHUP is reported even when not requested (EOF signal).
+                fds[i].revents = (ev & fds[i].events) | (ev & POLLHUP);
+                if (fds[i].revents) ready++;
+            }
+        }
+        fd_lock_release();
+        if (ready > 0) return ready;
+        if (timeout_ms == 0) return 0;
+        if (deadline >= 0 && (int)get_ticks() >= deadline) return 0;
+        __asm__ volatile("sti; hlt");
+    }
+}
+
+// POSIX select(): bitmaps are uint32_t (fd < 32). readfds/writefds are
+// rewritten in place to the ready fds (zeroed on timeout); exceptfds is
+// always cleared (no exceptional conditions are tracked). Returns the ready
+// count, 0 on timeout, -1 on error.
+int do_sys_select(int nfds, uint32_t* readfds, uint32_t* writefds,
+                  uint32_t* exceptfds, int timeout_ms) {
+    int tid = get_current_task();
+    if (tid < 0) return -1;
+    if (nfds < 0 || nfds > MAX_FDS_PER_TASK) return -1;
+
+    // Snapshot the requested sets once — the loop rewrites the live bitmaps
+    // every pass, so re-reading them after a sleep would lose the fds that
+    // were already cleared while nothing was ready.
+    uint32_t want_r = readfds ? *readfds : 0;
+    uint32_t want_w = writefds ? *writefds : 0;
+
+    uint32_t start = get_ticks();
+    int deadline = (timeout_ms < 0) ? -1
+        : (int)(start + ((uint64_t)timeout_ms * (uint64_t)ticks_per_sec) / 1000);
+
+    for (;;) {
+        uint32_t r = want_r, w = want_w;
+        int ready = 0;
+        fd_lock_acquire();
+        for (int fd = 0; fd < nfds; fd++) {
+            int ev = fd_poll_events(tid, fd);
+            if (r & (1u << fd)) {
+                if (ev & POLLIN) ready++; else r &= ~(1u << fd);
+            }
+            if (w & (1u << fd)) {
+                if (ev & POLLOUT) ready++; else w &= ~(1u << fd);
+            }
+        }
+        fd_lock_release();
+        if (ready > 0 || timeout_ms == 0 ||
+            (deadline >= 0 && (int)get_ticks() >= deadline)) {
+            if (readfds) *readfds = r;
+            if (writefds) *writefds = w;
+            if (exceptfds) *exceptfds = 0;
+            return ready;
+        }
+        __asm__ volatile("sti; hlt");
+    }
 }
 
 // Release one global FD: drop its refcount and free the slot (and any pipe it

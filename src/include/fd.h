@@ -38,6 +38,13 @@ int do_sys_pipe(int pipefd[2]);
 int do_sys_lseek(int fd, int offset, int whence);
 // POSIX fstat: fill a stat_t for an open file descriptor. Returns 0 or -1.
 int do_sys_fstat(int fd, stat_t* out);
+// I/O multiplexing (POSIX poll/select). poll() fills fds[i].revents and
+// returns the number of ready descriptors (0 on timeout, -1 on error).
+// select() rewrites the read/write bitmaps (uint32_t, fd < 32) to the ready
+// fds and returns the count. timeout_ms < 0 blocks forever.
+int do_sys_poll(pollfd_t* fds, int nfds, int timeout_ms);
+int do_sys_select(int nfds, uint32_t* readfds, uint32_t* writefds,
+                  uint32_t* exceptfds, int timeout_ms);
 void task_close_all_fds(int tid);
 void task_rewire_fds(int tid, int in_fd, int out_fd);
 

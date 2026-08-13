@@ -306,6 +306,15 @@ All syscalls are invoked via `int 0x80` (trap gate). Registers: `EAX` = number, 
 | 95 | SYS_LSEEK | Reposition fd read/write offset. EBX=fd, ECX=offset, EDX=whence(SEEK_SET/CUR/END) → new offset |
 | 96 | SYS_FSTAT | File metadata by fd. EBX=fd, ECX=stat_t* {size,type,node_idx,parent,data_sector,name} |
 
+### I/O Multiplexing & POSIX misc (97–101)
+| # | Name | Description |
+|---|------|-------------|
+| 97 | SYS_POLL | POSIX poll(). EBX=pollfd_t*, ECX=nfds, EDX=timeout_ms (<0 = forever) → ready count |
+| 98 | SYS_SELECT | POSIX select(). EBX=nfds, ECX=readfds*, EDX=writefds*, ESI=exceptfds*, EDI=timeout_ms (uint32_t bitmaps) → ready count |
+| 99 | SYS_GETCWD | Absolute path of the working directory. EBX=buf, ECX=size → 0 |
+| 100 | SYS_CHDIR | Change working directory. EBX=path (relative or absolute) → 0 |
+| 101 | SYS_CLOCK_GETTIME | Monotonic uptime. EBX=CLOCK_MONOTONIC, ECX=timespec_t* {tv_sec,tv_nsec} → 0 |
+
 ### UNIX Compatibility & Hardware (32–38)
 | # | Name | Description |
 |---|------|-------------|

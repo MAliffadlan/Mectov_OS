@@ -165,6 +165,13 @@ typedef struct {
 #define SYS_LSEEK       95  // EBX=fd, ECX=offset, EDX=whence(SEEK_*) -> new offset or -1
 #define SYS_FSTAT       96  // EBX=fd, ECX=stat_t* -> 0 or -1
 
+// I/O multiplexing + POSIX misc
+#define SYS_POLL        97  // EBX=pollfd_t*, ECX=nfds, EDX=timeout_ms -> ready count / 0 / -1
+#define SYS_SELECT      98  // EBX=nfds, ECX=readfds*, EDX=writefds*, ESI=exceptfds*, EDI=timeout_ms -> ready count / 0 / -1
+#define SYS_GETCWD      99  // EBX=buf, ECX=size -> 0 or -1
+#define SYS_CHDIR       100 // EBX=path -> 0 or -1
+#define SYS_CLOCK_GETTIME 101 // EBX=clock_id, ECX=timespec_t* -> 0 or -1
+
 // Open flags (SYS_OPEN mode / third arg)
 #define O_APPEND        8   // write always appends at end of file
 
@@ -183,6 +190,24 @@ typedef struct {
     int data_sector;    // Starting ATA sector (files only)
     char name[32];      // Node name
 } stat_t;
+
+// poll() events/struct (SYS_POLL). revents is filled by the kernel.
+#define POLLIN    0x001  // data available to read
+#define POLLOUT   0x004  // buffer space available to write
+#define POLLHUP   0x010  // peer closed (EOF on a pipe read end)
+#define POLLNVAL  0x020  // fd not open
+typedef struct {
+    int fd;
+    int events;    // requested events (POLLIN/POLLOUT)
+    int revents;   // returned events (kernel fills)
+} pollfd_t;
+
+// timespec for SYS_CLOCK_GETTIME (CLOCK_MONOTONIC only)
+#define CLOCK_MONOTONIC 1
+typedef struct {
+    uint32_t tv_sec;
+    uint32_t tv_nsec;
+} timespec_t;
 
 // Signal numbers (POSIX subset; SIGKILL and SIGSTOP cannot be caught or
 // ignored, SIGCONT resumes a stopped task)
@@ -292,6 +317,33 @@ static inline int sys_lseek(int fd, int offset, int whence) {
 // name} for an open file descriptor. Returns 0 or -1.
 static inline int sys_fstat(int fd, stat_t* st) {
     return syscall(SYS_FSTAT, fd, (int)st, 0);
+}
+
+// POSIX poll(): fill fds[i].revents and return the number of ready fds
+// (0 on timeout, -1 on error). timeout_ms < 0 blocks forever.
+static inline int sys_poll(pollfd_t* fds, int nfds, int timeout_ms) {
+    return syscall(SYS_POLL, (int)fds, nfds, timeout_ms);
+}
+
+// POSIX select(): bitmaps are uint32_t (fd < 32). Returns ready count,
+// 0 on timeout, -1 on error.
+static inline int sys_select(int nfds, uint32_t* readfds, uint32_t* writefds,
+                             uint32_t* exceptfds, int timeout_ms) {
+    return syscall5(SYS_SELECT, nfds, (int)readfds, (int)writefds, (int)exceptfds, timeout_ms);
+}
+
+// POSIX getcwd()/chdir(): absolute path of the calling task's working
+// directory, or change it (path may be relative or absolute).
+static inline int sys_getcwd(char* buf, int size) {
+    return syscall(SYS_GETCWD, (int)buf, size, 0);
+}
+static inline int sys_chdir(const char* path) {
+    return syscall(SYS_CHDIR, (int)path, 0, 0);
+}
+
+// POSIX clock_gettime() (CLOCK_MONOTONIC only): uptime since boot.
+static inline int sys_clock_gettime(int clock_id, timespec_t* ts) {
+    return syscall(SYS_CLOCK_GETTIME, clock_id, (int)ts, 0);
 }
 
 static inline int sys_read(int fd, char* buf, int size) {
