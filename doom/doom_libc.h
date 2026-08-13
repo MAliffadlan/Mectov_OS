@@ -120,6 +120,7 @@ void *realloc(void *ptr, size_t size);
 void  free(void *ptr);
 int   atoi(const char *s);
 long  atol(const char *s);
+double atof(const char *s);
 long  strtol(const char *s, char **endptr, int base);
 unsigned long strtoul(const char *s, char **endptr, int base);
 int   abs(int x);
@@ -128,6 +129,7 @@ int   rand(void);
 void  srand(unsigned int s);
 #define RAND_MAX 0x7FFFFFFF
 char *getenv(const char *name);
+int   system(const char *cmd);
 
 /* ===== stdio.h ===== */
 typedef struct {
@@ -219,6 +221,7 @@ struct stat {
 
 /* ===== math.h (minimal) ===== */
 #define M_PI 3.14159265358979323846
+double fabs(double x);
 /* DOOM doesn't use floating point heavily, but just in case */
 
 /* ===== strings.h ===== */
