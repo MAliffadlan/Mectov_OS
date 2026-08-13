@@ -8,7 +8,7 @@ on:
 jobs:
   build-and-boot:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -102,3 +102,22 @@ jobs:
           # Cached reads must beat cold disk reads by a wide margin; the
           # benchmark also exercises the write-through + save-skip path.
           python3 scripts/iocache_test.py --timeout 300
+
+      - name: Demo app smoke tests (smpstress + sigdemo + crashme, TCG)
+        run: |
+          # One boot, three apps back-to-back: SMP scheduler stress (8
+          # children, CPU burn + sleep + self-signals), the signal-semantics
+          # demo, and a deliberate #UD that the kernel must contain.
+          python3 scripts/app_smoke_test.py --timeout 360
+
+      - name: File-backed mmap regression (TCG)
+        run: |
+          python3 scripts/mmapfile_test.py --timeout 240
+
+      - name: Rust Ring 3 app regression (TCG)
+        run: |
+          python3 scripts/rusthello_test.py --timeout 240
+
+      - name: lseek/fstat/O_APPEND regression (TCG)
+        run: |
+          python3 scripts/lseekfile_test.py --timeout 240
