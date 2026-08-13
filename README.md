@@ -31,7 +31,7 @@ Mectov OS is a from-scratch i386 operating system with:
 - **A Unix process model** — `fork` / `exec` / `waitpid`, POSIX signals (`sigaction`, `sa_mask`, `SA_RESTART`), process groups, sessions and a controlling terminal with SIGTTIN/SIGTTOU, plus System V shared memory, pipes, and fds.
 - **A real shell (msh)** — env vars with `$VAR` expansion, aliases, tab completion, scripts, job control, and a growing POSIX toolkit (`uname`, `whoami`, `hostname`, `env`, `seq`, `head`, `grep`, `cp`, `mv`, `df`, ...).
 - **A graphical desktop** — double-buffered window manager (resize, Aero snap, rounded corners), taskbar with system tray, draggable persistent icons, and a graphical login screen.
-- **On-disk persistence** — an ATA-backed VFS plus a fully writable ext2 partition (verified with host `fsck.ext2`).
+- **On-disk persistence** — an ATA-backed VFS, a fully writable ext2 partition (verified with host `fsck.ext2`), and a FAT32 volume at `/fat32` (drive 3, LFN read/write).
 - **Networking** — RTL8139 driver with IRQ-driven RX, multi-connection TCP, UDP, ARP/ICMP/DNS, and a browser that reaches the real internet through a host gateway proxy.
 - **Audio** — Sound Blaster 16 driver with WAV playback and PC-speaker tones.
 - **Developer tooling** — in-kernel GDB stub (attach over TCP, breakpoints, single-step), ELF32 + custom `.mct` loaders, and a shared-library runtime that keeps app binaries under 2 KB.
@@ -109,7 +109,7 @@ Mectov OS is a from-scratch i386 operating system with:
 | Privilege | Ring 0 (kernel) + Ring 3 (user) |
 | Scheduler | Preemptive, per-CPU runqueues, priority + aging, work stealing |
 | Display | VESA VBE linear framebuffer, 1024×768, 32-bit color |
-| Storage | ATA PIO (IDE) — drive 0 VFS, drive 1 ext2 |
+| Storage | ATA PIO (IDE) — drive 0 VFS, drive 1 ext2, drive 3 FAT32 (drive 2 CD-ROM) |
 | Audio | Sound Blaster 16 + PC speaker |
 | Network | RTL8139 (virtual, via QEMU) |
 | Serial | COM1/COM2 UART 16550A (38400 baud, 8N1) |

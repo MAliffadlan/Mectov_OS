@@ -74,8 +74,6 @@ static void power_key(int id, char c, uint8_t sc) {
 static void power_mouse(int id, int cx, int cy, int btn) {
     (void)id;
     if (btn == 1) {
-        int wx = (fb_width - 240) / 2;
-        int wy = (fb_height - 160) / 2;
         int content_x = cx;  // relative to window content area
         int content_y = cy;
 
