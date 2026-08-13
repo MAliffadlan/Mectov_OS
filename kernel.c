@@ -338,9 +338,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             if (btn != prev_btn || handled || needs_redraw) {
                 needs_redraw = 1;
             } else {
-                // Pure mouse move with no state change: just update cursor on VRAM
+                // Pure mouse move with no state change: just update cursor on VRAM.
+                // This is a real presented frame — count it so the FPS HUD shows
+                // the live rate while the cursor moves instead of the HUD's own
+                // 200ms cadence.
                 wait_for_vsync();
                 swap_buffers();
+                fps_frames++;
             }
             prev_btn = btn; prev_mx = mx; prev_my = my;
         }
@@ -519,21 +523,35 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             needs_redraw = 1;
         }
 
-        // Update FPS counter every 200ms (real-time responsive feel)
+        // Update FPS counter every 200ms (real-time responsive feel).
+        // elapsed is in ticks, so convert to real seconds via the measured
+        // tick rate (ticks_per_sec drifts under TCG — see timer.c). When the
+        // window presented nothing new (static desktop) keep the last reading
+        // instead of decaying to the HUD's own 200ms cadence, and only force
+        // a redraw when the number actually changed.
         if (now - fps_last_tick >= 200) {
-            uint32_t elapsed_ms = now - fps_last_tick;
-            if (elapsed_ms > 0) {
-                fps_val = (fps_frames * 1000) / elapsed_ms;
-            } else {
-                fps_val = 0;
+            uint32_t elapsed_ticks = now - fps_last_tick;
+            int new_val = fps_val;
+            if (fps_frames > 0 && elapsed_ticks > 0 && ticks_per_sec > 0) {
+                // 32-bit safe: fps_frames*ticks_per_sec << 2^32 in practice.
+                new_val = (int)((fps_frames * ticks_per_sec) / elapsed_ticks);
             }
             fps_frames = 0;
             fps_last_tick = now;
-            needs_redraw = 1;
+            if (new_val != fps_val) {
+                fps_val = new_val;
+                needs_redraw = 1;
+            }
         }
 
-        // Limit composition rate to maximum 60 FPS (16ms per frame) to prevent CPU choking
-        if (needs_redraw && (now - last_frame_tick >= 16)) {
+        // Limit composition rate to maximum 60 FPS (16ms per frame) to prevent
+        // CPU choking. Scale the tick window by the measured rate so the cap is
+        // a real 60 FPS in wall time even when the PIT drifts under TCG (a raw
+        // 16 ticks at 549 ticks/s would cap at ~34 FPS).
+        extern volatile uint32_t ticks_per_sec;
+        uint32_t frame_interval = (ticks_per_sec * 16) / 1000;
+        if (frame_interval < 1) frame_interval = 1;
+        if (needs_redraw && (now - last_frame_tick >= frame_interval)) {
             needs_redraw = 0;
             last_frame_tick = now;
             fps_frames++;

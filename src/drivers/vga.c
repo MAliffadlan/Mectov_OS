@@ -544,18 +544,32 @@ void swap_buffers(void) {
     int w = d_max_x - d_min_x;
 
     if (fb_bpp == 32) {
-        uint32_t copy_bytes = w * 4;
         for (int y = d_min_y; y < d_max_y; y++) {
             uint32_t* src = back_buffer + y * fb_width + d_min_x;
             uint32_t* dst = (uint32_t*)((uint8_t*)fb_addr + y * fb_pitch) + d_min_x;
-            
-            // Fast direct block copy to VRAM (MMIO)
-            memcpy(dst, src, copy_bytes);
-            
-            // Also keep shadow copy in sync (RAM to RAM, very fast)
+
             if (front_buffer_copy) {
-                uint32_t* shadow = front_buffer_copy + y * fb_width + d_min_x;
-                memcpy(shadow, src, copy_bytes);
+                // Delta copy: compare each row against the shadow copy of the
+                // last presented frame and write only the changed runs to
+                // VRAM. The framebuffer is MMIO, so in QEMU/KVM every write is
+                // a VM exit — copying the whole dirty rect each frame is what
+                // made drags/resizes stutter. Small moves change only the
+                // leading/trailing strips (the window overlap is identical),
+                // cutting VRAM traffic by ~10x. The shadow is synced in the
+                // same pass so the next compare stays correct.
+                uint32_t* sh = front_buffer_copy + y * fb_width + d_min_x;
+                int x = 0;
+                while (x < w) {
+                    while (x < w && src[x] == sh[x]) x++; // skip unchanged run
+                    if (x >= w) break;
+                    int run_start = x;
+                    while (x < w && src[x] != sh[x]) x++;
+                    int run_len = x - run_start;
+                    memcpy(dst + run_start, src + run_start, (uint32_t)run_len * 4);
+                    memcpy(sh + run_start, src + run_start, (uint32_t)run_len * 4);
+                }
+            } else {
+                memcpy(dst, src, (uint32_t)w * 4);
             }
         }
     } else if (fb_bpp == 24) {
@@ -565,9 +579,13 @@ void swap_buffers(void) {
             
             for (int x = 0; x < w; x++) {
                 uint32_t c = src[x];
-                dst[x * 3 + 0] = c & 0xFF;
-                dst[x * 3 + 1] = (c >> 8) & 0xFF;
-                dst[x * 3 + 2] = (c >> 16) & 0xFF;
+                // Delta: skip unchanged pixels (VRAM is MMIO; writes are costly)
+                if (!front_buffer_copy ||
+                    front_buffer_copy[y * fb_width + d_min_x + x] != c) {
+                    dst[x * 3 + 0] = c & 0xFF;
+                    dst[x * 3 + 1] = (c >> 8) & 0xFF;
+                    dst[x * 3 + 2] = (c >> 16) & 0xFF;
+                }
                 if (front_buffer_copy) {
                     front_buffer_copy[y * fb_width + d_min_x + x] = c;
                 }
@@ -918,11 +936,57 @@ static void darken_pixel_vram(int x, int y) {
     }
 }
 
+// Repaint the previous cursor rectangle from the back buffer straight to VRAM
+// (and the shadow copy). The cursor is composited only on VRAM, so the shadow
+// still holds the pre-cursor background there; the delta copy in swap_buffers()
+// would see back == shadow and skip, leaving a ghost cursor behind. Called
+// before drawing the cursor at its new spot, so overlapping rects come out
+// right (new cursor drawn last).
+static void erase_prev_cursor(int x, int y) {
+    if (x < 0 || y < 0 || !back_buffer || !front_buffer_copy) return;
+    int x0 = x, y0 = y;
+    int x1 = x + 24, y1 = y + 24;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)fb_width)  x1 = fb_width;
+    if (y1 > (int)fb_height) y1 = fb_height;
+    int w = x1 - x0;
+    if (w <= 0 || y1 <= y0) return;
+    if (fb_bpp == 32) {
+        for (int row = y0; row < y1; row++) {
+            uint32_t* src = back_buffer + row * fb_width + x0;
+            uint32_t* dst = (uint32_t*)((uint8_t*)fb_addr + row * fb_pitch) + x0;
+            memcpy(dst, src, (uint32_t)w * 4);
+            memcpy(front_buffer_copy + row * fb_width + x0, src, (uint32_t)w * 4);
+        }
+    } else if (fb_bpp == 24) {
+        for (int row = y0; row < y1; row++) {
+            uint32_t* src = back_buffer + row * fb_width + x0;
+            uint8_t*  dst = (uint8_t*)fb_addr + row * fb_pitch + x0 * 3;
+            for (int x = 0; x < w; x++) {
+                uint32_t c = src[x];
+                dst[x * 3 + 0] = c & 0xFF;
+                dst[x * 3 + 1] = (c >> 8) & 0xFF;
+                dst[x * 3 + 2] = (c >> 16) & 0xFF;
+                front_buffer_copy[row * fb_width + x0 + x] = c;
+            }
+        }
+    }
+}
+
 void draw_mouse_cursor(int x, int y) {
     if (!is_vbe || !fb_addr) return;
     extern volatile int doom_fullscreen;
     if (doom_fullscreen) return;  // Don't draw cursor during DOOM
-    
+
+    // Remove the cursor from its previous position before drawing the new one.
+    // Skip the first call (cursor_saved_x starts at -1).
+    if (cursor_saved_x >= 0) {
+        erase_prev_cursor(cursor_saved_x, cursor_saved_y);
+    }
+    cursor_saved_x = x;
+    cursor_saved_y = y;
+
     // Draw shadow directly to VRAM
     for (int j = 0; j < 24; j++) {
         uint16_t mask = cursor_mask[j];
