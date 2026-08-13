@@ -292,6 +292,20 @@ static int fd_poll_events(int tid, int fd) {
     return rev;
 }
 
+// Convert a millisecond timeout to a tick count without 64-bit division (the
+// freestanding kernel has no __udivdi3). Decompose a*b/c = (a/c)*b + (a%c)*b/c
+// so every intermediate fits in 32 bits; clamp on overflow so an absurd
+// timeout degrades to "essentially forever" instead of wrapping negative.
+static uint32_t ms_to_ticks(uint32_t ms) {
+    uint32_t tps = ticks_per_sec;
+    if (tps == 0) return 0;
+    uint32_t sec = ms / 1000;          // whole seconds
+    uint32_t rem = ms % 1000;          // leftover milliseconds
+    uint32_t part = (sec > 0xFFFFFFFFu / tps) ? 0xFFFFFFFFu : sec * tps;
+    uint32_t tail = rem * tps / 1000;  // rem <= 999, always safe
+    return (part > 0xFFFFFFFFu - tail) ? 0xFFFFFFFFu : part + tail;
+}
+
 // POSIX poll(): scan the fds array, fill each revents, and return the number
 // of descriptors with pending events. timeout_ms semantics: 0 = return
 // immediately, >0 = wait up to that long (in ms, scaled by the calibrated
@@ -303,8 +317,9 @@ int do_sys_poll(pollfd_t* fds, int nfds, int timeout_ms) {
     if (nfds < 0 || nfds > MAX_FDS_PER_TASK) return -1;
 
     uint32_t start = get_ticks();
+    // Wrapping add is fine here: the loop compares wrapped tick counters too.
     int deadline = (timeout_ms < 0) ? -1
-        : (int)(start + ((uint64_t)timeout_ms * (uint64_t)ticks_per_sec) / 1000);
+        : (int)(start + ms_to_ticks((uint32_t)timeout_ms));
 
     for (;;) {
         int ready = 0;
@@ -346,7 +361,7 @@ int do_sys_select(int nfds, uint32_t* readfds, uint32_t* writefds,
 
     uint32_t start = get_ticks();
     int deadline = (timeout_ms < 0) ? -1
-        : (int)(start + ((uint64_t)timeout_ms * (uint64_t)ticks_per_sec) / 1000);
+        : (int)(start + ms_to_ticks((uint32_t)timeout_ms));
 
     for (;;) {
         uint32_t r = want_r, w = want_w;
