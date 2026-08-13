@@ -1074,12 +1074,29 @@ int task_kill(int tid) {
 // Returns the number of tasks signalled, or -1 on a bad root.
 int task_signal_group(int root_tid, int sig) {
     if (root_tid <= 0 || root_tid >= MAX_TASKS) return -1;
-    if (tasks[root_tid].state == TASK_STATE_FREE) return -1;
 
-    int sent = 0;
+    // Snapshot the group membership under task_lock: a concurrent fork/exit
+    // could otherwise reparent tasks (or free a slot) mid-walk and deliver to
+    // the wrong set. Delivery itself happens AFTER the lock is released,
+    // because task_signal() re-takes task_lock (cli-first) — nesting would
+    // self-deadlock. The snapshot is just a tid list; task_signal() re-checks
+    // liveness, so a task that dies meanwhile is skipped safely.
+    int members[MAX_TASKS];
+    int count = 0;
+
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&task_lock);
+
+    if (tasks[root_tid].state == TASK_STATE_FREE) {
+        spin_unlock(&task_lock);
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return -1;
+    }
+
     // One pass over the task table: any task whose parent chain leads back to
-    // root_tid is in the group. (Root itself is sent last so its children get
-    // the signal even if terminating root first would orphan them.)
+    // root_tid is in the group. (Root itself is appended last so its children
+    // get the signal even if terminating root first would orphan them.)
     for (int i = 1; i < MAX_TASKS; i++) {
         if (tasks[i].state == TASK_STATE_FREE || i == root_tid) continue;
         int p = tasks[i].parent;
@@ -1088,8 +1105,7 @@ int task_signal_group(int root_tid, int sig) {
         // corrupt/cyclic parent chain cannot loop forever.
         while (p > 0 && p < MAX_TASKS && hops < MAX_TASKS && p != i) {
             if (p == root_tid) {
-                task_signal(i, sig);
-                sent++;
+                members[count++] = i;
                 break;
             }
             p = tasks[p].parent;
@@ -1097,8 +1113,15 @@ int task_signal_group(int root_tid, int sig) {
         }
     }
     // Root last: it is the group leader; children above were signalled first.
-    task_signal(root_tid, sig);
-    sent++;
+    members[count++] = root_tid;
+
+    spin_unlock(&task_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+
+    int sent = 0;
+    for (int i = 0; i < count; i++) {
+        if (task_signal(members[i], sig) >= 0) sent++;
+    }
     return sent;
 }
 

@@ -248,8 +248,15 @@ uint32_t handle_syscall_gui(registers_t* regs) {
                 win_canvases[idx].pending_count = 0; // Reset for next frame
                 gui_unlock(g_ef);
                 
-                // Composite WM: trigger a redraw for this window's buffer
+                // Composite WM: trigger a redraw for this window's buffer.
+                // wm_wins[] is shared with the main loop's draw/raise on other
+                // cores, so the dirty flag is set under wm_lock (kernel
+                // locking audit v38.19 — get_win_index already released it).
+                extern void wm_lock_acquire(void);
+                extern void wm_lock_release(void);
+                wm_lock_acquire();
                 wm_wins[idx].buffer_dirty = 1;
+                wm_lock_release();
                 extern volatile int needs_redraw;
                 needs_redraw = 1;
             } else {
