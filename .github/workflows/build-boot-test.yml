@@ -121,3 +121,11 @@ jobs:
       - name: lseek/fstat/O_APPEND regression (TCG)
         run: |
           python3 scripts/lseekfile_test.py --timeout 240
+
+      - name: Multi-core panic dump + panic=reboot self-test (TCG)
+        run: |
+          # Boots with `panic_self_test panic=reboot` and -no-reboot: the
+          # kernel panics deliberately, must dump registers for all 4 cores
+          # (NMI-IPI snapshot), then reset so QEMU exits cleanly instead of
+          # hanging — proving the panic path CI can rely on.
+          python3 scripts/panic_test.py --timeout 240

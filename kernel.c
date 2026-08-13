@@ -108,6 +108,15 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     uint32_t fb_p = 0, fb_s = 0;
     uint32_t mem_size = 32 * 1024 * 1024; // Default fallback 32MB
 
+    // Parse the GRUB command line BEFORE paging is enabled: cmdline sits in
+    // low physical memory (still identity-mapped at this point). Enables
+    // `panic=reboot` (CI: QEMU exits instead of hanging on a kernel panic)
+    // and `panic_self_test` (deliberate panic once the desktop is up).
+    extern void panic_parse_cmdline(const char* cmd);
+    if (magic == 0x2BADB002 && mbi != NULL && (mbi->flags & 4) && mbi->cmdline) {
+        panic_parse_cmdline((const char*)mbi->cmdline);
+    }
+
     write_serial_string("1\n");
     if (magic == 0x2BADB002 && mbi != NULL) {
         // Auto-detect RAM size from GRUB Multiboot header
@@ -163,6 +172,14 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] smp\n");
     extern void smp_init(void);
     smp_init();
+
+    // CI self-test: booted with `panic_self_test`, fire a deliberate kernel
+    // panic here — AFTER every AP is awake and has loaded the shared IDT (so
+    // the NMI handler is live on all 4 cores) but BEFORE the blocking
+    // gui_login(), which would otherwise never return in a headless boot.
+    // Exercises the multi-core register dump + panic=reboot end to end.
+    extern void panic_self_test_tick(void);
+    panic_self_test_tick();
 
     write_serial_string("[K] syscalls\n");
     extern void init_syscalls(void);

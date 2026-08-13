@@ -3,6 +3,7 @@
 #include "../include/task.h"
 #include "../include/utils.h"
 #include "../include/serial.h"
+#include "../include/panic.h"
 
 idt_entry_t idt[256];
 idt_ptr_t   idt_ptr;
@@ -174,6 +175,12 @@ void idt_init() {
 
     // Register Overflow handler (Exception 4) — just ignore and return
     register_interrupt_handler(4, overflow_handler);
+
+    // NMI (vector 2): during a panic dump this snapshots the core's registers
+    // and parks (see panic.c); otherwise it returns so GDB/machine-check keep
+    // working. Registered here so every CPU (APs reload the same IDT) can
+    // answer the BSP's NMI-IPI during a multi-core panic dump.
+    register_interrupt_handler(2, panic_nmi_handler);
 }
 
 void register_interrupt_handler(uint8_t n, isr_t handler) {
@@ -272,7 +279,7 @@ void isr_handler(registers_t *r) {
         p = str_append(p, " - kernel stack corruption, halting\n");
         write_serial_try(buf, (int)(p - buf));
         print("\n[KERNEL PANIC] Double Fault - kernel stack corrupted\n", 0x0C);
-        for(;;) __asm__("hlt");
+        panic_finish();
     }
 
     if (r->int_no == 14) {
@@ -306,7 +313,7 @@ void isr_handler(registers_t *r) {
             p = str_append(p, "\n");
             write_serial_try(buf, (int)(p - buf));
             print("\n[KERNEL PANIC] Kernel stack overflow - halting\n", 0x0C);
-            for(;;) __asm__("hlt");
+            panic_finish();
         }
 
         uint32_t cr3_val;
@@ -575,7 +582,7 @@ void isr_handler(registers_t *r) {
             print("\n  EIP=", 0x0C); p_int(r->eip, 0x0C);
             print("  CS=",  0x0C); p_int(r->cs, 0x0C);
             print("\n", 0x0C);
-            for(;;) __asm__("hlt");
+            panic_finish();
         }
     }
 }

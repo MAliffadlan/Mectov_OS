@@ -44,7 +44,8 @@ static void heap_panic(const char* what, uint32_t addr, uint32_t caller_ra) {
     print("\n[KERNEL PANIC] Heap corruption: ", 0x0C);
     print(what, 0x0C);
     print("\n", 0x0C);
-    for (;;) __asm__ volatile("hlt");
+    extern void panic_finish(void);
+    panic_finish();
 }
 
 

@@ -69,7 +69,8 @@ static void df_task_handler(void) {
     *p++ = ' '; *p++ = 'C'; *p++ = 'R'; *p++ = '3'; *p++ = '='; df_hex(&p, tss[cid].cr3);
     *p++ = '\n';
     write_serial_try(buf, (int)(p - buf));
-    for (;;) __asm__ volatile("hlt");
+    extern void panic_finish(void);
+    panic_finish();
 }
 
 extern void gdt_flush(uint32_t);
