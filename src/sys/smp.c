@@ -34,7 +34,7 @@ void ap_main(void) {
     lapic_timer_init();
     
     int cid = apic_get_id() & 15;
-    
+
     write_serial_string("[SMP] CPU ");
     write_serial_hex(cid);
     write_serial_string(" is awake!\n");

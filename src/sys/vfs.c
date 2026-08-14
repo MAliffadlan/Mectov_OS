@@ -485,6 +485,11 @@ void vfs_init() {
         extern uint8_t _binary_threaddemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/threaddemo.mct", (const char*)_binary_threaddemo_mct_start, _binary_threaddemo_mct_end - _binary_threaddemo_mct_start);
 
+        // Mutex + condvar demo (v38.27 — see scripts/cond_test.py)
+        extern uint8_t _binary_conddemo_mct_start[];
+        extern uint8_t _binary_conddemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/conddemo.mct", (const char*)_binary_conddemo_mct_start, _binary_conddemo_mct_end - _binary_conddemo_mct_start);
+
         // Multi-sector PIO benchmark (v38.25 — see scripts/bigread_test.py)
         extern uint8_t _binary_bigread_mct_start[];
         extern uint8_t _binary_bigread_mct_end[];
@@ -753,6 +758,10 @@ void vfs_init() {
     extern uint8_t _binary_threaddemo_mct_end[];
     vfs_create_file("apps/threaddemo.mct");
     vfs_write_file("apps/threaddemo.mct", (const char*)_binary_threaddemo_mct_start, _binary_threaddemo_mct_end - _binary_threaddemo_mct_start);
+    extern uint8_t _binary_conddemo_mct_start[];
+    extern uint8_t _binary_conddemo_mct_end[];
+    vfs_create_file("apps/conddemo.mct");
+    vfs_write_file("apps/conddemo.mct", (const char*)_binary_conddemo_mct_start, _binary_conddemo_mct_end - _binary_conddemo_mct_start);
 
     extern uint8_t _binary_bigread_mct_start[];
     extern uint8_t _binary_bigread_mct_end[];

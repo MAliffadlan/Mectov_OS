@@ -56,6 +56,17 @@ void sync_init(void) {
 static int wake_one(int* waiters, int* waiter_count) {
     if (*waiter_count <= 0) return 0;
     int tid = waiters[0];
+    // An idle task in a waiter list is corruption (it can never legitimately
+    // call futex_wait). task_set_state already refuses to wake it; dropping it
+    // here keeps the bogus entry from wedging the queue forever.
+    if (tid > 0) {
+        extern int task_is_idle(int);
+        if (task_is_idle(tid)) {
+            for (int i = 1; i < *waiter_count; i++) waiters[i - 1] = waiters[i];
+            (*waiter_count)--;
+            return 0;
+        }
+    }
     // shift queue (FIFO fairness)
     for (int i = 1; i < *waiter_count; i++) waiters[i - 1] = waiters[i];
     (*waiter_count)--;
@@ -198,6 +209,12 @@ int futex_wait(uint32_t addr, uint32_t expected) {
     int tid = get_current_task();
     uint32_t pd = task_get_page_dir(tid);
 
+    // Critical section: register the waiter + block it ATOMICALLY with the
+    // re-check, under IF=0. task_set_state now PRESERVES IF (irqsave), so
+    // interrupts stay disabled until sync_lock is released below — the timer
+    // can never preempt us while holding sync_lock, which would leave the
+    // lock owned by a task that is BLOCKED and can only be woken by code that
+    // itself needs sync_lock (permanent deadlock).
     __asm__ volatile("cli");
     spin_lock(&sync_lock);
     // Re-check under the lock: a concurrent futex_wake between the read above
@@ -218,6 +235,8 @@ int futex_wait(uint32_t addr, uint32_t expected) {
     spin_unlock(&sync_lock);
     __asm__ volatile("sti");
 
+    // Wait to be woken (the scheduler runs other tasks meanwhile; the wake
+    // path flips us to READY and this loop exits).
     for (;;) {
         __asm__ volatile("pause");
         if (task_get_state(tid) != TASK_STATE_BLOCKED) break;

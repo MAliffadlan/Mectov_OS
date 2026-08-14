@@ -147,6 +147,15 @@ jobs:
           # Proves FS/GS survive every context switch + signal path.
           python3 scripts/thread_test.py --timeout 360
 
+      - name: Futex mutex + condvar regression (TCG)
+        run: |
+          # Ring 3 conddemo app on 4 cores: 4 threads bump a shared counter
+          # to exactly 20,000 under a futex mutex, then 2 producers + 2
+          # consumers move 3,000 items through a bounded buffer over a
+          # condvar. Asserts ALL PASS + every item consumed exactly once +
+          # zero [PANIC] (exercises the scheduler's self-blocking wake path).
+          python3 scripts/cond_test.py --timeout 300
+
       - name: IDE DMA + multi-sector disk read regression (TCG)
         run: |
           # Ring 3 bigread app: reads /bench.big (160 KB, > PCACHE_MAX_FILE)

@@ -46,6 +46,17 @@ irq_common_stub:
     call irq_handler
     add esp, 4            ; Clean up argument
 
+    ; Safety net: sanity-check the ESP we're about to iret from — it must be
+    ; inside THIS core's current task's kernel stack. A corrupted saved frame
+    ; (migration race) would otherwise iret into garbage and triple-fault;
+    ; this turns that silent reset into a logged panic with a full dump.
+    push eax
+    extern irq_esp_sanity_check
+    push eax
+    call irq_esp_sanity_check
+    add esp, 4
+    pop eax
+
     mov esp, eax          ; <<< CONTEXT SWITCH: load new task's ESP
 
     ; Frame layout: [gs][fs][ds]... — the LOWEST slot is GS, pop it first.

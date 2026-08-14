@@ -107,6 +107,12 @@ typedef struct {
 static task_t tasks[MAX_TASKS];
 static void mmap_free_dirty_bitmaps(int tid);  // defined in the mmap section
 static int current_task[16] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+// Set at the end of init_tasking(). Before that, APs boot with
+// current_task[cid] == -1 (they wake in smp_init(), program their LAPIC
+// timer and sti before the scheduler exists) — that state is legitimate and
+// must not trip the iret-ESP sanity check.
+static volatile int scheduler_ready = 0;
+
 static inline int get_cid() { extern uint32_t smp_lapic_addr; return smp_lapic_addr ? (apic_get_id() & 15) : 0; }
 
 // Exported CPU-id accessor for lock ownership keys in other subsystems
@@ -160,6 +166,12 @@ int task_cpu_count(void) { return rq_cpu_count(); }
 static void rq_enqueue(int cpu, int tid) {
     if (tid < 0 || tid >= MAX_TASKS || cpu < 0 || cpu >= MAX_CPUS) return;
     if (tasks[tid].rq_cpu >= 0) return;
+    // Idle tasks are pinned to the core matching their tid and NEVER leave it.
+    // If one ends up enqueued elsewhere, a wake/state-corruption bug ran a
+    // worker's frame under an idle task's identity (current_task[cid] says
+    // idle while real code executes) — refusing the foreign enqueue stops the
+    // chain before another core can iret the idle task's stale frame.
+    if (tasks[tid].is_idle && cpu != tid) return;
     if (rq[cpu].count >= MAX_TASKS) cpu = 0;  // overflow fallback (cannot happen)
     rq[cpu].tids[rq[cpu].count++] = tid;
     tasks[tid].rq_cpu = cpu;
@@ -203,16 +215,104 @@ static int rq_least_loaded(void) {
     return best;
 }
 
-// Wake-path enqueue: park the task on the least-loaded CPU. A task that was
-// SLEEP/BLOCKED/STOPPED is no longer current anywhere (the scheduler parked
-// it), so any CPU may pick it up.
+// Wake-path enqueue: park the task on the least-loaded CPU. The woken task
+// is no longer running only once the scheduler on its home core has actually
+// parked it — see task_is_current_elsewhere(): a task that blocks itself
+// mid-syscall (futex/sem wait) stays current on its core until the next
+// timer tick preempts it, so rq_pick/rq_steal must not resume it before
+// then (a stale saved frame would be iret'd -> stack corruption).
 static void rq_enqueue_wake(int tid) {
+    // An idle task is never woken: it parks in its own hlt loop on its own
+    // core and is always already in its own runqueue. Waking one (e.g. from
+    // a corrupted futex waiter list) would enqueue it on a foreign core and
+    // let that core iret its stale frame under the wrong identity.
+    if (tid <= 0 || tid >= MAX_TASKS) return;
+    if (tasks[tid].is_idle) return;
     rq_enqueue(rq_least_loaded(), tid);
+}
+
+// Called from irq_common_stub before iret. `esp` is the frame we are about to
+// pop; it must lie within the current task's kernel stack. If not, a saved
+// frame was corrupted (or the task table got clobbered) — dump the full state
+// instead of silently iret'ing into garbage.
+static void esp_bad(const char* tag, uint32_t cid, uint32_t cur, uint32_t esp, uint32_t top) {
+    // One atomic line: 4 cores share the serial port and multi-call prints
+    // interleave into garbage. Buffer must exceed the max content.
+    char b[96];
+    int n = 0;
+    const char* s = tag;
+    while (*s && n < 90) b[n++] = *s++;
+    b[n++] = ' '; b[n++] = '0'; b[n++] = 'x';
+    for (int i = 7; i >= 0 && n < 94; i--) { int d = (cid >> (i * 4)) & 0xF; b[n++] = d < 10 ? '0' + d : 'A' + d - 10; }
+    b[n++] = ' '; b[n++] = '0'; b[n++] = 'x';
+    for (int i = 7; i >= 0 && n < 94; i--) { int d = (cur >> (i * 4)) & 0xF; b[n++] = d < 10 ? '0' + d : 'A' + d - 10; }
+    b[n++] = ' '; b[n++] = '0'; b[n++] = 'x';
+    for (int i = 7; i >= 0 && n < 94; i--) { int d = (esp >> (i * 4)) & 0xF; b[n++] = d < 10 ? '0' + d : 'A' + d - 10; }
+    b[n++] = ' '; b[n++] = '0'; b[n++] = 'x';
+    for (int i = 7; i >= 0 && n < 94; i--) { int d = (top >> (i * 4)) & 0xF; b[n++] = d < 10 ? '0' + d : 'A' + d - 10; }
+    b[n++] = '\n';
+    extern void write_serial_buffer(const char* buf, int size);
+    write_serial_buffer(b, n);
+    extern void panic_finish(void);
+    panic_finish();
+}
+
+void irq_esp_sanity_check(uint32_t esp) {
+    int cid = get_cid();
+    int cur = current_task[cid];
+    // Pre-scheduler boot window: APs legitimately tick with cur == -1 while
+    // parked in their own hlt loop (see scheduler_ready comment). Skip.
+    if (!scheduler_ready) return;
+    if (cur < 0 || cur >= MAX_TASKS) {
+        esp_bad("[ESP] BAD current_task", (uint32_t)cid, (uint32_t)cur, esp, 0);
+    }
+    // Task 0 is the BSP's kernel main loop: it runs on the BOOT stack (the
+    // scheduler fills tasks[0].esp with whatever frame preempted kernel main),
+    // so its esp legitimately lives far outside kstacks[0]. Only kstack-based
+    // tasks (AP idle, ring-3) must iret from inside their own kstack.
+    if (cur == 0) return;
+    uint32_t top = kstack_top(cur);
+    if (esp > top || esp + 4 < kstack_guard(cur)) {
+        esp_bad("[ESP] BAD frame", (uint32_t)cid, (uint32_t)cur, esp, top);
+        extern void panic_finish(void);
+        panic_finish();
+    }
+}
+
+// Is tid one of the per-CPU idle tasks? Idle tasks are pinned to the core
+// matching their tid and can never legitimately enter a waiter list or a
+// foreign runqueue; callers that spot one treat it as corruption.
+int task_is_idle(int tid) {
+    if (tid <= 0 || tid >= MAX_TASKS) return 0;
+    return tasks[tid].is_idle;
+}
+
+// True if `tid` is currently executing on some CPU (including cid itself).
+// A self-blocking task keeps its core until the timer preempts it; resuming
+// it from a peer core before that happens would run it twice from a stale
+// kernel-stack frame.
+static int task_is_current_elsewhere(int cid, int tid) {
+    for (int c = 0; c < MAX_CPUS; c++) {
+        if (c != cid && current_task[c] == tid) return 1;
+    }
+    return 0;
+}
+
+// True if `tid` is still the running task on ANY core (its own included). A
+// self-blocked task (futex/sem/waitpid park) stays current on its owner core
+// until that core's timer preempts it. While it is, its kernel-stack frame is
+// LIVE — enqueueing it elsewhere would let a peer core iret a stale frame.
+static int task_current_anywhere(int tid) {
+    for (int c = 0; c < MAX_CPUS; c++) {
+        if (current_task[c] == tid) return 1;
+    }
+    return 0;
 }
 
 // Pick the best READY task from cpu cid's own runqueue (priority + aging).
 // Task 0 (the kernel main loop) may only run on the BSP; idle tasks only on
-// the core they were pinned to.
+// the core they were pinned to. Never picks a task still current on a peer
+// CPU (see task_is_current_elsewhere).
 static int rq_pick(int cid) {
     struct runqueue* q = &rq[cid];
     int best = -1, best_score = -1;
@@ -220,6 +320,12 @@ static int rq_pick(int cid) {
         int tid = q->tids[i];
         if (tasks[tid].state != TASK_STATE_READY) continue;
         if (tid == 0 && cid != 0) continue;
+        // Idle tasks are pinned to the core matching their tid. A foreign
+        // core must never pick one (its saved frame only makes sense on its
+        // home core — iret'ing it elsewhere runs the hlt loop under a stale
+        // identity and corrupts the per-CPU task table).
+        if (tasks[tid].is_idle && cid != tid) continue;
+        if (task_is_current_elsewhere(cid, tid)) continue;
         tasks[tid].wait_ticks++;
         int score = tasks[tid].priority * 10 + tasks[tid].wait_ticks;
         if (score > best_score) { best_score = score; best = tid; }
@@ -243,6 +349,7 @@ static int rq_steal(int cid) {
             int tid = q->tids[i];
             if (tid == 0 || tasks[tid].is_idle) continue;
             if (tasks[tid].state != TASK_STATE_READY) continue;
+            if (task_is_current_elsewhere(cid, tid)) continue;
             int score = tasks[tid].priority * 10 + tasks[tid].wait_ticks;
             if (score > best_score) { best_score = score; best = tid; best_src = c; }
         }
@@ -395,6 +502,10 @@ void init_tasking() {
     // verbatim, so every later (and forked) address space inherits the holes.
     task_install_stack_guards(tasks[0].page_dir);
     write_serial_string("[K] stack guards installed\n");
+
+    // From here on, every core must have a current task whenever it iret's.
+    // The iret-ESP sanity check (irq_esp_sanity_check) is armed from now on.
+    scheduler_ready = 1;
 }
 
 uint32_t tasks_get_boot_cr3(void) {
@@ -657,6 +768,22 @@ uint32_t schedule(uint32_t esp) {
     //    interrupts land anywhere in the call stack), so fold it into the
     //    per-task stack watermark — /proc/tasks shows how close to the
     //    guard page each task has ever come.
+    // HARD INVARIANT: an idle task can only ever be current on its own core.
+    // If the scheduler is about to save a frame for an idle task on a foreign
+    // core, a previous commit already iret'd a stale frame under the wrong
+    // identity — halt instead of compounding the corruption.
+    if (cur > 0 && cur < MAX_TASKS && tasks[cur].is_idle && cid != cur) {
+        extern void panic_finish(void);
+        extern void write_serial_string(const char*);
+        extern void write_serial_hex(uint32_t);
+        write_serial_string("[SCHED] IDLE ON FOREIGN CORE cid=");
+        write_serial_hex(cid);
+        write_serial_string(" tid=");
+        write_serial_hex(cur);
+        write_serial_string("\n");
+        panic_finish();
+    }
+
     if (cur >= 0) {
         tasks[cur].esp = esp;
         if (esp >= kstack_guard(cur) + KERNEL_STACK_GUARD && esp <= kstack_top(cur)) {
@@ -665,6 +792,13 @@ uint32_t schedule(uint32_t esp) {
         }
         if (tasks[cur].state == TASK_STATE_RUNNING) {
             tasks[cur].state = TASK_STATE_READY;
+        }
+        // A task woken while still running (futex/sem wake flipped it READY
+        // but its owner core hadn't preempted it yet) is off-queue. If we now
+        // switch AWAY from it, it would be stranded (READY, in no runqueue) —
+        // put it back on OUR queue so it stays pickable from a fresh frame.
+        if (tasks[cur].state == TASK_STATE_READY && tasks[cur].rq_cpu < 0) {
+            rq_enqueue(cid, cur);
         }
     }
 
@@ -679,9 +813,18 @@ uint32_t schedule(uint32_t esp) {
              tasks[cur].state == TASK_STATE_RUNNING)) {
             next = cur;
         } else {
-            current_task[cid] = -1;
+            // Nothing runnable to switch to: we iret right back into the
+            // CURRENT frame. If cur is a task that blocked itself mid-syscall
+            // (futex/sem/waitpid park loop), that frame is ITS — it keeps
+            // executing, so it must stay current on this CPU. Clearing
+            // current_task[cid] here would lose the task's identity: later
+            // get_current_task() returns garbage (parking a bogus tid/pd into
+            // the futex table) and the busy-elsewhere guard in rq_pick/steal
+            // no longer protects it -> another CPU iret's its stale frame =
+            // double-run, kernel-stack corruption. (cur == -1 already means
+            // this CPU was parked in its own idle loop.)
             spin_unlock(&task_lock);
-            return esp;   // iret back to this CPU's idle loop
+            return esp;
         }
     }
 
@@ -697,7 +840,13 @@ uint32_t schedule(uint32_t esp) {
         }
     }
 
-    // 4. Commit the switch.
+    // 4. Commit the switch. The picked task must never be an idle task on a
+    //    foreign core (the rq_pick/steal guards above make it impossible, but
+    //    a corrupted runqueue could still hand one back — refuse to commit).
+    if (next > 0 && next < MAX_TASKS && tasks[next].is_idle && cid != next) {
+        spin_unlock(&task_lock);
+        return esp;
+    }
     tasks[next].state = TASK_STATE_RUNNING;
     current_task[cid] = next;
 
@@ -1040,20 +1189,44 @@ int task_get_state(int tid) {
 
 void task_set_state(int tid, int state) {
     if (tid < 0 || tid >= MAX_TASKS) return;
-    __asm__ volatile("cli");
+    // Idle tasks never block, sleep or get woken — they only ever sit in
+    // their own runqueue and hlt loop. Refusing transitions keeps a stray
+    // wake (e.g. a corrupted futex waiter list containing an idle tid) from
+    // migrating one onto a foreign runqueue.
+    if (tasks[tid].is_idle && state != TASK_STATE_RUNNING && state != TASK_STATE_READY) {
+        return;
+    }
+    // Preserve the caller's IF state (irqsave/restore) instead of forcing
+    // cli...sti. Callers that hold ANOTHER lock while blocking/waking a task
+    // (futex/semaphore wait, under sync_lock) must keep interrupts disabled
+    // until they release that lock — an unconditional `sti` here would open a
+    // preemption window where the timer parks the caller mid-critical-section,
+    // leaving e.g. sync_lock held by a task that can never be woken (the wake
+    // itself needs that lock) -> permanent deadlock.
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; popl %0; cli" : "=r"(eflags) : : "memory");
     spin_lock(&task_lock);
     int old = tasks[tid].state;
     if (old != state) {
         tasks[tid].state = state;
         if (state == TASK_STATE_READY) {
             tasks[tid].sleep_ticks = 0;
-            rq_enqueue_wake(tid);
+            // If the woken task is STILL RUNNING on its owner core (it
+            // blocked itself mid-syscall and the timer hasn't preempted it
+            // yet), its kernel-stack frame is live: enqueueing it on some
+            // (possibly foreign) runqueue would let a peer core iret a stale
+            // frame — the double-run that corrupts the task identity. Just
+            // flip the state; the owner core resumes it (keep-current path)
+            // or re-enqueues it when it finally preempts the park loop.
+            if (!task_current_anywhere(tid)) {
+                rq_enqueue_wake(tid);
+            }
         } else if (state != TASK_STATE_RUNNING) {
             rq_remove(tid);
         }
     }
     spin_unlock(&task_lock);
-    __asm__ volatile("sti");
+    __asm__ __volatile__("pushl %0; popfl" : : "r"(eflags) : "memory", "cc");
 }
 
 // Get/set priority
