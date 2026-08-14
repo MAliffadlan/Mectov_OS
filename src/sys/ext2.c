@@ -21,8 +21,13 @@ static void ext2_read_block(uint32_t block, unsigned char* buf) {
     uint32_t start_sector = block * sectors_per_block;
     if (start_sector >= 4096) { memset(buf, 0, block_size); return; }
     if (start_sector + sectors_per_block > 4096) sectors_per_block = 4096 - start_sector;
-    for (uint32_t i = 0; i < sectors_per_block; i++) {
-        ata_read_sector_drive(ext2_drive, start_sector + i, buf + (i * 512));
+    // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
+    uint32_t done = 0;
+    while (done < sectors_per_block) {
+        int batch = ata_batch_limit(start_sector + done, sectors_per_block - done);
+        ata_read_sectors_drive(ext2_drive, start_sector + done, batch,
+                               buf + done * 512);
+        done += batch;
     }
 }
 
@@ -296,8 +301,13 @@ static void ext2_write_block(uint32_t block, unsigned char* buf) {
     uint32_t start_sector = block * sectors_per_block;
     if (start_sector >= 4096) return;
     if (start_sector + sectors_per_block > 4096) sectors_per_block = 4096 - start_sector;
-    for (uint32_t i = 0; i < sectors_per_block; i++) {
-        ata_write_sector_drive(ext2_drive, start_sector + i, buf + (i * 512));
+    // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
+    uint32_t done = 0;
+    while (done < sectors_per_block) {
+        int batch = ata_batch_limit(start_sector + done, sectors_per_block - done);
+        ata_write_sectors_drive(ext2_drive, start_sector + done, batch,
+                                buf + done * 512);
+        done += batch;
     }
 }
 

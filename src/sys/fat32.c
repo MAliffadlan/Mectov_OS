@@ -35,15 +35,25 @@ static uint32_t fat32_max_cluster = 0;  // highest valid cluster number
 // --- low-level disk / FAT access -------------------------------------------
 
 static void fat32_read_sectors(uint32_t lba, unsigned char* buf, int count) {
-    for (int i = 0; i < count; i++) {
-        if (ata_read_sector_drive(fat32_drive, lba + i, buf + i * 512) != 0) {
-            memset(buf + i * 512, 0, 512);
+    // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
+    int done = 0;
+    while (done < count) {
+        int batch = ata_batch_limit(lba + done, count - done);
+        if (ata_read_sectors_drive(fat32_drive, lba + done, batch,
+                                   buf + done * 512) != 0) {
+            memset(buf + done * 512, 0, batch * 512);
         }
+        done += batch;
     }
 }
 static void fat32_write_sectors(uint32_t lba, const unsigned char* buf, int count) {
-    for (int i = 0; i < count; i++) {
-        ata_write_sector_drive(fat32_drive, lba + i, (unsigned char*)(buf + i * 512));
+    // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
+    int done = 0;
+    while (done < count) {
+        int batch = ata_batch_limit(lba + done, count - done);
+        ata_write_sectors_drive(fat32_drive, lba + done, batch,
+                                buf + done * 512);
+        done += batch;
     }
 }
 

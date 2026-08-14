@@ -146,3 +146,12 @@ jobs:
           # land on exactly ITERS (a broken/shared TLS would race/corrupt).
           # Proves FS/GS survive every context switch + signal path.
           python3 scripts/thread_test.py --timeout 360
+
+      - name: Multi-sector PIO + rep insw regression (TCG)
+        run: |
+          # Ring 3 bigread app: reads /bench.big (160 KB, > PCACHE_MAX_FILE)
+          # 3 times — every read is a real disk read through the batched
+          # multi-sector path (`rep insw`, one command per 16 sectors). The
+          # byte pattern must survive every read, so a batch-offset or DRQ
+          # bug cannot pass silently.
+          python3 scripts/bigread_test.py --timeout 420

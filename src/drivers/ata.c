@@ -49,11 +49,77 @@ int ata_read_sector_drive(int drive, unsigned int lba, unsigned char* b) {
     outb(base + 7, 0x20);
     if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; } 
     if (ata_wait_drq_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
-    for (int i = 0; i < 256; i++) { 
-        unsigned short word = inw(base); 
-        b[i * 2] = (unsigned char)word; 
-        b[i * 2 + 1] = (unsigned char)(word >> 8); 
+    // One `rep insw` moves the whole 512-byte sector — under KVM that is a
+    // SINGLE VM exit for the entire data phase instead of 256 (v38.25).
+    unsigned char* p = b;
+    int wc = 256;
+    __asm__ volatile("cld; rep insw" : "+D"(p), "+c"(wc) : "d"(base) : "memory");
+    spin_unlock_irqrestore(&ata_lock, ata_eflags);
+    return 0;
+}
+
+// Multi-sector PIO read (v38.25). One command transfers up to ATA_BATCH_MAX
+// contiguous sectors; the drive asserts DRQ once per sector, so the per-
+// sector overhead (command setup + BSY latency) is paid once for the whole
+// batch instead of once per sector. Sector count is clamped to the 128-
+// sector LBA boundary per the ATA spec (a multi-sector transfer may not
+// cross it) — QEMU tolerates crossing, real drives may not.
+int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char* b) {
+    uint16_t base = ata_base_port(drive);
+    if (count < 1) return -1;
+    count = ata_batch_limit(lba, count);
+
+    ata_eflags = spin_lock_irqsave(&ata_lock);
+    hdd_activity = 10;
+    if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
+    outb(base + 6, ((drive & 1) ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F));
+    outb(base + 2, (unsigned char)count);
+    outb(base + 3, (unsigned char)lba);
+    outb(base + 4, (unsigned char)(lba >> 8));
+    outb(base + 5, (unsigned char)(lba >> 16));
+    outb(base + 7, 0x20);   // READ SECTORS (LBA28)
+    if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
+    for (int s = 0; s < count; s++) {
+        if (ata_wait_drq_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
+        // One `rep insw` per sector: a single VM exit for the whole data
+        // phase under KVM instead of 256 word-by-word exits (v38.25).
+        unsigned char* p = b + s * 512;
+        int wc = 256;
+        __asm__ volatile("cld; rep insw" : "+D"(p), "+c"(wc) : "d"(base) : "memory");
     }
+    // Drain any residual BSY before the caller issues the next command.
+    ata_wait_bsy_drive(drive);
+    spin_unlock_irqrestore(&ata_lock, ata_eflags);
+    return 0;
+}
+
+// Multi-sector PIO write — the mirror of ata_read_sectors_drive: one
+// command, DRQ pulses per sector, data written in count*512-byte chunks.
+int ata_write_sectors_drive(int drive, unsigned int lba, int count, const unsigned char* b) {
+    uint16_t base = ata_base_port(drive);
+    if (count < 1) return -1;
+    count = ata_batch_limit(lba, count);
+
+    ata_eflags = spin_lock_irqsave(&ata_lock);
+    hdd_activity = 10;
+    if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
+    outb(base + 6, ((drive & 1) ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F));
+    outb(base + 2, (unsigned char)count);
+    outb(base + 3, (unsigned char)lba);
+    outb(base + 4, (unsigned char)(lba >> 8));
+    outb(base + 5, (unsigned char)(lba >> 16));
+    outb(base + 7, 0x30);   // WRITE SECTORS (LBA28)
+    if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
+    for (int s = 0; s < count; s++) {
+        if (ata_wait_drq_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
+        // One `rep outsw` per sector (v38.25): single VM exit for the data
+        // phase under KVM instead of 256 word-by-word exits.
+        const unsigned char* p = b + s * 512;
+        int wc = 256;
+        __asm__ volatile("cld; rep outsw" : "+S"(p), "+c"(wc) : "d"(base) : "memory");
+    }
+    outb(base + 7, 0xE7);   // CACHE FLUSH
+    ata_wait_bsy_drive(drive);
     spin_unlock_irqrestore(&ata_lock, ata_eflags);
     return 0;
 }
@@ -70,7 +136,10 @@ int ata_write_sector_drive(int drive, unsigned int lba, unsigned char* b) {
     outb(base + 4, (unsigned char)(lba >> 8)); outb(base + 5, (unsigned char)(lba >> 16)); outb(base + 7, 0x30);
     if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
     if (ata_wait_drq_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
-    for (int i = 0; i < 256; i++) { unsigned short word = b[i * 2] | (b[i * 2 + 1] << 8); outw(base, word); }
+    // One `rep outsw` per sector (v38.25): single VM exit for the data phase.
+    const unsigned char* pw = b;
+    int wc = 256;
+    __asm__ volatile("cld; rep outsw" : "+S"(pw), "+c"(wc) : "d"(base) : "memory");
     outb(base + 7, 0xE7); ata_wait_bsy_drive(drive);
     spin_unlock_irqrestore(&ata_lock, ata_eflags);
     return 0;

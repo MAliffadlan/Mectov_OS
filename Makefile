@@ -87,6 +87,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/iobench_mct.o \
        $(OBJ_DIR)/permtest_mct.o \
        $(OBJ_DIR)/threaddemo_mct.o \
+       $(OBJ_DIR)/bigread_mct.o \
        $(OBJ_DIR)/libc_mct.o \
        $(OBJ_DIR)/calc_mct.o \
        $(OBJ_DIR)/volume_mct.o \
@@ -256,6 +257,9 @@ permtest.mct: apps/permtest.c
 threaddemo.mct: apps/threaddemo.c
 	python3 scripts/build_mct.py apps/threaddemo.c threaddemo.mct
 
+bigread.mct: apps/bigread.c
+	python3 scripts/build_mct.py apps/bigread.c bigread.mct
+
 tcpserver.mct: apps/tcpserver.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/tcpserver.c tcpserver.mct
 
@@ -351,6 +355,9 @@ $(OBJ_DIR)/permtest_mct.o: permtest.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/threaddemo_mct.o: threaddemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 threaddemo.mct $(OBJ_DIR)/threaddemo_mct.o
+
+$(OBJ_DIR)/bigread_mct.o: bigread.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 bigread.mct $(OBJ_DIR)/bigread_mct.o
 
 $(OBJ_DIR)/looper_mct.o: looper.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 looper.mct $(OBJ_DIR)/looper_mct.o

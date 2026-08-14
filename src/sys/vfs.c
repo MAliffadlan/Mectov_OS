@@ -177,6 +177,25 @@ static int vfs_update_file_if_needed(const char* path, const char* data, int siz
 // runtime writes (shell echo > file, etc.) still save immediately.
 static int vfs_seeding = 0;
 
+// Seed a 160 KB pattern file (v38.25) used by apps/bigread.mct to benchmark
+// multi-sector PIO: 160 KB > PCACHE_MAX_FILE (128 KB), so the page cache
+// never absorbs it and every read is a real disk read. Pattern = byte index
+// mod 256, which bigread verifies. No-op when the file already exists.
+static int vfs_seed_bench_big(void) {
+    extern int vfs_get_node(const char* path);
+    const char* path = "/bench.big";
+    if (vfs_get_node(path) >= 0) return 0;
+    const int bsize = 160 * 1024;
+    char* buf = (char*)kmalloc(bsize);
+    if (!buf) return 0;
+    for (int i = 0; i < bsize; i++) buf[i] = (char)(i & 0xFF);
+    vfs_create_file(path);
+    vfs_write_file(path, buf, bsize);
+    kfree(buf);
+    write_serial_string("[VFS] seeded /bench.big\n");
+    return 1;
+}
+
 // Drop every VFS node under `node` (in_use = 0) WITHOUT touching the on-disk
 // filesystem — used at mount time so a removable/external filesystem (FAT32)
 // is re-built from its real disk contents every boot instead of trusting
@@ -316,6 +335,10 @@ void vfs_init() {
         extern uint8_t _binary_apps_music_wav_start[];
         extern uint8_t _binary_apps_music_wav_end[];
         changed += vfs_update_file_if_needed("apps/music.wav", (const char*)_binary_apps_music_wav_start, _binary_apps_music_wav_end - _binary_apps_music_wav_start);
+
+        // Large uncached benchmark file (v38.25): 160 KB > PCACHE_MAX_FILE, so
+        // every read pays the disk — the multi-sector PIO path (bigread.mct).
+        changed += vfs_seed_bench_big();
 
     extern uint8_t _binary_hello_mct_start[];
     extern uint8_t _binary_hello_mct_end[];
@@ -461,6 +484,11 @@ void vfs_init() {
         extern uint8_t _binary_threaddemo_mct_start[];
         extern uint8_t _binary_threaddemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/threaddemo.mct", (const char*)_binary_threaddemo_mct_start, _binary_threaddemo_mct_end - _binary_threaddemo_mct_start);
+
+        // Multi-sector PIO benchmark (v38.25 — see scripts/bigread_test.py)
+        extern uint8_t _binary_bigread_mct_start[];
+        extern uint8_t _binary_bigread_mct_end[];
+        changed += vfs_update_file_if_needed("apps/bigread.mct", (const char*)_binary_bigread_mct_start, _binary_bigread_mct_end - _binary_bigread_mct_start);
 
         // Pipeline demo apps
         extern uint8_t _binary_pipegen_mct_start[];
@@ -726,6 +754,11 @@ void vfs_init() {
     vfs_create_file("apps/threaddemo.mct");
     vfs_write_file("apps/threaddemo.mct", (const char*)_binary_threaddemo_mct_start, _binary_threaddemo_mct_end - _binary_threaddemo_mct_start);
 
+    extern uint8_t _binary_bigread_mct_start[];
+    extern uint8_t _binary_bigread_mct_end[];
+    vfs_create_file("apps/bigread.mct");
+    vfs_write_file("apps/bigread.mct", (const char*)_binary_bigread_mct_start, _binary_bigread_mct_end - _binary_bigread_mct_start);
+
     // Pipeline demo apps
     extern uint8_t _binary_pipegen_mct_start[];
     extern uint8_t _binary_pipegen_mct_end[];
@@ -763,6 +796,10 @@ void vfs_init() {
     extern uint8_t _binary_apps_music_wav_end[];
     vfs_create_file("apps/music.wav");
     vfs_write_file("apps/music.wav", (const char*)_binary_apps_music_wav_start, _binary_apps_music_wav_end - _binary_apps_music_wav_start);
+
+    // Large uncached benchmark file (v38.25): 160 KB > PCACHE_MAX_FILE, so
+    // every read pays the disk — the multi-sector PIO path (bigread.mct).
+    vfs_seed_bench_big();
 
     // Inject snake.mct
     extern uint8_t _binary_snake_mct_start[];
@@ -1797,17 +1834,24 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
     if (size > max_readable) size = max_readable;
     if (size <= 0) { buf[0] = '\0'; return 0; }
     
-    // Read sectors
-    int remaining = size;
-    int offset = 0;
-    while (remaining > 0) {
+    // Read sectors in multi-sector PIO batches (v38.25): one ATA command per
+    // up-to-16-sector run instead of one per sector. Only WHOLE sectors are
+    // batched straight into the caller's buffer — the partial tail sector is
+    // read into a temp and copied, so a small caller buffer (e.g. the 4-byte
+    // magic check) can never be overrun by a full 512-byte sector.
+    int secs_full = size / 512;
+    int s = 0;
+    while (s < secs_full) {
+        int batch = ata_batch_limit((unsigned int)(sector + s), secs_full - s);
+        ata_read_sectors_drive(0, (unsigned int)(sector + s), batch,
+                               (unsigned char*)buf + s * 512);
+        s += batch;
+    }
+    int tail = size - secs_full * 512;
+    if (tail > 0) {
         unsigned char tmp[512];
-        ata_read_sector(sector++, tmp);
-        
-        int chunk = remaining > 512 ? 512 : remaining;
-        memcpy(buf + offset, tmp, chunk);
-        offset += chunk;
-        remaining -= chunk;
+        ata_read_sector_drive(0, (unsigned int)(sector + secs_full), tmp);
+        memcpy(buf + secs_full * 512, tmp, tail);
     }
     
     // Prime the cache with the bytes just read — a second read of this file
@@ -1868,15 +1912,22 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
             if (psector > 0 && psector < VFS_DISK_SECTORS && prime_size > max_readable)
                 prime_size = max_readable;
             if (psector > 0 && psector < VFS_DISK_SECTORS && prime_size > 0) {
-                int remaining = prime_size;
-                int done = 0;
-                while (remaining > 0) {
-                    unsigned char t[512];
-                    ata_read_sector((unsigned int)psector++, t);
-                    int chunk = remaining > 512 ? 512 : remaining;
-                    memcpy(tmp + done, t, chunk);
-                    done += chunk;
-                    remaining -= chunk;
+                // Multi-sector PIO (v38.25): batch the prime read. Whole
+                // sectors go straight into tmp; the partial tail sector is
+                // read alone so tmp (exactly prime_size bytes) never overflows.
+                int pfull = prime_size / 512;
+                int ps = 0;
+                while (ps < pfull) {
+                    int batch = ata_batch_limit((unsigned int)psector + ps, pfull - ps);
+                    ata_read_sectors_drive(0, (unsigned int)psector + ps, batch,
+                                           (unsigned char*)tmp + ps * 512);
+                    ps += batch;
+                }
+                int ptail = prime_size - pfull * 512;
+                if (ptail > 0) {
+                    unsigned char t2[512];
+                    ata_read_sector_drive(0, (unsigned int)psector + pfull, t2);
+                    memcpy(tmp + pfull * 512, t2, ptail);
                 }
                 pcache_insert(node, tmp, prime_size);
                 cached = pcache_lookup(node, prime_size);
@@ -1899,18 +1950,36 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
     int in_off = offset % 512;
     int remaining = len;
     int done = 0;
-    while (remaining > 0) {
+    // Head: the first (possibly partial) sector is read alone; everything
+    // after it is sector-aligned, so the middle can use multi-sector PIO
+    // batches straight into the caller's buffer (v38.25).
+    if (in_off > 0) {
         unsigned char tmp[512];
-        ata_read_sector((unsigned int)sector++, tmp);
-        int chunk = remaining > 512 ? 512 : remaining;
-        if (in_off > 0) {
-            chunk = 512 - in_off;
-            if (chunk > remaining) chunk = remaining;
-        }
+        ata_read_sector_drive(0, (unsigned int)sector++, tmp);
+        int chunk = 512 - in_off;
+        if (chunk > remaining) chunk = remaining;
         memcpy(buf + done, tmp + in_off, chunk);
         done += chunk;
         remaining -= chunk;
-        in_off = 0;
+    }
+    if (remaining > 0) {
+        int secs = remaining / 512;
+        int s = 0;
+        while (s < secs) {
+            int batch = ata_batch_limit((unsigned int)sector + s, secs - s);
+            ata_read_sectors_drive(0, (unsigned int)sector + s, batch,
+                                   (unsigned char*)buf + done + s * 512);
+            s += batch;
+        }
+        done += secs * 512;
+        remaining -= secs * 512;
+        sector += secs;
+    }
+    // Tail: the final partial sector.
+    if (remaining > 0) {
+        unsigned char tmp[512];
+        ata_read_sector_drive(0, (unsigned int)sector, tmp);
+        memcpy(buf + done, tmp, remaining);
     }
     return len;
 }
@@ -2032,21 +2101,36 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
     }
     
     // Write data sectors
-    int remaining = size;
-    int offset = 0;
-    int sector = start_sector;
-    while (remaining > 0 || (offset == 0 && remaining == 0)) {
-        unsigned char tmp[512];
-        memset(tmp, 0, 512);
-        
-        int chunk = remaining > 512 ? 512 : remaining;
-        if (chunk > 0) memcpy(tmp, data + offset, chunk);
-        
-        ata_write_sector(sector++, tmp);
-        offset += 512;
-        remaining -= 512;
-        
-        if (offset >= size) break;
+    // Multi-sector PIO (v38.25): write up to ATA_BATCH_MAX sectors per
+    // command, zero-padding the partial tail sector inside the batch buffer.
+    int secs = (size + 511) / 512;
+    int s = 0;
+    unsigned char* wbuf = (unsigned char*)kmalloc(ATA_BATCH_MAX * 512);
+    if (wbuf) {
+        while (s < secs) {
+            int batch = ata_batch_limit((unsigned int)(start_sector + s), secs - s);
+            memset(wbuf, 0, batch * 512);
+            int n = batch * 512;
+            if (s * 512 + n > size) n = size - s * 512;
+            if (n > 0) memcpy(wbuf, data + s * 512, n);
+            ata_write_sectors_drive(0, (unsigned int)(start_sector + s), batch, wbuf);
+            s += batch;
+        }
+        kfree(wbuf);
+    } else {
+        // Heap unavailable: fall back to per-sector writes.
+        int remaining = size;
+        int offset = 0;
+        int sector = start_sector;
+        while (remaining > 0) {
+            unsigned char tmp[512];
+            memset(tmp, 0, 512);
+            int chunk = remaining > 512 ? 512 : remaining;
+            if (chunk > 0) memcpy(tmp, data + offset, chunk);
+            ata_write_sector((unsigned int)sector++, tmp);
+            offset += 512;
+            remaining -= 512;
+        }
     }
     
     fs_nodes[node].size = size;
