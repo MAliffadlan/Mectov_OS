@@ -175,6 +175,12 @@ typedef struct {
 #define SYS_CHOWN        103 // EBX=path_ptr, ECX=uid, EDX=gid -> 0 or -1 (root only)
 #define SYS_CLONE        104 // EBX=entry, ECX=child_stack (0=default), EDX=tls_base (0=none) -> child: 0, parent: TID
 #define SYS_TLS_SET      105 // EBX=tls_base (TCB VA, 0 = remove) -> 0 or -1. Sets CURRENT task's %gs
+#define SYS_GETRLIMIT    106 // EBX=resource (RLIMIT_*), ECX=rlimit_t* {cur,max} -> 0 or -1
+#define SYS_SETRLIMIT    107 // EBX=resource, ECX=rlimit_t* {cur,max} -> 0 or -1 (POSIX privilege rules)
+
+// Resource limits (rlimit_t + RLIMIT_* are defined in types.h, the common
+// base of syscall.h and task.h). Enforced at fork/clone/thread-create
+// (NPROC), fd allocation (NOFILE) and heap/mmap growth (AS).
 
 // Open flags (SYS_OPEN mode / third arg)
 #define O_APPEND        8   // write always appends at end of file
@@ -754,6 +760,18 @@ static inline int sys_shmctl(int shmid, int cmd) {
 static inline void sys_exit_with_code(int code) {
     syscall(SYS_EXIT, code, 0, 0);
     for(;;); // Never returns
+}
+
+// Resource limits (POSIX getrlimit/setrlimit subset, v38.28). resource is
+// RLIMIT_NPROC/RLIMIT_AS/RLIMIT_NOFILE; rl is {cur, max}. setrlimit follows
+// POSIX privilege rules: a non-root caller may lower cur and raise cur only
+// up to max, but may never raise max; root may set anything. Both return
+// 0 on success, -1 on error (bad resource / EPERM / EINVAL).
+static inline int sys_getrlimit(int resource, rlimit_t* rl) {
+    return syscall(SYS_GETRLIMIT, resource, (int)rl, 0);
+}
+static inline int sys_setrlimit(int resource, rlimit_t* rl) {
+    return syscall(SYS_SETRLIMIT, resource, (int)rl, 0);
 }
 
 #endif

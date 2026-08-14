@@ -88,6 +88,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/permtest_mct.o \
        $(OBJ_DIR)/threaddemo_mct.o \
        $(OBJ_DIR)/conddemo_mct.o \
+       $(OBJ_DIR)/rlimittest_mct.o \
        $(OBJ_DIR)/bigread_mct.o \
        $(OBJ_DIR)/libc_mct.o \
        $(OBJ_DIR)/calc_mct.o \
@@ -261,6 +262,9 @@ threaddemo.mct: apps/threaddemo.c
 conddemo.mct: apps/conddemo.c
 	python3 scripts/build_mct.py apps/conddemo.c conddemo.mct
 
+rlimittest.mct: apps/rlimittest.c
+	python3 scripts/build_mct.py apps/rlimittest.c rlimittest.mct
+
 bigread.mct: apps/bigread.c
 	python3 scripts/build_mct.py apps/bigread.c bigread.mct
 
@@ -362,6 +366,9 @@ $(OBJ_DIR)/threaddemo_mct.o: threaddemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/conddemo_mct.o: conddemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 conddemo.mct $(OBJ_DIR)/conddemo_mct.o
+
+$(OBJ_DIR)/rlimittest_mct.o: rlimittest.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 rlimittest.mct $(OBJ_DIR)/rlimittest_mct.o
 
 $(OBJ_DIR)/bigread_mct.o: bigread.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 bigread.mct $(OBJ_DIR)/bigread_mct.o

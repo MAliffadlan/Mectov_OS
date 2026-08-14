@@ -156,6 +156,16 @@ jobs:
           # zero [PANIC] (exercises the scheduler's self-blocking wake path).
           python3 scripts/cond_test.py --timeout 300
 
+      - name: Resource limits (RLIMIT_NPROC/AS/NOFILE) regression (TCG)
+        run: |
+          # Ring 3 rlimittest app: getrlimit defaults sane, fork refused
+          # under NPROC cur=1 (per-uid count), fork OK after raising cur,
+          # non-root may never raise the hard limit, NOFILE stops fd
+          # allocation at the soft limit (close frees a slot), AS stops mmap
+          # at the soft limit (2 MB under 1 MB refused, 256 KB allowed, raise
+          # re-allows). Asserts ALL PASS + zero [PANIC].
+          python3 scripts/rlimit_test.py --timeout 360
+
       - name: IDE DMA + multi-sector disk read regression (TCG)
         run: |
           # Ring 3 bigread app: reads /bench.big (160 KB, > PCACHE_MAX_FILE)

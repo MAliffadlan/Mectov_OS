@@ -164,6 +164,39 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_GETRLIMIT (106) / SYS_SETRLIMIT (107) -----
+        // POSIX getrlimit/setrlimit subset (v38.28): resource is
+        // RLIMIT_NPROC/RLIMIT_AS/RLIMIT_NOFILE, the value is a user rlimit_t
+        // {cur,max}. setrlimit follows POSIX privilege rules (non-root may
+        // lower cur and raise cur only up to max, never raise max). Enforced
+        // at fork/thread-create (NPROC), fd allocation (NOFILE) and
+        // heap/mmap growth (AS) — see task_rlimit_* in task.c.
+        case SYS_GETRLIMIT: {
+            int res = (int)regs->ebx;
+            rlimit_t* out = (rlimit_t*)(uintptr_t)regs->ecx;
+            if (res < 0 || res >= RLIM_NLIMITS ||
+                !validate_user_ptr(out, sizeof(rlimit_t))) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            if (task_getrlimit(res, out) != 0) { regs->eax = (uint32_t)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYS_SETRLIMIT: {
+            int res = (int)regs->ebx;
+            rlimit_t* in = (rlimit_t*)(uintptr_t)regs->ecx;
+            if (res < 0 || res >= RLIM_NLIMITS ||
+                !validate_user_ptr(in, sizeof(rlimit_t))) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            rlimit_t copy = *in;  // kernel-side copy; task_setrlimit may not
+            if (task_setrlimit(res, &copy) != 0) { regs->eax = (uint32_t)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+
         // ----- SYS_SLEEP (19) -----
         case SYS_SLEEP: {
             int ticks = (int)regs->ebx;

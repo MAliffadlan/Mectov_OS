@@ -36,6 +36,25 @@ int task_get_cid(void);
 #define SIGTTOU  22   // background pgrp write to controlling terminal (default: stop)
 #define SIG_MAX  32
 
+// Resource limits (rlimit_t + RLIMIT_* are defined in types.h, the common
+// base of both task.h and syscall.h). Enforced at the syscall layer:
+// RLIMIT_NPROC at fork/clone/thread-create (counts live tasks with the
+// caller's uid), RLIMIT_NOFILE at fd allocation, RLIMIT_AS at heap/mmap
+// growth — see task_rlimit_* below.
+
+// Get/set a resource limit of the CURRENT task (SYS_GETRLIMIT/SYS_SETRLIMIT).
+// setrlimit follows POSIX: a non-root caller may lower cur and raise cur only
+// up to max, but never raise max; root may set anything. Returns 0 or -1.
+int task_getrlimit(int res, rlimit_t* out);
+int task_setrlimit(int res, const rlimit_t* in);
+// RLIMIT_NOFILE check at fd allocation: 1 = another fd is allowed, 0 = the
+// task's soft NOFILE limit is reached (root bypasses). Called with fd_lock
+// held by the fd layer; reads the current task's table without task_lock.
+int task_rlimit_nofile_ok(void);
+// RLIMIT_AS check for the current task: 1 = growing the address space by
+// `additional` bytes stays under the soft AS limit (root bypasses).
+int task_rlimit_as_allows(uint32_t additional);
+
 // mmap() regions per task (demand paged): the region is reserved in VA space
 // with no physical frames; a page fault inside it lazily materializes a frame
 // — zero-filled for anonymous mappings, or file bytes read straight off the

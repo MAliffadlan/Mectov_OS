@@ -102,6 +102,8 @@ typedef struct {
     uint32_t tls_base;          // user VA of this thread's TCB; 0 = no TLS.
                                 // Its FS/GS GDT descriptors (slot = 2*tid)
                                 // are kept in sync via gdt_tls_update().
+    // === NEW: Resource limits (v38.28) ===
+    rlimit_t rlimits[RLIM_NLIMITS];  // soft/hard per RLIMIT_* resource
 } task_t;
 
 static task_t tasks[MAX_TASKS];
@@ -112,6 +114,50 @@ static int current_task[16] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -
 // timer and sti before the scheduler exists) — that state is legitimate and
 // must not trip the iret-ESP sanity check.
 static volatile int scheduler_ready = 0;
+
+// Default resource limits for a fresh task slot (set by init_tasking and by
+// every task constructor that reuses a slot). Values are generous for the
+// single-user desktop but real: 64 processes, 256 MB of address space, and
+// the full 16-fd table per task. Root (uid 0) bypasses every limit.
+static void rlimit_set_defaults(int tid) {
+    tasks[tid].rlimits[RLIMIT_NPROC].cur  = 64;
+    tasks[tid].rlimits[RLIMIT_NPROC].max  = 64;
+    tasks[tid].rlimits[RLIMIT_AS].cur     = 256u * 1024u * 1024u;
+    tasks[tid].rlimits[RLIMIT_AS].max     = 256u * 1024u * 1024u;
+    tasks[tid].rlimits[RLIMIT_NOFILE].cur = 16;
+    tasks[tid].rlimits[RLIMIT_NOFILE].max = 16;
+}
+
+// RLIMIT_NPROC enforcement: count live tasks with the same uid as `tid` and
+// reject creation when the caller's soft NPROC limit is reached (POSIX: the
+// limit applies to the real user id, so every process of that user counts,
+// not just direct children). Root (uid 0) bypasses. Must be called with
+// task_lock held. Returns 0 when the limit allows another task, -1 when not.
+static int rlimit_nproc_allows(int tid) {
+    if (tasks[tid].uid == ROOT_UID) return 0;  // root is never limited
+    uint32_t limit = tasks[tid].rlimits[RLIMIT_NPROC].cur;
+    if (limit == 0) return -1;
+    int count = 0;
+    for (int i = 1; i < MAX_TASKS; i++) {
+        if (tasks[i].state == TASK_STATE_FREE) continue;
+        if (tasks[i].uid == tasks[tid].uid) count++;
+        if (count >= (int)limit) return -1;
+    }
+    return 0;
+}
+
+// RLIMIT_AS enforcement: the task's committed address space is its heap
+// (0x08000000 .. heap_ptr) plus every reserved mmap region. Returns bytes.
+static uint32_t rlimit_as_used(int tid) {
+    uint32_t used = 0;
+    if (tasks[tid].heap_ptr > 0x08000000u) {
+        used += tasks[tid].heap_ptr - 0x08000000u;
+    }
+    for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+        used += tasks[tid].mmap_regions[j].size;
+    }
+    return used;
+}
 
 static inline int get_cid() { extern uint32_t smp_lapic_addr; return smp_lapic_addr ? (apic_get_id() & 15) : 0; }
 
@@ -411,6 +457,7 @@ static int create_idle_task(int cpu) {
     for (int j = 0; j < SIG_MAX; j++) { tasks[tid].signal_handlers[j] = NULL; tasks[tid].sig_masks[j] = 0; tasks[tid].sig_flags[j] = 0; }
     tasks[tid].is_idle = 1;
     tasks[tid].rq_cpu = -1;
+    rlimit_set_defaults(tid);
 
     // Ring 0 interrupt frame -> ap_idle() (same layout as create_task).
     uint32_t* stack = (uint32_t*)kstack_top(tid);
@@ -462,6 +509,7 @@ void init_tasking() {
         for (int j = 0; j < SIG_MAX; j++) { tasks[i].signal_handlers[j] = NULL; tasks[i].sig_masks[j] = 0; tasks[i].sig_flags[j] = 0; }
         for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
         for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[i].mmap_regions[j].base = 0;
+        rlimit_set_defaults(i);
     }
     tasks[0].state = TASK_STATE_RUNNING;
     tasks[0].ring = 0;
@@ -470,6 +518,7 @@ void init_tasking() {
     tasks[0].esp = 0; // Will be filled by scheduler on first preemption
     tasks[0].parent = 0;
     tasks[0].shm_bits = 0;
+    rlimit_set_defaults(0);
     
     // Save boot CR3 to task 0
     uint32_t boot_cr3;
@@ -597,6 +646,7 @@ int create_task(void (*entry)()) {
             tasks[i].rq_cpu = -1;
             tasks[i].is_idle = 0;
             tasks[i].tls_base = 0;
+            rlimit_set_defaults(i);
             num_tasks++;
             
             // Set state LAST — only now is it safe for the scheduler
@@ -1028,6 +1078,17 @@ int thread_create_ex(void (*entry)(), int priority, uint32_t page_dir,
 
     __asm__ volatile("cli");
     spin_lock(&task_lock);
+
+    // RLIMIT_NPROC counts threads too (POSIX: RLIMIT_NPROC bounds the number
+    // of processes OR threads of a user). A thread shares its creator's uid
+    // and address space, so the same per-uid count applies.
+    int parent_tid = (current_task[cid] >= 0) ? current_task[cid] : -1;
+    if (parent_tid > 0 && rlimit_nproc_allows(parent_tid) != 0) {
+        spin_unlock(&task_lock);
+        __asm__ volatile("sti");
+        return -1;
+    }
+
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == TASK_STATE_FREE) {
             
@@ -1071,6 +1132,13 @@ int thread_create_ex(void (*entry)(), int priority, uint32_t page_dir,
             // from their parent either way (v38.23 ownership model).
             tasks[i].uid = (current_task[cid] >= 0) ? tasks[current_task[cid]].uid : ROOT_UID;
             tasks[i].gid = (current_task[cid] >= 0) ? tasks[current_task[cid]].gid : 0;
+            // A thread inherits its creator's resource limits (POSIX: rlimits
+            // are per-process and shared by all threads of that process).
+            if (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS) {
+                memcpy(tasks[i].rlimits, tasks[current_task[cid]].rlimits, sizeof(tasks[i].rlimits));
+            } else {
+                rlimit_set_defaults(i);
+            }
             tasks[i].waiting = 0;
             tasks[i].pending_signals = 0;
             tasks[i].blocked_signals = 0;
@@ -1366,6 +1434,83 @@ void task_set_gid(int tid, int gid) {
     tasks[tid].gid = gid;
 }
 
+// ---- Resource limits (v38.28) ----
+
+// SYS_GETRLIMIT: copy the current task's soft+hard value for a resource.
+int task_getrlimit(int res, rlimit_t* out) {
+    if (res < 0 || res >= RLIM_NLIMITS) return -1;
+    if (!out) return -1;
+    int cid = get_cid();
+    int tid = (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS) ? current_task[cid] : 0;
+    *out = tasks[tid].rlimits[res];
+    return 0;
+}
+
+// SYS_SETRLIMIT (POSIX semantics): a non-root caller may lower cur and raise
+// cur only up to max, but may never raise max. Root may set anything. cur
+// must not exceed max. Values are clamped to sane bounds to keep a hostile
+// caller from setting an absurd hard limit that later trips an overflow.
+int task_setrlimit(int res, const rlimit_t* in) {
+    if (res < 0 || res >= RLIM_NLIMITS) return -1;
+    if (!in) return -1;
+    int cid = get_cid();
+    int tid = (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS) ? current_task[cid] : 0;
+
+    rlimit_t want = *in;
+    // Clamp to hard physical ceilings so a corrupt/absurd value can never
+    // cause an arithmetic overflow in the enforcement checks below.
+    if (want.max > 0x7FFFFFFFu) want.max = 0x7FFFFFFFu;
+    if (want.cur > want.max) want.cur = want.max;
+
+    rlimit_t cur = tasks[tid].rlimits[res];
+    int is_root = (tasks[tid].uid == ROOT_UID);
+    if (!is_root) {
+        // Non-root: never raise the hard limit; cur must stay within max.
+        if (want.max > cur.max) return -1;
+        if (want.cur > want.max) return -1;
+    }
+
+    tasks[tid].rlimits[res] = want;
+    return 0;
+}
+
+// RLIMIT_AS enforcement (v38.28): returns 1 when the CURRENT task may grow
+// its address space by `additional` bytes without exceeding its soft AS
+// limit (root bypasses). Counts committed heap (0x08000000..heap_ptr) plus
+// all reserved mmap regions — the same accounting task_mmap_reserve uses.
+// Called from SYS_MALLOC and the mmap reservations; no task_lock needed (the
+// task table reads are plain and each caller holds its own lock or none).
+int task_rlimit_as_allows(uint32_t additional) {
+    int cid = get_cid();
+    int tid = (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS) ? current_task[cid] : -1;
+    if (tid < 0) return 1;
+    if (tasks[tid].uid == ROOT_UID) return 1;
+    uint32_t limit = tasks[tid].rlimits[RLIMIT_AS].cur;
+    if (limit == 0) return 0;
+    uint64_t used = rlimit_as_used(tid);
+    used += additional;
+    return used <= limit;
+}
+
+// RLIMIT_NOFILE enforcement at fd allocation: returns 1 when the task may
+// allocate another fd, 0 when its soft NOFILE limit is reached. Root
+// bypasses. Used by task_map_fd()/do_sys_dup2_tid() before mapping a new
+// local fd. Runs without task_lock (plain read of the current task's table;
+// fd_lock is already held by every caller).
+int task_rlimit_nofile_ok(void) {
+    int cid = get_cid();
+    int tid = (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS) ? current_task[cid] : -1;
+    if (tid < 0) return 1;
+    if (tasks[tid].uid == ROOT_UID) return 1;
+    uint32_t limit = tasks[tid].rlimits[RLIMIT_NOFILE].cur;
+    if (limit >= MAX_FDS_PER_TASK) return 1;
+    int open = 0;
+    for (int j = 0; j < 16; j++) {
+        if (tasks[tid].fd_table[j] >= 0) open++;
+    }
+    return open < (int)limit;
+}
+
 // ---- Thread-local storage (v38.24) ----
 
 // Set the CURRENT task's TLS base. The GDT descriptors are repointed (or
@@ -1467,6 +1612,15 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
     __asm__ volatile("cli");
     spin_lock(&task_lock);
 
+    // RLIMIT_NPROC: refuse to create another process when the caller's soft
+    // limit is reached (EAGAIN semantics — the caller may retry after
+    // reaping or raising the limit).
+    if (rlimit_nproc_allows(parent) != 0) {
+        spin_unlock(&task_lock);
+        __asm__ volatile("sti");
+        return -1;
+    }
+
     // COW clone of the parent's address space. User writable pages are marked
     // read-only + PAGE_COW in BOTH directories, so writes fault and duplicate.
     uint32_t new_pd = vmm_clone_address_space(tasks[parent].page_dir);
@@ -1567,6 +1721,8 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         memcpy(tasks[i].launch_arg, tasks[parent].launch_arg, sizeof(tasks[i].launch_arg));
         tasks[i].current_dir = tasks[parent].current_dir;
         tasks[i].heap_ptr = tasks[parent].heap_ptr;
+        // Resource limits are inherited by the child (POSIX fork semantics).
+        memcpy(tasks[i].rlimits, tasks[parent].rlimits, sizeof(tasks[i].rlimits));
         // Child inherits mmap regions (the COW clone keeps the same VA layout;
         // faulted pages become COW, unfaulted ones stay demand-paged).
         memcpy(tasks[i].mmap_regions, tasks[parent].mmap_regions,
@@ -1802,6 +1958,16 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
     __asm__ volatile("cli");
     spin_lock(&task_lock);
 
+    // RLIMIT_NPROC: the spawner (the shell) is a normal user task, so creating
+    // the child counts against its limit like any other fork.
+    if (current_task[cid] > 0 && rlimit_nproc_allows(current_task[cid]) != 0) {
+        spin_unlock(&task_lock);
+        __asm__ volatile("sti");
+        extern void vmm_free_address_space(uint32_t);
+        vmm_free_address_space(img.page_dir);
+        return -1;
+    }
+
     int child = -1;
     for (int i = 1; i < MAX_TASKS; i++) {
         if (tasks[i].state != TASK_STATE_FREE) continue;
@@ -1849,6 +2015,8 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
     tasks[child].shm_bits = 0;
     tasks[child].heap_ptr = img.heap_start;
     tasks[child].current_dir = tasks[current_task[cid]].current_dir;
+    // The spawned process inherits the caller's resource limits (POSIX exec).
+    memcpy(tasks[child].rlimits, tasks[current_task[cid]].rlimits, sizeof(tasks[child].rlimits));
     mmap_free_dirty_bitmaps(child);  // fresh spawn: never inherit stale bitmaps
     for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[child].mmap_regions[j].base = 0;
     for (int j = 0; j < SIG_MAX; j++) tasks[child].signal_handlers[j] = NULL;
@@ -2415,6 +2583,9 @@ uint32_t task_mmap_reserve(uint32_t size) {
     size = (size + 0xFFF) & ~0xFFFu;
     if (size == 0) size = 4096;
     if (size > (MMAP_END - MMAP_BASE)) return 0;
+    // RLIMIT_AS (v38.28): the reservation counts against the task's soft
+    // address-space limit. Check BEFORE the region slot is consumed.
+    if (!task_rlimit_as_allows(size)) return 0;
 
     int slot;
     uint32_t base;
@@ -2462,6 +2633,9 @@ uint32_t task_mmap_file(int fd, int flags) {
     uint32_t size = (file_size + 0xFFF) & ~0xFFFu;
     if (size == 0) size = 4096;
     if (size > (MMAP_END - MMAP_BASE)) return 0;
+    // RLIMIT_AS (v38.28): file-backed reservations count against the soft AS
+    // limit like anonymous ones.
+    if (!task_rlimit_as_allows(size)) return 0;
 
     int slot;
     uint32_t base;

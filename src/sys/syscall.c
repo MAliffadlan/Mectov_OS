@@ -381,6 +381,8 @@ static void syscall_handler(registers_t* regs) {
         case SYS_THREAD_CREATE:
         case SYS_CLONE:
         case SYS_TLS_SET:
+        case SYS_GETRLIMIT:
+        case SYS_SETRLIMIT:
         case SYS_SLEEP:
         case SYS_GET_PID:
         case SYS_SET_PRIORITY:
@@ -489,6 +491,10 @@ static void syscall_handler(registers_t* regs) {
                 
                 // Prevent overflow, wrapping, or collision with libraries at 0x09000000
                 if (end_addr < start_addr || end_addr > 0x08F00000) { // Limit to ~15MB (before 0x09000000)
+                    regs->eax = 0;
+                } else if (!task_rlimit_as_allows(size)) {
+                    // RLIMIT_AS (v38.28): the new heap region would push the
+                    // task's committed address space past its soft limit.
                     regs->eax = 0;
                 } else {
                     task_set_heap_ptr(tid, end_addr);

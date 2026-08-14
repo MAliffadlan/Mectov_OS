@@ -54,6 +54,10 @@ static int alloc_global_fd() {
 int task_map_fd(int global_fd) {
     int tid = get_current_task();
     if (tid < 0) return -1;
+    // RLIMIT_NOFILE (v38.28): refuse a new local fd when the caller's soft
+    // limit is reached. The caller (do_sys_open/do_sys_pipe) releases the
+    // already-allocated global fd on the -1 return, so nothing leaks.
+    if (!task_rlimit_nofile_ok()) return -1;
     for (int i = 0; i < MAX_FDS_PER_TASK; i++) {
         if (task_get_fd(tid, i) == -1) {
             task_set_fd(tid, i, global_fd);
@@ -464,6 +468,14 @@ int do_sys_dup2_tid(int tid, int oldfd, int newfd) {
     fd_lock_acquire();
     int ogfd = task_get_fd(tid, oldfd);
     if (ogfd < 0 || !global_fds[ogfd].in_use) { fd_lock_release(); return -1; }
+
+    // RLIMIT_NOFILE (v38.28): dup2 onto a slot that is currently EMPTY opens
+    // a new local fd, so it counts against the limit (only when dup2 targets
+    // the calling task itself — child rewiring in task_rewire_fds runs on a
+    // not-yet-running task whose caller is the shell, and must not be limited
+    // by the shell's own fd budget).
+    if (tid == get_current_task() && task_get_fd(tid, newfd) < 0 &&
+        !task_rlimit_nofile_ok()) { fd_lock_release(); return -1; }
 
     // Close the target slot first (POSIX semantics).
     int ngfd = task_get_fd(tid, newfd);

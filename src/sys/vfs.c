@@ -490,6 +490,11 @@ void vfs_init() {
         extern uint8_t _binary_conddemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/conddemo.mct", (const char*)_binary_conddemo_mct_start, _binary_conddemo_mct_end - _binary_conddemo_mct_start);
 
+        // Resource limits test (v38.28 — see scripts/rlimit_test.py)
+        extern uint8_t _binary_rlimittest_mct_start[];
+        extern uint8_t _binary_rlimittest_mct_end[];
+        changed += vfs_update_file_if_needed("apps/rlimittest.mct", (const char*)_binary_rlimittest_mct_start, _binary_rlimittest_mct_end - _binary_rlimittest_mct_start);
+
         // Multi-sector PIO benchmark (v38.25 — see scripts/bigread_test.py)
         extern uint8_t _binary_bigread_mct_start[];
         extern uint8_t _binary_bigread_mct_end[];
@@ -762,6 +767,11 @@ void vfs_init() {
     extern uint8_t _binary_conddemo_mct_end[];
     vfs_create_file("apps/conddemo.mct");
     vfs_write_file("apps/conddemo.mct", (const char*)_binary_conddemo_mct_start, _binary_conddemo_mct_end - _binary_conddemo_mct_start);
+
+    extern uint8_t _binary_rlimittest_mct_start[];
+    extern uint8_t _binary_rlimittest_mct_end[];
+    vfs_create_file("apps/rlimittest.mct");
+    vfs_write_file("apps/rlimittest.mct", (const char*)_binary_rlimittest_mct_start, _binary_rlimittest_mct_end - _binary_rlimittest_mct_start);
 
     extern uint8_t _binary_bigread_mct_start[];
     extern uint8_t _binary_bigread_mct_end[];
