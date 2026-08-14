@@ -171,6 +171,8 @@ typedef struct {
 #define SYS_GETCWD      99  // EBX=buf, ECX=size -> 0 or -1
 #define SYS_CHDIR       100 // EBX=path -> 0 or -1
 #define SYS_CLOCK_GETTIME 101 // EBX=clock_id, ECX=timespec_t* -> 0 or -1
+#define SYS_CHMOD        102 // EBX=path_ptr, ECX=mode (9 bits) -> 0 or -1
+#define SYS_CHOWN        103 // EBX=path_ptr, ECX=uid, EDX=gid -> 0 or -1 (root only)
 
 // Open flags (SYS_OPEN mode / third arg)
 #define O_APPEND        8   // write always appends at end of file
@@ -189,6 +191,9 @@ typedef struct {
     int parent;         // Parent node index (-1 = root)
     int data_sector;    // Starting ATA sector (files only)
     char name[32];      // Node name
+    uint16_t mode;      // 9 permission bits (v38.23 ownership)
+    uint16_t uid;       // owning user
+    uint16_t gid;       // owning group
 } stat_t;
 
 // poll() events/struct (SYS_POLL). revents is filled by the kernel.
@@ -314,9 +319,21 @@ static inline int sys_lseek(int fd, int offset, int whence) {
 }
 
 // POSIX fstat: fills stat_t {size, type, node_idx, parent, data_sector,
-// name} for an open file descriptor. Returns 0 or -1.
+// name, mode, uid, gid} for an open file descriptor. Returns 0 or -1.
 static inline int sys_fstat(int fd, stat_t* st) {
     return syscall(SYS_FSTAT, fd, (int)st, 0);
+}
+
+// chmod: change a file's permission bits. EBX=path, ECX=mode (9 bits).
+// Owner or root only; returns 0 or -1.
+static inline int sys_chmod(const char* path, int mode) {
+    return syscall(SYS_CHMOD, (int)path, mode, 0);
+}
+
+// chown: transfer a file's ownership. EBX=path, ECX=uid, EDX=gid.
+// Root only (POSIX); returns 0 or -1.
+static inline int sys_chown(const char* path, int uid, int gid) {
+    return syscall(SYS_CHOWN, (int)path, uid, gid);
 }
 
 // POSIX poll(): fill fds[i].revents and return the number of ready fds

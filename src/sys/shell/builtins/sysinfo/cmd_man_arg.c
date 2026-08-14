@@ -11,6 +11,13 @@ void cmd_man_arg(void) {
             print("  cd home/user = relative path\n", 0x0F);
         } else if (strcmp(topic, "ls") == 0) {
             print("ls [dir]  — List directory contents\n", 0x0B);
+            print("  ls -l = long format: mode uid/gid size name\n", 0x0F);
+        } else if (strcmp(topic, "chmod") == 0) {
+            print("chmod <octal> <path> — Change file permissions\n", 0x0B);
+            print("  e.g. chmod 755 f  = rwxr-xr-x, chmod 600 = rw-------\n", 0x0F);
+            print("  Only the owner (or root) may chmod.\n", 0x0F);
+        } else if (strcmp(topic, "chown") == 0) {
+            print("chown <uid> <gid> <path> — Change file owner (root only)\n", 0x0B);
         } else if (strcmp(topic, "mkdir") == 0) {
             print("mkdir [path] — Create directory\n", 0x0B);
         } else if (strcmp(topic, "rm") == 0) {

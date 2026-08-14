@@ -350,6 +350,8 @@ static void syscall_handler(registers_t* regs) {
         case SYS_PIPE:
         case SYS_LSEEK:
         case SYS_FSTAT:
+        case SYS_CHMOD:
+        case SYS_CHOWN:
             regs->eax = handle_syscall_vfs(regs);
             break;
 

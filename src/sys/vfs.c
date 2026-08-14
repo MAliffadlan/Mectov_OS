@@ -452,6 +452,11 @@ void vfs_init() {
         extern uint8_t _binary_iobench_mct_end[];
         changed += vfs_update_file_if_needed("apps/iobench.mct", (const char*)_binary_iobench_mct_start, _binary_iobench_mct_end - _binary_iobench_mct_start);
 
+        // Ownership & permission enforcement test (v38.23 — see scripts/perm_test.py)
+        extern uint8_t _binary_permtest_mct_start[];
+        extern uint8_t _binary_permtest_mct_end[];
+        changed += vfs_update_file_if_needed("apps/permtest.mct", (const char*)_binary_permtest_mct_start, _binary_permtest_mct_end - _binary_permtest_mct_start);
+
         // Pipeline demo apps
         extern uint8_t _binary_pipegen_mct_start[];
         extern uint8_t _binary_pipegen_mct_end[];
@@ -474,6 +479,21 @@ void vfs_init() {
         extern uint8_t _binary_udptest_elf_start[];
         extern uint8_t _binary_udptest_elf_end[];
         changed += vfs_update_file_if_needed("apps/udptest.elf", (const char*)_binary_udptest_elf_start, _binary_udptest_elf_end - _binary_udptest_elf_start);
+
+        // Ownership & permissions (v38.23): /apps binaries are seeded
+        // root-owned, so give them 0755 (rwxr-xr-x) — every user can read
+        // AND execute them (execdemo uses SYS_EXEC, which now checks S_IXUSR).
+        // Scripts/data stay 0644. Loop over all nodes under /apps.
+        {
+            int apps_node = vfs_get_node("apps");
+            for (int i = 0; i < MAX_NODES; i++) {
+                if (!fs_nodes[i].in_use) continue;
+                if (fs_nodes[i].parent != apps_node) continue;
+                if (fs_nodes[i].type == FS_FILE) {
+                    fs_nodes[i].mode = S_IRUSR|S_IWUSR|S_IXUSR|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH; // 0755
+                }
+            }
+        }
 
         if (changed > 0) {
             write_serial_string("[VFS] saving...\n");
@@ -551,6 +571,11 @@ void vfs_init() {
     fs_nodes[0].type = FS_DIR;
     strcpy(fs_nodes[0].name, "/");
     fs_nodes[0].size = 0;
+    // Root is the shared seed dir: uid 0 (kernel) but 0777 so the single
+    // user can create files anywhere (v38.23 ownership model).
+    fs_nodes[0].uid = ROOT_UID;
+    fs_nodes[0].gid = 0;
+    fs_nodes[0].mode = 0x1FF;
     set_current_dir(0);
     
     // Buat home directory default
@@ -685,6 +710,11 @@ void vfs_init() {
     extern uint8_t _binary_iobench_mct_end[];
     vfs_create_file("apps/iobench.mct");
     vfs_write_file("apps/iobench.mct", (const char*)_binary_iobench_mct_start, _binary_iobench_mct_end - _binary_iobench_mct_start);
+
+    extern uint8_t _binary_permtest_mct_start[];
+    extern uint8_t _binary_permtest_mct_end[];
+    vfs_create_file("apps/permtest.mct");
+    vfs_write_file("apps/permtest.mct", (const char*)_binary_permtest_mct_start, _binary_permtest_mct_end - _binary_permtest_mct_start);
 
     // Pipeline demo apps
     extern uint8_t _binary_pipegen_mct_start[];
@@ -1176,6 +1206,32 @@ static int vfs_create_node_unlocked(const char* name, fs_type_t type, int parent
             fs_nodes[i].size = 0;
             fs_nodes[i].data_sector = 0;
             fs_nodes[i].in_use = 1;
+            // Ownership & default mode (v38.23): the creating task owns the
+            // node; kernel-created nodes (seeding) get uid 0 (root). Directories
+            // default to 0755 (rwxr-xr-x), files to 0644 (rw-r--r--). One
+            // deliberate exception: directories created BY ROOT get 0777
+            // (rwxrwxrwx) — the seeded tree (/ , /home, /dev, /proc, /apps) is
+            // root-owned, and Ring 3 apps legitimately create files there
+            // (notepad, iobench, explorer write into cwd). Owner-write would
+            // lock the single user out of their own OS; 0777 keeps the
+            // permission demo honest (files still enforce ownership).
+            {
+                extern int get_current_task(void);
+                extern int task_get_uid(int);
+                int ctask = get_current_task();
+                int cuid = (ctask >= 0) ? task_get_uid(ctask) : ROOT_UID;
+                fs_nodes[i].uid = (uint16_t)cuid;
+                fs_nodes[i].gid = 0;
+                if (type == FS_DIR || type == FS_EXT2_DIR || type == FS_FAT32_DIR) {
+                    if (cuid == ROOT_UID) {
+                        fs_nodes[i].mode = 0x1FF;  // 0777: kernel dirs are shared
+                    } else {
+                        fs_nodes[i].mode = (S_IRUSR|S_IWUSR|S_IXUSR|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH); // 0755
+                    }
+                } else {
+                    fs_nodes[i].mode = (S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);  // 0644
+                }
+            }
             // The slot may previously have held a deleted file with a stale
             // cache entry — never let a new node serve another node's bytes.
             pcache_invalidate(i);
@@ -2170,6 +2226,175 @@ static void vfs_list_dir_unlocked(int dir_node, void (*print_fn)(const char*, un
 void vfs_list_dir(int dir_node, void (*print_fn)(const char*, unsigned char)) {
     vfs_lock_acquire();
     vfs_list_dir_unlocked(dir_node, print_fn);
+    vfs_lock_release();
+}
+
+// --- Ownership & permissions (v38.23) ---
+
+// The POSIX permission model: each node stores a uid/gid and a 9-bit mode
+// (owner/group/other rwx). The CURRENT task's uid selects the row; root
+// (uid 0) bypasses everything, POSIX-style. FAT32 has no permission concept
+// on disk, so its nodes are always accessible — a caller can't be locked out
+// of a filesystem that can't store an owner. /proc and /dev are kernel
+// nodes: treated as world-readable/writable, same as FAT32.
+int vfs_check_perm(int node, uint16_t want) {
+    if (node < 0 || node >= MAX_NODES) return 0;
+    if (!fs_nodes[node].in_use) return 0;
+
+    fs_type_t t = fs_nodes[node].type;
+    if (t == FS_FAT32_FILE || t == FS_FAT32_DIR || t == FS_PROC || t == FS_DEV)
+        return 1;   // no permission concept on these
+
+    extern int get_current_task(void);
+    extern int task_get_uid(int);
+    int tid = get_current_task();
+    int uid = (tid >= 0) ? task_get_uid(tid) : ROOT_UID;
+    if (uid == ROOT_UID) return 1;   // root bypasses every check
+
+    uint16_t bits;
+    if (uid == fs_nodes[node].uid) {
+        bits = (uint16_t)(fs_nodes[node].mode >> 6) & 0x7;   // owner row
+    } else {
+        // No real groups yet (every node is gid 0); treat group row as the
+        // "everyone else" row for any uid that isn't the owner. This keeps
+        // the group bits meaningful the day groups land.
+        bits = (uint16_t)fs_nodes[node].mode & 0x7;          // other row
+    }
+    return (bits & ((want >> 6) & 0x7)) != 0;
+}
+
+// Write a node's ownership/mode back to an ext2 inode so chmod/chown survive
+// the ext2 image, not just the VFS cache. Ext2 file-type bits (0x8000 regular,
+// 0x4000 dir) are preserved; only the low 9 permission bits change.
+static void vfs_ext2_sync_meta(int node) {
+    if (node < 0 || node >= MAX_NODES || !fs_nodes[node].in_use) return;
+    if (fs_nodes[node].type != FS_EXT2_FILE && fs_nodes[node].type != FS_EXT2_DIR) return;
+    if (!fs_nodes[node].ext2_inode) return;
+    ext2_inode_t inode;
+    if (ext2_read_inode(fs_nodes[node].ext2_inode, &inode) != 0) return;
+    inode.i_mode = (inode.i_mode & 0xF000) | (fs_nodes[node].mode & 0x1FF);
+    inode.i_uid = fs_nodes[node].uid;
+    inode.i_gid = fs_nodes[node].gid;
+    ext2_write_inode(fs_nodes[node].ext2_inode, &inode);
+}
+
+static int vfs_chmod_unlocked(int node, uint16_t mode) {
+    if (node < 0 || node >= MAX_NODES || !fs_nodes[node].in_use) return -1;
+    extern int get_current_task(void);
+    extern int task_get_uid(int);
+    int tid = get_current_task();
+    int uid = (tid >= 0) ? task_get_uid(tid) : ROOT_UID;
+    // Only the owner (or root) may change the mode.
+    if (uid != ROOT_UID && uid != fs_nodes[node].uid) return -1;
+    fs_nodes[node].mode = mode & 0x1FF;   // 9 permission bits only
+    vfs_ext2_sync_meta(node);
+    if (!vfs_seeding) vfs_save();
+    return 0;
+}
+
+int vfs_chmod(const char* path, uint16_t mode) {
+    vfs_lock_acquire();
+    int node = vfs_get_node_unlocked(path);
+    int r = (node >= 0) ? vfs_chmod_unlocked(node, mode) : -1;
+    vfs_lock_release();
+    return r;
+}
+
+static int vfs_chown_unlocked(int node, uint16_t uid, uint16_t gid) {
+    if (node < 0 || node >= MAX_NODES || !fs_nodes[node].in_use) return -1;
+    extern int get_current_task(void);
+    extern int task_get_uid(int);
+    int tid = get_current_task();
+    int caller = (tid >= 0) ? task_get_uid(tid) : ROOT_UID;
+    // Only root may transfer ownership (POSIX). A non-root caller cannot even
+    // give away a file it owns — that would let users dodge quota/permissions.
+    if (caller != ROOT_UID) return -1;
+    fs_nodes[node].uid = uid;
+    fs_nodes[node].gid = gid;
+    vfs_ext2_sync_meta(node);
+    if (!vfs_seeding) vfs_save();
+    return 0;
+}
+
+int vfs_chown(const char* path, uint16_t uid, uint16_t gid) {
+    vfs_lock_acquire();
+    int node = vfs_get_node_unlocked(path);
+    int r = (node >= 0) ? vfs_chown_unlocked(node, uid, gid) : -1;
+    vfs_lock_release();
+    return r;
+}
+
+// Kernel-only override: force a node's mode regardless of ownership (used at
+// seeding time so /apps/* stays executable for the non-root user, and by the
+// permission test to set up a root-owned read-only file).
+int vfs_set_mode(const char* path, uint16_t mode) {
+    vfs_lock_acquire();
+    int node = vfs_get_node_unlocked(path);
+    int r = -1;
+    if (node >= 0) {
+        fs_nodes[node].mode = mode & 0x1FF;
+        if (!vfs_seeding) vfs_save();
+        r = 0;
+    }
+    vfs_lock_release();
+    return r;
+}
+
+// Mode-string helpers shared with `ls -l`.
+static char vfs_mode_char(fs_type_t t) {
+    if (t == FS_DIR || t == FS_EXT2_DIR || t == FS_FAT32_DIR) return 'd';
+    if (t == FS_DEV) return 'c';
+    if (t == FS_PROC) return 'p';
+    return '-';
+}
+void vfs_format_mode(uint16_t mode, char* out) {
+    const char* rwx = "rwxrwxrwx";
+    for (int i = 0; i < 9; i++) {
+        out[i] = (mode & (0x100 >> i)) ? rwx[i] : '-';
+    }
+    out[9] = '\0';
+}
+
+static void vfs_list_dir_long_unlocked(int dir_node, void (*print_fn)(const char*, unsigned char)) {
+    int count = 0;
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (!fs_nodes[i].in_use) continue;
+        if (fs_nodes[i].parent != dir_node) continue;
+        count++;
+
+        char line[96];
+        int p = 0;
+        line[p++] = vfs_mode_char(fs_nodes[i].type);
+        char mstr[10];
+        vfs_format_mode(fs_nodes[i].mode, mstr);
+        for (int j = 0; j < 9; j++) line[p++] = mstr[j];
+        line[p++] = ' ';
+        // uid gid (right-aligned small ints)
+        int nums[3] = { fs_nodes[i].uid, fs_nodes[i].gid, fs_nodes[i].size };
+        for (int ni = 0; ni < 3; ni++) {
+            char nb[10];
+            int n = nums[ni];
+            int k = 0;
+            if (n == 0) nb[k++] = '0';
+            while (n > 0 && k < 8) { nb[k++] = (char)('0' + (n % 10)); n /= 10; }
+            for (int j = 0; j < k/2; j++) { char t = nb[j]; nb[j] = nb[k-1-j]; nb[k-1-j] = t; }
+            for (int j = 0; j < k && p < 92; j++) line[p++] = nb[j];
+            line[p++] = ' ';
+            line[p++] = ' ';
+        }
+        // name
+        for (int j = 0; fs_nodes[i].name[j] && p < 100; j++) line[p++] = fs_nodes[i].name[j];
+        if (fs_nodes[i].type == FS_DIR || fs_nodes[i].type == FS_EXT2_DIR ||
+            fs_nodes[i].type == FS_FAT32_DIR) line[p++] = '/';
+        line[p++] = '\n';
+        line[p] = '\0';
+        print_fn(line, 0x0F);
+    }
+    if (count == 0) print_fn("  (empty)\n", 0x07);
+}
+void vfs_list_dir_long(int dir_node, void (*print_fn)(const char*, unsigned char)) {
+    vfs_lock_acquire();
+    vfs_list_dir_long_unlocked(dir_node, print_fn);
     vfs_lock_release();
 }
 

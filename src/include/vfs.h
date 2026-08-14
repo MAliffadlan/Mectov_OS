@@ -22,9 +22,29 @@
 #define VFS_NODE_SECTORS  256  // 256 nodes * 512 bytes = 128KB on disk
 #define VFS_DATA_START    (VFS_NODE_START + VFS_NODE_SECTORS)
 #define VFS_DISK_SECTORS  2048 // total sectors on the 1MB image
-#define VFS_LAYOUT_VERSION 2
+// v3 (v38.23): node table gained uid/gid/mode (ownership + permissions). An
+// image written by an older layout is rejected so the table is rebuilt with
+// the new fields instead of reading garbage ownership into every node.
+#define VFS_LAYOUT_VERSION 3
 
 typedef enum { FS_FILE, FS_DIR, FS_DEV, FS_EXT2_FILE, FS_EXT2_DIR, FS_FAT32_FILE, FS_FAT32_DIR, FS_PROC } fs_type_t;
+
+// ---- Unix-style ownership & permission bits (POSIX S_I* values) ----
+#define S_IRUSR 0x100  // owner read
+#define S_IWUSR 0x080  // owner write
+#define S_IXUSR 0x040  // owner execute
+#define S_IRGRP 0x020  // group read
+#define S_IWGRP 0x010  // group write
+#define S_IXGRP 0x008  // group execute
+#define S_IROTH 0x004  // other read
+#define S_IWOTH 0x002  // other write
+#define S_IXOTH 0x001  // other execute
+
+// UID 0 is root (kernel tasks + kernel-created nodes). User apps run as
+// UID 1000 (the single logged-in user). gid is 0 everywhere today but is
+// carried through the node table so group bits are already meaningful.
+#define ROOT_UID    0
+#define USER_UID    1000
 
 typedef struct {
     char name[MAX_FILENAME];
@@ -34,7 +54,10 @@ typedef struct {
     int data_sector;     // Untuk FILE: ATA sector start data
     int in_use;
     uint32_t ext2_inode; // Ext2 Inode Number
-    char pad[456];       // Total 512 bytes per node
+    uint16_t uid;        // owning user (POSIX UID)
+    uint16_t gid;        // owning group (POSIX GID)
+    uint16_t mode;       // 9 permission bits (S_IRUSR|...|S_IXOTH)
+    char pad[450];       // Total 512 bytes per node
 } __attribute__((packed)) fs_node_t;
 
 extern fs_node_t fs_nodes[MAX_NODES];
@@ -79,5 +102,27 @@ int vfs_is_file(int node);
 int vfs_get_node(const char* path);
 int vfs_get_node_count();
 int vfs_get_parent(const char* path, char* parent_path, int buf_size);
+
+// ---- Ownership & permissions (v38.23) ----
+// Check whether the CURRENT task may access `node` for the given permission
+// bits (S_IRUSR for read, S_IWUSR for write, S_IXUSR for execute — the owner
+// set is compared against the caller's uid). Returns 1 (allow) or 0 (deny).
+// Root (uid 0) bypasses every check, POSIX-style. FAT32 nodes are always
+// allowed (the filesystem has no permission concept); ext2/MECTOVFS nodes
+// enforce their stored mode.
+int vfs_check_perm(int node, uint16_t want);
+// Set the mode/owner of a node (path resolves inside; takes vfs_lock).
+// chmod requires the caller to own the node (or be root); chown requires
+// root. Returns 0 or -1.
+int vfs_chmod(const char* path, uint16_t mode);
+int vfs_chown(const char* path, uint16_t uid, uint16_t gid);
+// Force the default mode for a node regardless of ownership (kernel use:
+// seeding keeps /apps executable for every user). Returns 0 or -1.
+int vfs_set_mode(const char* path, uint16_t mode);
+// Long-format directory listing for `ls -l`: prints one line per entry with
+// mode string, owner/group, size and name.
+void vfs_list_dir_long(int dir_node, void (*print_fn)(const char*, unsigned char));
+// Format a 9-bit mode into "rwxr-xr-x" (out must hold 10 bytes).
+void vfs_format_mode(uint16_t mode, char* out);
 
 #endif

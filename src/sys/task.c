@@ -92,6 +92,9 @@ typedef struct {
     uint32_t zombie_since;      // tick when the task became a zombie (reap timeout)
     uint32_t shm_bits;          // bitmap of shm segments this task has attached
     mmap_region_t mmap_regions[MMAP_MAX_REGIONS]; // reserved mmap() ranges (0 = free)
+    // === NEW: Unix user id (v38.23) ===
+    int uid;                    // 0 = root, 1000 = user (permission checks)
+    int gid;                    // group id (0 today, carried for the future)
 } task_t;
 
 static task_t tasks[MAX_TASKS];
@@ -885,6 +888,11 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             tasks[i].exit_code = 0;
             tasks[i].pgrp = (current_task[cid] >= 0) ? tasks[current_task[cid]].pgrp : 0;
             tasks[i].session = (current_task[cid] >= 0) ? tasks[current_task[cid]].session : 0;
+            // Inherit the caller's Unix identity (uid/gid). load_mct_app() then
+            // raises Ring 3 apps to USER_UID; fork/exec/thread-create inherit
+            // from their parent either way (v38.23 ownership model).
+            tasks[i].uid = (current_task[cid] >= 0) ? tasks[current_task[cid]].uid : ROOT_UID;
+            tasks[i].gid = (current_task[cid] >= 0) ? tasks[current_task[cid]].gid : 0;
             tasks[i].waiting = 0;
             tasks[i].pending_signals = 0;
             tasks[i].blocked_signals = 0;
@@ -1126,6 +1134,23 @@ int task_signal_group(int root_tid, int sig) {
 }
 
 // ---- Process groups & sessions (Fase 2) ----
+
+int task_get_uid(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return ROOT_UID;
+    return tasks[tid].uid;
+}
+void task_set_uid(int tid, int uid) {
+    if (tid < 0 || tid >= MAX_TASKS) return;
+    tasks[tid].uid = uid;
+}
+int task_get_gid(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    return tasks[tid].gid;
+}
+void task_set_gid(int tid, int gid) {
+    if (tid < 0 || tid >= MAX_TASKS) return;
+    tasks[tid].gid = gid;
+}
 
 int task_get_pgrp(int tid) {
     if (tid < 0 || tid >= MAX_TASKS) return 0;

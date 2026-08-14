@@ -94,6 +94,14 @@ int do_sys_read(int fd, char* buf, int size) {
     if (gfd < 0 || !global_fds[gfd].in_use) { fd_lock_release(); return -1; }
     
     if (global_fds[gfd].type == FD_TYPE_FILE || global_fds[gfd].type == FD_TYPE_DEV) {
+        // Permission check (v38.23): reading a regular file requires read
+        // access on its node. Per-call (not just at open) so a chmod while
+        // the descriptor is open takes effect. Runs under fd_lock.
+        if (global_fds[gfd].type == FD_TYPE_FILE &&
+            !vfs_check_perm(global_fds[gfd].vfs_node, S_IRUSR)) {
+            fd_lock_release();
+            return -1;
+        }
         int node = global_fds[gfd].vfs_node;
         if (fs_nodes[node].type == FS_FILE) {
             // Offset-aware read at the descriptor's position, then advance it
@@ -148,6 +156,16 @@ int do_sys_write(int fd, const char* buf, int size) {
     if (gfd < 0 || !global_fds[gfd].in_use) { fd_lock_release(); return -1; }
     
     if (global_fds[gfd].type == FD_TYPE_FILE || global_fds[gfd].type == FD_TYPE_DEV) {
+        // Permission check (v38.23): writing a regular file requires write
+        // access on its node. Per-call (not just at open) because a file can
+        // be chmod'ed while a descriptor stays open. Runs under fd_lock, so
+        // the node lookup is race-free. Root bypasses; /dev and /proc nodes
+        // always pass.
+        if (global_fds[gfd].type == FD_TYPE_FILE &&
+            !vfs_check_perm(global_fds[gfd].vfs_node, S_IWUSR)) {
+            fd_lock_release();
+            return -1;
+        }
         char path[256];
         if (vfs_get_abs_path(global_fds[gfd].vfs_node, path, 256) < 0) { fd_lock_release(); return -1; }
         // vfs_write_file() always writes from the START of the file, so a
@@ -255,6 +273,10 @@ int do_sys_fstat(int fd, stat_t* out) {
         if (!fs_nodes[node].name[i]) break;
     }
     out->name[MAX_FILENAME - 1] = '\0';
+    // Ownership & permission bits (v38.23)
+    out->mode = fs_nodes[node].mode;
+    out->uid = fs_nodes[node].uid;
+    out->gid = fs_nodes[node].gid;
     fd_lock_release();
     return 0;
 }

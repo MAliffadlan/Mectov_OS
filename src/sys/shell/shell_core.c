@@ -255,6 +255,7 @@ void expand_alias(char* out, const char* in, int max_len) {
 const char* cmd_list[] = {
     "help","clear","mfetch","mem","memstat","kmemstats","uptime","dmesg","vfsinfo",
     "ls","cd","pwd","mkdir","touch","cat","head","tree","rm","rmdir","cp","mv","df",
+    "chmod","chown",
     "edit","nano",
     "sh","source","export","alias","unalias","history","ps","kill",
     "jobs","fg","bg",
@@ -702,6 +703,9 @@ else if (strcmp(cmd_b, "pwd") == 0) { cmd_pwd(); }
 // --- LS (new VFS version) ---
 else if (strcmp(cmd_b, "ls") == 0) { cmd_ls(); }
 else if (strncmp(cmd_b, "ls ", 3) == 0) { cmd_ls_arg(); }
+// --- CHMOD / CHOWN (v38.23 ownership & permissions) ---
+else if (strncmp(cmd_b, "chmod ", 6) == 0) { cmd_chmod_arg(); }
+else if (strncmp(cmd_b, "chown ", 6) == 0) { cmd_chown_arg(); }
 // --- TREE ---
 else if (strcmp(cmd_b, "tree") == 0) { cmd_tree(); }
 else if (strncmp(cmd_b, "tree ", 5) == 0) { cmd_tree_arg(); }

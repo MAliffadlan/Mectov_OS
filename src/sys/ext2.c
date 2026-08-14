@@ -146,8 +146,14 @@ static void ext2_scan_dir_block(uint32_t block, int vfs_parent_node, int depth) 
                 if (new_dir >= 0) {
                     fs_nodes[new_dir].ext2_inode = entry->inode;
                     ext2_inode_t dinode;
-                    if (ext2_read_inode(entry->inode, &dinode) == 0)
+                    if (ext2_read_inode(entry->inode, &dinode) == 0) {
                         fs_nodes[new_dir].size = dinode.i_size;
+                        // Carry the real on-disk ownership into the VFS node
+                        // so ls -l / permission checks see what the image has.
+                        fs_nodes[new_dir].uid = dinode.i_uid;
+                        fs_nodes[new_dir].gid = dinode.i_gid;
+                        fs_nodes[new_dir].mode = dinode.i_mode & 0x1FF;
+                    }
                     ext2_populate_vfs_depth(entry->inode, new_dir, depth + 1);
                 }
             } else if (entry->file_type == EXT2_FT_REG_FILE) {
@@ -157,8 +163,12 @@ static void ext2_scan_dir_block(uint32_t block, int vfs_parent_node, int depth) 
                     ext2_inode_t finode;
                     // Ignoring the return left finode uninitialized on failure,
                     // storing garbage i_size into the VFS node.
-                    if (ext2_read_inode(entry->inode, &finode) == 0)
+                    if (ext2_read_inode(entry->inode, &finode) == 0) {
                         fs_nodes[new_file].size = finode.i_size;
+                        fs_nodes[new_file].uid = finode.i_uid;
+                        fs_nodes[new_file].gid = finode.i_gid;
+                        fs_nodes[new_file].mode = finode.i_mode & 0x1FF;
+                    }
                 }
             }
         }

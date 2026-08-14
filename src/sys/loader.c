@@ -338,6 +338,12 @@ static int finish_loaded_task(const char* filename, const char* arg,
     }
     extern void task_set_heap_ptr(int tid, uint32_t ptr);
     task_set_heap_ptr(task_id, img->heap_start);
+    // Ring 3 apps run as the logged-in user (uid 1000), not root, so file
+    // permission checks are meaningful. Kernel tasks (and apps the kernel
+    // spawns via thread_create for its own services) stay uid 0. Set while
+    // interrupts are still disabled, same window as launch_arg above.
+    extern void task_set_uid(int tid, int uid);
+    task_set_uid(task_id, USER_UID);
     __asm__ volatile("sti");
 
     write_serial_string("[LOADER] task ");

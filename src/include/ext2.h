@@ -108,6 +108,7 @@ typedef struct {
 // API — read
 int ext2_init(int drive);
 int ext2_read_inode(uint32_t inode_num, ext2_inode_t* inode);
+int ext2_write_inode(uint32_t inode_num, ext2_inode_t* inode);
 int ext2_read_file_data(uint32_t inode_num, char* buf, int max_size);
 
 // API — write (persistence)

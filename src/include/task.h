@@ -177,6 +177,13 @@ int task_set_pgrp(int tid, int pgrp);
 int task_get_session(int tid);
 void task_set_session(int tid, int session);
 int task_get_parent(int tid);
+// Unix user id (v38.23): 0 = root (kernel tasks), 1000 = the logged-in user.
+// Inherited by fork/exec/thread_create; set to USER_UID by load_mct_app for
+// Ring 3 apps so permission checks see a non-root caller.
+int task_get_uid(int tid);
+void task_set_uid(int tid, int uid);
+int task_get_gid(int tid);
+void task_set_gid(int tid, int gid);
 // Foreground process group of the controlling terminal (0 = none).
 int task_get_fg_pgrp(void);
 void task_set_fg_pgrp(int pgrp);

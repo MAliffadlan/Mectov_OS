@@ -129,3 +129,11 @@ jobs:
           # (NMI-IPI snapshot), then reset so QEMU exits cleanly instead of
           # hanging — proving the panic path CI can rely on.
           python3 scripts/panic_test.py --timeout 240
+
+      - name: Ownership/permission enforcement regression (TCG)
+        run: |
+          # Ring 3 permtest app: create/write own file, chmod 0400/0000
+          # open+read/write denials, chown root-only, root-owned 0644
+          # read-allowed / write+delete-denied. Also sanity-checks the
+          # `ls -l` shell builtin.
+          python3 scripts/perm_test.py --timeout 360

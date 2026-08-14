@@ -63,6 +63,17 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
+            // Permission check (v38.23): opening a file requires read access
+            // (or write access when opened for append, the only write mode
+            // SYS_OPEN knows). Root bypasses; /dev /proc /FAT32 always pass.
+            int onode = vfs_get_node(filename);
+            if (onode >= 0) {
+                uint16_t want = (regs->ecx & O_APPEND) ? S_IWUSR : S_IRUSR;
+                if (!vfs_check_perm(onode, want)) {
+                    regs->eax = (uint32_t)-1;
+                    break;
+                }
+            }
             regs->eax = (uint32_t)do_sys_open(filename, (int)regs->ecx);
             break;
         }
@@ -93,6 +104,10 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
 
             int cur_tid = get_current_task();
             extern int task_get_fd(int, int);
+            // Permission check (v38.23) is done inside do_sys_write() where
+            // fd_lock is held (a file can be chmod'ed while open, and the fd
+            // table must be read race-free). fd 1/2 with no descriptor is the
+            // serial console — always writable.
             if (task_get_fd(cur_tid, fd) == -1 && (fd == 1 || fd == 2)) {
                 // One locked serial write for the whole buffer: byte-by-byte
                 // writes would let other CPUs interleave between the bytes and
@@ -180,6 +195,17 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
             if (safe_strlen(path, MAX_PATH) < 0) {
                 regs->eax = (uint32_t)-1; break;
             }
+            // Permission check (v38.23): creating a file needs write access
+            // on the parent directory.
+            extern int vfs_get_parent(const char*, char*, int);
+            char pp[MAX_PATH];
+            extern int vfs_get_node(const char* path);
+            int pnode = -1;
+            if (vfs_get_parent(path, pp, MAX_PATH) == 0) pnode = vfs_get_node(pp);
+            if (pnode >= 0 && !vfs_check_perm(pnode, S_IWUSR)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
             write_serial_string("[CREATE_FILE] ");
             write_serial_string(path);
             write_serial('\n');
@@ -196,6 +222,15 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
+            // Permission check (v38.23): removing a file requires write
+            // access on its node (POSIX: write on the parent dir; this OS
+            // checks the node itself — simpler, and root/FAT32 bypass).
+            extern int vfs_get_node(const char* path);
+            int dnode = vfs_get_node(path);
+            if (dnode >= 0 && !vfs_check_perm(dnode, S_IWUSR)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
             extern int vfs_delete_node(const char* path);
             regs->eax = (uint32_t)vfs_delete_node(path);
             break;
@@ -205,6 +240,17 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
         case SYS_MKDIR: {
             const char* path = (const char*)regs->ebx;
             if (!validate_user_ptr(path, 1) || safe_strlen(path, 256) < 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            // Permission check (v38.23): creating a directory needs write
+            // access on the parent directory.
+            extern int vfs_get_parent(const char*, char*, int);
+            char pp[MAX_PATH];
+            extern int vfs_get_node(const char* path);
+            int pnode = -1;
+            if (vfs_get_parent(path, pp, MAX_PATH) == 0) pnode = vfs_get_node(pp);
+            if (pnode >= 0 && !vfs_check_perm(pnode, S_IWUSR)) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
@@ -222,8 +268,48 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
+            // Permission check (v38.23): renaming requires write access on
+            // the source node and on the destination's parent directory.
+            extern int vfs_get_parent(const char*, char*, int);
+            char pp[MAX_PATH];
+            extern int vfs_get_node(const char* path);
+            int onode = vfs_get_node(old_path);
+            int dpnode = -1;
+            if (vfs_get_parent(new_path, pp, MAX_PATH) == 0) dpnode = vfs_get_node(pp);
+            if ((onode >= 0 && !vfs_check_perm(onode, S_IWUSR)) ||
+                (dpnode >= 0 && !vfs_check_perm(dpnode, S_IWUSR))) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
             extern int vfs_rename(const char* old_path, const char* new_path);
             regs->eax = (uint32_t)vfs_rename(old_path, new_path);
+            break;
+        }
+
+        // ----- SYS_CHMOD (102): change permission bits (owner or root) -----
+        case SYS_CHMOD: {
+            const char* path = (const char*)regs->ebx;
+            uint16_t mode = (uint16_t)regs->ecx;
+            if (safe_strlen(path, MAX_PATH) < 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int vfs_chmod(const char* path, uint16_t mode);
+            regs->eax = (uint32_t)vfs_chmod(path, mode);
+            break;
+        }
+
+        // ----- SYS_CHOWN (103): transfer ownership (root only) -----
+        case SYS_CHOWN: {
+            const char* path = (const char*)regs->ebx;
+            uint16_t uid = (uint16_t)regs->ecx;
+            uint16_t gid = (uint16_t)regs->edx;
+            if (safe_strlen(path, MAX_PATH) < 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int vfs_chown(const char* path, uint16_t uid, uint16_t gid);
+            regs->eax = (uint32_t)vfs_chown(path, uid, gid);
             break;
         }
 

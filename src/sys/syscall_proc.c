@@ -493,6 +493,16 @@ uint32_t handle_syscall_proc(registers_t* regs) {
                 }
             }
 
+            // Permission check (v38.23): exec'ing a file requires execute
+            // access on its node (POSIX). Root bypasses; /apps is seeded
+            // 0755 root-owned so the user can still run every demo app.
+            extern int vfs_get_node(const char*);
+            extern int vfs_check_perm(int, uint16_t);
+            int xnode = vfs_get_node(kpath);
+            if (xnode >= 0 && !vfs_check_perm(xnode, S_IXUSR)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
             extern int task_exec(const char* path, const char* arg, void* frame);
             regs->eax = (uint32_t)task_exec(kpath, karg, regs);
             break;
