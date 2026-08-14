@@ -29,6 +29,7 @@ Mectov OS is a from-scratch i386 operating system with:
 - **Ring 0 / Ring 3 isolation** — user applications run in separate address spaces with COW fork, demand-paged `mmap()`, and per-process page directories.
 - **True SMP** — per-CPU runqueues, work-stealing migration, and a LAPIC timer per core; all four QEMU cores execute tasks (verified live by SysInfo's per-core load bars).
 - **A Unix process model** — `fork` / `exec` / `waitpid`, POSIX signals (`sigaction`, `sa_mask`, `SA_RESTART`), process groups, sessions and a controlling terminal with SIGTTIN/SIGTTOU, plus System V shared memory, pipes, and fds.
+- **Ownership, permissions & real threads (v38.23–v38.24)** — every file carries a POSIX uid/gid + 9-bit mode enforced at the syscall layer (`chmod`/`chown`/`ls -l`, root bypass, ext2-persisted), and every task has a private `%gs` TLS descriptor with `clone()` + a pthread-style runtime, so thread-local variables are genuinely per-thread.
 - **A real shell (msh)** — env vars with `$VAR` expansion, aliases, tab completion, scripts, job control, and a growing POSIX toolkit (`uname`, `whoami`, `hostname`, `env`, `seq`, `head`, `grep`, `cp`, `mv`, `df`, ...).
 - **A graphical desktop** — double-buffered window manager (resize, Aero snap, rounded corners), taskbar with system tray, draggable persistent icons, and a graphical login screen.
 - **On-disk persistence** — an ATA-backed VFS, a fully writable ext2 partition (verified with host `fsck.ext2`), and a FAT32 volume at `/fat32` (drive 3, LFN read/write).
