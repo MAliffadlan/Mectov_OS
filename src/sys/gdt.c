@@ -3,7 +3,7 @@
 #include "../include/apic.h"
 #include "../include/serial.h"
 
-gdt_entry_t gdt_entries[16][8];
+gdt_entry_t gdt_entries[16][TLS_GDT_ENTRIES];
 gdt_ptr_t   gdt_ptr[16];
 
 // TSS structure
@@ -85,9 +85,34 @@ static void gdt_set_gate(int cid, int32_t num, uint32_t base, uint32_t limit, ui
     gdt_entries[cid][num].access      = access;
 }
 
+// Point a task's TLS descriptors at `base` in EVERY CPU's GDT (tasks migrate
+// between cores, and each CPU keeps its own GDT — the selector number must
+// resolve identically everywhere). The slots are static BSS (not-present
+// from boot), so a task without TLS never touches them; gdt_tls_clear()
+// restores that state when a slot is reused.
+void gdt_tls_update(int tid, uint32_t base) {
+    if (tid < 0 || tid >= TLS_MAX_TASKS) return;
+    int fs = TLS_GDT_BASE_SLOT + 2 * tid;
+    int gs = fs + 1;
+    for (int c = 0; c < 16; c++) {
+        gdt_set_gate(c, fs, base, 0xFFFFFFFF, 0xF2, 0xCF);  // DPL=3 data, r/w
+        gdt_set_gate(c, gs, base, 0xFFFFFFFF, 0xF2, 0xCF);
+    }
+}
+
+void gdt_tls_clear(int tid) {
+    if (tid < 0 || tid >= TLS_MAX_TASKS) return;
+    int fs = TLS_GDT_BASE_SLOT + 2 * tid;
+    int gs = fs + 1;
+    for (int c = 0; c < 16; c++) {
+        gdt_set_gate(c, fs, 0, 0, 0, 0);   // access 0 => not present
+        gdt_set_gate(c, gs, 0, 0, 0, 0);
+    }
+}
+
 void init_gdt() {
     int cid = get_cid();
-    gdt_ptr[cid].limit = (sizeof(gdt_entry_t) * 8) - 1;
+    gdt_ptr[cid].limit = (sizeof(gdt_entry_t) * TLS_GDT_ENTRIES) - 1;
     gdt_ptr[cid].base  = (uint32_t)&gdt_entries[cid];
 
     gdt_set_gate(cid, 0, 0, 0, 0, 0);                // 0x00: Null segment

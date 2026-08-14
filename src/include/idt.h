@@ -19,6 +19,8 @@ struct idt_ptr_struct {
 typedef struct idt_ptr_struct idt_ptr_t;
 
 struct registers {
+    uint32_t gs;
+    uint32_t fs;
     uint32_t ds;
     uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax;
     uint32_t int_no, err_code;

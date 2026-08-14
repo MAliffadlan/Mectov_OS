@@ -12,8 +12,11 @@
 #include "../include/utils.h" // memcpy/memset
 #include "../include/loader.h" // loader_image_t for exec()
 #include "../include/vfs.h"   // fs_nodes[] + offset reads for file-backed mmap
+#include "../include/gdt.h"   // tls_gs_sel()/gdt_tls_update() (v38.24 TLS)
 
 static spinlock_t task_lock = SPINLOCK_INIT;
+// TLS_MAX_TASKS in gdt.h must cover every task slot: keep in sync with
+// MAX_TASKS below (both 64). The GDT carries one FS+GS pair per slot.
 
 #define MAX_TASKS 64
 #define KERNEL_STACK_SIZE TASK_KSTACK_SIZE  // defined in task.h (shared with /proc)
@@ -95,6 +98,10 @@ typedef struct {
     // === NEW: Unix user id (v38.23) ===
     int uid;                    // 0 = root, 1000 = user (permission checks)
     int gid;                    // group id (0 today, carried for the future)
+    // === NEW: Thread-local storage (v38.24) ===
+    uint32_t tls_base;          // user VA of this thread's TCB; 0 = no TLS.
+                                // Its FS/GS GDT descriptors (slot = 2*tid)
+                                // are kept in sync via gdt_tls_update().
 } task_t;
 
 static task_t tasks[MAX_TASKS];
@@ -308,6 +315,8 @@ static int create_idle_task(int cpu) {
     *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
     *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
     *(--stack) = 0x10;       // DS (kernel data)
+    *(--stack) = 0x10;       // FS (kernel data — no TLS)
+    *(--stack) = 0x10;       // GS (kernel data — no TLS)
     tasks[tid].esp = (uint32_t)stack;
     tasks[tid].stack_watermark = 0;
 
@@ -469,11 +478,14 @@ int create_task(void (*entry)()) {
             *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; // eax,ecx,edx,ebx
             *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; // esp,ebp,esi,edi
             *(--stack) = 0x10;       // DS (kernel data)
+            *(--stack) = 0x10;       // FS (kernel data — no TLS)
+            *(--stack) = 0x10;       // GS (kernel data — no TLS)
             
             tasks[i].esp = (uint32_t)stack;
             tasks[i].stack_watermark = 0;
             tasks[i].rq_cpu = -1;
             tasks[i].is_idle = 0;
+            tasks[i].tls_base = 0;
             num_tasks++;
             
             // Set state LAST — only now is it safe for the scheduler
@@ -770,6 +782,7 @@ static void terminate_task(int tid, int code) {
             if (tasks[k].state == TASK_STATE_ZOMBIE) {
                 tasks[k].state = TASK_STATE_FREE;
                 num_tasks--;
+                gdt_tls_clear(k);   // slot freed: drop its TLS descriptors
             } else {
                 tasks[k].parent = 0;
             }
@@ -794,6 +807,7 @@ static void terminate_task(int tid, int code) {
         // No one will ever reap it: release the slot immediately.
         tasks[tid].state = TASK_STATE_FREE;
         num_tasks--;
+        gdt_tls_clear(tid);   // slot freed: drop its TLS descriptors
     }
 }
 
@@ -849,7 +863,14 @@ void set_current_dir(int dir) {
 }
 
 // === NEW: Thread creation with priority + page_dir ===
-int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
+// Create a task that shares the caller's address space, with an optional
+// explicit child stack (0 = the default per-slot 64KB user stack) and an
+// optional TLS base (0 = no TLS). When tls_base is nonzero the task's FS/GS
+// GDT descriptors (all CPUs) are pointed at it and its saved frame carries
+// the task's private TLS selectors, so Ring 3 %gs accesses resolve to the
+// thread control block. The caller must have interrupts disabled.
+int thread_create_ex(void (*entry)(), int priority, uint32_t page_dir,
+                     uint32_t child_stack, uint32_t tls_base) {
     int cid = get_cid();
     // Clamp priority like task_set_priority does: an out-of-range value from
     // Ring 3 (e.g. INT_MAX) would overflow the scheduler's priority*10 + aging
@@ -861,20 +882,28 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == TASK_STATE_FREE) {
             
-            // Each task slot owns a private 64KB stack region below USER_STACK_TOP
-            // in this address space: USER_STACK_TOP - (i+1)*USER_STACK_SIZE.
-            // The stack is mapped while holding task_lock (slot i is only claimed
-            // after a successful map), so two tasks can never pick the same VA —
-            // the old fixed USER_STACK_BOTTOM..USER_STACK_TOP mapping let sibling
-            // threads overwrite each other's stacks.
-            // Lock order task_lock -> vmm_lock (via frame_alloc) is safe: no path
-            // ever acquires them in reverse.
-            uint32_t stack_top = USER_STACK_TOP - ((uint32_t)(i + 1) * USER_STACK_SIZE);
-            uint32_t user_esp = vmm_setup_user_stack(page_dir, stack_top);
-            if (user_esp == 0) {
-                write_serial_string("[TASK] thread_create: could not map user stack\n");
-                spin_unlock(&task_lock);
-                return -1;
+            uint32_t user_esp;
+            if (child_stack != 0) {
+                // Caller-supplied stack (clone semantics): the VA is already
+                // mapped in the shared address space; just start there.
+                user_esp = child_stack;
+            } else {
+                // Each task slot owns a private 64KB stack region below
+                // USER_STACK_TOP in this address space: USER_STACK_TOP -
+                // (i+1)*USER_STACK_SIZE. The stack is mapped while holding
+                // task_lock (slot i is only claimed after a successful map),
+                // so two tasks can never pick the same VA — the old fixed
+                // USER_STACK_BOTTOM..USER_STACK_TOP mapping let sibling
+                // threads overwrite each other's stacks.
+                // Lock order task_lock -> vmm_lock (via frame_alloc) is safe:
+                // no path ever acquires them in reverse.
+                uint32_t stack_top = USER_STACK_TOP - ((uint32_t)(i + 1) * USER_STACK_SIZE);
+                user_esp = vmm_setup_user_stack(page_dir, stack_top);
+                if (user_esp == 0) {
+                    write_serial_string("[TASK] thread_create_ex: could not map user stack\n");
+                    spin_unlock(&task_lock);
+                    return -1;
+                }
             }
 
             tasks[i].ring = 3;  // Threads are user tasks by default
@@ -920,9 +949,14 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
                 }
             }
             
+            tasks[i].tls_base = tls_base;
+            if (tls_base != 0) gdt_tls_update(i, tls_base);
+
             uint32_t* stack = (uint32_t*)kstack_top(i);
 
-            // Ring 3 interrupt frame
+            // Ring 3 interrupt frame. A thread with TLS starts with its own
+            // FS/GS selectors; without one, plain user data (0x23).
+            uint16_t tsel = (tls_base != 0) ? tls_gs_sel(i) : 0x23;
             *(--stack) = 0x23;       // SS
             *(--stack) = user_esp;   // ESP
             *(--stack) = 0x202;      // EFLAGS
@@ -933,6 +967,8 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
             *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
             *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
             *(--stack) = 0x23;       // DS
+            *(--stack) = tsel;       // FS
+            *(--stack) = tsel;       // GS
             
             tasks[i].esp = (uint32_t)stack;
             tasks[i].stack_watermark = 0;
@@ -950,6 +986,11 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
     }
     spin_unlock(&task_lock);
     return -1;
+}
+
+// Backward-compatible wrapper: no explicit stack, no TLS.
+int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
+    return thread_create_ex(entry, priority, page_dir, 0, 0);
 }
 
 // Sleep the current task for N timer ticks
@@ -1152,6 +1193,32 @@ void task_set_gid(int tid, int gid) {
     tasks[tid].gid = gid;
 }
 
+// ---- Thread-local storage (v38.24) ----
+
+// Set the CURRENT task's TLS base. The GDT descriptors are repointed (or
+// cleared for base 0) on every CPU; the caller (SYS_TLS_SET handler) also
+// rewrites the pending return frame's GS selector so the task runs with %gs
+// pointing at its TCB the moment the syscall iret's. The task's %gs register
+// at this instant is irrelevant — the frame is what the epilogue loads.
+uint32_t task_get_tls_base(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    return tasks[tid].tls_base;
+}
+
+int task_set_tls(uint32_t base) {
+    int cid = get_cid();
+    int tid = current_task[cid];
+    if (tid <= 0 || tid >= MAX_TASKS) return -1;
+    // Must not race the scheduler's per-switch frame loads.
+    __asm__ volatile("cli");
+    spin_lock(&task_lock);
+    tasks[tid].tls_base = base;
+    if (base) gdt_tls_update(tid, base); else gdt_tls_clear(tid);
+    spin_unlock(&task_lock);
+    __asm__ volatile("sti");
+    return 0;
+}
+
 int task_get_pgrp(int tid) {
     if (tid < 0 || tid >= MAX_TASKS) return 0;
     return tasks[tid].pgrp;
@@ -1276,14 +1343,29 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         // parent while its fork frame was still intact.
         fr->esp = (uint32_t)&fr->int_no;
 
+        // TLS (v38.24): the child inherits the parent's TLS base (POSIX) but
+        // gets its OWN FS/GS descriptors keyed to its tid — the byte-copied
+        // frame still carries the PARENT's selectors, which would alias the
+        // parent's GDT slots and break when the parent exits.
+        tasks[i].tls_base = tasks[parent].tls_base;
         if (kern_entry) {
             // Shell background child: never return to user mode — iret straight
             // into a kernel entry that runs the command and exits.
             fr->eip = (uint32_t)(uintptr_t)kern_entry;
             fr->cs  = 0x08;   // kernel code segment
             fr->ds  = 0x10;   // kernel data segment
+            fr->fs  = 0x10;   // kernel data segment
+            fr->gs  = 0x10;
         } else {
             fr->eax = 0;      // child sees fork() == 0
+            if (tasks[i].tls_base) {
+                gdt_tls_update(i, tasks[i].tls_base);
+                fr->fs = tls_gs_sel(i);
+                fr->gs = tls_gs_sel(i);
+            } else {
+                fr->fs = 0x23;
+                fr->gs = 0x23;
+            }
         }
 
         tasks[i].ring = 3;
@@ -1502,6 +1584,12 @@ int task_exec(const char* path, const char* arg, void* frame) {
     fr->eflags  = 0x202;   // IF=1
     fr->useresp = user_esp;
     fr->eax     = 0;       // exec() reports success (never actually returned)
+    // TLS (v38.24): exec replaces the address space, so the old TCB VA is
+    // gone. Reset the task's TLS — the new program calls SYS_TLS_SET itself
+    // if it wants one — and drop the frame's stale TLS selectors.
+    if (tasks[tid].tls_base) { gdt_tls_clear(tid); tasks[tid].tls_base = 0; }
+    fr->fs = 0x23;
+    fr->gs = 0x23;
 
     __asm__ volatile("sti");
 
@@ -1628,6 +1716,8 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
     *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
     *(--stack) = 0; *(--stack) = 0; *(--stack) = 0; *(--stack) = 0;
     *(--stack) = 0x23;       // DS
+    *(--stack) = 0x23;       // FS (user data — no TLS)
+    *(--stack) = 0x23;       // GS (user data — no TLS)
     tasks[child].esp = (uint32_t)stack;
     tasks[child].stack_watermark = 0;
 
@@ -1675,6 +1765,7 @@ int task_waitpid(int pid, int* status, int options) {
             *status = tasks[zombie].exit_code;
             tasks[zombie].state = TASK_STATE_FREE;
             num_tasks--;
+            gdt_tls_clear(zombie);   // slot freed: drop its TLS descriptors
             return zombie;
         }
         if (!found_child) return -1;          // ECHILD
@@ -1882,6 +1973,8 @@ int task_deliver_signals(void* frame) {
             r->eip = (uint32_t)(uintptr_t)&task_dead_park;
             r->cs  = 0x08;
             r->ds  = 0x10;
+            r->fs  = 0x10;
+            r->gs  = 0x10;
             return 1;
         }
 
@@ -1898,6 +1991,8 @@ int task_deliver_signals(void* frame) {
             r->eip = (uint32_t)(uintptr_t)&task_dead_park;
             r->cs  = 0x08;
             r->ds  = 0x10;
+            r->fs  = 0x10;
+            r->gs  = 0x10;
             return 1;
         }
 
@@ -1975,6 +2070,8 @@ int task_fault_signal(int sig, void* frame) {
         r->eip = (uint32_t)(uintptr_t)&task_dead_park;
         r->cs  = 0x08;
         r->ds  = 0x10;
+        r->fs  = 0x10;
+        r->gs  = 0x10;
         spin_unlock(&task_lock);
         return 1;
     }
@@ -1989,6 +2086,8 @@ int task_fault_signal(int sig, void* frame) {
         r->eip = (uint32_t)(uintptr_t)&task_dead_park;
         r->cs  = 0x08;
         r->ds  = 0x10;
+        r->fs  = 0x10;
+        r->gs  = 0x10;
     }
     spin_unlock(&task_lock);
     return 1;

@@ -13,6 +13,7 @@
 #include "../include/shell.h"
 #include "../include/vmm.h"   // USER_STACK_BOTTOM
 #include "../include/task.h"   // SIG_MAX, SIG_IGN_SENTINEL, sigframe_t
+#include "../include/gdt.h"    // tls_gs_sel() (SYS_TLS_SET frame rewrite)
 
 extern int validate_user_ptr(const void* ptr, uint32_t size);
 extern int validate_user_array_ptr(const void* ptr, uint32_t elem_size, int count);
@@ -95,6 +96,71 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             write_serial_string("[SYS] thread_create -> TID=");
             write_serial('0' + (tid < 0 ? 0 : tid));
             write_serial('\n');
+            break;
+        }
+
+        // ----- SYS_CLONE (104): pthread-style thread creation with TLS -----
+        // EBX=entry, ECX=child_stack (0 = default per-slot stack), EDX=tls_base
+        // (0 = no TLS). The child shares the caller's address space, inherits
+        // uid/fds/pgrp like SYS_THREAD_CREATE, and — when tls_base is set —
+        // starts with %gs pointing at the TCB (its own private FS/GS GDT
+        // descriptors). Parent gets the child TID; the child sees return 0.
+        case SYS_CLONE: {
+            uint32_t eip = (uint32_t)regs->ebx;
+            uint32_t child_stack = (uint32_t)regs->ecx;
+            uint32_t tls_base = (uint32_t)regs->edx;
+            int caller = get_current_task();
+
+            // The entry point has to be code the caller can actually execute.
+            if (task_in_kernel_space(caller) || eip < 0x08000000 || eip >= USER_STACK_BOTTOM) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            // Child stack / TCB must be user addresses that are currently
+            // mapped (the runtime mallocs both before calling clone).
+            if (child_stack != 0 &&
+                !validate_user_ptr((void*)child_stack, 1)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            if (tls_base != 0 &&
+                !validate_user_ptr((void*)tls_base, 1)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+
+            int tid = thread_create_ex((void (*)())eip, PRIORITY_INTERACTIVE,
+                                       task_get_page_dir(caller),
+                                       child_stack, tls_base);
+            __asm__ volatile("sti"); // thread_create_ex leaves IF=0
+            regs->eax = (uint32_t)tid;
+            write_serial_string("[SYS] clone -> TID=");
+            write_serial('0' + (tid < 0 ? 0 : tid));
+            write_serial('\n');
+            break;
+        }
+
+        // ----- SYS_TLS_SET (105): install the current thread's TLS -----
+        // EBX = TCB base (0 = remove TLS). Repoints the task's FS/GS GDT
+        // descriptors and rewrites the pending return frame, so the caller's
+        // very next %gs access resolves to the TCB. Used by the main thread
+        // at app start; clone() takes the tls_base directly for new threads.
+        case SYS_TLS_SET: {
+            uint32_t tls_base = (uint32_t)regs->ebx;
+            int caller = get_current_task();
+            if (caller <= 0) { regs->eax = (uint32_t)-1; break; }
+            if (tls_base != 0 &&
+                !validate_user_ptr((void*)tls_base, 1)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            if (task_set_tls(tls_base) != 0) { regs->eax = (uint32_t)-1; break; }
+            // The iret epilogue restores FS/GS from the frame: rewrite it so
+            // the new selector (or plain user data when TLS is removed) takes
+            // effect the moment the syscall returns.
+            regs->gs = (tls_base != 0) ? tls_gs_sel(caller) : 0x23;
+            regs->fs = regs->gs;
+            regs->eax = 0;
             break;
         }
 

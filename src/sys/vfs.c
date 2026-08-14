@@ -457,6 +457,11 @@ void vfs_init() {
         extern uint8_t _binary_permtest_mct_end[];
         changed += vfs_update_file_if_needed("apps/permtest.mct", (const char*)_binary_permtest_mct_start, _binary_permtest_mct_end - _binary_permtest_mct_start);
 
+        // TLS + clone() demo (v38.24 — see scripts/thread_test.py)
+        extern uint8_t _binary_threaddemo_mct_start[];
+        extern uint8_t _binary_threaddemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/threaddemo.mct", (const char*)_binary_threaddemo_mct_start, _binary_threaddemo_mct_end - _binary_threaddemo_mct_start);
+
         // Pipeline demo apps
         extern uint8_t _binary_pipegen_mct_start[];
         extern uint8_t _binary_pipegen_mct_end[];
@@ -715,6 +720,11 @@ void vfs_init() {
     extern uint8_t _binary_permtest_mct_end[];
     vfs_create_file("apps/permtest.mct");
     vfs_write_file("apps/permtest.mct", (const char*)_binary_permtest_mct_start, _binary_permtest_mct_end - _binary_permtest_mct_start);
+
+    extern uint8_t _binary_threaddemo_mct_start[];
+    extern uint8_t _binary_threaddemo_mct_end[];
+    vfs_create_file("apps/threaddemo.mct");
+    vfs_write_file("apps/threaddemo.mct", (const char*)_binary_threaddemo_mct_start, _binary_threaddemo_mct_end - _binary_threaddemo_mct_start);
 
     // Pipeline demo apps
     extern uint8_t _binary_pipegen_mct_start[];

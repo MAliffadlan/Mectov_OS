@@ -173,6 +173,8 @@ typedef struct {
 #define SYS_CLOCK_GETTIME 101 // EBX=clock_id, ECX=timespec_t* -> 0 or -1
 #define SYS_CHMOD        102 // EBX=path_ptr, ECX=mode (9 bits) -> 0 or -1
 #define SYS_CHOWN        103 // EBX=path_ptr, ECX=uid, EDX=gid -> 0 or -1 (root only)
+#define SYS_CLONE        104 // EBX=entry, ECX=child_stack (0=default), EDX=tls_base (0=none) -> child: 0, parent: TID
+#define SYS_TLS_SET      105 // EBX=tls_base (TCB VA, 0 = remove) -> 0 or -1. Sets CURRENT task's %gs
 
 // Open flags (SYS_OPEN mode / third arg)
 #define O_APPEND        8   // write always appends at end of file
@@ -334,6 +336,20 @@ static inline int sys_chmod(const char* path, int mode) {
 // Root only (POSIX); returns 0 or -1.
 static inline int sys_chown(const char* path, int uid, int gid) {
     return syscall(SYS_CHOWN, (int)path, uid, gid);
+}
+
+// clone: create a thread sharing this task's address space. entry runs in
+// the child; child_stack is the child's initial user ESP (0 = the default
+// per-slot stack); tls_base is the child's TCB (its %gs points there).
+// Returns the child's TID to the parent and 0 to the child.
+static inline int sys_clone(int entry, int child_stack, int tls_base) {
+    return syscall(SYS_CLONE, entry, child_stack, tls_base);
+}
+
+// tls_set: install (or remove, base=0) the current thread's TLS. After this
+// returns, %gs:0 reads the TCB at `base` (write self/fields before calling).
+static inline int sys_tls_set(int tls_base) {
+    return syscall(SYS_TLS_SET, tls_base, 0, 0);
 }
 
 // POSIX poll(): fill fds[i].revents and return the number of ready fds

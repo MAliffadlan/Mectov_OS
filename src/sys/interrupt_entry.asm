@@ -32,6 +32,10 @@ irq_common_stub:
     pushad
     mov ax, ds
     push eax              ; Save caller's DS
+    mov ax, fs
+    push eax              ; Save caller's FS (TLS selector)
+    mov ax, gs
+    push eax              ; Save caller's GS (TLS selector)
     mov ax, 0x10          ; Switch to kernel data segments
     mov ds, ax
     mov es, ax
@@ -44,11 +48,14 @@ irq_common_stub:
 
     mov esp, eax          ; <<< CONTEXT SWITCH: load new task's ESP
 
+    ; Frame layout: [gs][fs][ds]... — the LOWEST slot is GS, pop it first.
+    pop eax               ; Restore GS (TLS selector)
+    mov gs, ax
+    pop eax               ; Restore FS (TLS selector)
+    mov fs, ax
     pop eax               ; Restore DS (could be 0x10 or 0x23)
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
     popad
     add esp, 8            ; Skip int_no + err_code
     iret                  ; Return to Ring 0 or Ring 3 (auto-detected by CPU)
@@ -78,6 +85,10 @@ section .text
 isr_common_stub:
     pushad
     mov ax, ds
+    push eax
+    mov ax, fs
+    push eax
+    mov ax, gs
     push eax
     mov ax, 0x10
     mov ds, ax
@@ -120,11 +131,14 @@ isr_keep_stack:
     pop ecx
     mov esp, ecx
 
+    ; Frame layout: [gs][fs][ds]... — the LOWEST slot is GS, pop it first.
+    pop eax
+    mov gs, ax
+    pop eax
+    mov fs, ax
     pop eax
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
     popad
     add esp, 8
     iret
@@ -298,6 +312,10 @@ isr128:
     pushad
     mov ax, ds
     push eax
+    mov ax, fs
+    push eax
+    mov ax, gs
+    push eax
     mov ax, 0x10          ; Switch to kernel data segments
     mov ds, ax
     mov es, ax
@@ -310,11 +328,14 @@ isr128:
     add esp, 4
 
     cli                   ; deterministic epilogue (no nested IRQ frames)
+    ; Frame layout: [gs][fs][ds]... — the LOWEST slot is GS, pop it first.
+    pop eax               ; Restore GS (TLS selector)
+    mov gs, ax
+    pop eax               ; Restore FS (TLS selector)
+    mov fs, ax
     pop eax               ; Restore user's DS
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
     popad
     add esp, 8            ; Skip int_no + err_code
     iret                  ; Return to Ring 3 (CPU pops SS/ESP automatically)

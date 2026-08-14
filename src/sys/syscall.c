@@ -379,6 +379,8 @@ static void syscall_handler(registers_t* regs) {
             break;
 
         case SYS_THREAD_CREATE:
+        case SYS_CLONE:
+        case SYS_TLS_SET:
         case SYS_SLEEP:
         case SYS_GET_PID:
         case SYS_SET_PRIORITY:

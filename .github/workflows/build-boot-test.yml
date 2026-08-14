@@ -137,3 +137,12 @@ jobs:
           # read-allowed / write+delete-denied. Also sanity-checks the
           # `ls -l` shell builtin.
           python3 scripts/perm_test.py --timeout 360
+
+      - name: TLS + clone() regression (TCG)
+        run: |
+          # Ring 3 threaddemo app: main thread installs its own TLS, 4
+          # workers spawned via SYS_CLONE each get a private %gs TCB, each
+          # bumps a per-thread counter ITERS times and every counter must
+          # land on exactly ITERS (a broken/shared TLS would race/corrupt).
+          # Proves FS/GS survive every context switch + signal path.
+          python3 scripts/thread_test.py --timeout 360

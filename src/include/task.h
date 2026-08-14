@@ -199,6 +199,18 @@ int task_is_background(int tid);
 // Create a task with explicit priority and optional page directory
 // page_dir = 0 means use global identity map
 int thread_create(void (*entry)(), int priority, uint32_t page_dir);
+// Extended create (v38.24): shares the caller's address space like
+// thread_create, plus an optional explicit child user stack (0 = the default
+// per-slot stack) and an optional TLS base (0 = no TLS). With a nonzero
+// tls_base the new task's FS/GS descriptors (all CPUs) point at it, so
+// Ring 3 %gs accesses resolve to the thread control block. Caller must have
+// interrupts disabled (same discipline as thread_create).
+int thread_create_ex(void (*entry)(), int priority, uint32_t page_dir,
+                     uint32_t child_stack, uint32_t tls_base);
+// Set the CURRENT task's TLS base (SYS_TLS_SET): updates its GDT descriptors
+// and the pending return frame so the caller immediately runs with %gs
+// pointing at the TCB. base 0 removes TLS.
+int task_set_tls(uint32_t base);
 
 // Sleep the current task for N timer ticks
 void task_sleep(int ticks);
