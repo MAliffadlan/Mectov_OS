@@ -174,6 +174,16 @@ void ioapic_init(void) {
     entry_net |= ((uint64_t)smp_bsp_lapic_id) << 56;
     ioapic_set_entry(11, entry_net);
 
+    // Route IRQ14 (IDE primary, BMIDE DMA) to APIC INT 46 and IRQ15 (IDE
+    // secondary) to INT 47. Without these the BMIDE controller's completion
+    // interrupt never reaches a LAPIC and the IRQ stays latched.
+    uint64_t entry_ide0 = 46 | (0 << 8) | (0 << 11) | (0 << 13) | (0 << 15) | (0 << 16);
+    entry_ide0 |= ((uint64_t)smp_bsp_lapic_id) << 56;
+    ioapic_set_entry(14, entry_ide0);
+    uint64_t entry_ide1 = 47 | (0 << 8) | (0 << 11) | (0 << 13) | (0 << 15) | (0 << 16);
+    entry_ide1 |= ((uint64_t)smp_bsp_lapic_id) << 56;
+    ioapic_set_entry(15, entry_ide1);
+
     // Route Timer to GSI dynamically parsed from MADT (smp_pit_gsi). The PIT
     // tick stays BSP-only: Application Processors get their own periodic
     // tick from the local APIC timer (see lapic_timer_init() in ap_main), so
@@ -184,7 +194,8 @@ void ioapic_init(void) {
     
     // Mask the rest
     for (uint32_t i = 0; i <= max_intr; i++) {
-        if (i != smp_pit_gsi && i != 1 && i != 5 && i != 11 && i != 12) {
+        if (i != smp_pit_gsi && i != 1 && i != 5 && i != 11 && i != 12 &&
+            i != 14 && i != 15) {
             ioapic_set_entry(i, 0x10000); // Set mask bit
         }
     }

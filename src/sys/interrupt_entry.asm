@@ -291,6 +291,8 @@ IRQ 1, 33    ; Keyboard
 IRQ 5, 37    ; Sound (SB16)
 IRQ 11, 43   ; Network (RTL8139)
 IRQ 12, 44   ; Mouse
+IRQ 14, 46   ; IDE primary channel (BMIDE DMA)
+IRQ 15, 47   ; IDE secondary channel (BMIDE DMA)
 
 ; ============================================================
 ; Syscall entry: int 0x80

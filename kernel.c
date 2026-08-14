@@ -192,6 +192,18 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     detect_cpu();
     write_serial_string("[K] pci\n");
     pci_scan();
+    // Bus-mastering DMA for the IDE controller (v38.26): detect the BMIDE
+    // BAR + enable bus mastering, and route the controller's completion
+    // interrupt (IRQ14/15 -> INT 46/47) to the ATA driver. Must run after
+    // pci_scan and after the PIC/IOAPIC routing above.
+    write_serial_string("[K] ata_dma\n");
+    extern void ata_dma_init(void);
+    ata_dma_init();
+    extern void register_interrupt_handler(uint8_t n, isr_t handler);
+    extern void ata_dma_irq_primary(registers_t*);
+    extern void ata_dma_irq_secondary(registers_t*);
+    register_interrupt_handler(46, ata_dma_irq_primary);
+    register_interrupt_handler(47, ata_dma_irq_secondary);
     write_serial_string("[K] sb16\n");
     extern void sb16_init(void);
     sb16_init();

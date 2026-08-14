@@ -38,6 +38,8 @@ extern void irq1();
 extern void irq5();
 extern void irq11();
 extern void irq12();
+extern void irq14();
+extern void irq15();
 extern void idt_flush(uint32_t);
 
 // Per-CPU exception stacks (interrupt_entry.asm): one 4KB stack per CPU so
@@ -112,12 +114,15 @@ void idt_init() {
         outb(0x21, 0x04); outb(0xA1, 0x02);
         outb(0x21, 0x01); outb(0xA1, 0x01);
         // Unmask: IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade), IRQ5 (SB16),
-        // IRQ11 (RTL8139 NIC), IRQ12 (mouse)
-        // 0xD8 = 1101_1000: unmask bits 0,1,2,5 (IRQ0 timer, IRQ1 kb, IRQ2
-        // cascade, IRQ5 SB16); mask the rest. (0xE8 previously masked IRQ5
-        // and the cascade, silently killing SB16 + mouse on legacy-PIC boots.)
-        outb(0x21, 0xD8);
-        outb(0xA1, 0xEF ^ (1 << 3)); // slave: unmask IRQ11 (bit 3 = 0)
+        // IRQ11 (RTL8139 NIC), IRQ12 (mouse), IRQ14/15 (IDE BMIDE DMA)
+        // Primary: 0x98 = 1001_1000: unmask bits 0,1,2,3,5,6 (IRQ0 timer,
+        // IRQ1 kb, IRQ2 cascade, IRQ3 COM2, IRQ5 SB16, IRQ14 IDE primary);
+        // mask the rest. (0xD8 previously masked IRQ14, so BMIDE DMA would
+        // never see its completion interrupt.)
+        outb(0x21, 0x98);
+        // Slave: 0x67 = 0110_0111: unmask bits 0,1,2,3,5,7 (IRQ8 RTC, IRQ9,
+        // IRQ10, IRQ11 NIC, IRQ13 FPU, IRQ15 IDE secondary).
+        outb(0xA1, 0x67);
     }
 
     // CPU Exceptions. Every real fault vector gets a dedicated stub so the
@@ -161,6 +166,8 @@ void idt_init() {
     idt_set_gate(37, (uint32_t)irq5,  0x08, 0x8E);  // Sound (SB16, IRQ5)
     idt_set_gate(43, (uint32_t)irq11, 0x08, 0x8E);  // Network (RTL8139, IRQ11)
     idt_set_gate(44, (uint32_t)irq12, 0x08, 0x8E);  // Mouse
+    idt_set_gate(46, (uint32_t)irq14, 0x08, 0x8E);  // IDE primary (BMIDE DMA, IRQ14)
+    idt_set_gate(47, (uint32_t)irq15, 0x08, 0x8E);  // IDE secondary (BMIDE DMA, IRQ15)
 
     // Syscall gate: int 0x80, DPL=3 (Ring 3 can call this).
     // TRAP gate (0xEF, not 0xEE): the CPU does NOT auto-clear IF on entry, so

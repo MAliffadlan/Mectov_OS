@@ -147,11 +147,12 @@ jobs:
           # Proves FS/GS survive every context switch + signal path.
           python3 scripts/thread_test.py --timeout 360
 
-      - name: Multi-sector PIO + rep insw regression (TCG)
+      - name: IDE DMA + multi-sector disk read regression (TCG)
         run: |
           # Ring 3 bigread app: reads /bench.big (160 KB, > PCACHE_MAX_FILE)
-          # 3 times — every read is a real disk read through the batched
-          # multi-sector path (`rep insw`, one command per 16 sectors). The
-          # byte pattern must survive every read, so a batch-offset or DRQ
-          # bug cannot pass silently.
+          # 3 times through the bus-mastering IDE DMA path (PRD table + BMIDE
+          # controller; falls back to multi-sector PIO only if DMA is absent
+          # or fails). The test also asserts the serial log shows the DMA
+          # controller engaged and zero failed DMA transfers, and that the
+          # byte pattern survives every read.
           python3 scripts/bigread_test.py --timeout 420

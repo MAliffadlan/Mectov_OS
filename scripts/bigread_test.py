@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-scripts/bigread_test.py — multi-sector PIO regression test (v38.25).
+scripts/bigread_test.py — DMA + multi-sector disk read regression test.
 
 Boots mectov.iso once, logs in, launches the Terminal, runs the Ring 3
 `bigread` app (`run /apps/bigread.mct`) and verifies from the serial log:
 
+  * the bus-mastering IDE DMA controller was detected and engaged
+    ("[ATA] BMIDE DMA ready") and no DMA transfer ever failed
   * /bench.big (160 KB, > PCACHE_MAX_FILE) is read 3 times — every read is
-    a real disk read through the multi-sector PIO path (one ATA command per
-    up-to-16-sector batch instead of one per sector)
+    a real disk read through the batched multi-sector path (DMA when
+    available, multi-sector PIO otherwise)
   * the byte pattern (index mod 256) is intact on every read, so a batch
-    offset bug cannot pass silently
-  * the three read times are all sane (a single-sector fallback would also
-    pass; the A/B speedup is measured offline in the changelog)
+    offset or DMA-address bug cannot pass silently
   * the kernel never panicked during the run
 
 Usage:
@@ -153,6 +153,15 @@ def main():
             print("[FAIL] kernel panicked during the big-read run")
             return 1
         print("[OK] no kernel panic in the whole big-read run")
+
+        if "[ATA] BMIDE DMA ready" not in log_text:
+            print("[FAIL] bus-mastering IDE DMA was not engaged")
+            return 1
+        print("[OK] IDE bus-mastering DMA engaged")
+        if "[ATA] DMA read FAIL" in log_text or "[ATA] DMA xfer fail" in log_text:
+            print("[FAIL] a DMA transfer failed and fell back to PIO")
+            return 1
+        print("[OK] no DMA transfer failed (all reads used the DMA path)")
 
         time.sleep(5)
         if qemu.poll() is not None:
