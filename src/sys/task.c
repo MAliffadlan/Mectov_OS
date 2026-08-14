@@ -1460,12 +1460,15 @@ int task_setrlimit(int res, const rlimit_t* in) {
     // Clamp to hard physical ceilings so a corrupt/absurd value can never
     // cause an arithmetic overflow in the enforcement checks below.
     if (want.max > 0x7FFFFFFFu) want.max = 0x7FFFFFFFu;
-    if (want.cur > want.max) want.cur = want.max;
+    // POSIX EINVAL: cur may never exceed max. Refuse instead of clamping, so
+    // a caller cannot silently "raise" a limit by asking for an impossible
+    // pair (e.g. `ulimit -n 99` with hard=16 must fail, not clamp to 16).
+    if (want.cur > want.max) return -1;
 
     rlimit_t cur = tasks[tid].rlimits[res];
     int is_root = (tasks[tid].uid == ROOT_UID);
     if (!is_root) {
-        // Non-root: never raise the hard limit; cur must stay within max.
+        // Non-root: never raise the hard limit.
         if (want.max > cur.max) return -1;
         if (want.cur > want.max) return -1;
     }

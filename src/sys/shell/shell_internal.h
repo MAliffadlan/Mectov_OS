@@ -184,6 +184,7 @@ void cmd_alias(void);
 void cmd_unalias_arg(void);
 void cmd_history(void);
 void cmd_ps(void);
+void cmd_ulimit(void);
 void cmd_jobs(void);
 void cmd_fg(void);
 void cmd_bg(void);

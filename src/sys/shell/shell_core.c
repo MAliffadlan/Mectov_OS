@@ -257,7 +257,7 @@ const char* cmd_list[] = {
     "ls","cd","pwd","mkdir","touch","cat","head","tree","rm","rmdir","cp","mv","df",
     "chmod","chown",
     "edit","nano",
-    "sh","source","export","alias","unalias","history","ps","kill",
+    "sh","source","export","alias","unalias","history","ps","kill","ulimit",
     "jobs","fg","bg",
     "echo","beep","tone","sleep","date","color","lock",
     "uname","whoami","passwd","hostname","env","seq","wc","type","yes",
@@ -804,6 +804,9 @@ else if (strncmp(cmd_b, "unalias ", 8) == 0) { cmd_unalias_arg(); }
 else if (strcmp(cmd_b, "history") == 0) { cmd_history(); }
 // --- PS (Process Status) ---
 else if (strcmp(cmd_b, "ps") == 0) { cmd_ps(); }
+// --- ULIMIT (v38.28: show/set RLIMIT_NPROC/AS/NOFILE) ---
+else if (strncmp(cmd_b, "ulimit", 6) == 0 &&
+         (cmd_b[6] == '\0' || cmd_b[6] == ' ')) { cmd_ulimit(); }
 // --- JOBS ---
 else if (strcmp(cmd_b, "jobs") == 0) { cmd_jobs(); }
 // --- FG: bring a background job to the foreground (wait for it) ---

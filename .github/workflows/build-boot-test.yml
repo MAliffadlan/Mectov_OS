@@ -166,6 +166,16 @@ jobs:
           # re-allows). Asserts ALL PASS + zero [PANIC].
           python3 scripts/rlimit_test.py --timeout 360
 
+      - name: Shell `ulimit` builtin regression (TCG)
+        run: |
+          # Drives the shell `ulimit` builtin from the terminal: -a lists
+          # all resources with sane defaults, -n 8 lowers NOFILE and reads
+          # back 8/16, raising soft above the hard limit is refused for a
+          # non-root caller, -u 4 lowers NPROC, raising cur back to the hard
+          # limit is allowed, and rlimittest still passes afterwards (limits
+          # are inherited by child processes). Asserts zero [PANIC].
+          python3 scripts/ulimit_test.py --timeout 360
+
       - name: IDE DMA + multi-sector disk read regression (TCG)
         run: |
           # Ring 3 bigread app: reads /bench.big (160 KB, > PCACHE_MAX_FILE)
