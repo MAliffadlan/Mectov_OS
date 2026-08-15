@@ -27,6 +27,7 @@
 // Forward declaration
 extern void init_double_buffer(void);
 extern volatile int power_overlay_active;
+extern volatile int pending_lock;
 
 volatile int pending_logout = 0;
 volatile int needs_redraw = 1;
@@ -328,7 +329,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             if (popup_open && (btn & 1) && !(prev_btn & 1) && !in_taskbar) {
                 // Mouse press on desktop area while popup open → close all popups
                 int sm_ty = (int)fb_height - TASKBAR_H_PX;
-                int sm_h = 348;
+                int sm_h = START_MENU_H;
                 int sm_y = sm_ty - sm_h;
                 int in_start_menu = (start_menu_open && mx >= 2 && mx <= 202 && my >= sm_y && my <= sm_ty);
                 if (!in_start_menu) {
@@ -515,6 +516,12 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                             shell_register_stopped_job(fg_tid);
                         }
                         needs_redraw = 1;
+                    } else if ((kbd_mods & 6) == 6 && sc == 0x26) {
+                        // Ctrl+Alt+L: lock the desktop (same as Start menu ->
+                        // Lock / the `lock` shell command). Consumed here so it
+                        // never reaches the focused window as 'L'.
+                        pending_lock = 1;
+                        needs_redraw = 1;
                     } else if (sc == 0x0F && keyboard_alt_held) {
                         wm_alt_tab_start();
                         needs_redraw = 1;
@@ -597,13 +604,25 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             full_redraw();
         }
 
-        // Logout: kembali ke login screen
+        // Logout: kembali ke login screen (session di-reset)
         if (pending_logout) {
             pending_logout = 0;
             start_menu_open = 0;
             calendar_open = 0;
             extern void wm_reset_session(void);
             wm_reset_session();
+            gui_login();
+            mark_dirty(0, 0, fb_width, fb_height);
+            full_redraw();
+        }
+
+        // Lock screen: jalankan login gate TANPA reset session — windows &
+        // task tetap hidup di belakangnya, dan full_redraw() memulihkan
+        // desktop saat unlock.
+        if (pending_lock) {
+            pending_lock = 0;
+            start_menu_open = 0;
+            calendar_open = 0;
             gui_login();
             mark_dirty(0, 0, fb_width, fb_height);
             full_redraw();

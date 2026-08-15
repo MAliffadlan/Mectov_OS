@@ -98,7 +98,10 @@ static void refresh_clock(void) {
     rtc_time_t t = rtc_read_time();
     rtc_wall_sec = t.second;    // cached for gui_login's 4 s idle window
 
-    if ((int)t.day != last_day) {  // rebuild the date once per day
+    // Rebuild the date once per day — or immediately if a fresh gui_login()
+    // cleared date_str (boot, logout, lock: last_day survives across calls,
+    // so an empty string must force a rebuild).
+    if ((int)t.day != last_day || date_str[0] == '\0') {
         last_day = t.day;
         const char* dn = day_names[(t.dow - 1) % 7];
         const char* mn = month_names[(t.month - 1) % 12];
@@ -116,7 +119,7 @@ static void refresh_clock(void) {
     }
 
     int sec = t.second;
-    if (sec == last_sec) return;
+    if (sec == last_sec && clock_str[0] != '\0') return; // same for the clock
     last_sec = sec;
     itoa2(clock_str, t.hour);
     clock_str[2] = ':';
@@ -247,6 +250,18 @@ static void draw_blurred_background(void) {
 // output pixel only reads its own source pixels). Fixed-point t in 0..256
 // (the kernel has no floats).
 static uint32_t* prev_frame = NULL;
+
+// The gate keeps framebuffer-sized caches (scaled wallpaper 4 MB, blurred
+// wallpaper 4 MB, transition snapshot 4 MB — ~12 MB total). They are only
+// useful while the login screen is on screen, so release them back to the
+// 24 MB kernel heap the moment the gate closes: otherwise DOOM's Z_Init
+// (5 MiB zone) and other big kernel allocations fail after a login.
+// All three rebuild lazily on the next gui_login() (each checks NULL).
+static void free_login_buffers(void) {
+    if (wp_scaled)   { kfree(wp_scaled);   wp_scaled = NULL;   wp_scaled_w = 0; wp_scaled_h = 0; }
+    if (wp_blurred)  { kfree(wp_blurred);  wp_blurred = NULL;  wp_blur_w = 0; wp_blur_h = 0; }
+    if (prev_frame)  { kfree(prev_frame);  prev_frame = NULL; }
+}
 
 static int snapshot_prev(void) {
     if (!prev_frame) {
@@ -517,7 +532,7 @@ int gui_login() {
 
                 if (c == '\n') {
                     input[idx] = '\0';
-                    if (strcmp(input, pass) == 0) { beep(); return 1; }
+                    if (strcmp(input, pass) == 0) { beep(); free_login_buffers(); return 1; }
                     err = 1; shake = 10; idx = 0;
                 } else if (c == '\b') {
                     if (idx > 0) { idx--; err = 0; }
@@ -557,7 +572,7 @@ int gui_login() {
                 mouse_x >= bbx2 && mouse_x < bbx2 + LOGIN_PW - 64 &&
                 mouse_y >= bby2 && mouse_y < bby2 + 30) {
                 input[idx] = '\0';
-                if (strcmp(input, pass) == 0) { beep(); return 1; }
+                if (strcmp(input, pass) == 0) { beep(); free_login_buffers(); return 1; }
                 err = 1; shake = 10; idx = 0;
             }
         }

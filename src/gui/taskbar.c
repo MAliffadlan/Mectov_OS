@@ -27,13 +27,13 @@ void taskbar_track_mouse(int mx, int my, int px, int py) {
     if (my < ty) {
         // Check if mouse is over start menu
         if (start_menu_open) {
-            int sm_h = 348, sm_w = 200;
+            int sm_h = START_MENU_H, sm_w = 200;
             int sm_y = ty - sm_h;
             if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
                 if (my >= sm_y + 36) {
                     int rel_y = my - (sm_y + 36);
                     int item = rel_y / 28;
-                    if (item >= 0 && item < 11) {
+                    if (item >= 0 && item < START_MENU_ITEMS) {
                         hover_menu_idx = item;
                         return;
                     }
@@ -298,10 +298,9 @@ void taskbar_draw() {
         vga_bevel_raised(start_x, start_y, start_w, start_h);
     // Pressed content shifts 1px for the physical feel
     int start_txt_off = start_pressed ? 1 : 0;
-    // Mectov logo (small amber square before text) — vertically centered
-    draw_rounded_rect(start_x + 6 + start_txt_off, start_y + 3 + start_txt_off, 14, 14, 2, RETRO_SEL);
-    draw_string_px(start_x + 6 + start_txt_off, start_y + 3 + start_txt_off, "M", RETRO_SELTXT, RETRO_SEL);
-    draw_string_px(start_x + 24 + start_txt_off, start_y + 2 + start_txt_off, "Mectov", RETRO_TEXT, TB_BG);
+    // Plain "START" label (no logo) — centered in the button
+    draw_string_px(start_x + (start_w - 5 * 8) / 2 + start_txt_off, start_y + 2 + start_txt_off,
+                   "START", RETRO_TEXT, TB_BG);
     
     // ---------- Separator (groove) ----------
     groove_v(sep_x, ty + 8, TASKBAR_H_PX - 16);
@@ -416,7 +415,7 @@ void taskbar_draw() {
 
     // ========== Draw Start Menu (retro bevel, Win95 selection) ==========
     if (start_menu_open) {
-        int sm_h = 348;
+        int sm_h = START_MENU_H;
         int sm_w = 200;
         int sm_y = ty - sm_h;
         
@@ -444,12 +443,13 @@ void taskbar_draw() {
             {"PCI Manager", 11, 0x00DD6B20},
             {"Snake Game", 10, 0x0038A169},
             {"Task Manager", 12, 0x00805AD5},
+            {"Lock", 4, 0x00000000},
             {"Logout", 6, 0x00000000},
             {"Power Off", 9, 0x00000000},
         };
         
         int oy = sm_y + 40; // after header
-        for (int n = 0; n < 11; n++) {
+        for (int n = 0; n < START_MENU_ITEMS; n++) {
             int item_y = oy;
             int item_h = 28;
             int hovered = (hover_menu_idx == n);
@@ -459,7 +459,7 @@ void taskbar_draw() {
                 draw_rect(3, item_y, sm_w - 6, item_h - 2, RETRO_SEL);
             }
             
-            if (n == 10) {
+            if (n == 11) {
                 // Power off: red accent
                 // Icon: power symbol
                 int ic_x = 10;
@@ -470,11 +470,27 @@ void taskbar_draw() {
                 draw_string_px(ic_x + 18, item_y + 6, items[n].label,
                                hovered ? RETRO_SELTXT : 0x00CC0000,
                                hovered ? RETRO_SEL : TB_BG);
-            } else if (n == 9) {
+            } else if (n == 10) {
                 // Logout: muted amber accent (was bright mustard)
                 int ic_x = 10;
                 draw_string_px(ic_x + 18, item_y + 6, items[n].label,
                                hovered ? RETRO_SELTXT : 0x00A0883C,
+                               hovered ? RETRO_SEL : TB_BG);
+            } else if (n == 9) {
+                // Lock: padlock glyph (amber), normal highlight text
+                int ic_x = 10, ic_y = item_y + 5;
+                // body
+                draw_rect(ic_x + 3, ic_y + 9, 10, 7, 0x00C9A227);
+                // keyhole
+                draw_rect(ic_x + 6, ic_y + 11, 4, 4, hovered ? RETRO_SEL : TB_BG);
+                draw_rect(ic_x + 7, ic_y + 12, 2, 3, 0x00C9A227);
+                // shackle sides
+                draw_rect(ic_x + 5, ic_y + 4, 2, 6, 0x00C9A227);
+                draw_rect(ic_x + 9, ic_y + 4, 2, 6, 0x00C9A227);
+                // shackle top
+                draw_rect(ic_x + 4, ic_y + 2, 8, 2, 0x00C9A227);
+                draw_string_px(ic_x + 20, item_y + 6, items[n].label,
+                               hovered ? RETRO_SELTXT : RETRO_TEXT,
                                hovered ? RETRO_SEL : TB_BG);
             } else {
                 // Normal item with icon
@@ -611,7 +627,16 @@ static void handle_start_menu_click(int item) {
         case 6: open_pci_app(); break;
         case 7: start_ular(); break;
         case 8: open_taskmgr_app(); break;
-        case 9: // Logout
+        case 9: // Lock
+            {
+                extern volatile int pending_lock;
+                start_menu_open = 0;
+                calendar_open = 0;
+                volume_popup_open = 0;
+                pending_lock = 1;
+            }
+            break;
+        case 10: // Logout
             {
                 extern volatile int pending_logout;
                 start_menu_open = 0;
@@ -620,7 +645,7 @@ static void handle_start_menu_click(int item) {
                 pending_logout = 1;
             }
             break;
-        case 10: open_power_app(); break;
+        case 11: open_power_app(); break;
     }
 }
 
@@ -629,13 +654,13 @@ void taskbar_handle_click(int mx, int my) {
     
     // ---------- Start menu items hit test ----------
     if (start_menu_open && my < ty) {
-        int sm_h = 348, sm_w = 200;
+        int sm_h = START_MENU_H, sm_w = 200;
         int sm_y = ty - sm_h;
         if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
             if (my >= sm_y + 36) {
                 int rel_y = my - (sm_y + 36);
                 int item = rel_y / 28;
-                if (item >= 0 && item < 11) {
+                if (item >= 0 && item < START_MENU_ITEMS) {
                     handle_start_menu_click(item);
                     return;
                 }

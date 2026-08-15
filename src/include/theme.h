@@ -18,7 +18,7 @@
 // Backgrounds
 #define GUI_BG       0x001E1E2E  // Window body background (mantle)
 #define GUI_DESKTOP  0x0011111B  // Desktop background (crust)
-#define GUI_TASKBAR  0x00181825  // Taskbar background (surface0)
+#define GUI_TASKBAR  0x00000000  // Taskbar background (black; fallback strip in d_desktop)
 #define GUI_TASKBAR_A 0xCC181825 // Taskbar semi-transparent (was 0x88)
 
 // Borders
@@ -45,15 +45,18 @@
 #define GUI_ORANGE   0x00FAB387  // Peach accent
 
 // ---- Retro (SerenityOS-inspired) bevel palette ----
-// Classic 1990s 3D beveled chrome: light-gray face with white highlight /
+// Classic 1990s 3D beveled chrome: dark face with subtle light highlight /
 // dark shadow edges that make widgets look physically raised or pressed in.
-#define RETRO_FACE      0x0016130F  // Widget face (now charcoal, was gray)
-#define RETRO_HILIGHT   0x003C2E18  // Raised edge highlight (dim amber-brown)
-#define RETRO_SHADOW    0x000B0A08  // Raised edge shadow (deep charcoal)
-#define RETRO_DKSHADOW  0x002C2821  // Hard outline (IC_LINE)
+// v38.37: the face and bevel edges are now pure black / neutral gray (they
+// used to be warm charcoal + amber-brown, which read as "orange" on the
+// taskbar). These constants are only consumed by the taskbar bevels.
+#define RETRO_FACE      0x00000000  // Widget face (pure black)
+#define RETRO_HILIGHT   0x00282828  // Raised edge highlight (neutral gray)
+#define RETRO_SHADOW    0x000E0E0E  // Raised edge shadow (neutral deep)
+#define RETRO_DKSHADOW  0x00303030  // Hard outline (neutral gray)
 #define RETRO_TEXT      0x00EDE6D9  // Text on face (IC_INK, was black)
 #define RETRO_SEL       0x00E0A94F  // Selection (IC_AMBER, was blue)
-#define RETRO_SELTXT    0x0016130F  // Text on selection (dark on amber)
+#define RETRO_SELTXT    0x00000000  // Text on selection (black on amber)
 #define RETRO_FACE_LT   0x00DFDFDF  // Lighter face (gradient top)
 
 // Win95-style titlebars (classic blue gradient when focused)
@@ -63,25 +66,26 @@
 #define RETRO_TITLE_IBOT  0x00A0A0A0  // Inactive titlebar bottom (darker gray)
 
 // ---- ToaruOS-inspired chrome, re-skinned to the Instrument Console ----
-// Flat dark titlebars, but in the login screen's warm charcoal + phosphor
-// amber: the active titlebar carries an amber hairline + amber glyphs so the
-// whole desktop coheres with the gate. (Was neutral gray.)
-#define TOARU_TITLE       0x0016130F  // Active titlebar   (IC_BG_PANEL charcoal)
-#define TOARU_TITLE_I     0x000B0A08  // Inactive titlebar (IC_BG_DEEP)
+// v38.37: full-black window chrome — no amber hairline, no amber glyphs
+// (the "yellow line" around focused windows). Titlebars and borders are
+// pure black; the window-control glyphs are off-white so they stay visible
+// on the black bar.
+#define TOARU_TITLE       0x00000000  // Active titlebar   (black)
+#define TOARU_TITLE_I     0x00000000  // Inactive titlebar (black)
 #define TOARU_TEXT        0x00EDE6D9  // Active title text  (IC_INK)
 #define TOARU_TEXT_I      0x008A8172  // Inactive title text (IC_DIM)
-#define TOARU_BORDER      0x00E0A94F  // Active window border (IC_AMBER hairline)
-#define TOARU_BORDER_I    0x002C2821  // Inactive window border (IC_LINE)
-#define TOARU_BTN_HOV     0x002C2821  // Titlebar button hover (IC_LINE)
-#define TOARU_BTN_GLYPH   0x00E0A94F  // Titlebar button glyph (IC_AMBER)
+#define TOARU_BORDER      0x00000000  // Active window border (black)
+#define TOARU_BORDER_I    0x00000000  // Inactive window border (black)
+#define TOARU_BTN_HOV     0x00282828  // Titlebar button hover (neutral gray)
+#define TOARU_BTN_GLYPH   0x00EDE6D9  // Titlebar button glyph (off-white)
 
 // ---- Taskbar, re-skinned to the Instrument Console ----
-// Warm charcoal surface + ink text + phosphor-amber selection, matching the
-// login palette. (Was classic gray with black text and blue selection.)
-#define TB_BG        0x0016130F  // Taskbar background (IC_BG_PANEL charcoal)
-#define TB_BORDER    0x002C2821  // 1px borders / hairline (IC_LINE)
-#define TB_BTN       0x0016130F  // Normal task button face (charcoal)
-#define TB_BTN_HOV   0x002C2821  // Hovered button (IC_LINE)
+// v38.37: full-black surface (no warm/orange tint) + ink text; the amber
+// accents stay only as selection feedback in popups.
+#define TB_BG        0x00000000  // Taskbar background (pure black)
+#define TB_BORDER    0x00303030  // 1px borders / hairline (neutral gray)
+#define TB_BTN       0x00000000  // Normal task button face (black)
+#define TB_BTN_HOV   0x00282828  // Hovered button (neutral gray)
 #define TB_BTN_ACT   0x00E0A94F  // Selection (pressed / active, IC_AMBER)
 #define TB_TEXT      0x00EDE6D9  // Primary text (IC_INK)
 #define TB_TEXT_DIM  0x008A8172  // Secondary text (IC_DIM)

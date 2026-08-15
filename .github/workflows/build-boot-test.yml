@@ -74,6 +74,16 @@ jobs:
           # screenshots the lock screen, then drives the whole gate flow.
           python3 scripts/login_redesign_test.py --timeout 300
 
+      - name: Lock screen feature regression (TCG)
+        run: |
+          # v38.34: `lock` shell builtin, Start menu "Lock" item and the
+          # Ctrl+Alt+L shortcut run the login gate WITHOUT resetting the
+          # session — windows stay alive behind the lock and the desktop is
+          # pixel-restored on unlock. One boot: launch Terminal, `lock`,
+          # unlock, compare the terminal window pre/post (must be intact),
+          # then lock again via Ctrl+Alt+L.
+          python3 scripts/lock_test.py --timeout 480
+
       - name: Fork + jobcontrol regressions (TCG)
         run: |
           python3 scripts/fork_test.py --timeout 240
