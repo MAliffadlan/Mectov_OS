@@ -2122,8 +2122,29 @@ int task_waitpid(int pid, int* status, int options) {
         tasks[self].waiting = (pid > 0) ? pid : -1;
         tasks[self].state = TASK_STATE_BLOCKED;
         rq_remove(self);
+        // Lost-wakeup guard: a child can exit between the scan above and this
+        // park. Its exit path saw waiting == 0 and therefore did NOT wake us
+        // (see terminate_task), leaving us about to sleep forever with a
+        // reaped-able zombie. Re-check for a zombie under task_lock — the exit
+        // path holds the same lock, so this re-check cannot race it. If one
+        // exists, undo the park and let the next loop iteration reap it.
+        int recheck_zombie = -1;
+        for (int i = 1; i < MAX_TASKS; i++) {
+            if (tasks[i].state == TASK_STATE_FREE) continue;
+            if (tasks[i].parent != self) continue;
+            if (pid > 0 && i != pid) continue;
+            if (tasks[i].state == TASK_STATE_ZOMBIE) { recheck_zombie = i; break; }
+        }
+        if (recheck_zombie >= 0) {
+            tasks[self].waiting = 0;
+            tasks[self].state = TASK_STATE_READY;
+            // We are still current on this core, so do NOT enqueue: if a timer
+            // tick preempts us before the loop re-scans, schedule() re-enqueues
+            // us via the keep-current path (READY + rq_cpu < 0).
+        }
         spin_unlock(&task_lock);
         __asm__ volatile("sti");
+        if (recheck_zombie >= 0) continue;   // reap the zombie on the next pass
         while (tasks[self].state == TASK_STATE_BLOCKED) __asm__ volatile("hlt");
         tasks[self].waiting = 0;
     }
