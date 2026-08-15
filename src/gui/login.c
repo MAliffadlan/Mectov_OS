@@ -8,15 +8,18 @@
 #include "../include/rtc.h"
 #include "../include/font8x16.h"
 #include "../include/passwd.h"
+#include "../include/mem.h"
 
 // ---- Instrument-console palette (warm charcoal + phosphor amber) ----
 // Mectov is a hand-built OS, so the gate should read as a machine console:
 // the live clock is proof the box is awake. Amber is the phosphor of CRT
 // terminals — warm rather than the acid-green cliché or the blue every OS
 // uses. The flow is deliberately Windows-like: a minimal lock screen with
-// just the time, dismissed by any keypress or click, followed by the
-// password entry screen.
-#define IC_BG_DEEP    0x000B0A08  // wallpaper dim layer (warm near-black)
+// the full wallpaper, a digital clock + full date pinned to the bottom-left
+// corner, and a password entry that only opens on SPACE (or a click). While
+// typing the password the wallpaper blurs and every other caption (clock,
+// footer) disappears so the eye lands on the panel alone. If the user stops
+// typing for 4 seconds, the screen falls back to the clock view.
 #define IC_BG_PANEL   0x0016130F  // panel fill (warm charcoal)
 #define IC_LINE       0x002C2821  // hairline borders
 #define IC_INK        0x00EDE6D9  // primary text (warm off-white)
@@ -90,6 +93,7 @@ static int str_advance(const char* s, int scale, int ls) {
 // reformat when the second (or the day) actually changed.
 static char clock_str[9];
 static char date_str[32];
+static int rtc_wall_sec = -1;   // last RTC second seen (wall time, for the idle window)
 
 static void refresh_clock(void) {
     static int last_sec = -1;
@@ -99,6 +103,7 @@ static void refresh_clock(void) {
     if (last_read != 0 && now - last_read < 500) return;  // first call always reads
     last_read = now;
     rtc_time_t t = rtc_read_time();
+    rtc_wall_sec = t.second;    // cached for gui_login's 4 s idle window
 
     if ((int)t.day != last_day) {  // rebuild the date once per day
         last_day = t.day;
@@ -112,6 +117,8 @@ static void refresh_clock(void) {
         while (date_str[k]) k++;
         date_str[k++] = ' ';
         while (*mn) date_str[k++] = *mn++;
+        date_str[k++] = ' ';
+        itoa_dec(date_str + k, t.year); // full year, e.g. 2026
         date_str[k] = '\0';
     }
 
@@ -126,24 +133,115 @@ static void refresh_clock(void) {
     clock_str[8] = '\0';
 }
 
-// ---- Shared background: wallpaper dimmed to a warm charcoal field ----
+// ---- Shared background: full wallpaper, never cropped ----
+// The wallpaper is scaled (nearest-neighbor) to fill the ENTIRE framebuffer,
+// so it is always full-bleed at any resolution — no crop, no dark filler
+// bands. A single cached scaled copy is built once per resolution and then
+// memcpy'd every frame.
+static uint32_t* wp_scaled = NULL;
+static uint32_t wp_scaled_w = 0, wp_scaled_h = 0;
+
 static void draw_background(void) {
     extern uint32_t _binary_obj_wallpaper_bin_start[];
-    uint32_t* wp_ptr = _binary_obj_wallpaper_bin_start;
-    uint32_t wp_w = 1024, wp_h = 768;
-    uint32_t copy_w = (fb_width  < wp_w) ? fb_width  : wp_w;
-    uint32_t copy_h = (fb_height < wp_h) ? fb_height : wp_h;
-    for (uint32_t y = 0; y < copy_h; y++) {
-        memcpy(&back_buffer[y * fb_width], &wp_ptr[y * wp_w], copy_w * 4);
+    if (!is_vbe || fb_width == 0 || fb_height == 0) return;
+    if (!wp_scaled || wp_scaled_w != fb_width || wp_scaled_h != fb_height) {
+        if (wp_scaled) kfree(wp_scaled);
+        wp_scaled = (uint32_t*)kmalloc(fb_width * fb_height * 4);
+        if (!wp_scaled) return;
+        wp_scaled_w = fb_width; wp_scaled_h = fb_height;
+        uint32_t* wp_ptr = _binary_obj_wallpaper_bin_start;
+        uint32_t wp_w = 1024, wp_h = 768;
+        for (uint32_t y = 0; y < fb_height; y++) {
+            uint32_t sy = (y * wp_h) / fb_height;
+            for (uint32_t x = 0; x < fb_width; x++) {
+                uint32_t sx = (x * wp_w) / fb_width;
+                wp_scaled[y * fb_width + x] = wp_ptr[sy * wp_w + sx];
+            }
+        }
     }
-    if (fb_width > wp_w)  draw_rect(wp_w, 0, fb_width - wp_w, fb_height, IC_BG_DEEP);
-    if (fb_height > wp_h) draw_rect(0, wp_h, fb_width, fb_height - wp_h, IC_BG_DEEP);
-    // Two 50% blends pull the wallpaper down to a warm charcoal field; a
-    // dark band at top and bottom adds gentle depth.
-    draw_rect_alpha(0, 0, fb_width, fb_height, 0x00000000);
-    draw_rect_alpha(0, 0, fb_width, fb_height, 0x000B0A08);
-    draw_rect_alpha(0, 0, fb_width, fb_height / 5, 0x00000000);
-    draw_rect_alpha(0, fb_height - fb_height / 5, fb_width, fb_height / 5, 0x00000000);
+    memcpy(back_buffer, wp_scaled, fb_width * fb_height * 4);
+}
+
+// ---- Blurred wallpaper (password entry screen) ----
+// The same full-bleed scaled wallpaper, but run through a 5-tap box blur
+// (horizontal then vertical pass) so the panel pops against a soft backdrop.
+// Built once per resolution and cached, exactly like wp_scaled.
+static uint32_t* wp_blurred = NULL;
+static uint32_t wp_blur_w = 0, wp_blur_h = 0;
+
+static void build_blur(void) {
+    // Separable 5-tap box blur as two sliding-window passes. Each pass is O(n)
+    // (a running sum per row / per column, 2 reads per pixel) and strictly
+    // row-major, so even under slow emulation the cache holds up.
+    uint32_t* tmp = (uint32_t*)kmalloc(fb_width * fb_height * 4);
+    if (!tmp || !wp_scaled) return;
+    int w = (int)fb_width, h = (int)fb_height;
+    const uint32_t* src = wp_scaled;
+
+    // ---- Horizontal pass: sliding window [x-2 .. x+2] ----
+    for (int y = 0; y < h; y++) {
+        const uint32_t* row = src + (uint32_t)y * w;
+        uint32_t* out = tmp + (uint32_t)y * w;
+        // Window at x=0, edges clamped left: {0,0,0,1,2}
+        int cr = 3 * ((row[0] >> 16) & 0xFF) + ((row[1] >> 16) & 0xFF) + ((row[2] >> 16) & 0xFF);
+        int cg = 3 * ((row[0] >> 8) & 0xFF) + ((row[1] >> 8) & 0xFF) + ((row[2] >> 8) & 0xFF);
+        int cb = 3 * (row[0] & 0xFF) + (row[1] & 0xFF) + (row[2] & 0xFF);
+        for (int x = 0; x < w; x++) {
+            out[x] = ((uint32_t)(cr / 5) << 16) | ((uint32_t)(cg / 5) << 8) | (uint32_t)(cb / 5);
+            if (x + 1 >= w) break;
+            uint32_t a = row[(x + 3 >= w) ? w - 1 : x + 3];  // pixel entering
+            uint32_t d = row[(x - 2 < 0) ? 0 : x - 2];        // pixel leaving
+            cr += (int)((a >> 16) & 0xFF) - (int)((d >> 16) & 0xFF);
+            cg += (int)((a >> 8) & 0xFF) - (int)((d >> 8) & 0xFF);
+            cb += (int)(a & 0xFF) - (int)(d & 0xFF);
+        }
+    }
+
+    // ---- Vertical pass: running column sums, window [y-2 .. y+2] ----
+    uint32_t* cr = (uint32_t*)kmalloc((uint32_t)w * 4);
+    uint32_t* cg = (uint32_t*)kmalloc((uint32_t)w * 4);
+    uint32_t* cb = (uint32_t*)kmalloc((uint32_t)w * 4);
+    if (!cr || !cg || !cb) {
+        kfree(tmp); kfree(cr); kfree(cg); kfree(cb);
+        return;
+    }
+    const uint32_t* r0 = tmp;
+    const uint32_t* r1 = tmp + w;
+    const uint32_t* r2 = tmp + 2 * w;
+    for (int x = 0; x < w; x++) {  // column sums at y=0, edges clamped top: {0,0,1,2}
+        cr[x] = 3 * ((r0[x] >> 16) & 0xFF) + ((r1[x] >> 16) & 0xFF) + ((r2[x] >> 16) & 0xFF);
+        cg[x] = 3 * ((r0[x] >> 8) & 0xFF) + ((r1[x] >> 8) & 0xFF) + ((r2[x] >> 8) & 0xFF);
+        cb[x] = 3 * (r0[x] & 0xFF) + (r1[x] & 0xFF) + (r2[x] & 0xFF);
+    }
+    for (int y = 0; y < h; y++) {
+        uint32_t* out = wp_blurred + (uint32_t)y * w;
+        for (int x = 0; x < w; x++)
+            out[x] = ((uint32_t)(cr[x] / 5) << 16) | ((uint32_t)(cg[x] / 5) << 8) | (uint32_t)(cb[x] / 5);
+        if (y + 1 >= h) break;
+        const uint32_t* add = tmp + (uint32_t)((y + 3 >= h) ? h - 1 : y + 3) * w;  // row entering
+        const uint32_t* rem = tmp + (uint32_t)((y - 2 < 0) ? 0 : y - 2) * w;        // row leaving
+        for (int x = 0; x < w; x++) {
+            cr[x] += (int)((add[x] >> 16) & 0xFF) - (int)((rem[x] >> 16) & 0xFF);
+            cg[x] += (int)((add[x] >> 8) & 0xFF) - (int)((rem[x] >> 8) & 0xFF);
+            cb[x] += (int)(add[x] & 0xFF) - (int)(rem[x] & 0xFF);
+        }
+    }
+    kfree(cr); kfree(cg); kfree(cb);
+    kfree(tmp);
+}
+
+static void draw_blurred_background(void) {
+    if (!is_vbe || fb_width == 0 || fb_height == 0) return;
+    if (!wp_scaled) draw_background();   // ensure the sharp copy exists
+    if (!wp_scaled) return;
+    if (!wp_blurred || wp_blur_w != fb_width || wp_blur_h != fb_height) {
+        if (wp_blurred) kfree(wp_blurred);
+        wp_blurred = (uint32_t*)kmalloc(fb_width * fb_height * 4);
+        if (!wp_blurred) return;
+        wp_blur_w = fb_width; wp_blur_h = fb_height;
+        build_blur();
+    }
+    memcpy(back_buffer, wp_blurred, fb_width * fb_height * 4);
 }
 
 // ---- Bottom-center release string (both screens) ----
@@ -155,10 +253,31 @@ static void draw_footer(void) {
     const char* fr = "  SMP  MECTOVFS  1024x768";
     while (*fr) footer[fl++] = *fr++;
     footer[fl] = '\0';
-    draw_string_px((int)(fb_width - fl * 8) / 2, 716, footer, IC_DIM, 0xFFFFFFFF);
+    draw_string_px((int)(fb_width - fl * 8) / 2, (int)fb_height - 52, footer, IC_DIM, 0xFFFFFFFF);
 }
 
-// ---- Lock screen: one big clock, a date, nothing else ----
+// ---- Shared bottom-left corner: digital clock + full date ----
+// Pinned to the bottom-left corner on BOTH screens (lock + password entry),
+// so the eye always knows where the time lives. HH:MM:SS with blinking
+// colons; below it the full day, date, month and year.
+static void draw_clock_corner(void) {
+    int scale = 5;
+    int gy = (int)fb_height - 180;
+    int gx = 40;
+    // HH:MM:SS (8 glyphs), colons blink in sync
+    for (int i = 0; i < 8; i++) {
+        char ch = clock_str[i];
+        if (ch == ':') {
+            if ((get_ticks() / 500) & 1) gx += draw_char_scale(gx, gy, ':', scale, IC_AMBER_BRT);
+            else gx += 8 * scale; // blink: skip the colon
+        } else {
+            gx += draw_char_scale(gx, gy, ch, scale, IC_AMBER_BRT);
+        }
+    }
+    draw_str_scale(40, gy + 16 * scale + 12, date_str, 2, 3, IC_INK);
+}
+
+// ---- Lock screen: full wallpaper, clock + date bottom-left ----
 static void draw_lock_screen(void) {
     if (!is_vbe || fb_width == 0 || fb_height == 0) return;
     draw_background();
@@ -166,34 +285,12 @@ static void draw_lock_screen(void) {
 
     int cx = (int)fb_width / 2;
 
-    // Brand wordmark — small, top center, deliberate restraint
-    const char* wm = "MECTOV OS";
-    draw_str_scale(cx - str_advance(wm, 2, 6) / 2, 64, wm, 2, 6, IC_AMBER);
+    // No branding — the lock screen is wallpaper + clock + hint only.
+    // Hint: how to proceed (SPACE only)
+    const char* hint = "press SPACE to sign in";
+    draw_str_scale(cx - str_advance(hint, 1, 0) / 2, (int)fb_height - 108, hint, 1, 0, IC_DIM);
 
-    // Hero clock: HH:MM at 8x with a blinking colon
-    int scale = 8;
-    int gy = 248;
-    int gx = cx - (5 * 8 * scale) / 2;  // 5 glyphs, no spacing
-    // draw_char_scale returns the glyph ADVANCE (8*scale), so accumulate
-    // into gx with += — assigning (=) would reset gx to 64 and stack every
-    // following glyph on top of each other.
-    gx += draw_char_scale(gx, gy, clock_str[0], scale, IC_AMBER_BRT);
-    gx += draw_char_scale(gx, gy, clock_str[1], scale, IC_AMBER_BRT);
-    if ((get_ticks() / 500) & 1) {
-        gx += draw_char_scale(gx, gy, ':', scale, IC_AMBER_BRT);
-    } else {
-        gx += 8 * scale;  // blink: skip the colon, background shows through
-    }
-    gx += draw_char_scale(gx, gy, clock_str[3], scale, IC_AMBER_BRT);
-    draw_char_scale(gx, gy, clock_str[4], scale, IC_AMBER_BRT);
-
-    // Date line under the clock
-    draw_str_scale(cx - str_advance(date_str, 2, 4) / 2, 424, date_str, 2, 4, IC_INK);
-
-    // Hint: how to proceed
-    const char* hint = "click anywhere or press any key";
-    draw_str_scale(cx - str_advance(hint, 1, 0) / 2, 690, hint, 1, 0, IC_DIM);
-
+    draw_clock_corner();
     draw_footer();
 }
 
@@ -205,15 +302,16 @@ static void draw_lock_screen(void) {
 
 static void draw_login(int pass_len, int shake, int err, int cap_lock) {
     if (!is_vbe || fb_width == 0 || fb_height == 0) return;
-    draw_background();
+
+    // Soft blurred backdrop — the panel is now the only thing in focus. The
+    // clock + date and the version footer are deliberately NOT drawn here:
+    // while typing the password, every caption disappears so nothing competes
+    // with the input field.
+    draw_blurred_background();
     refresh_clock();
 
     int shake_off = shake ? ((shake & 1) ? 6 : -6) : 0;
     int cx = (int)fb_width / 2 + shake_off;
-
-    // Clock + date shrink to the top-left corner (Windows-style after dismiss)
-    draw_str_scale(32, 28, clock_str, 2, 4, IC_AMBER_BRT);
-    draw_str_scale(32, 58, date_str, 1, 2, IC_DIM);
 
     // User avatar above the panel: amber ring, warm fill, brand initial
     int avx = cx, avy = LOGIN_PY - 46;
@@ -274,8 +372,6 @@ static void draw_login(int pass_len, int shake, int err, int cap_lock) {
         draw_rect_border(bbx, bby, bbw, bbh, IC_AMBER);
         draw_string_px(bbx + (bbw - 8 * 8) / 2, bby + 7, "SIGN IN", IC_AMBER, 0xFFFFFFFF);
     }
-
-    draw_footer();
 }
 
 int gui_login() {
@@ -285,7 +381,9 @@ int gui_login() {
     sys_get_password(pass, (int)sizeof(pass));
     char input[32];
     int idx = 0, shake = 0, err = 0, cap_lock_active = 0;
-    int locked = 1;                 // Windows-style: dismiss with any key/click
+    int locked = 1;                 // lock screen shown; SPACE or click opens password entry
+    int panel_shown = 0;            // password screen actually rendered (blur ready)
+    int open_rtc_sec = -1;          // RTC second the panel first rendered (idle anchor)
     uint32_t click_ignore_until = 0; // debounce the dismissing click
 
     cursor_saved_x = -1;
@@ -302,7 +400,22 @@ int gui_login() {
             extern void mark_dirty(int, int, int, int);
             mark_dirty(0, 0, fb_width, fb_height);
             if (locked) draw_lock_screen();
-            else draw_login(idx, shake, err, cap_lock_active);
+            else {
+                draw_login(idx, shake, err, cap_lock_active);
+                // The 4s idle clock starts only once the password screen is
+                // actually on screen — building the blurred wallpaper can take
+                // a while on slow emulation, and that must not count as "idle".
+                // Anchored to the RTC (wall time): raw PIT ticks run faster
+                // than the wall clock under QEMU TCG, so a tick-counted window
+                // would collapse to ~2-3 s there.
+                if (!panel_shown) {
+                    panel_shown = 1;
+                    // Anchor to the NEXT whole second: the RTC value truncates
+                    // the sub-second fraction, so anchoring to the current
+                    // second would shrink the window to as little as ~3 s.
+                    open_rtc_sec = (rtc_read_time().second + 1) % 60;
+                }
+            }
             extern int cursor_draw_x, cursor_draw_y;
             cursor_draw_x = mouse_x;
             cursor_draw_y = mouse_y;
@@ -310,17 +423,42 @@ int gui_login() {
             if (shake > 0) shake--;
         }
 
+        // ---- 4-second idle revert: no typing on the password screen falls
+        // back to the lock screen (clock + date view). Measured in RTC seconds
+        // (wall time), so it means 4 real seconds on KVM, TCG and hardware
+        // alike — PIT ticks drift against the wall clock under TCG.
+        if (!locked && panel_shown && rtc_wall_sec >= 0) {
+            int elapsed = rtc_wall_sec - open_rtc_sec;
+            if (elapsed < 0) elapsed += 60;    // RTC seconds wrap at 60
+            if (elapsed > 30) elapsed -= 60;   // anchor can be 1 s "ahead" of the
+            if (elapsed >= 4) {                // stale cache across a minute roll
+                locked = 1;
+                panel_shown = 0;
+                open_rtc_sec = -1;
+                idx = 0; err = 0; shake = 0;
+                input[0] = '\0';
+            }
+        }
+
         // ---- State machine ----
         uint8_t kbd_mods = 0;
         uint8_t sc = k_get_scancode_ex(&kbd_mods);
         if (sc != 0 && sc < 0x80) {
             if (locked) {
-                // Any key dismisses the lock screen. The dismissing press is
-                // consumed so it never reaches the password field — only the
-                // *next* keypress types (Windows behavior).
+                // Only SPACE (0x39) opens the password entry — anything else
+                // is ignored so the lock screen stays clean. The dismissing
+                // press is consumed so it never reaches the password field;
+                // only the *next* keypress types (Windows behavior).
                 if (sc == 0x3A) cap_lock_active = !cap_lock_active;
-                locked = 0;
+                if (sc == 0x39) {
+                    locked = 0;
+                    panel_shown = 0;
+                    open_rtc_sec = -1;
+                }
             } else {
+                // Any key resets the idle window; re-anchor to the cached
+                // RTC second (refresh_clock keeps it fresh, ≤~0.5 s stale).
+                if (rtc_wall_sec >= 0) open_rtc_sec = rtc_wall_sec;
                 char c = scancode_to_char_mods(sc, kbd_mods);
                 if (sc == 0x3A) { cap_lock_active = !cap_lock_active; }
 
@@ -337,11 +475,13 @@ int gui_login() {
         }
 
         if (locked) {
-            // Any left click dismisses; ignore the held button for a beat so
-            // it cannot immediately trigger Sign In on the next screen.
+            // A left click also opens the password entry; ignore the held
+            // button for a beat so it cannot immediately trigger Sign In.
             if ((mouse_btn & 1) && now >= click_ignore_until) {
                 click_ignore_until = now + 300;
                 locked = 0;
+                panel_shown = 0;
+                open_rtc_sec = -1;
             }
         } else {
             // Mouse click on Sign In button (same geometry as the render)

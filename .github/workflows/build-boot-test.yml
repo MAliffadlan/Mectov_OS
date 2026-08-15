@@ -66,6 +66,14 @@ jobs:
         run: |
           python3 scripts/boot_test.py --timeout 240
 
+      - name: Redesigned login screen regression (TCG)
+        run: |
+          # v38.30: full-bleed wallpaper (never cropped), digital clock +
+          # full date (day/date/month/year) pinned bottom-left, SPACE-only
+          # password entry, 4s idle fallback back to the clock view. Boots,
+          # screenshots the lock screen, then drives the whole gate flow.
+          python3 scripts/login_redesign_test.py --timeout 300
+
       - name: Fork + jobcontrol regressions (TCG)
         run: |
           python3 scripts/fork_test.py --timeout 240
