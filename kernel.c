@@ -399,7 +399,17 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             // reading it here turns "shift-7" into '7'. See keyboard.c.
             uint8_t kbd_mods = 0;
             uint8_t sc = k_get_scancode_ex(&kbd_mods);
-            if (sc != 0) {
+            // Windowed DOOM (v38.29): while the DOOM window holds focus, every
+            // raw scancode — press AND release — goes straight to DOOM's key
+            // queue. The normal character path below only forwards press
+            // scancodes and deliberately drops releases, which would leave
+            // DOOM's keys stuck down. Legacy fullscreen DOOM never reaches
+            // here: it sets doom_fullscreen, which skips this whole block.
+            extern int doom_window_has_focus(void);
+            if (sc != 0 && doom_window_has_focus()) {
+                extern void doom_handle_scancode(uint8_t);
+                doom_handle_scancode(sc);
+            } else if (sc != 0) {
                 // F12 = break into the in-kernel GDB stub (see gdb_stub.c)
                 if (sc == 0x58) {
                     extern void gdb_stub_break(void);

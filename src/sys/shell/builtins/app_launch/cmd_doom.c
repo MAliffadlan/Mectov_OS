@@ -12,6 +12,12 @@ void cmd_doom(void) {
         doom_sound_enabled = (strstr_custom(cmd_b, "-sound") >= 0
                               && strstr_custom(cmd_b, "-nosound") < 0) ? 1 : 0;
         if (!doom_sound_enabled) write_serial_string("[DOOM] sound off (use 'doom -sound' to enable)\n");
+        // v38.29: windowed by default — DOOM renders into a WM window like
+        // any other desktop app. `doom -fullscreen` keeps the legacy
+        // framebuffer grab (heartbeat overlay + hidden cursor).
+        extern int doom_windowed;
+        doom_windowed = (strstr_custom(cmd_b, "-fullscreen") < 0) ? 1 : 0;
+        if (doom_windowed) write_serial_string("[DOOM] windowed mode (use 'doom -fullscreen' for fullscreen)\n");
         print("Starting DOOM...\n", 0x0C);
         extern void doom_start(void);
         doom_start();

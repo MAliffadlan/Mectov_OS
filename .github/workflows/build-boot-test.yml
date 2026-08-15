@@ -110,6 +110,15 @@ jobs:
           # demo, and a deliberate #UD that the kernel must contain.
           python3 scripts/app_smoke_test.py --timeout 360
 
+      - name: Windowed DOOM smoke test (TCG)
+        run: |
+          # v38.29: `doom` now renders into a WM window like any desktop app
+          # instead of grabbing the whole framebuffer. One boot: launch the
+          # Terminal, run `doom`, and assert a DOOM window opens, the game
+          # loop enters, and [DOOM] tick lines prove frames are being
+          # produced (composited by the WM) without crashing the OS.
+          python3 scripts/doom_test.py --timeout 480
+
       - name: File-backed mmap regression (TCG)
         run: |
           python3 scripts/mmapfile_test.py --timeout 240

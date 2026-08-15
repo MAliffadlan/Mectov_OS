@@ -257,7 +257,7 @@ void I_Quit (void)
         entry = entry->next;
     }
 
-    extern int doom_running;
+    extern volatile int doom_running;
     doom_running = 0;
 }
 

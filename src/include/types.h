@@ -6,7 +6,12 @@ typedef unsigned short uint16_t;
 typedef unsigned int   uint32_t;
 typedef unsigned long long uint64_t;
 
-typedef char  int8_t;
+/* int8_t must be `signed char`, not plain `char`: the C standard treats
+ * them as distinct types, and doom_libc.h (compiled into the same image)
+ * typedefs int8_t as signed char — a kernel header that does the opposite
+ * makes doom/… TUs that include both fail to compile. Identical on i386,
+ * where plain char is signed anyway. */
+typedef signed char int8_t;
 typedef short int16_t;
 typedef int   int32_t;
 typedef long long int64_t;

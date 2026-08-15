@@ -19,10 +19,13 @@ LDFLAGS = -m elf_i386 -T linker.ld
 ASFLAGS = -f elf32
 
 # DOOM compile flags: redirect standard headers to our mini libc
+# v38.29: windowed DOOM — DG_ScreenBuffer is a 2x upscale of the 320x200
+# internal screen (640x400) and gets scaled into a WM window by the
+# compositor. (Was 1024x768 when DOOM owned the whole framebuffer.)
 DOOM_CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -MMD -MP \
               -isystem doom/include_override -Idoom \
               -fno-builtin \
-              -DDOOMGENERIC_RESX=1024 -DDOOMGENERIC_RESY=768 \
+              -DDOOMGENERIC_RESX=640 -DDOOMGENERIC_RESY=400 \
               -DFEATURE_SOUND \
               -w
 
