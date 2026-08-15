@@ -244,6 +244,40 @@ static void draw_blurred_background(void) {
     memcpy(back_buffer, wp_blurred, fb_width * fb_height * 4);
 }
 
+// ---- Screen transition: cross-fade between the lock and password screens ----
+// Opening the panel (or the idle revert closing it) cross-fades the two full
+// screens over ~0.5 s. Because the two screens differ only in wallpaper blur
+// + captions + panel, a plain lerp between them is simultaneously a blur
+// animation (sharp -> blurred), a caption fade and a panel fade — exactly the
+// "fade/blur transition" in both directions. prev_frame holds a snapshot of
+// the screen we are leaving; the blend is in-place into back_buffer (each
+// output pixel only reads its own source pixels). Fixed-point t in 0..256
+// (the kernel has no floats).
+static uint32_t* prev_frame = NULL;
+
+static int snapshot_prev(void) {
+    if (!prev_frame) {
+        prev_frame = (uint32_t*)kmalloc(fb_width * fb_height * 4);
+        if (!prev_frame) return 0;   // OOM: caller falls back to an instant switch
+    }
+    memcpy(prev_frame, back_buffer, fb_width * fb_height * 4);
+    return 1;
+}
+
+static void blend_transition(int t) {
+    uint32_t n = fb_width * fb_height;
+    uint32_t inv = 256 - t;
+    uint32_t* dst = back_buffer;
+    const uint32_t* src = prev_frame;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t a = src[i], b = dst[i];
+        uint32_t r = (((a >> 16) & 0xFF) * inv + ((b >> 16) & 0xFF) * t) >> 8;
+        uint32_t g = (((a >> 8) & 0xFF) * inv + ((b >> 8) & 0xFF) * t) >> 8;
+        uint32_t bl = ((a & 0xFF) * inv + (b & 0xFF) * t) >> 8;
+        dst[i] = (r << 16) | (g << 8) | bl;
+    }
+}
+
 // ---- Bottom-center release string (both screens) ----
 static void draw_footer(void) {
     char footer[48];
@@ -299,6 +333,10 @@ static void draw_lock_screen(void) {
 #define LOGIN_PW  380
 #define LOGIN_PH  178
 #define LOGIN_PY  ((int)(fb_height - LOGIN_PH) / 2 + 56)
+
+// Screen-transition animation. Fixed-point progress 0..256; +10 per draw
+// frame (~60 fps) gives ~26 frames ≈ 0.45 s of guest time per direction.
+#define TRANS_STEP 10
 
 static void draw_login(int pass_len, int shake, int err, int cap_lock) {
     if (!is_vbe || fb_width == 0 || fb_height == 0) return;
@@ -381,9 +419,12 @@ int gui_login() {
     sys_get_password(pass, (int)sizeof(pass));
     char input[32];
     int idx = 0, shake = 0, err = 0, cap_lock_active = 0;
-    int locked = 1;                 // lock screen shown; SPACE or click opens password entry
-    int panel_shown = 0;            // password screen actually rendered (blur ready)
+    int locked = 1;                 // destination screen: 1 = lock, 0 = password
+    int panel_shown = 0;            // password screen fully visible (blur ready, idle armed)
     int open_rtc_sec = -1;          // RTC second the panel first rendered (idle anchor)
+    int trans_active = 0;           // screen cross-fade in progress
+    int trans_open = 0;             // 1 = opening panel, 0 = closing back to lock
+    int trans_t = 0;                // fixed-point progress 0..256
     uint32_t click_ignore_until = 0; // debounce the dismissing click
 
     cursor_saved_x = -1;
@@ -399,8 +440,33 @@ int gui_login() {
             last_draw = now;
             extern void mark_dirty(int, int, int, int);
             mark_dirty(0, 0, fb_width, fb_height);
-            if (locked) draw_lock_screen();
-            else {
+            if (trans_active) {
+                // Render the destination screen, then cross-fade it over the
+                // snapshot of the screen we are leaving.
+                if (locked) draw_lock_screen();
+                else draw_login(idx, shake, err, cap_lock_active);
+                blend_transition(trans_t);
+                trans_t += TRANS_STEP;
+                if (trans_t >= 256) {
+                    trans_t = 256;
+                    trans_active = 0;
+                    if (!locked) {
+                        // Panel fully on screen: arm the 4s idle clock. Anchor
+                        // to the NEXT whole second (the RTC value truncates
+                        // the sub-second fraction, so anchoring to the current
+                        // second would shrink the window to as little as ~3 s).
+                        panel_shown = 1;
+                        open_rtc_sec = (rtc_read_time().second + 1) % 60;
+                    } else {
+                        // Close finished: reset the gate state for a fresh
+                        // password attempt.
+                        idx = 0; err = 0; shake = 0;
+                        input[0] = '\0';
+                    }
+                }
+            } else if (locked) {
+                draw_lock_screen();
+            } else {
                 draw_login(idx, shake, err, cap_lock_active);
                 // The 4s idle clock starts only once the password screen is
                 // actually on screen — building the blurred wallpaper can take
@@ -410,9 +476,6 @@ int gui_login() {
                 // would collapse to ~2-3 s there.
                 if (!panel_shown) {
                     panel_shown = 1;
-                    // Anchor to the NEXT whole second: the RTC value truncates
-                    // the sub-second fraction, so anchoring to the current
-                    // second would shrink the window to as little as ~3 s.
                     open_rtc_sec = (rtc_read_time().second + 1) % 60;
                 }
             }
@@ -424,9 +487,10 @@ int gui_login() {
         }
 
         // ---- 4-second idle revert: no typing on the password screen falls
-        // back to the lock screen (clock + date view). Measured in RTC seconds
-        // (wall time), so it means 4 real seconds on KVM, TCG and hardware
-        // alike — PIT ticks drift against the wall clock under TCG.
+        // back to the lock screen (clock + date view), through the close
+        // cross-fade. Measured in RTC seconds (wall time), so it means 4 real
+        // seconds on KVM, TCG and hardware alike — PIT ticks drift against
+        // the wall clock under TCG.
         if (!locked && panel_shown && rtc_wall_sec >= 0) {
             int elapsed = rtc_wall_sec - open_rtc_sec;
             if (elapsed < 0) elapsed += 60;    // RTC seconds wrap at 60
@@ -435,8 +499,10 @@ int gui_login() {
                 locked = 1;
                 panel_shown = 0;
                 open_rtc_sec = -1;
-                idx = 0; err = 0; shake = 0;
-                input[0] = '\0';
+                if (snapshot_prev()) {
+                    trans_active = 1; trans_open = 0; trans_t = 0;
+                }
+                // (if the snapshot failed, the switch is simply instant)
             }
         }
 
@@ -444,7 +510,16 @@ int gui_login() {
         uint8_t kbd_mods = 0;
         uint8_t sc = k_get_scancode_ex(&kbd_mods);
         if (sc != 0 && sc < 0x80) {
-            if (locked) {
+            if (trans_active && !trans_open) {
+                // Fading back to the lock screen — the user came back. Cancel
+                // the close, return to the panel and restart the idle clock;
+                // this key is consumed (it is the "wake" key, like the
+                // dismissing SPACE).
+                trans_active = 0;
+                locked = 0;
+                panel_shown = 1;
+                open_rtc_sec = (rtc_read_time().second + 1) % 60;
+            } else if (locked) {
                 // Only SPACE (0x39) opens the password entry — anything else
                 // is ignored so the lock screen stays clean. The dismissing
                 // press is consumed so it never reaches the password field;
@@ -454,6 +529,9 @@ int gui_login() {
                     locked = 0;
                     panel_shown = 0;
                     open_rtc_sec = -1;
+                    if (snapshot_prev()) {
+                        trans_active = 1; trans_open = 1; trans_t = 0;
+                    }
                 }
             } else {
                 // Any key resets the idle window; re-anchor to the cached
@@ -474,7 +552,17 @@ int gui_login() {
             }
         }
 
-        if (locked) {
+        if (trans_active && !trans_open) {
+            // Same wake logic as the key path: a click during the close fade
+            // cancels it and brings the panel back.
+            if ((mouse_btn & 1) && now >= click_ignore_until) {
+                click_ignore_until = now + 300;
+                trans_active = 0;
+                locked = 0;
+                panel_shown = 1;
+                open_rtc_sec = (rtc_read_time().second + 1) % 60;
+            }
+        } else if (locked) {
             // A left click also opens the password entry; ignore the held
             // button for a beat so it cannot immediately trigger Sign In.
             if ((mouse_btn & 1) && now >= click_ignore_until) {
@@ -482,6 +570,9 @@ int gui_login() {
                 locked = 0;
                 panel_shown = 0;
                 open_rtc_sec = -1;
+                if (snapshot_prev()) {
+                    trans_active = 1; trans_open = 1; trans_t = 0;
+                }
             }
         } else {
             // Mouse click on Sign In button (same geometry as the render)

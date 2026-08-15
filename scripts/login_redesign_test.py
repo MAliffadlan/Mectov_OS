@@ -220,7 +220,35 @@ def main():
         print("[OK] SPACE opened the password panel")
         print("[OK] password panel stays on screen")
 
-        # ---- 3b. Password screen: clock + footer gone, wallpaper blurred
+        # ---- 3b. The open fade/blur transition must settle before the
+        # content checks: mid-fade the background is only half blurred and
+        # the clock is still fading out. Re-dump until the wallpaper
+        # sharpness drops below the blur bar (and the panel is still up).
+        # (Lock-screen sharpness, measured on the dump1 wallpaper, is the
+        # reference for the blur bar.)
+        sharp = mean_neighbor_diff(px, w, 60, 40, 460, 220)
+        settled = False
+        for _ in range(20):
+            time.sleep(0.4)
+            dump3s = "/tmp/mectov_login_settle.ppm"
+            screendump(dump3s, wait=0.15)
+            w3s, h3s, px3s = load_ppm(dump3s)
+            r, g, b = px_at(px3s, w3s, w3s // 2, 440)
+            if not (abs(r - 0x16) < 12 and abs(g - 0x13) < 12
+                    and abs(b - 0x0F) < 12):
+                print("[FAIL] password panel disappeared before the fade settled")
+                return 1
+            soft = mean_neighbor_diff(px3s, w3s, 60, 40, 460, 220)
+            if soft < sharp * 0.70:
+                settled = True
+                w3, h3, px3 = w3s, h3s, px3s   # content checks use this frame
+                break
+        if not settled:
+            print("[FAIL] blurred background never settled (fade stuck?)")
+            return 1
+        print("[OK] fade/blur transition settled")
+
+        # ---- 3c. Password screen: clock + footer gone, wallpaper blurred
         # Clock region (bottom-left) must no longer hold amber glyphs.
         amber_gone = True
         for y in range(h3 - 165, h3 - 105, 4):
@@ -254,8 +282,8 @@ def main():
         # A 5-tap box blur typically cuts the mean horizontal neighbor-diff to
         # ~45-60% of the sharp copy (the wallpaper is dark and smooth there,
         # so the reduction is modest); without blur the ratio is ~100%. The
-        # 70% bar cleanly separates the two.
-        sharp = mean_neighbor_diff(px, w, 60, 40, 460, 220)
+        # 70% bar cleanly separates the two. (soft is recomputed here on the
+        # settled dump for the diagnostic line.)
         soft = mean_neighbor_diff(px3, w3, 60, 40, 460, 220)
         print(f"[i] wallpaper sharpness (mean neighbor diff): lock={sharp:.2f}, "
               f"password={soft:.2f} (ratio {soft/sharp:.2f})")
@@ -265,28 +293,42 @@ def main():
             print("[FAIL] wallpaper does not look blurred (needs < 70% of lock sharpness)")
             return 1
 
-        # ---- 4. Idle ~4s reverts to the lock screen (blur cache is freed view,
-        # lock screen returns to the sharp wallpaper + clock)
-        time.sleep(5)  # > 4s without any key
-        dump4 = "/tmp/mectov_login_revert.ppm"
-        screendump(dump4)
-        w4, h4, px4 = load_ppm(dump4)
-        r, g, b = px_at(px4, w4, w4 // 2, 440)
-        panel = (abs(r - 0x16) < 12 and abs(g - 0x13) < 12 and abs(b - 0x0F) < 12)
-        if panel:
+        # ---- 4. Idle ~4s reverts to the lock screen through the close
+        # cross-fade (the panel fades out while the clock fades back in, so
+        # retry through the animation instead of checking one frame).
+        time.sleep(5)  # > 4s without any key: the close transition starts
+        panel_gone = False
+        for _ in range(24):
+            dump4 = "/tmp/mectov_login_revert.ppm"
+            screendump(dump4, wait=0.15)
+            w4, h4, px4 = load_ppm(dump4)
+            r, g, b = px_at(px4, w4, w4 // 2, 440)
+            if not (abs(r - 0x16) < 12 and abs(g - 0x13) < 12
+                    and abs(b - 0x0F) < 12):
+                panel_gone = True
+                break
+            time.sleep(0.5)
+        if not panel_gone:
             print("[FAIL] password panel still visible after 4s idle")
             return 1
         print("[OK] 4s idle reverted to lock screen")
-        # ...and the clock is back at the bottom-left corner.
+        # ...and the clock fades back in at the bottom-left corner.
         amber_back = False
-        for y in range(h4 - 165, h4 - 105, 4):
-            for x in range(50, 300, 4):
-                r, g, b = px_at(px4, w4, x, y)
-                if r > 160 and g > 120 and b < 130:
-                    amber_back = True
+        for _ in range(20):
+            dump4b = "/tmp/mectov_login_clockback.ppm"
+            screendump(dump4b, wait=0.15)
+            w4b, h4b, px4b = load_ppm(dump4b)
+            for y in range(h4b - 165, h4b - 105, 4):
+                for x in range(50, 300, 4):
+                    r, g, b = px_at(px4b, w4b, x, y)
+                    if r > 160 and g > 120 and b < 130:
+                        amber_back = True
+                        break
+                if amber_back:
                     break
             if amber_back:
                 break
+            time.sleep(0.5)
         print("[OK] clock returned after idle revert" if amber_back
               else "[FAIL] clock missing after idle revert")
         if not amber_back:
