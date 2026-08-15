@@ -76,6 +76,7 @@ def main():
         "-display", "none",
         "-serial", f"file:{SERIAL_LOG}",
         "-net", "none",
+        "-snapshot",   # never write the drive images (a run.sh instance may hold them)
         "-drive", f"file={args.disk},format=raw,index=0,media=disk",
         "-drive", f"file={args.ext2},format=raw,index=1,media=disk",
         "-monitor", f"unix:{MON_SOCK},server,nowait",

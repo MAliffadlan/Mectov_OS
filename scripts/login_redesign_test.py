@@ -129,6 +129,7 @@ def main():
         "-display", "none",
         "-serial", f"file:{SERIAL_LOG}",
         "-net", "none",
+        "-snapshot",   # never write the drive images (a run.sh instance may hold them)
         "-drive", f"file={args.disk},format=raw,index=0,media=disk",
         "-drive", f"file={args.ext2},format=raw,index=1,media=disk",
         "-monitor", f"unix:{MON_SOCK},server,nowait",
@@ -174,6 +175,17 @@ def main():
               else "[FAIL] no amber clock glyphs at bottom-left")
         if not amber_found:
             return 1
+        # The lock screen is deliberately bare: no "press SPACE to sign in"
+        # hint, no "v38.xx SMP MECTOVFS 1024x768" footer (both used IC_DIM
+        # 0x8A8172, bottom-center). Both bands must be free of that dim text
+        # (the bottom-left date uses bright off-white, never matches).
+        dim_text = (count_dim_text(px, w, h - 112, h - 88, w // 2, 220) +
+                    count_dim_text(px, w, h - 60, h - 36, w // 2, 220))
+        print(f"[i] lock-screen dim text pixels (hint+footer bands): {dim_text}")
+        if dim_text > 40:
+            print("[FAIL] lock screen still shows hint/footer text")
+            return 1
+        print("[OK] lock screen is bare (no hint, no footer)")
 
         # ---- 2. Non-SPACE key must NOT open the password entry
         mon_cmd("sendkey a")
@@ -264,19 +276,9 @@ def main():
         if not amber_gone:
             return 1
 
-        # Version footer (dim gray, centered at h-52) must also be gone.
-        fy0, fy1 = h - 60, h - 36   # footer glyph band
-        cx_ = w // 2
-        foot_lock = count_dim_text(px, w, fy0, fy1, cx_, 140)
-        foot_pw = count_dim_text(px3, w3, fy0, fy1, cx_, 140)
-        print(f"[i] footer dim-text pixels: lock={foot_lock}, password={foot_pw}")
-        if foot_lock > 20 and foot_pw < foot_lock // 4:
-            print("[OK] version footer hidden on password screen")
-        elif foot_lock <= 20:
-            print("[i] footer baseline too weak to assert (skipped)")
-        else:
-            print("[FAIL] footer still visible on password screen")
-            return 1
+        # (The version footer was removed from the lock screen entirely in
+        # v38.33, and the password screen never drew one — the "lock screen
+        # is bare" check above covers it.)
 
         # Blur: sharpness in a wallpaper-only region (top-left) must drop a lot.
         # A 5-tap box blur typically cuts the mean horizontal neighbor-diff to

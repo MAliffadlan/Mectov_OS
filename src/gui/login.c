@@ -79,13 +79,6 @@ static int draw_str_scale(int px, int py, const char* s, int scale, int ls, uint
     return cx - px;
 }
 
-// Advance width of a string (same metrics as draw_str_scale), for centering.
-static int str_advance(const char* s, int scale, int ls) {
-    int w = 0;
-    for (; *s; s++) w += (*s == ' ') ? (4 * scale + ls) : (8 * scale + ls);
-    return w;
-}
-
 // ---- Live clock + date ----
 // The CMOS read itself is gated: rtc_read_time() busy-waits on the UIP flag
 // (up to 10ms), so reading it every 16ms frame would stall frames whenever
@@ -278,18 +271,6 @@ static void blend_transition(int t) {
     }
 }
 
-// ---- Bottom-center release string (both screens) ----
-static void draw_footer(void) {
-    char footer[48];
-    int fl = 0;
-    const char* fv = "v"; while (*fv) footer[fl++] = *fv++;
-    const char* ov = OS_VERSION; while (*ov) footer[fl++] = *ov++;
-    const char* fr = "  SMP  MECTOVFS  1024x768";
-    while (*fr) footer[fl++] = *fr++;
-    footer[fl] = '\0';
-    draw_string_px((int)(fb_width - fl * 8) / 2, (int)fb_height - 52, footer, IC_DIM, 0xFFFFFFFF);
-}
-
 // ---- Shared bottom-left corner: digital clock + full date ----
 // Pinned to the bottom-left corner on BOTH screens (lock + password entry),
 // so the eye always knows where the time lives. HH:MM:SS with blinking
@@ -312,20 +293,14 @@ static void draw_clock_corner(void) {
 }
 
 // ---- Lock screen: full wallpaper, clock + date bottom-left ----
+// Deliberately bare: no branding, no hint, no version footer — just the
+// wallpaper and the live clock. SPACE (or a click) still opens the panel.
 static void draw_lock_screen(void) {
     if (!is_vbe || fb_width == 0 || fb_height == 0) return;
     draw_background();
     refresh_clock();
 
-    int cx = (int)fb_width / 2;
-
-    // No branding — the lock screen is wallpaper + clock + hint only.
-    // Hint: how to proceed (SPACE only)
-    const char* hint = "press SPACE to sign in";
-    draw_str_scale(cx - str_advance(hint, 1, 0) / 2, (int)fb_height - 108, hint, 1, 0, IC_DIM);
-
     draw_clock_corner();
-    draw_footer();
 }
 
 // ---- Password entry screen ----
