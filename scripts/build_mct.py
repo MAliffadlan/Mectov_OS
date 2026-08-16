@@ -35,8 +35,12 @@ SECTIONS {
     # -fno-stack-protector: don't require libc's stack check
     # -fno-asynchronous-unwind-tables: prevent eh_frame generation
     # -fno-pie -fno-pic: prevent GOT/PLT generation which breaks flat binaries
+    # MCT_CFLAGS_EXTRA (env): appended flags for apps that need more than the
+    # soft-float baseline — e.g. fputest enables SSE for its inline asm
+    # (with -mno-sse the compiler rejects %%xmm register names outright).
+    extra_flags = os.environ.get("MCT_CFLAGS_EXTRA", "").split()
     try:
-        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic", "-static", "-O0", "-g", "-msoft-float", "-mno-80387", "-mno-sse", "-mno-mmx", "-I.", "-c", c_file, "-o", o_file], check=True)
+        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic", "-static", "-O0", "-g", "-msoft-float", "-mno-80387", "-mno-sse", "-mno-mmx", "-I.", "-c", c_file, "-o", o_file] + extra_flags, check=True)
     except subprocess.CalledProcessError:
         print("[!] Compilation failed!")
         return

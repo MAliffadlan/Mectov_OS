@@ -23,6 +23,7 @@ int task_get_cid(void);
 // Signal numbers (POSIX subset). SIGKILL and SIGSTOP cannot be caught or
 // ignored; SIGCONT resumes a stopped task.
 #define SIGINT   2
+#define SIGFPE   8    // raised by #XM/#DE-class math faults (v38.41)
 #define SIGKILL  9
 #define SIGUSR1  10
 #define SIGSEGV  11

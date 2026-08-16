@@ -71,6 +71,34 @@ static void overflow_handler(registers_t* regs) {
     write_serial_string("[INT4] Overflow (ignored)\n");
 }
 
+// #NM (vector 7, device not available): the eager FPU scheme (fpu.c,
+// v38.41) never sets CR0.TS, so this trap means FPU state got out of sync
+// somewhere. Clear TS, log, and continue rather than fault-looping.
+static void nm_handler(registers_t* regs) {
+    __asm__ __volatile__("clts");
+    write_serial_string("[FPU] unexpected #NM (TS was set, cleared), EIP=");
+    write_serial_hex(regs->eip);
+    write_serial_string("\n");
+}
+
+// #XM (vector 19, SIMD floating-point exception): an unmasked SSE
+// exception from Ring 3. Route it through the signal framework like any
+// other synchronous fault — an installed SIGFPE handler runs, the default
+// action terminates. Kernel-mode #XM is a kernel bug (the kernel core
+// never emits SIMD instructions): dump and halt.
+static void xm_handler(registers_t* regs) {
+    if ((regs->cs & 3) == 3) {
+        extern int task_fault_signal(int sig, void* frame);
+        task_fault_signal(SIGFPE, regs);
+        return;
+    }
+    write_serial_string("\n[KERNEL PANIC] SIMD exception (#XM) in kernel mode, EIP=");
+    write_serial_hex(regs->eip);
+    write_serial_string("\n");
+    panic_finish();
+    for (;;) { __asm__ __volatile__("hlt"); }
+}
+
 // Atomic-line helpers for the exception path. Every line is built into a
 // local buffer and emitted with ONE write_serial_try() call: locked when the
 // lock is free (no interleaving with other CPUs), raw when it is not (the
@@ -182,6 +210,12 @@ void idt_init() {
 
     // Register Overflow handler (Exception 4) — just ignore and return
     register_interrupt_handler(4, overflow_handler);
+
+    // FPU exception routing (v38.41): #NM as a belt-and-braces safety net
+    // for the eager fxsave scheduler, #XM as a synchronous SIGFPE for
+    // Ring 3 SSE code.
+    register_interrupt_handler(7, nm_handler);
+    register_interrupt_handler(19, xm_handler);
 
     // NMI (vector 2): during a panic dump this snapshots the core's registers
     // and parks (see panic.c); otherwise it returns so GDB/machine-check keep

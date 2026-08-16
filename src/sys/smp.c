@@ -20,6 +20,13 @@ void ap_main(void) {
     
     // 1. Initialize per-core GDT
     init_gdt();
+
+    // 1b. Per-core FPU enable (v38.41): CR4.OSFXSR is per-CPU and NOT
+    //     inherited from the BSP, so every AP must set up its own FPU
+    //     before the scheduler can fxsave/fxrstor on this core. No task
+    //     runs here yet, so rebuilding the clean template is safe.
+    extern void fpu_init_cpu(void);
+    fpu_init_cpu();
     
     // 2. Load IDT
     idt_load_ap();

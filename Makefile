@@ -7,12 +7,13 @@ CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g -msoft-float -mno-8
 # MAX_WINDOWS in wm.h) rebuilds every object that includes it. Without this,
 # touching a header left stale .o files and the change silently never
 # reached the binary.
-# -msoft-float: the kernel core never touches the x87/SSE FPU, so no FPU
-# state exists to leak between tasks on context switch (there is no
-# fxsave/fxrstor in the scheduler). GCC only emits soft-float libgcc calls
-# where float arithmetic actually appears, and src/ + kernel.c have none.
-# Doom (DOOM_CFLAGS) keeps real x87 because it is the ONLY FPU user — a
-# single owner means its state can never be clobbered by another task.
+# -msoft-float: the kernel core never emits x87/SSE instructions of its
+# own — all float math in src/ + kernel.c goes through soft-float libgcc
+# calls. Ring 3 apps and DOOM (which runs inside the shell's task) DO use
+# the real FPU; since v38.41 the scheduler eagerly swaps the full
+# x87+MMX+SSE image on every context switch (fxsave/fxrstor in fpu.c +
+# schedule()), so multiple FPU users can be preempted against each other
+# safely.
 # -g keeps DWARF debug info in myos.bin so GDB can resolve kernel symbols
 # (break kernel_main, bt, list, etc.) when debugging via the in-kernel stub.
 LDFLAGS = -m elf_i386 -T linker.ld
@@ -66,6 +67,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/notepad_mct.o \
        $(OBJ_DIR)/flappy_mct.o \
        $(OBJ_DIR)/forkdemo_mct.o \
+       $(OBJ_DIR)/fputest_mct.o \
        $(OBJ_DIR)/execdemo_mct.o \
        $(OBJ_DIR)/execchild_mct.o \
        $(OBJ_DIR)/tcpserver_mct.o \
@@ -190,6 +192,9 @@ mplayer.mct: apps/mplayer.c $(MCT_LIBC_H)
 
 forkdemo.mct: apps/forkdemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/forkdemo.c forkdemo.mct
+
+fputest.mct: apps/fputest.c $(MCT_LIBC_H)
+	MCT_CFLAGS_EXTRA="-msse -msse2" python3 scripts/build_mct.py apps/fputest.c fputest.mct
 
 execdemo.mct: apps/execdemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/execdemo.c execdemo.mct
@@ -318,6 +323,9 @@ $(OBJ_DIR)/mplayer_mct.o: mplayer.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/forkdemo_mct.o: forkdemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 forkdemo.mct $(OBJ_DIR)/forkdemo_mct.o
+
+$(OBJ_DIR)/fputest_mct.o: fputest.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 fputest.mct $(OBJ_DIR)/fputest_mct.o
 
 $(OBJ_DIR)/execdemo_mct.o: execdemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 execdemo.mct $(OBJ_DIR)/execdemo_mct.o

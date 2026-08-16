@@ -160,6 +160,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] idt\n");
     idt_init();
 
+    // Eager FPU/SSE context switching (v38.41): enable the FPU on the BSP
+    // and build the clean-state template BEFORE tasking — the scheduler
+    // fxsave/fxrstor's on every switch. APs do the same in ap_main().
+    write_serial_string("[K] fpu\n");
+    extern void fpu_init_cpu(void);
+    fpu_init_cpu();
+
     write_serial_string("[K] gdbstub\n");
     extern void gdb_stub_init(void);
     gdb_stub_init();

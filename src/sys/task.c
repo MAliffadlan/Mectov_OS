@@ -13,6 +13,7 @@
 #include "../include/loader.h" // loader_image_t for exec()
 #include "../include/vfs.h"   // fs_nodes[] + offset reads for file-backed mmap
 #include "../include/gdt.h"   // tls_gs_sel()/gdt_tls_update() (v38.24 TLS)
+#include "../include/fpu.h"   // eager fxsave/fxrstor context switching (v38.41)
 
 static spinlock_t task_lock = SPINLOCK_INIT;
 // TLS_MAX_TASKS in gdt.h must cover every task slot: keep in sync with
@@ -104,6 +105,11 @@ typedef struct {
                                 // are kept in sync via gdt_tls_update().
     // === NEW: Resource limits (v38.28) ===
     rlimit_t rlimits[RLIM_NLIMITS];  // soft/hard per RLIMIT_* resource
+    // === NEW: FPU/SSE context (v38.41) ===
+    // 16-byte-aligned (fxsave #GP's on misaligned operands); schedule()
+    // fxsave's the outgoing task's live state into it and fxrstor's the
+    // incoming task's on every context switch.
+    uint8_t  fxsave[512] __attribute__((aligned(16)));
 } task_t;
 
 static task_t tasks[MAX_TASKS];
@@ -458,6 +464,7 @@ static int create_idle_task(int cpu) {
     tasks[tid].is_idle = 1;
     tasks[tid].rq_cpu = -1;
     rlimit_set_defaults(tid);
+    fpu_task_init(tasks[tid].fxsave);
 
     // Ring 0 interrupt frame -> ap_idle() (same layout as create_task).
     uint32_t* stack = (uint32_t*)kstack_top(tid);
@@ -510,6 +517,7 @@ void init_tasking() {
         for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
         for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[i].mmap_regions[j].base = 0;
         rlimit_set_defaults(i);
+        fpu_task_init(tasks[i].fxsave);
     }
     tasks[0].state = TASK_STATE_RUNNING;
     tasks[0].ring = 0;
@@ -626,7 +634,7 @@ int create_task(void (*entry)()) {
             for (int j = 0; j < SIG_MAX; j++) { tasks[i].signal_handlers[j] = NULL; tasks[i].sig_masks[j] = 0; tasks[i].sig_flags[j] = 0; }
             task_set_launch_arg(i, "sys_kernel");
             for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
-            
+            fpu_task_init(tasks[i].fxsave);
             uint32_t* stack = (uint32_t*)kstack_top(i);
             
             // Ring 0 interrupt frame
@@ -943,6 +951,19 @@ uint32_t schedule(uint32_t esp) {
         }
     }
 
+    // Eager FPU switch (v38.41): swap the full x87+MMX+SSE image between
+    // the outgoing and incoming tasks. IF=0 under task_lock here, so no
+    // other context can observe the FPU mid-swap. `cur` still names the
+    // task this CPU entered with (current_task[cid] was overwritten
+    // above); if the final pick — possibly after a signal-kill repick —
+    // landed back on it, the hardware already holds its live state and
+    // the swap is skipped. fxsave does not disturb the hardware state, so
+    // the early-return paths above never need a matching restore.
+    if (next != cur) {
+        if (cur >= 0 && cur < MAX_TASKS) fpu_save(tasks[cur].fxsave);
+        fpu_restore(tasks[next].fxsave);
+    }
+
     uint32_t ret = tasks[next].esp;
     spin_unlock(&task_lock);
     return ret;
@@ -1147,6 +1168,7 @@ int thread_create_ex(void (*entry)(), int priority, uint32_t page_dir,
             tasks[i].zombie_since = 0;
             tasks[i].shm_bits = 0;
             mmap_free_dirty_bitmaps(i);  // reused slot: drop any stale bitmaps
+            fpu_task_init(tasks[i].fxsave);  // fresh task: clean FPU image
             for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[i].mmap_regions[j].base = 0;
             for (int j = 0; j < SIG_MAX; j++) tasks[i].signal_handlers[j] = NULL;
             // Inherit the caller's fd table (POSIX spawn semantics). The shell's
@@ -1640,6 +1662,11 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         // syscall frame. The parent is inside the fork syscall with IF=0
         // (interrupt gate), so the stack cannot contain nested IRQ frames.
         memcpy(&kstacks[i][KERNEL_STACK_GUARD], &kstacks[parent][KERNEL_STACK_GUARD], KERNEL_STACK_SIZE);
+        // POSIX: the child inherits the parent's FPU state as of the fork.
+        // The parent is current on this CPU with IF=0, so flush its live
+        // hardware state into its own image first, then copy it wholesale.
+        fpu_save(tasks[parent].fxsave);
+        memcpy(tasks[i].fxsave, tasks[parent].fxsave, sizeof(tasks[i].fxsave));
         // CRITICAL: locate the frame at the TOP of the kernel stack, not at
         // tasks[parent].esp. The fork syscall (int 0x80) always pushes its
         // registers_t frame at TSS.esp0 (= kernel stack top), and the parent
@@ -1922,6 +1949,12 @@ int task_exec(const char* path, const char* arg, void* frame) {
     if (tasks[tid].tls_base) { gdt_tls_clear(tid); tasks[tid].tls_base = 0; }
     fr->fs = 0x23;
     fr->gs = 0x23;
+
+    // Fresh program image -> fresh FPU state (POSIX: exec resets the FPU).
+    // This task keeps the CPU (the epilogue iret's straight into the new
+    // program), so swap the hardware state now, not at the next switch.
+    fpu_task_init(tasks[tid].fxsave);
+    fpu_restore(tasks[tid].fxsave);
 
     __asm__ volatile("sti");
 
