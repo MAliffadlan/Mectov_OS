@@ -96,6 +96,18 @@ jobs:
           # selection bar appears on hover.
           python3 scripts/taskbar_hover_test.py --timeout 300
 
+      - name: Start menu search-as-you-type regression (TCG)
+        run: |
+          # v38.40: while the Start menu is open, printable keys filter its
+          # 12 items (case-insensitive substring) instead of reaching the
+          # focused window, Backspace pops the query, Escape clears then
+          # closes, Enter launches the filtered item. The query renders in
+          # amber in the menu header. One boot: type "Snake" -> single row,
+          # Enter launches the game; "zzz" -> "No results", backspace x3
+          # restores all; "lock" -> the two items containing the substring
+          # (Clock + Lock); Escape clears then closes.
+          python3 scripts/startmenu_search_test.py --timeout 300
+
       - name: Fork + jobcontrol regressions (TCG)
         run: |
           python3 scripts/fork_test.py --timeout 240

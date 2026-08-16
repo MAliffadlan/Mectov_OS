@@ -309,6 +309,26 @@ def main():
             return 1
         print("[OK] start menu item highlights on hover")
 
+        # Move to item 0 WITHIN the menu (both rows above the taskbar): the
+        # bar must follow. Before v38.40 this glitched — taskbar_draw
+        # early-returned when the dirty rect stayed above the taskbar strip,
+        # so the highlight stayed stuck on the previous row.
+        item0_y = sm_y + 40 + 14
+        mon_cmd("mouse_move 0 -%d" % (item2_y - item0_y))
+        time.sleep(0.4)
+        screendump("/tmp/mectov_hover_sm2.ppm")
+        w4, h4, px4 = load_ppm("/tmp/mectov_hover_sm2.ppm")
+        a0 = count_amber(px4, w4, 3, item0_y - 14, 201, item0_y + 14)
+        a2b = count_amber(px4, w4, 3, item2_y - 14, 201, item2_y + 14)
+        print(f"[i] after in-menu move: bar0={a0} bar2={a2b}")
+        if a0 < 200:
+            print("[FAIL] bar did not follow the mouse to item 0 (stuck)")
+            return 1
+        if a2b > 100:
+            print("[FAIL] old bar position did not clear (stuck highlight)")
+            return 1
+        print("[OK] hover follows the mouse within the menu (no stuck bar)")
+
         time.sleep(1)
         if qemu.poll() is not None:
             print(f"[FAIL] QEMU exited early with code {qemu.returncode}")

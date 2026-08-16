@@ -18,6 +18,15 @@ static int hover_win_idx = -1;   // which window button is hovered
 static int hover_menu_idx = -1;  // which start menu item is hovered
 static int mouse_x_tmp = 0, mouse_y_tmp = 0;
 
+// Start menu search-as-you-type state (v38.40). The filter helper is defined
+// below with taskbar_handle_key; declared here so the hover tracker (above)
+// can consult the filtered list.
+static char sm_search[16];
+static int sm_search_len = 0;
+static int sm_filtered[START_MENU_ITEMS];
+static int sm_filtered_count = 0;
+static void sm_rebuild_filter(void);
+
 void taskbar_track_mouse(int mx, int my, int px, int py) {
     (void)px; (void)py;
     mouse_x_tmp = mx;
@@ -55,7 +64,8 @@ void taskbar_track_mouse(int mx, int my, int px, int py) {
             if (my >= sm_y + 36) {
                 int rel_y = my - (sm_y + 36);
                 int item = rel_y / 28;
-                if (item >= 0 && item < START_MENU_ITEMS) new_menu = item;
+                sm_rebuild_filter();
+                if (item >= 0 && item < sm_filtered_count) new_menu = item;
             }
         }
     }
@@ -162,6 +172,56 @@ void draw_app_icon(int ix, int iy, const char* title, int size) {
 int start_menu_open = 0;
 int calendar_open = 0;
 static int volume_popup_open = 0;
+
+// ---------- Start menu search-as-you-type (v38.40) ----------
+// Labels in menu order; draw, hover and click all key off the ORIGINAL
+// index, while the filtered list maps display rows to those indices.
+static const char* const sm_labels[START_MENU_ITEMS] = {
+    "Terminal", "Notepad", "File Explorer", "Mini Browser", "System Info",
+    "Clock", "PCI Manager", "Snake Game", "Task Manager",
+    "Lock", "Logout", "Power Off"
+};
+
+static void sm_rebuild_filter(void) {
+    sm_filtered_count = 0;
+    if (sm_search_len == 0) {
+        for (int i = 0; i < START_MENU_ITEMS; i++) sm_filtered[sm_filtered_count++] = i;
+        return;
+    }
+    for (int i = 0; i < START_MENU_ITEMS; i++) {
+        if (stristr(sm_labels[i], sm_search)) sm_filtered[sm_filtered_count++] = i;
+    }
+}
+
+static void handle_start_menu_click(int item); // forward decl
+
+// Keyboard while the Start menu is open: printable chars filter the items,
+// Backspace pops the query, Escape clears the query then closes the menu,
+// Enter launches the hovered (or first) filtered item.
+void taskbar_handle_key(int sc, char c) {
+    if (!start_menu_open) return;
+    if (sc == 0x01) { // Escape
+        if (sm_search_len > 0) sm_search_len = 0;
+        else start_menu_open = 0;
+    } else if (sc == 0x0E) { // Backspace
+        if (sm_search_len > 0) sm_search_len--;
+    } else if (sc == 0x1C && sm_filtered_count > 0 &&
+               (sm_search_len > 0 || hover_menu_idx >= 0)) { // Enter
+        int pick = (hover_menu_idx >= 0 && hover_menu_idx < sm_filtered_count)
+                       ? hover_menu_idx : 0;
+        handle_start_menu_click(sm_filtered[pick]);
+        return;
+    } else if (c >= ' ' && c <= '~') {
+        if (sm_search_len < (int)sizeof(sm_search) - 1) {
+            sm_search[sm_search_len++] = c;
+            sm_search[sm_search_len] = '\0';
+        }
+    }
+    sm_rebuild_filter();
+    extern volatile int needs_redraw;
+    needs_redraw = 1;
+}
+
 static int vol_icon_x_s = 0;  // saved for click handler
 static int vol_icon_ty_s = 0;
 static int prev_volume = 80;  // for mute toggle
@@ -216,7 +276,13 @@ void taskbar_draw() {
     // Check if the taskbar overlaps the active dirty rectangle.
     // If not, we don't need to redraw it because it is already correct in the back buffer!
     if (d_max_y < ty) {
-        return;
+        // Popups (Start menu / calendar / volume) extend ABOVE the taskbar
+        // strip. When one is open and the dirty rect reaches it, the popup
+        // must be repainted too — otherwise moving the mouse INSIDE the
+        // Start menu never updates the hover highlight (it stays stuck on
+        // the previous row). START_MENU_H is the tallest popup.
+        if (!start_menu_open && !calendar_open && !volume_popup_open) return;
+        if (d_max_y < ty - START_MENU_H) return;
     }
 
     // ---------- Read clock/date up front so the tray layout is exact ----------
@@ -434,36 +500,40 @@ void taskbar_draw() {
         draw_string_px(8, sm_y + 14, "M", RETRO_SELTXT, RETRO_SEL);
         // User name
         draw_string_px(38, sm_y + 10, "Mectov User", RETRO_TEXT, TB_BG);
-        draw_string_px(38, sm_y + 22, "Professional Edition", TB_TEXT_DIM, TB_BG);
-        
-        // Menu items with icons (icon on left, label on right)
-        struct { const char* label; int len; uint32_t icon_bg; } items[] = {
-            {"Terminal", 8, 0x002D3748},
-            {"Notepad", 7, 0x00718096},
-            {"File Explorer", 13, 0x003182CE},
-            {"Mini Browser", 12, 0x00319795},
-            {"System Info", 11, 0x00E2E8F0},
-            {"Clock", 5, 0x00FFFFFF},
-            {"PCI Manager", 11, 0x00DD6B20},
-            {"Snake Game", 10, 0x0038A169},
-            {"Task Manager", 12, 0x00805AD5},
-            {"Lock", 4, 0x00000000},
-            {"Logout", 6, 0x00000000},
-            {"Power Off", 9, 0x00000000},
-        };
-        
+        // Second header line doubles as the live search query while typing
+        // (v38.40): "Search: <query>" in amber once a filter is active.
+        if (sm_search_len > 0) {
+            char sbuf[22];
+            int si = 0;
+            const char* pre = "Search: ";
+            while (*pre && si < 21) sbuf[si++] = *pre++;
+            for (int i = 0; i < sm_search_len && si < 21; i++) sbuf[si++] = sm_search[i];
+            sbuf[si] = '\0';
+            draw_string_px(38, sm_y + 22, sbuf, TB_ACTIVE, TB_BG);
+        } else {
+            draw_string_px(38, sm_y + 22, "Professional Edition", TB_TEXT_DIM, TB_BG);
+        }
+
+        // Menu items with icons — only the ones matching the search query.
+        // The hover index and click hit-test are positions in THIS filtered
+        // list; the original menu index is sm_filtered[n].
+        sm_rebuild_filter();
         int oy = sm_y + 40; // after header
-        for (int n = 0; n < START_MENU_ITEMS; n++) {
+        if (sm_filtered_count == 0) {
+            draw_string_px(sm_w / 2 - 4 * 8, oy + 8, "No results", TB_TEXT_DIM, TB_BG);
+        }
+        for (int n = 0; n < sm_filtered_count; n++) {
+            int orig = sm_filtered[n];
             int item_y = oy;
             int item_h = 28;
             int hovered = (hover_menu_idx == n);
             
-            // Selection: classic blue highlight with white text
+            // Selection: classic amber highlight with black text
             if (hovered) {
                 draw_rect(3, item_y, sm_w - 6, item_h - 2, RETRO_SEL);
             }
             
-            if (n == 11) {
+            if (orig == 11) {
                 // Power off: red accent
                 // Icon: power symbol
                 int ic_x = 10;
@@ -471,16 +541,16 @@ void taskbar_draw() {
                 fill_circle(ic_x + 8, ic_y + 7, 7, 0x00CC0000);
                 fill_circle(ic_x + 8, ic_y + 7, 5, hovered ? RETRO_SEL : TB_BG);
                 draw_rect(ic_x + 6, ic_y + 2, 4, 7, 0x00CC0000);
-                draw_string_px(ic_x + 18, item_y + 6, items[n].label,
+                draw_string_px(ic_x + 18, item_y + 6, sm_labels[orig],
                                hovered ? RETRO_SELTXT : 0x00CC0000,
                                hovered ? RETRO_SEL : TB_BG);
-            } else if (n == 10) {
+            } else if (orig == 10) {
                 // Logout: muted amber accent (was bright mustard)
                 int ic_x = 10;
-                draw_string_px(ic_x + 18, item_y + 6, items[n].label,
+                draw_string_px(ic_x + 18, item_y + 6, sm_labels[orig],
                                hovered ? RETRO_SELTXT : 0x00A0883C,
                                hovered ? RETRO_SEL : TB_BG);
-            } else if (n == 9) {
+            } else if (orig == 9) {
                 // Lock: padlock glyph (amber), normal highlight text
                 int ic_x = 10, ic_y = item_y + 5;
                 // body
@@ -493,15 +563,15 @@ void taskbar_draw() {
                 draw_rect(ic_x + 9, ic_y + 4, 2, 6, 0x00C9A227);
                 // shackle top
                 draw_rect(ic_x + 4, ic_y + 2, 8, 2, 0x00C9A227);
-                draw_string_px(ic_x + 20, item_y + 6, items[n].label,
+                draw_string_px(ic_x + 20, item_y + 6, sm_labels[orig],
                                hovered ? RETRO_SELTXT : RETRO_TEXT,
                                hovered ? RETRO_SEL : TB_BG);
             } else {
                 // Normal item with icon
                 int ic_x = 10;
                 int ic_y = item_y + 5;
-                draw_app_icon(ic_x, ic_y, items[n].label, 16);
-                draw_string_px(ic_x + 20, item_y + 6, items[n].label,
+                draw_app_icon(ic_x, ic_y, sm_labels[orig], 16);
+                draw_string_px(ic_x + 20, item_y + 6, sm_labels[orig],
                                hovered ? RETRO_SELTXT : RETRO_TEXT,
                                hovered ? RETRO_SEL : TB_BG);
             }
@@ -621,6 +691,8 @@ void taskbar_draw() {
 
 static void handle_start_menu_click(int item) {
     start_menu_open = 0;
+    sm_search_len = 0;
+    sm_rebuild_filter();
     switch (item) {
         case 0: open_terminal_app(); break;
         case 1: { extern int load_mct_app(const char*); load_mct_app("apps/notepad.mct"); } break;
@@ -664,8 +736,9 @@ void taskbar_handle_click(int mx, int my) {
             if (my >= sm_y + 36) {
                 int rel_y = my - (sm_y + 36);
                 int item = rel_y / 28;
-                if (item >= 0 && item < START_MENU_ITEMS) {
-                    handle_start_menu_click(item);
+                sm_rebuild_filter();
+                if (item >= 0 && item < sm_filtered_count) {
+                    handle_start_menu_click(sm_filtered[item]);
                     return;
                 }
             }
@@ -718,7 +791,10 @@ void taskbar_handle_click(int mx, int my) {
     // Start button hit test (4px padding, 88px wide)
     if (mx >= 4 && mx <= 4 + 88) {
         start_menu_open = !start_menu_open;
-        if (start_menu_open) { calendar_open = 0; volume_popup_open = 0; }
+        if (start_menu_open) {
+            calendar_open = 0; volume_popup_open = 0;
+            sm_search_len = 0; sm_rebuild_filter();
+        }
         return;
     }
 
