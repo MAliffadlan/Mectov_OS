@@ -22,51 +22,50 @@ void taskbar_track_mouse(int mx, int my, int px, int py) {
     (void)px; (void)py;
     mouse_x_tmp = mx;
     mouse_y_tmp = my;
-    
+
+    // Compute the desired hover state from scratch; if it differs from the
+    // currently painted state, request a redraw. Without this, hover only
+    // appeared when some OTHER event (e.g. the 1s clock tick) happened to
+    // trigger a full redraw — pure mouse moves just blit the back buffer.
+    int new_start = 0;
+    int new_win = -1;
+    int new_menu = -1;
+
     int ty = (int)fb_height - TASKBAR_H_PX;
-    if (my < ty) {
-        // Check if mouse is over start menu
-        if (start_menu_open) {
-            int sm_h = START_MENU_H, sm_w = 200;
-            int sm_y = ty - sm_h;
-            if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
-                if (my >= sm_y + 36) {
-                    int rel_y = my - (sm_y + 36);
-                    int item = rel_y / 28;
-                    if (item >= 0 && item < START_MENU_ITEMS) {
-                        hover_menu_idx = item;
-                        return;
-                    }
-                }
+    if (my >= ty) {
+        // Over the taskbar itself.
+        if (mx >= 4 && mx <= 4 + 88) new_start = 1;
+
+        // Window buttons (same geometry as taskbar_draw).
+        int sep_x = 4 + 88 + 4;
+        int wx = sep_x + 4;
+        int tray_right = (int)fb_width - 248;
+        for (int i = 0; i < MAX_WINDOWS; i++) {
+            if (!wm_wins[i].visible) continue;
+            int btn_w = TASKBAR_BTN_W;
+            if (wx + btn_w + 2 > tray_right) break;
+            if (mx >= wx && mx < wx + btn_w) { new_win = i; break; }
+            wx += btn_w + 4;
+        }
+    } else if (start_menu_open) {
+        // Above the taskbar: hover over an open Start menu item.
+        int sm_h = START_MENU_H, sm_w = 200;
+        int sm_y = ty - sm_h;
+        if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
+            if (my >= sm_y + 36) {
+                int rel_y = my - (sm_y + 36);
+                int item = rel_y / 28;
+                if (item >= 0 && item < START_MENU_ITEMS) new_menu = item;
             }
         }
-        hover_menu_idx = -1;
-        return;
     }
-    
-    // Over taskbar
-    hover_start_x = 0;
-    hover_win_idx = -1;
-    hover_menu_idx = -1;
-    
-    // Check start button
-    if (mx >= 4 && mx <= 4 + 88) {
-        hover_start_x = 1;
-    }
-    
-    // Check window buttons
-    int sep_x = 4 + 88 + 4;
-    int wx = sep_x + 4;
-    int tray_right = (int)fb_width - 248; // buttons stop before tray panel
-    for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (!wm_wins[i].visible) continue;
-        int btn_w = TASKBAR_BTN_W; // fixed task button width
-        if (wx + btn_w + 2 > tray_right) break;
-        if (mx >= wx && mx < wx + btn_w) {
-            hover_win_idx = i;
-            break;
-        }
-        wx += btn_w + 4;
+
+    if (new_start != hover_start_x || new_win != hover_win_idx || new_menu != hover_menu_idx) {
+        hover_start_x = new_start;
+        hover_win_idx = new_win;
+        hover_menu_idx = new_menu;
+        extern volatile int needs_redraw;
+        needs_redraw = 1;
     }
 }
 
@@ -298,9 +297,11 @@ void taskbar_draw() {
         vga_bevel_raised(start_x, start_y, start_w, start_h);
     // Pressed content shifts 1px for the physical feel
     int start_txt_off = start_pressed ? 1 : 0;
-    // Plain "START" label (no logo) — centered in the button
+    // Plain "START" label (no logo) — centered in the button; amber on hover
+    // echoes the window-button hover state (and the Start menu selection).
+    uint32_t start_txt_col = (hover_start_x && !start_pressed) ? TB_ACTIVE : RETRO_TEXT;
     draw_string_px(start_x + (start_w - 5 * 8) / 2 + start_txt_off, start_y + 2 + start_txt_off,
-                   "START", RETRO_TEXT, TB_BG);
+                   "START", start_txt_col, TB_BG);
     
     // ---------- Separator (groove) ----------
     groove_v(sep_x, ty + 8, TASKBAR_H_PX - 16);
@@ -317,12 +318,15 @@ void taskbar_draw() {
         int focused = (wm_focused == wm_wins[i].id) && !wm_wins[i].minimized;
         
         // Classic buttons: inactive = raised, active (focused) = sunken/pressed.
+        // Hovered (but not pressed) buttons echo the amber selection accent
+        // from the Start menu so they read as clickable.
         if (focused)
             vga_bevel_sunken(wx, ty + 3, btn_w, TASKBAR_H_PX - 6);
         else
             vga_bevel_raised(wx, ty + 3, btn_w, TASKBAR_H_PX - 6);
         // Pressed content shifts 1px down/right for the physical feel
         int txt_off = focused ? 1 : 0;
+        uint32_t btn_txt = (hover_win_idx == i && !focused) ? TB_ACTIVE : RETRO_TEXT;
 
         // Icon (14x14 small) — vertically centered
         draw_app_icon(wx + 8 + txt_off, ty + 7 + txt_off, wm_wins[i].title, 14);
@@ -345,7 +349,7 @@ void taskbar_draw() {
             }
         }
         
-        draw_string_px(wx + 26 + txt_off, ty + 6 + txt_off, title_buf, RETRO_TEXT, TB_BG);
+        draw_string_px(wx + 26 + txt_off, ty + 6 + txt_off, title_buf, btn_txt, TB_BG);
         
         wx += btn_w + 4;
     }

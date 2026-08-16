@@ -312,6 +312,11 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                 if (!(btn & 1)) {
                     extern void wm_track_mouse(int, int);
                     wm_track_mouse(mx, my);
+                    // Taskbar hover (Start button + window buttons + Start
+                    // menu items) — was dead code before v38.39: this function
+                    // was never called, so buttons never highlighted.
+                    extern void taskbar_track_mouse(int, int, int, int);
+                    taskbar_track_mouse(mx, my, prev_mx, prev_my);
                 }
             }
 

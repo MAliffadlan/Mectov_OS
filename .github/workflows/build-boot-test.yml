@@ -84,6 +84,18 @@ jobs:
           # then lock again via Ctrl+Alt+L.
           python3 scripts/lock_test.py --timeout 480
 
+      - name: Taskbar window buttons + hover regression (TCG)
+        run: |
+          # v38.39: clicking a focused window's taskbar button minimizes it
+          # and clicking again restores it (pixel-compared), and the hover
+          # system is wired up — taskbar_track_mouse was dead code (never
+          # called) and hover changes never requested a redraw, so window
+          # buttons/START/Start-menu items never highlighted. Verifies the
+          # non-focused button turns amber on hover, the focused one stays
+          # plain, highlights clear on move-away, and the Start menu item
+          # selection bar appears on hover.
+          python3 scripts/taskbar_hover_test.py --timeout 300
+
       - name: Fork + jobcontrol regressions (TCG)
         run: |
           python3 scripts/fork_test.py --timeout 240
