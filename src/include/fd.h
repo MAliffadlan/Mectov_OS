@@ -5,14 +5,18 @@
 #include "syscall.h"  // stat_t
 
 #define MAX_FDS_PER_TASK 16
-#define MAX_GLOBAL_FDS   128
+// Global table (v38.44): 256 entries — socket-heavy apps (one fd per
+// accepted connection) plus pipes/files easily exceeded the old 128.
+#define MAX_GLOBAL_FDS   256
 
 typedef enum {
     FD_TYPE_NONE,
     FD_TYPE_FILE,
     FD_TYPE_PIPE_READ,
     FD_TYPE_PIPE_WRITE,
-    FD_TYPE_DEV
+    FD_TYPE_DEV,
+    FD_TYPE_SOCKET      // v38.43: POSIX socket API — sock_conn is the conn id
+                        // (TCP) or -1 (UDP, which uses the single global bind)
 } fd_type_t;
 
 typedef struct {
@@ -20,8 +24,9 @@ typedef struct {
     fd_type_t type;
     int vfs_node;       // For files and devices
     int pipe_id;        // For pipes
+    int sock_conn;      // For sockets: TCP conn id (flags stores SOCK_*)
     int offset;         // Read/write offset
-    int flags;          // Open flags (O_APPEND)
+    int flags;          // Open flags (O_APPEND) / socket type (SOCK_*)
     int ref_count;
 } global_fd_t;
 
@@ -47,5 +52,12 @@ int do_sys_select(int nfds, uint32_t* readfds, uint32_t* writefds,
                   uint32_t* exceptfds, int timeout_ms);
 void task_close_all_fds(int tid);
 void task_rewire_fds(int tid, int in_fd, int out_fd);
+
+// POSIX socket descriptors (v38.43) — see fd.c for the storage layout.
+int sock_socket(int type);            // -> local fd
+int sock_bind(int lfd, uint16_t port);
+int sock_get_conn(int lfd);           // TCP conn id or -1
+int sock_set_conn(int lfd, int conn);
+int sock_accept(int lfd);             // -> fd of one completed inbound conn
 
 #endif

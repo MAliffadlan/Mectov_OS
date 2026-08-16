@@ -4,6 +4,7 @@
 #include "../include/mem.h"
 #include "../include/spinlock.h"
 #include "../include/timer.h"
+#include "../include/net.h"
 
 // fd_lock protects the shared descriptor tables (global_fds[], pipes[]) from
 // concurrent syscalls on different cores. Process context (syscall, main
@@ -146,6 +147,16 @@ int do_sys_read(int fd, char* buf, int size) {
         }
         fd_lock_release();
         return read_bytes;
+    } else if (global_fds[gfd].type == FD_TYPE_SOCKET) {
+        // Sockets (v38.43). TCP: poll-style recv (0 = nothing yet, -1 = EOF).
+        // UDP: the single global binding. Plain read() works on both so
+        // shell-style apps can treat a socket like any fd.
+        fd_lock_release();   // net layer is self-synchronised (cli/sti poll)
+        if (global_fds[gfd].flags == 2 /* SOCK_DGRAM */) {
+            return net_udp_recv((uint8_t*)buf, (uint32_t)size);
+        }
+        int r = net_tcp_recv(global_fds[gfd].sock_conn, (uint8_t*)buf, (uint32_t)size);
+        return (r == -2) ? -1 : r;
     }
     fd_lock_release();
     return -1;
@@ -215,6 +226,18 @@ int do_sys_write(int fd, const char* buf, int size) {
         }
         fd_lock_release();
         return written;
+    } else if (global_fds[gfd].type == FD_TYPE_SOCKET) {
+        // Sockets (v38.43): stream write sends on the connection (it must
+        // be ESTABLISHED; net_tcp_send reports -1 otherwise). UDP needs a
+        // destination — use sendto/write with a bound peer via SYS_SENDTO.
+        if (global_fds[gfd].flags == 2 /* SOCK_DGRAM */) {
+            fd_lock_release();
+            return -1;
+        }
+        int conn = global_fds[gfd].sock_conn;
+        fd_lock_release();
+        int r = net_tcp_send(conn, (uint8_t*)buf, (uint32_t)size);
+        return (r == -2) ? -1 : r;
     }
     fd_lock_release();
     return -1;
@@ -310,6 +333,29 @@ static int fd_poll_events(int tid, int fd) {
             int p = global_fds[gfd].pipe_id;
             int next = (pipes[p].write_pos + 1) % PIPE_BUF_SIZE;
             if (next != pipes[p].read_pos) rev |= POLLOUT; // space left
+            break;
+        }
+        case FD_TYPE_SOCKET: {
+            int conn = global_fds[gfd].sock_conn;
+            if (global_fds[gfd].flags == 2 /* SOCK_DGRAM */) {
+                // UDP: readable whenever a datagram is buffered host-side
+                // (net_udp_recv drains one per call); always writable.
+                rev = POLLIN | POLLOUT;
+            } else if (conn >= 0 && net_tcp_state(conn) == TCP_LISTEN) {
+                // Listening socket: readable when accept() would return a
+                // completed child (POSIX POLLIN-on-listener semantics).
+                if (net_tcp_accept_pending(conn)) rev |= POLLIN;
+            } else if (conn >= 0) {
+                int st = net_tcp_state(conn);
+                if (st == TCP_ESTABLISHED) {
+                    rev = POLLOUT;
+                    if (net_tcp_rx_pending(conn)) rev |= POLLIN;
+                } else if (st == TCP_CLOSED) {
+                    rev = POLLHUP;   // reset / never connected
+                }
+                // ESTABLISHED with EOF drained also reports POLLIN|POLLHUP
+                if (st == TCP_ESTABLISHED && net_tcp_eof(conn)) rev |= POLLIN | POLLHUP;
+            }
             break;
         }
         default:
@@ -435,6 +481,10 @@ static void fd_release_global(int gfd) {
             if (!read_open) pipes[p].in_use = 0;
         } else if (global_fds[gfd].type == FD_TYPE_PIPE_READ && pipes[p].closed_write) {
             pipes[p].in_use = 0; // free pipe completely
+        } else if (global_fds[gfd].type == FD_TYPE_SOCKET &&
+                   global_fds[gfd].sock_conn >= 0) {
+            // Last reference to a socket: tear the connection down too.
+            net_tcp_close(global_fds[gfd].sock_conn);
         }
         global_fds[gfd].in_use = 0;
     }
@@ -537,6 +587,98 @@ void task_close_all_fds(int tid) {
         if (gfd < MAX_GLOBAL_FDS && global_fds[gfd].in_use) fd_release_global(gfd);
         fd_lock_release();
     }
+}
+
+// ============================================================
+// POSIX socket descriptors (v38.43)
+// ============================================================
+// socket()/accept() allocate ordinary file descriptors whose global entry
+// is FD_TYPE_SOCKET. flags stores SOCK_STREAM/SOCK_DGRAM, offset stashes
+// the bind() port until listen()/connect() consume it, and sock_conn holds
+// the TCP conn id (-1 until then; UDP sockets keep -1 forever — the UDP
+// path uses the stack's single global binding, documented limitation).
+
+// socket(type): allocate an unattached socket descriptor. Returns the local
+// fd or -1 (no global slot / NOFILE limit reached).
+int sock_socket(int type) {
+    fd_lock_acquire();
+    int gfd = alloc_global_fd();
+    if (gfd < 0) { fd_lock_release(); return -1; }
+    global_fds[gfd].type = FD_TYPE_SOCKET;
+    global_fds[gfd].flags = type;
+    global_fds[gfd].sock_conn = -1;
+    global_fds[gfd].offset = 0;   // bind() port goes here
+    global_fds[gfd].vfs_node = -1;
+    int lfd = task_map_fd(gfd);
+    if (lfd < 0) { global_fds[gfd].in_use = 0; fd_lock_release(); return -1; }
+    fd_lock_release();
+    return lfd;
+}
+
+// Record the local port for a later listen()/connect(). UDP also arms the
+// stack's global binding. Returns 0 or -1 (bad fd / not a socket).
+int sock_bind(int lfd, uint16_t port) {
+    int tid = get_current_task();
+    if (tid < 0) return -1;
+    fd_lock_acquire();
+    int gfd = task_get_fd(tid, lfd);
+    if (gfd < 0 || !global_fds[gfd].in_use ||
+        global_fds[gfd].type != FD_TYPE_SOCKET) { fd_lock_release(); return -1; }
+    global_fds[gfd].offset = (int)port;
+    int is_dgram = (global_fds[gfd].flags == 2 /* SOCK_DGRAM */);
+    fd_lock_release();
+    if (is_dgram) net_udp_bind(port);
+    return 0;
+}
+
+// Get the attached conn id of a socket fd: >= 0 the conn id, -1 a valid
+// socket with nothing attached yet, -2 not a socket fd at all.
+int sock_get_conn(int lfd) {
+    int tid = get_current_task();
+    if (tid < 0) return -2;
+    fd_lock_acquire();
+    int gfd = task_get_fd(tid, lfd);
+    if (gfd < 0 || !global_fds[gfd].in_use ||
+        global_fds[gfd].type != FD_TYPE_SOCKET) { fd_lock_release(); return -2; }
+    int conn = global_fds[gfd].sock_conn;
+    fd_lock_release();
+    return conn;
+}
+
+int sock_set_conn(int lfd, int conn) {
+    int tid = get_current_task();
+    if (tid < 0) return -1;
+    fd_lock_acquire();
+    int gfd = task_get_fd(tid, lfd);
+    if (gfd < 0 || !global_fds[gfd].in_use ||
+        global_fds[gfd].type != FD_TYPE_SOCKET) { fd_lock_release(); return -1; }
+    global_fds[gfd].sock_conn = conn;
+    fd_lock_release();
+    return 0;
+}
+
+// accept(listener_fd): attach one completed inbound connection to a fresh
+// socket fd. Returns the new local fd or -1 (nothing pending / no slot).
+int sock_accept(int lfd) {
+    int conn = sock_get_conn(lfd);
+    if (conn < 0) return -1;
+    int child = net_tcp_accept(conn);
+    if (child < 0) return -1;
+
+    int tid = get_current_task();
+    if (tid < 0) return -1;
+    fd_lock_acquire();
+    int gfd = alloc_global_fd();
+    if (gfd < 0) { fd_lock_release(); return -1; }
+    global_fds[gfd].type = FD_TYPE_SOCKET;
+    global_fds[gfd].flags = SOCK_STREAM;
+    global_fds[gfd].sock_conn = child;
+    global_fds[gfd].vfs_node = -1;
+    global_fds[gfd].offset = 0;
+    int nfd = task_map_fd(gfd);
+    if (nfd < 0) { global_fds[gfd].in_use = 0; fd_lock_release(); return -1; }
+    fd_lock_release();
+    return nfd;
 }
 
 int do_sys_pipe(int pipefd[2]) {

@@ -81,7 +81,7 @@ enum {
     TCP_SYN_RCVD  // SYN received, SYN-ACK sent, waiting for the final ACK
 };
 
-#define TCP_MAX_CONNS 8
+#define TCP_MAX_CONNS 16
 #define TCP_CONN_BUF  16384
 
 typedef struct {
@@ -102,21 +102,38 @@ typedef struct {
     int      tx_pending_len;
     int  retrans_count;
     uint32_t conn_start_tick;    // when the connect attempt began
+    // Server accept model (v38.43): a LISTEN slot never mutates into a
+    // connection. An inbound SYN spawns a NEW slot whose listen_parent is
+    // the listener's id; net_tcp_accept hands ESTABLISHED children to the
+    // app (one call per child) and marks them accepted. -1 = not a child.
+    int  listen_parent;
+    int  accepted;
 } tcp_conn_t;
 
 // Returns the connection id (0..TCP_MAX_CONNS-1) or -1 if no free slot.
 int  net_tcp_connect(uint8_t* target_ip, uint16_t port);
-// Passive open: listen for one inbound connection on `port`. The slot
-// transitions LISTEN -> SYN_RCVD (on SYN) -> ESTABLISHED (on final ACK);
-// net_tcp_recv/send then work exactly like a client connection. Returns the
-// connection id or -1. Only one pending listener per slot (8 slots total).
+// Passive open: reserve a slot and wait for inbound connections on `port`.
+// The slot STAYS in TCP_LISTEN; each inbound SYN spawns a fresh child slot
+// (net_handle_tcp) that completes the handshake on its own. Server apps
+// poll net_tcp_accept(listener) for established children, POSIX-style.
 int  net_tcp_listen(uint16_t port);
+// Server accept (v38.43): return the id of one ESTABLISHED child spawned by
+// this listener and mark it handed-out, or -1 when no completed child is
+// pending. SYN_RCVD children still completing the handshake are skipped —
+// the free-slot count IS the backlog.
+int  net_tcp_accept(int listener_id);
+// Non-destructive check used by poll(): 1 when accept() would return a conn.
+int  net_tcp_accept_pending(int listener_id);
 int  net_tcp_send(int id, uint8_t* payload, uint32_t len);
 // Returns bytes copied, 0 = nothing new, -1 = connection closed/EOF, -2 = bad id.
 int  net_tcp_recv(int id, uint8_t* out, uint32_t max_len);
 void net_tcp_close(int id);
 // State of one connection by id (TCP_CLOSED if the id is invalid).
 int  net_tcp_state(int id);
+// Poll helpers for the fd layer (v38.43): 1 when unread bytes are buffered /
+// when the peer closed its write side (EOF after drain).
+int  net_tcp_rx_pending(int id);
+int  net_tcp_eof(int id);
 // State of the most recently created connection (for SYS_NET_STATUS compat).
 int  net_tcp_latest_state(void);
 

@@ -419,6 +419,7 @@ int net_tcp_connect(uint8_t* target_ip, uint16_t port) {
     c->in_use = 1;
     c->state = TCP_CLOSED;
     c->local_port = tcp_port_counter++;
+    c->listen_parent = -1;   // not a listener-spawned child
     if (tcp_port_counter > 60000) tcp_port_counter = 49152; // dynamic range
     tcp_latest = id;
 
@@ -458,6 +459,8 @@ int net_tcp_listen(uint16_t port) {
     c->eof = 0;
     c->unacked_len = 0;
     c->retrans_count = 0;
+    c->listen_parent = -1;
+    c->accepted = 0;
     tcp_latest = id;
 
     write_serial_string("[TCP] listening on port=");
@@ -466,6 +469,33 @@ int net_tcp_listen(uint16_t port) {
     write_serial_hex(id);
     write_serial_string("\n");
     return id;
+}
+
+// Server accept (v38.43): hand out one ESTABLISHED child of this listener.
+int net_tcp_accept(int listener_id) {
+    if (listener_id < 0 || listener_id >= TCP_MAX_CONNS) return -1;
+    for (int i = 0; i < TCP_MAX_CONNS; i++) {
+        if (tcp_conns[i].in_use && !tcp_conns[i].accepted &&
+            tcp_conns[i].listen_parent == listener_id &&
+            tcp_conns[i].state == TCP_ESTABLISHED) {
+            tcp_conns[i].accepted = 1;
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Non-destructive poll variant (POLLIN on a listening socket).
+int net_tcp_accept_pending(int listener_id) {
+    if (listener_id < 0 || listener_id >= TCP_MAX_CONNS) return 0;
+    for (int i = 0; i < TCP_MAX_CONNS; i++) {
+        if (tcp_conns[i].in_use && !tcp_conns[i].accepted &&
+            tcp_conns[i].listen_parent == listener_id &&
+            tcp_conns[i].state == TCP_ESTABLISHED) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 // Send app data over an established connection. Tracks the segment for
@@ -533,6 +563,16 @@ void net_tcp_close(int id) {
 int net_tcp_state(int id) {
     if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return TCP_CLOSED;
     return tcp_conns[id].state;
+}
+
+// Poll helpers for the fd layer (v38.43).
+int net_tcp_rx_pending(int id) {
+    if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return 0;
+    return tcp_conns[id].rx_len > 0;
+}
+int net_tcp_eof(int id) {
+    if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return 0;
+    return tcp_conns[id].eof;
 }
 
 // State of the most recently created connection (SYS_NET_STATUS compat).
@@ -935,33 +975,52 @@ static void net_handle_tcp(ip_header_t* ip, uint8_t* tcp_data, uint32_t tcp_len)
     }
     if (!c) {
         // No established connection matched. This is where a server accepts:
-        // a SYN aimed at a TCP_LISTEN slot starts the passive handshake.
+        // a SYN aimed at a TCP_LISTEN slot spawns a NEW child slot that runs
+        // the passive handshake on its own — the listener itself stays in
+        // TCP_LISTEN and keeps accepting (POSIX backlog model, v38.43).
         if (tcp->flags & TCP_SYN) {
+            int listener = -1;
             for (int i = 0; i < TCP_MAX_CONNS; i++) {
                 if (tcp_conns[i].in_use && tcp_conns[i].state == TCP_LISTEN &&
                     tcp_conns[i].local_port == dst_port) {
-                    c = &tcp_conns[i];
-                    write_serial_string("[TCP] SYN on listening port ");
-                    write_serial_hex(dst_port);
-                    write_serial_string(" -> SYN_RCVD (conn ");
-                    write_serial_hex(i);
-                    write_serial_string(")\n");
+                    listener = i;
                     break;
                 }
             }
+            if (listener >= 0) {
+                int child = -1;
+                for (int i = 0; i < TCP_MAX_CONNS; i++) {
+                    if (!tcp_conns[i].in_use) { child = i; break; }
+                }
+                if (child < 0) {
+                    // Backlog exhausted (no free slot): drop the SYN. The
+                    // peer retransmits and gets in once a slot frees up.
+                    write_serial_string("[TCP] listen backlog full, SYN dropped\n");
+                    return;
+                }
+                tcp_conn_t* ch = &tcp_conns[child];
+                memset(ch, 0, sizeof(tcp_conn_t));
+                ch->in_use = 1;
+                ch->state = TCP_SYN_RCVD;
+                ch->local_port = tcp_conns[listener].local_port;
+                memcpy(ch->remote_ip, ip->src_ip, 4);
+                ch->remote_port = src_port;
+                ch->seq = get_ticks() * 54321 + dst_port;  // our ISN
+                ch->ack = ntohl(tcp->seq) + 1;             // ACK the SYN
+                ch->listen_parent = listener;
+                ch->accepted = 0;
+                ch->conn_start_tick = get_ticks();
+                write_serial_string("[TCP] SYN on listening port ");
+                write_serial_hex(dst_port);
+                write_serial_string(" -> child conn ");
+                write_serial_hex(child);
+                write_serial_string("\n");
+                net_send_tcp_segment(ch, TCP_SYN | TCP_ACK, 0, 0);
+                ch->seq++;   // SYN consumes one sequence number
+                return;
+            }
         }
-        if (!c) {
-            write_serial_string("[TCP] segment for unknown connection, dropped\n");
-            return;
-        }
-        // Fill in the peer from this SYN.
-        memcpy(c->remote_ip, ip->src_ip, 4);
-        c->remote_port = src_port;
-        c->ack = ntohl(tcp->seq) + 1;   // ACK the SYN
-        c->state = TCP_SYN_RCVD;
-        c->conn_start_tick = get_ticks();
-        net_send_tcp_segment(c, TCP_SYN | TCP_ACK, 0, 0);
-        c->seq++;   // SYN consumes one sequence number
+        write_serial_string("[TCP] segment for unknown connection, dropped\n");
         return;
     }
 

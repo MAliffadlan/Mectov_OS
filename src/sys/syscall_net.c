@@ -163,6 +163,126 @@ uint32_t handle_syscall_net(registers_t* regs) {
             break;
         }
 
+        // ============================================================
+        // POSIX socket API (v38.43) — fd-integrated
+        // ============================================================
+        // ----- SYS_SOCKET (108) -----
+        case SYS_SOCKET: {
+            int domain = (int)regs->ebx;
+            int type = (int)regs->ecx;
+            if (domain != AF_INET ||
+                (type != SOCK_STREAM && type != SOCK_DGRAM)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            regs->eax = (uint32_t)sock_socket(type);
+            break;
+        }
+
+        // ----- SYS_BIND (109) -----
+        case SYS_BIND: {
+            sockaddr_t* sa = (sockaddr_t*)regs->ecx;
+            if (!validate_user_ptr(sa, sizeof(sockaddr_t))) { regs->eax = (uint32_t)-1; break; }
+            regs->eax = (uint32_t)sock_bind((int)regs->ebx, sa->port);
+            break;
+        }
+
+        // ----- SYS_LISTEN (110): backlog is the free-slot count -----
+        case SYS_LISTEN: {
+            int lfd = (int)regs->ebx;
+            // The bind() port rides in the descriptor until consumed here.
+            int port = 0;
+            {
+                int tid = get_current_task();
+                extern global_fd_t global_fds[];
+                if (tid < 0) { regs->eax = (uint32_t)-1; break; }
+                int gfd = task_get_fd(tid, lfd);
+                if (gfd < 0 || !global_fds[gfd].in_use ||
+                    global_fds[gfd].type != FD_TYPE_SOCKET) { regs->eax = (uint32_t)-1; break; }
+                port = global_fds[gfd].offset;
+            }
+            if (port <= 0) { regs->eax = (uint32_t)-1; break; }
+            int conn = net_tcp_listen((uint16_t)port);
+            if (conn < 0) { regs->eax = (uint32_t)-1; break; }
+            sock_set_conn(lfd, conn);
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_ACCEPT (111): non-blocking; poll(fd) for readiness -----
+        case SYS_ACCEPT: {
+            regs->eax = (uint32_t)sock_accept((int)regs->ebx);
+            break;
+        }
+
+        // ----- SYS_CONNECT (112): starts the handshake; poll for POLLOUT -----
+        case SYS_CONNECT: {
+            sockaddr_t* sa = (sockaddr_t*)regs->ecx;
+            if (!validate_user_ptr(sa, sizeof(sockaddr_t))) { regs->eax = (uint32_t)-1; break; }
+            int conn = net_tcp_connect(sa->ip, sa->port);
+            if (conn < 0) { regs->eax = (uint32_t)-1; break; }
+            if (sock_set_conn((int)regs->ebx, conn) < 0) {
+                net_tcp_close(conn);
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_SENDTO (113): stream ignores the address -----
+        case SYS_SENDTO: {
+            int lfd = (int)regs->ebx;
+            uint8_t* buf = (uint8_t*)regs->ecx;
+            int len = (int)regs->edx;
+            sockaddr_t* sa = (sockaddr_t*)regs->esi;
+            if (len <= 0 || !validate_user_ptr(buf, len)) { regs->eax = (uint32_t)-1; break; }
+            if (sa && !validate_user_ptr(sa, sizeof(sockaddr_t))) { regs->eax = (uint32_t)-1; break; }
+            if (len > 1400) len = 1400;
+
+            int conn = sock_get_conn(lfd);
+            if (conn == -2) { regs->eax = (uint32_t)-1; break; }   // not a socket fd
+            if (sa && sa->port != 0) {
+                // Destination given: UDP-style datagram send.
+                regs->eax = (uint32_t)net_udp_send(sa->ip, sa->port, buf, (uint32_t)len);
+                break;
+            }
+            if (conn < 0) { regs->eax = (uint32_t)-1; break; }
+            regs->eax = (uint32_t)net_tcp_send(conn, buf, (uint32_t)len);
+            break;
+        }
+
+        // ----- SYS_RECVFROM (114): fills the optional source address -----
+        case SYS_RECVFROM: {
+            int lfd = (int)regs->ebx;
+            uint8_t* buf = (uint8_t*)regs->ecx;
+            int max_len = (int)regs->edx;
+            uint8_t* src_ip = (uint8_t*)regs->esi;
+            uint16_t* src_port = (uint16_t*)regs->edi;
+            if (max_len <= 0 || !validate_user_ptr(buf, max_len)) { regs->eax = (uint32_t)-1; break; }
+            if (src_ip && !validate_user_ptr(src_ip, 4)) { regs->eax = (uint32_t)-1; break; }
+            if (src_port && !validate_user_ptr(src_port, 2)) { regs->eax = (uint32_t)-1; break; }
+
+            int conn = sock_get_conn(lfd);
+            if (conn == -2) { regs->eax = (uint32_t)-1; break; }   // not a socket fd
+            if (conn < 0) {
+                // UDP: one datagram per call; report the last peer.
+                int n = net_udp_recv(buf, (uint32_t)max_len);
+                if (n >= 0) {
+                    uint8_t peer_ip[4];
+                    uint16_t peer_port = 0;
+                    net_udp_peer(peer_ip, &peer_port);
+                    if (src_ip) for (int i = 0; i < 4; i++) src_ip[i] = peer_ip[i];
+                    if (src_port) *src_port = peer_port;
+                }
+                regs->eax = (uint32_t)n;
+                break;
+            }
+            int r = net_tcp_recv(conn, buf, (uint32_t)max_len);
+            regs->eax = (uint32_t)((r == -2) ? -1 : r);
+            break;
+        }
+
     }
     return regs->eax;
 }

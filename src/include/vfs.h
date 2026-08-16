@@ -62,6 +62,13 @@ typedef struct {
 
 extern fs_node_t fs_nodes[MAX_NODES];
 
+// Reentrant irqsave VFS lock (owner (cpu,tid) + depth) and the subtree
+// dropper — shared with the runtime mount layer (vfs_mount.c, v38.42).
+// Ordering: task_lock > fd_lock > vfs_lock > ata_lock.
+void vfs_lock_acquire(void);
+void vfs_lock_release(void);
+void vfs_clear_children(int node);
+
 int get_current_dir(void);
 void set_current_dir(int dir);
 

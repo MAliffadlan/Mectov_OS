@@ -352,6 +352,8 @@ static void syscall_handler(registers_t* regs) {
         case SYS_FSTAT:
         case SYS_CHMOD:
         case SYS_CHOWN:
+        case SYS_MOUNT:
+        case SYS_UMOUNT:
             regs->eax = handle_syscall_vfs(regs);
             break;
 
@@ -375,6 +377,13 @@ static void syscall_handler(registers_t* regs) {
         case SYS_UDP_BIND:
         case SYS_UDP_SEND:
         case SYS_UDP_RECV:
+        case SYS_SOCKET:
+        case SYS_BIND:
+        case SYS_LISTEN:
+        case SYS_ACCEPT:
+        case SYS_CONNECT:
+        case SYS_SENDTO:
+        case SYS_RECVFROM:
             regs->eax = handle_syscall_net(regs);
             break;
 

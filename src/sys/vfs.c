@@ -16,6 +16,7 @@
 #include "../include/task.h"
 #include "../include/spinlock.h"
 #include "../include/pcache.h"
+#include "../include/mount.h"
 
 // ---- Reentrant irqsave lock (kernel locking audit v38.4) ----
 //
@@ -25,12 +26,16 @@
 // lock tracks owner (cpu,tid) + depth: a nested call on the same task is a
 // no-op. Process context only — nothing touches VFS from an IRQ. Ordering:
 // task_lock > fd_lock > vfs_lock > ata_lock.
+// Reentrant and irqsave; also used by the runtime mount layer (vfs_mount.c)
+// — declared in vfs.h. Public VFS functions call each other (e.g.
+// vfs_write_file -> vfs_get_node), so the lock tracks owner (cpu,tid) +
+// depth: a nested call on the same task is a no-op.
 static spinlock_t vfs_lock = SPINLOCK_INIT;
 static uint32_t vfs_eflags;
 static int vfs_lock_owner = -1;
 static int vfs_lock_depth = 0;
 
-static void vfs_lock_acquire(void) {
+void vfs_lock_acquire(void) {
     int tid = get_current_task();
     int key = (task_get_cid() << 16) | (tid & 0xFFFF);
     if (vfs_lock_owner == key) { vfs_lock_depth++; return; }
@@ -39,7 +44,7 @@ static void vfs_lock_acquire(void) {
     vfs_lock_depth = 1;
 }
 
-static void vfs_lock_release(void) {
+void vfs_lock_release(void) {
     if (vfs_lock_depth > 1) { vfs_lock_depth--; return; }
     vfs_lock_depth = 0;
     vfs_lock_owner = -1;
@@ -200,8 +205,8 @@ static int vfs_seed_bench_big(void) {
 // filesystem — used at mount time so a removable/external filesystem (FAT32)
 // is re-built from its real disk contents every boot instead of trusting
 // stale nodes persisted in the MECTOVFS node table. The mount point itself
-// is kept.
-static void vfs_clear_children(int node) {
+// is kept. Public for the runtime mount layer (vfs_mount.c).
+void vfs_clear_children(int node) {
     if (node < 0 || node >= MAX_NODES) return;
     int changed;
     do {
@@ -229,6 +234,7 @@ static void vfs_clear_children(int node) {
 void vfs_init() {
     write_serial_string("[VFS] init start\n");
     pcache_init();
+    mount_init();   // runtime mount table (v38.42); boot mounts register below
     vfs_seeding = 1;
     // Coba load dari disk
     if (vfs_load()) {
@@ -383,6 +389,11 @@ void vfs_init() {
         extern uint8_t _binary_forkdemo_mct_start[];
         extern uint8_t _binary_forkdemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/forkdemo.mct", (const char*)_binary_forkdemo_mct_start, _binary_forkdemo_mct_end - _binary_forkdemo_mct_start);
+
+        // FPU/SSE context-switch regression (v38.41)
+        extern uint8_t _binary_fputest_mct_start[];
+        extern uint8_t _binary_fputest_mct_end[];
+        changed += vfs_update_file_if_needed("apps/fputest.mct", (const char*)_binary_fputest_mct_start, _binary_fputest_mct_end - _binary_fputest_mct_start);
 
         // Exec demo (fork + exec + waitpid)
         extern uint8_t _binary_execdemo_mct_start[];
@@ -564,6 +575,7 @@ void vfs_init() {
                 // otherwise create/write hooks would pass inode 0.
                 fs_nodes[ext2_node].ext2_inode = 2;
                 ext2_populate_vfs(2, ext2_node); // Inode 2 is the root directory
+                mount_register(ext2_node, MOUNT_EXT2, 1, 2);
             }
         }
         
@@ -589,6 +601,7 @@ void vfs_init() {
                 vfs_clear_children(fat_node);
                 fs_nodes[fat_node].data_sector = (int)fat32_root_cluster();
                 fat32_populate_vfs(fat32_root_cluster(), fat_node);
+                mount_register(fat_node, MOUNT_FAT32, 3, fat32_root_cluster());
             }
         }
         
@@ -646,6 +659,12 @@ void vfs_init() {
     extern uint8_t _binary_forkdemo_mct_end[];
     vfs_create_file("apps/forkdemo.mct");
     vfs_write_file("apps/forkdemo.mct", (const char*)_binary_forkdemo_mct_start, _binary_forkdemo_mct_end - _binary_forkdemo_mct_start);
+
+    // FPU/SSE context-switch regression (v38.41)
+    extern uint8_t _binary_fputest_mct_start[];
+    extern uint8_t _binary_fputest_mct_end[];
+    vfs_create_file("apps/fputest.mct");
+    vfs_write_file("apps/fputest.mct", (const char*)_binary_fputest_mct_start, _binary_fputest_mct_end - _binary_fputest_mct_start);
 
     // Exec demo apps
     extern uint8_t _binary_execdemo_mct_start[];
@@ -929,6 +948,7 @@ void vfs_init() {
         if (ext2_node >= 0) {
             fs_nodes[ext2_node].ext2_inode = 2; // mount point = root dir inode
             ext2_populate_vfs(2, ext2_node);    // Inode 2 is the root directory
+            mount_register(ext2_node, MOUNT_EXT2, 1, 2);
         }
     }
     
@@ -949,6 +969,7 @@ void vfs_init() {
             vfs_clear_children(fat_node);
             fs_nodes[fat_node].data_sector = (int)fat32_root_cluster();
             fat32_populate_vfs(fat32_root_cluster(), fat_node);
+            mount_register(fat_node, MOUNT_FAT32, 3, fat32_root_cluster());
         }
     }
     

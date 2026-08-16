@@ -3,7 +3,9 @@
 
 #include "types.h"
 
-#define MAX_WINDOWS  16
+// Window table (v38.44): 32 slots — the per-window draw canvases in
+// syscall.c grow with this (~147 KB BSS each), still fine at 128 MB RAM.
+#define MAX_WINDOWS  32
 // TITLEBAR_H defined in theme.h (included via vga.h)
 
 typedef void (*WinDrawFn)(int id, int cx, int cy, int cw, int ch);

@@ -313,6 +313,40 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_MOUNT (115): mount a filesystem at a directory (root only) -----
+        case SYS_MOUNT: {
+            const char* path = (const char*)regs->ebx;
+            const char* fstype = (const char*)regs->ecx;
+            int drive = (int)regs->edx;
+            if (safe_strlen(path, MAX_PATH) < 0 || safe_strlen(fstype, 16) < 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            if (task_get_uid(get_current_task()) != ROOT_UID) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int vfs_mount_path(const char* path, const char* fstype, int drive);
+            regs->eax = (uint32_t)vfs_mount_path(path, fstype, drive);
+            break;
+        }
+
+        // ----- SYS_UMOUNT (116): unmount (root only) -----
+        case SYS_UMOUNT: {
+            const char* path = (const char*)regs->ebx;
+            if (safe_strlen(path, MAX_PATH) < 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            if (task_get_uid(get_current_task()) != ROOT_UID) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int vfs_umount_path(const char* path);
+            regs->eax = (uint32_t)vfs_umount_path(path);
+            break;
+        }
+
         // Empty line
         // ----- SYS_PIPE (32) -----
         case SYS_PIPE: {

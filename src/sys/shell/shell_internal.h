@@ -33,6 +33,7 @@
 #include "../../include/rtc.h"
 #include "../../include/task.h"
 #include "../../include/ext2.h"
+#include "../../include/mount.h"
 #include "../../include/passwd.h"
 #include "../../include/serial.h"
 
@@ -139,6 +140,8 @@ void cmd_ls(void);
 void cmd_ls_arg(void);
 void cmd_chmod_arg(void);
 void cmd_chown_arg(void);
+void cmd_mount(void);
+void cmd_umount(void);
 void cmd_tree(void);
 void cmd_tree_arg(void);
 void cmd_mkdir_arg(void);

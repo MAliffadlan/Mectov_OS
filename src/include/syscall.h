@@ -178,6 +178,31 @@ typedef struct {
 #define SYS_GETRLIMIT    106 // EBX=resource (RLIMIT_*), ECX=rlimit_t* {cur,max} -> 0 or -1
 #define SYS_SETRLIMIT    107 // EBX=resource, ECX=rlimit_t* {cur,max} -> 0 or -1 (POSIX privilege rules)
 
+// Mount table (v38.42): mount a filesystem at a directory at runtime.
+#define SYS_MOUNT        115 // EBX=path (mount point), ECX="ext2"|"fat32", EDX=ATA drive -> 0 or -1 (root only)
+#define SYS_UMOUNT       116 // EBX=path -> 0 or -1 (root only)
+
+// POSIX socket API (v38.43) — fd-integrated: socket()/accept() return file
+// descriptors, so read/write/close/poll/select work on sockets uniformly.
+#define SYS_SOCKET       108 // EBX=domain (AF_INET), ECX=type (SOCK_*) -> fd or -1
+#define SYS_BIND         109 // EBX=fd, ECX=sockaddr_t* -> 0 or -1
+#define SYS_LISTEN       110 // EBX=fd, ECX=backlog (ignored; slots are the backlog) -> 0 or -1
+#define SYS_ACCEPT       111 // EBX=fd -> fd of one completed inbound connection or -1
+#define SYS_CONNECT      112 // EBX=fd, ECX=sockaddr_t* -> 0 (handshake started) or -1
+#define SYS_SENDTO       113 // EBX=fd, ECX=buf, EDX=len, ESI=sockaddr_t* (NULL for stream) -> sent or -1
+#define SYS_RECVFROM     114 // EBX=fd, ECX=buf, EDX=max, ESI=src ip[4] (optional), EDI=src port* (optional) -> n/0/-1
+
+#define AF_INET          2
+#define SOCK_STREAM      1
+#define SOCK_DGRAM       2
+
+// Socket address (fixed 8-byte form; family is AF_INET)
+typedef struct {
+    uint16_t family;
+    uint16_t port;     // host byte order
+    uint8_t  ip[4];
+} __attribute__((packed)) sockaddr_t;
+
 // Resource limits (rlimit_t + RLIMIT_* are defined in types.h, the common
 // base of syscall.h and task.h). Enforced at fork/clone/thread-create
 // (NPROC), fd allocation (NOFILE) and heap/mmap growth (AS).
@@ -225,6 +250,7 @@ typedef struct {
 // Signal numbers (POSIX subset; SIGKILL and SIGSTOP cannot be caught or
 // ignored, SIGCONT resumes a stopped task)
 #define SIGINT   2
+#define SIGFPE   8    // math fault (delivered by the kernel's #XM handler)
 #define SIGKILL  9
 #define SIGUSR1  10
 #define SIGSEGV  11
@@ -342,6 +368,48 @@ static inline int sys_chmod(const char* path, int mode) {
 // Root only (POSIX); returns 0 or -1.
 static inline int sys_chown(const char* path, int uid, int gid) {
     return syscall(SYS_CHOWN, (int)path, uid, gid);
+}
+
+// mount/umount (v38.42): mount filesystem `fstype` ("ext2"|"fat32") from
+// ATA `drive` at directory `path`, and undo it. Root only; 0 or -1.
+static inline int sys_mount(const char* path, const char* fstype, int drive) {
+    return syscall(SYS_MOUNT, (int)path, (int)fstype, drive);
+}
+static inline int sys_umount(const char* path) {
+    return syscall(SYS_UMOUNT, (int)path, 0, 0);
+}
+
+// POSIX sockets (v38.43) — fd-integrated: read()/write()/close()/poll()
+// work on the returned descriptors. accept() is non-blocking (poll first);
+// connect() returns once the SYN is out (poll for POLLOUT = established).
+static inline int sys_socket(int domain, int type) {
+    return syscall(SYS_SOCKET, domain, type, 0);
+}
+static inline int sys_bind(int fd, sockaddr_t* sa) {
+    return syscall(SYS_BIND, fd, (int)sa, 0);
+}
+static inline int sys_listen(int fd, int backlog) {
+    return syscall(SYS_LISTEN, fd, backlog, 0);
+}
+static inline int sys_accept(int fd) {
+    return syscall(SYS_ACCEPT, fd, 0, 0);
+}
+static inline int sys_connect(int fd, sockaddr_t* sa) {
+    return syscall(SYS_CONNECT, fd, (int)sa, 0);
+}
+static inline int sys_sendto(int fd, const void* buf, int len, sockaddr_t* sa) {
+    int ret;
+    __asm__ __volatile__("int $0x80"
+        : "=a"(ret)
+        : "a"(SYS_SENDTO), "b"(fd), "c"(buf), "d"(len), "S"(sa));
+    return ret;
+}
+static inline int sys_recvfrom(int fd, void* buf, int max, uint8_t* src_ip, uint16_t* src_port) {
+    int ret;
+    __asm__ __volatile__("int $0x80"
+        : "=a"(ret)
+        : "a"(SYS_RECVFROM), "b"(fd), "c"(buf), "d"(max), "S"(src_ip), "D"(src_port));
+    return ret;
 }
 
 // clone: create a thread sharing this task's address space. entry runs in
