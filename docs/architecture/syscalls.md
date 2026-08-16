@@ -110,3 +110,82 @@ query metadata without re-resolving a path.
 - Writes remain whole-file read-modify-write (files ≤ 4 KB), with the
   descriptor offset / O_APPEND selecting the splice point.
 - Demo: `run /apps/lseekfiledemo.mct` (see `apps/lseekfiledemo.c`).
+
+---
+
+## 🔌 POSIX Socket API (`SYS_SOCKET` 108 … `SYS_RECVFROM` 114, v38.43)
+
+An fd-integrated socket layer: `socket()` and `accept()` return ordinary
+file descriptors, so `read`/`write`/`close`/`poll`/`select` are
+socket-aware and apps can treat a socket like any other fd.
+
+- **`SYS_SOCKET` (domain, type)**: allocates an `FD_TYPE_SOCKET`
+  descriptor (`SOCK_STREAM`/`SOCK_DGRAM` stored in the flags field). The
+  TCP conn id is attached later by `listen`/`connect` (`sock_conn` = -1
+  until then).
+- **`SYS_BIND` (fd, sockaddr_t {family, port, ip})**: records the local
+  port on the descriptor (the TCP stack assigns ephemeral ports itself for
+  clients); a DGRAM bind also arms the stack's single global UDP binding.
+- **`SYS_LISTEN` (fd, backlog)**: `net_tcp_listen(port)`. Backlog is the
+  free-slot count: a LISTEN slot **never mutates into a connection** — each
+  inbound SYN spawns a fresh child slot that completes the handshake on its
+  own (`listen_parent` links it to the listener).
+- **`SYS_ACCEPT` (fd)**: non-blocking — returns an fd for one ESTABLISHED
+  child (marked `accepted`, one call per child) or -1. Poll the listener
+  for POLLIN (an accept-able child exists).
+- **`SYS_CONNECT` (fd, sockaddr_t*)**: returns once the SYN is out; poll
+  the fd for POLLOUT (= ESTABLISHED).
+- **`SYS_SENDTO`/`SYS_RECVFROM`**: with an address → UDP datagram
+  (`recvfrom` fills the last peer's ip/port via `net_udp_peer`); without →
+  stream send/recv on the attached conn.
+- Poll readiness: listener → POLLIN when accept would return; stream →
+  POLLOUT when established, POLLIN when `rx_len > 0` or EOF, POLLHUP when
+  closed/reset.
+- Demo: `run /apps/tcpserver.mct` — client phase (connect to a host echo
+  server at 10.0.2.2:9999) then server phase (listen :8080, accept the
+  host's hostfwd connection, PING→PONG). CI: `scripts/socktest.py`.
+
+---
+
+## 🗻 Runtime Mount Table (`SYS_MOUNT` 115 / `SYS_UMOUNT` 116, v38.42)
+
+A mount point is an empty VFS directory node retyped to the backend's
+`FS_*_DIR` — the existing type-based dispatch then routes read/write/
+create/delete to the real filesystem — and `src/sys/vfs_mount.c` records
+which drive + root key backs it so umount can undo the mapping.
+
+- Boot mounts (`/ext2` drive 1, `/fat32` drive 3) are the table's first
+  entries, registered from both `vfs_init` paths (fresh + loaded disk).
+- **`SYS_MOUNT` (path, "ext2"|"fat32", drive)** — root only: creates the
+  mount point when missing (must be an empty dir when present), runs
+  `ext2_init`/`fat32_init` for the drive, populates the subtree from the
+  real disk, registers the mount. Shell: `mount /mnt fat32 3`.
+- **`SYS_UMOUNT` (path)** — root only: drops the subtree (data on disk is
+  untouched), restores a plain `FS_DIR`, persists the node table. Shell:
+  `umount /mnt`; `mount` with no args lists active mounts over serial.
+- Limitation (until the backends grow per-volume state): ext2.c/fat32.c
+  keep one global superblock each, so a runtime mount must target the
+  drive the backend is initialized for (the boot drives or a remount).
+- CI: `scripts/mount_test.py` — umount → refuse-non-mount → remount →
+  fat32demo passes on the remounted filesystem.
+
+---
+
+## ⚡ FPU/SSE Context Switching (v38.41)
+
+Every `task_t` carries a 16-byte-aligned 512-byte `fxsave` image
+(`src/sys/fpu.c`); `schedule()` swaps it eagerly (fxsave out / fxrstor in)
+with IF=0 under `task_lock`, so any number of FPU users — DOOM's x87
+(kernel-mode, inside the shell task) and Ring 3 float/SSE code — can be
+preempted against each other safely.
+
+- Per-CPU bring-up (`fpu_init_cpu`) in `kernel_main` + every AP's
+  `ap_main`: CR0 EM=0/MP=1/TS=0, CR4 OSFXSR|OSXMMEXCPT, CPUID-checked with
+  a no-op fallback; builds the canonical `fninit` clean-state template.
+- Task lifecycle: creation seeds the clean template, `fork()` inherits the
+  parent's live state (flushed first — POSIX), `exec()` resets to clean.
+- Exceptions: #NM is a logged safety net (the eager scheme never sets TS);
+  #XM from Ring 3 delivers `SIGFPE` (default action terminates, 128+8).
+- Demo: `run /apps/fputest.mct` — two forked processes accumulating in the
+  live x87 register stack AND an SSE register across preemptions and
+  across fork; both must stay exact. CI: `scripts/fputest.py`.

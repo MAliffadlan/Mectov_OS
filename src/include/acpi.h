@@ -75,6 +75,27 @@ typedef struct {
     uint16_t flags;
 } __attribute__((packed)) madt_iso_t;
 
+// FADT (Fixed ACPI Description Table) — only the prefix this kernel uses:
+// the PM1a/b control-block IO ports and the DSDT pointer (for the \_S5
+// sleeping values). Header length is validated to cover through pm1b_cnt.
+typedef struct {
+    acpi_header_t header;      // 0
+    uint32_t firmware_ctrl;    // 36
+    uint32_t dsdt;             // 40
+    uint8_t  int_model;        // 44
+    uint8_t  preferred_pm_profile;
+    uint16_t sci_int;          // 46
+    uint32_t smi_cmd;          // 48
+    uint8_t  acpi_enable;
+    uint8_t  acpi_disable;
+    uint8_t  s4bios_req;
+    uint8_t  pstate_cnt;
+    uint32_t pm1a_evt_blk;     // 56
+    uint32_t pm1b_evt_blk;     // 60
+    uint32_t pm1a_cnt_blk;     // 64  <- SLP_TYP/SLP_EN go here to power off
+    uint32_t pm1b_cnt_blk;     // 68
+} __attribute__((packed)) fadt_t;
+
 #define MAX_CORES 16
 
 extern uint32_t smp_bsp_lapic_id;
@@ -85,5 +106,13 @@ extern uint32_t smp_ioapic_addr;
 extern uint32_t smp_pit_gsi;
 
 void acpi_init(void);
+
+// S5 soft-off (v38.45): write the \_S5 sleeping type + SLP_EN into the
+// FADT's PM1a/b control blocks. Never returns on success (the machine is
+// off); returns only when no usable FADT was found, so the caller can fall
+// back to legacy port pokes. Safe to call from anywhere with IO access.
+void acpi_poweroff(void);
+// 1 when acpi_init located a valid FADT (diagnostics / tests).
+int  acpi_s5_ready(void);
 
 #endif

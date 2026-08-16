@@ -61,3 +61,25 @@ static defaults: DISCOVER → OFFER → REQUEST → ACK, all over UDP broadcast.
 3. **Web Gateway Proxy Integration (`gateway.py`)**:
    - Outgoing HTTP connections on TCP port 80 are redirected by the network driver to `10.0.2.2:8888` (Host Web Gateway Proxy).
    - The python proxy fetches modern HTTPS web content, strips unnecessary bloat, and returns clean HTML/text readable by the Mectov OS Browser app.
+
+---
+
+## 🧵 Listener/Backlog Accept Model & POSIX Sockets (v38.43)
+
+Before v38.43 a SYN aimed at a listening slot **mutated the listener
+itself** into the connection (one pending connection per slot, no backlog).
+The slot model is now POSIX-shaped:
+
+- `tcp_conn_t` gained `listen_parent` + `accepted`. An inbound SYN finds
+  the LISTEN slot for the port, allocates a **fresh child slot**, and runs
+  SYN-RCVD → ESTABLISHED on the child; the listener stays listening and
+  keeps accepting. Free slots ARE the backlog (SYN dropped + logged when
+  exhausted; the peer's retransmit gets in once a slot frees).
+- `net_tcp_accept(listener)` hands out one ESTABLISHED, not-yet-accepted
+  child per call (SYS_ACCEPT attaches it to a new socket fd);
+  `net_tcp_accept_pending` backs poll-POLLIN on listening sockets.
+- Connection capacity is 16 slots (v38.44; was 8).
+- The fd layer gained `FD_TYPE_SOCKET`: `sock_socket/bind/get_conn/
+  set_conn/accept` in fd.c manage the descriptors; `do_sys_read`/`write`,
+  `fd_poll_events` (POLLOUT = established, POLLIN = data/EOF/acceptable)
+  and `fd_release_global` (close tears the conn down) are socket-aware.

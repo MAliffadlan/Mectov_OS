@@ -105,7 +105,9 @@ static void init_icons() {
     }
 }
 
-// ---- Modern Professional Icons (Squircle/iOS style) ----
+// ---- Desktop Icons (v38.46: clean FLAT squircles — no shadow, no gloss,
+// no gradient; just a nicer, more saturated palette than the old muddy
+// grays and crisp glyphs) ----
 static void draw_pro_icon(int ix, int iy, const char* label) {
     int cx = ix + ICON_W / 2;
     int cy = iy + ICON_W / 2 - 6; // Center of the icon background
@@ -114,26 +116,28 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
     int bg_y = cy - bg_size / 2;
     int radius = 10;
 
-    // Base colors for different apps
-    uint32_t bg_col = 0x00FFFFFF;
-    if (strcmp(label, "Terminal") == 0) bg_col = 0x002D3748; // Dark slate
-    else if (strcmp(label, "Explorer") == 0) bg_col = 0x003182CE; // Vibrant Blue
-    else if (strcmp(label, "SysInfo") == 0) bg_col = 0x00E2E8F0; // Light silver
-    else if (strcmp(label, "Clock") == 0) bg_col = 0x00FFFFFF; // Pure white
-    else if (strcmp(label, "Browser") == 0) bg_col = 0x00D69E2E; // Gold/Yellow
-    else if (strcmp(label, "Task Mgr") == 0) bg_col = 0x004A5568; // Gray
-    else if (strcmp(label, "Snake") == 0) bg_col = 0x0038A169; // Green
-    else if (strcmp(label, "Flappy") == 0) bg_col = 0x00ECC94B; // Yellow
-    else if (strcmp(label, "Notepad") == 0) bg_col = 0x00E2E8F0; // Light gray
-    else if (strcmp(label, "ELF Demo") == 0) bg_col = 0x00B83280; // Magenta-ish (ELF purple)
-    else bg_col = 0x00718096; // Default Gray
+    // Flat tile colors (one solid color per app, saturated + modern)
+    uint32_t bg_col;
+    if      (strcmp(label, "Terminal") == 0) bg_col = 0x001E222B; // near-black slate
+    else if (strcmp(label, "Explorer") == 0) bg_col = 0x003B82F6; // blue
+    else if (strcmp(label, "SysInfo")  == 0) bg_col = 0x0064748B; // slate
+    else if (strcmp(label, "Clock")    == 0) bg_col = 0x00F1F5F9; // off-white
+    else if (strcmp(label, "Browser")  == 0) bg_col = 0x00F59E0B; // amber
+    else if (strcmp(label, "PCI")      == 0) bg_col = 0x000EA5E9; // sky
+    else if (strcmp(label, "Snake")    == 0) bg_col = 0x0022C55E; // green
+    else if (strcmp(label, "Calc")     == 0) bg_col = 0x008B5CF6; // violet
+    else if (strcmp(label, "Task Mgr") == 0) bg_col = 0x00475569; // dark slate
+    else if (strcmp(label, "Flappy")   == 0) bg_col = 0x00EAB308; // yellow
+    else if (strcmp(label, "Notepad")  == 0) bg_col = 0x00E2E8F0; // paper
+    else if (strcmp(label, "ELF Demo") == 0) bg_col = 0x00D946EF; // fuchsia
+    else bg_col = 0x0064748B; // default slate
 
-    // Draw base rounded squircle
+    // Flat rounded squircle — that's it, nothing on top.
     draw_rounded_rect(bg_x, bg_y, bg_size, bg_size, radius, bg_col);
 
     // Draw inner glyphs (Minimalist & Crisp)
     if (strcmp(label, "Terminal") == 0) {
-        draw_string_px(cx - 8, cy - 4, ">_", 0x0048BB78, bg_col);
+        draw_string_px(cx - 8, cy - 4, ">_", 0x004ADE80, 0xFFFFFFFF);
     } else if (strcmp(label, "Explorer") == 0) {
         // Folder glyph
         draw_rect(cx - 12, cy - 10, 24, 18, 0x00FFFFFF);
@@ -173,11 +177,11 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
         draw_rect(cx - 10, cy - 4, 16, 6, 0x00FFFFFF); // Body horizontal
         draw_rect(cx + 2, cy - 10, 6, 8, 0x00FFFFFF); // Head
         draw_rect(cx - 10, cy + 2, 6, 6, 0x00FFFFFF); // Tail drop
-        draw_rect(cx + 4, cy - 8, 2, 2, 0x0038A169); // Eye (green to match bg)
+        draw_rect(cx + 4, cy - 8, 2, 2, 0x002E8B57); // Eye (matches the tile base)
     } else if (strcmp(label, "Calc") == 0) {
         // Calculator glyph
         draw_rect(cx - 10, cy - 14, 20, 28, 0x00FFFFFF); // Body
-        draw_rect(cx - 8, cy - 12, 16, 6, 0x00E2E8F0); // Screen
+        draw_rect(cx - 8, cy - 12, 16, 6, 0x00F0E8FF); // Screen
         for(int r=0; r<3; r++) {
             for(int c=0; c<3; c++) {
                 draw_rect(cx - 8 + c*6, cy - 3 + r*6, 4, 4, 0x00A0AEC0); // Buttons
@@ -196,6 +200,14 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
         draw_rect(cx + 2, cy - 4, 2, 2, 0x00000000); // Eye
         draw_rect(cx + 6, cy, 4, 4, 0x00E53E3E); // Beak (Reddish)
         draw_rect(cx - 10, cy, 4, 4, 0x00FFFFFF); // Wing
+    } else if (strcmp(label, "Notepad") == 0) {
+        // Page glyph on the light tile: white sheet + blue rule lines
+        draw_rect(cx - 9, cy - 12, 18, 24, 0x00FFFFFF);
+        draw_rect(cx - 9, cy - 12, 18, 1, 0x0090A4B8);
+        draw_rect(cx - 9, cy + 11, 18, 1, 0x0090A4B8);
+        draw_rect(cx - 6, cy - 7, 12, 2, 0x005B8DEF); // Title line
+        draw_rect(cx - 6, cy - 2, 12, 2, 0x00A8B8C8);
+        draw_rect(cx - 6, cy + 3, 12, 2, 0x00A8B8C8);
     } else if (strcmp(label, "ELF Demo") == 0) {
         // "ELF" text glyph — proves this app is a real ELF binary
         draw_string_px(cx - 14, cy - 8, "ELF", 0x00FFFFFF, 0x00B83280);
@@ -218,10 +230,11 @@ static void draw_icon(int i) {
     }
     draw_pro_icon(ic->x, ic->y, ic->label);
 
-    // Label below icon. The glyph font is 8x16 (font8x16_data), NOT 8x8, so
-    // the label box must be 16px tall — a 14px box clipped the bottom half of
-    // long labels that take the vga_set_clip() path below (glyph rows 11-15
-    // landed outside the clip rect).
+    // Label below the icon — plain white text with a 1px shadow (readable
+    // on any wallpaper, no chip). The glyph font is 8x16 (font8x16_data),
+    // NOT 8x8, so the label box must be 16px tall — a 14px box clipped the
+    // bottom half of long labels that take the vga_set_clip() path below
+    // (glyph rows 11-15 landed outside the clip rect).
     int llen = strlen(ic->label);
     int lw = llen * 8 + 10;   // padding 5px each side
     int lx = ic->x + (ICON_W - lw) / 2;

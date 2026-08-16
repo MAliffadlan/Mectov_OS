@@ -113,6 +113,10 @@ jobs:
           python3 scripts/fork_test.py --timeout 240
           python3 scripts/jobcontrol_test.py --timeout 240
 
+      - name: FPU/SSE context-switch regression (TCG)
+        run: |
+          python3 scripts/fputest.py --timeout 240
+
       - name: Fork KVM 4-core — mandatory SMP keyboard regression
         run: |
           # Most GitHub-hosted ubuntu-latest runners expose /dev/kvm; guard
@@ -121,6 +125,7 @@ jobs:
           # serial log tail to distinguish a QEMU startup error from a hang.
           if [ -e /dev/kvm ] && [ -r /dev/kvm ]; then
             python3 scripts/fork_test.py --kvm --timeout 240
+            python3 scripts/fputest.py --kvm --timeout 240
           else
             echo "::warning::/dev/kvm not available on this runner — skipping the KVM regression"
           fi
@@ -128,6 +133,18 @@ jobs:
       - name: FAT32 regression (drive 3, TCG)
         run: |
           python3 scripts/fat32_test.py --timeout 240
+
+      - name: Mount/umount roundtrip regression (TCG)
+        run: |
+          python3 scripts/mount_test.py --timeout 240
+
+      - name: POSIX socket regression (user-net + hostfwd, TCG)
+        run: |
+          python3 scripts/socktest.py --timeout 300
+
+      - name: ACPI S5 poweroff regression (TCG)
+        run: |
+          python3 scripts/poweroff_test.py --timeout 240
 
       - name: poll/select/getcwd/chdir/clock_gettime regression (TCG)
         run: |

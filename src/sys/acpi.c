@@ -2,6 +2,7 @@
 #include "../include/utils.h"
 #include "../include/serial.h"
 #include "../include/vmm.h"
+#include "../include/io.h"    // outw for the S5 PM1a/b control writes
 
 uint32_t smp_bsp_lapic_id = 0;
 uint32_t smp_cpu_count = 0;
@@ -122,13 +123,86 @@ static int validate_table(acpi_header_t* header, uint32_t max_len) {
     return checksum((char*)header, (int)len);
 }
 
+// ---- FADT / S5 poweroff state (v38.45) ----
+static int      fadt_found = 0;
+static uint32_t fadt_pm1a_cnt = 0;
+static uint32_t fadt_pm1b_cnt = 0;
+static int      s5_typa = 0;   // \_S5 package values (default 0 when absent)
+static int      s5_typb = 0;
+
+int acpi_s5_ready(void) { return fadt_found; }
+
+// Scan the DSDT AML for  Name(_S5_, Package(2) { a, b })  in its simplest
+// encoded form: 08 '_S5_' 12 pkglen 02 0A a 0A b. Virtually every real
+// firmware (SeaBIOS/QEMU included) emits exactly this for the sleep states.
+static void parse_s5_from_dsdt(uint32_t dsdt_addr) {
+    if (dsdt_addr == 0 || dsdt_addr >= ACPI_PHYS_MAX) return;
+    acpi_header_t* d = (acpi_header_t*)dsdt_addr;
+    if (!string_starts_with(d->signature, "DSDT")) return;
+    if (!validate_table(d, 256 * 1024)) return;
+    if (d->length <= sizeof(acpi_header_t)) return;
+
+    uint8_t* aml = (uint8_t*)dsdt_addr + sizeof(acpi_header_t);
+    uint32_t len = d->length - sizeof(acpi_header_t);
+    for (uint32_t i = 0; i + 12 <= len; i++) {
+        if (aml[i] == 0x08 && aml[i+1] == '_' && aml[i+2] == 'S' &&
+            aml[i+3] == '5' && aml[i+4] == '_' &&
+            aml[i+5] == 0x12 && aml[i+7] == 0x02 &&
+            aml[i+8] == 0x0A && aml[i+10] == 0x0A) {
+            s5_typa = aml[i+9];
+            s5_typb = aml[i+11];
+            write_serial_string("[ACPI] \\_S5 SLP_TYPa=");
+            write_serial_hex((uint32_t)s5_typa);
+            write_serial_string(" SLP_TYPb=");
+            write_serial_hex((uint32_t)s5_typb);
+            write_serial_string("\n");
+            return;
+        }
+    }
+    write_serial_string("[ACPI] no \\_S5 package in DSDT (using SLP_TYP=0)\n");
+}
+
+static void acpi_process_fadt(fadt_t* fadt) {
+    // A truncated FADT (length < 72) cannot even carry pm1b_cnt_blk.
+    if (fadt->header.length < 72) {
+        write_serial_string("[ACPI] FADT too short, ignoring\n");
+        return;
+    }
+    fadt_found = 1;
+    fadt_pm1a_cnt = fadt->pm1a_cnt_blk;
+    fadt_pm1b_cnt = fadt->pm1b_cnt_blk;
+    write_serial_string("[ACPI] FADT: PM1a_CNT=0x");
+    write_serial_hex(fadt_pm1a_cnt);
+    write_serial_string(" PM1b_CNT=0x");
+    write_serial_hex(fadt_pm1b_cnt);
+    write_serial_string("\n");
+    parse_s5_from_dsdt(fadt->dsdt);
+}
+
+void acpi_poweroff(void) {
+    if (!fadt_found) {
+        write_serial_string("[ACPI] poweroff: no FADT, caller must fall back\n");
+        return;
+    }
+    write_serial_string("[ACPI] S5 poweroff (PM1a write)\n");
+    // SLP_TYP lives at bits 12:10, SLP_EN at bit 13 of the PM1 control reg.
+    if (fadt_pm1a_cnt) outw(fadt_pm1a_cnt, (uint16_t)((s5_typa << 10) | 0x2000));
+    if (fadt_pm1b_cnt) outw(fadt_pm1b_cnt, (uint16_t)((s5_typb << 10) | 0x2000));
+    // Some firmware needs a moment + retry; if we are still here it did not
+    // take (e.g. SMM-guarded). Return so the caller's legacy fallback runs.
+    for (int i = 0; i < 100; i++) {
+        if (fadt_pm1a_cnt) outw(fadt_pm1a_cnt, (uint16_t)((s5_typa << 10) | 0x2000));
+        __asm__ __volatile__("pause");
+    }
+}
+
 void acpi_init(void) {
     rsdp_t* rsdp = find_rsdp();
     if (!rsdp) {
         write_serial_string("[ACPI] RSDP not found!\n");
         return;
     }
-    
+
     write_serial_string("[ACPI] Found RSDP at ");
     write_serial_hex((uint32_t)rsdp);
     write_serial_string("\n");
@@ -154,26 +228,34 @@ void acpi_init(void) {
         }
         write_serial_string("[ACPI] XSDT sig/len OK\n");
 
-        // XSDT entries are 64-bit pointers (table data follows the 36-byte
-        // header; pointer arithmetic is 64-bit-safe here).
+        // v38.45: scan EVERY entry — the MADT (SMP) and the FADT (poweroff)
+        // live in the same table list and their relative order varies by
+        // firmware, so an early return after the MADT could miss the FADT.
         uint32_t len = xsdt->length;
         int entries = (len - sizeof(acpi_header_t)) / 8;
         uint64_t* xptrs = (uint64_t*)((uint8_t*)xsdt + sizeof(acpi_header_t));
+        int madt_done = 0, fadt_done = 0;
         for (int i = 0; i < entries; i++) {
             uint64_t ptr = xptrs[i];
             if ((ptr >> 32) != 0 || ptr == 0 || ptr >= ACPI_PHYS_MAX) continue;
             acpi_header_t* header = (acpi_header_t*)(uint32_t)ptr;
-            if (string_starts_with(header->signature, "APIC")) {
+            if (!madt_done && string_starts_with(header->signature, "APIC")) {
                 if (validate_table(header, 1024 * 1024)) {
                     parse_madt((madt_t*)header);
-                    return;
+                    madt_done = 1;
+                }
+            } else if (!fadt_done && string_starts_with(header->signature, "FACP")) {
+                if (validate_table(header, 1024 * 1024)) {
+                    acpi_process_fadt((fadt_t*)header);
+                    fadt_done = 1;
                 }
             }
         }
-        write_serial_string("[ACPI] MADT not found in XSDT!\n");
+        if (!madt_done) write_serial_string("[ACPI] MADT not found in XSDT!\n");
+        if (!fadt_done) write_serial_string("[ACPI] FADT not found in XSDT\n");
         return;
     }
-    
+
     // ---- Legacy RSDT path (ACPI 1.0) ----
     uint32_t addr = rsdp->rsdt_address;
     write_serial_string("[ACPI] RSDT Addr: ");
@@ -190,16 +272,23 @@ void acpi_init(void) {
     uint32_t len = rsdt->length;
     int entries = (len - sizeof(acpi_header_t)) / 4;
     uint32_t* rptrs = (uint32_t*)((uint8_t*)rsdt + sizeof(acpi_header_t));
+    int madt_done = 0, fadt_done = 0;
     for (int i = 0; i < entries; i++) {
         uint32_t ptr = rptrs[i];
         if (ptr == 0 || ptr >= ACPI_PHYS_MAX) continue;
         acpi_header_t* header = (acpi_header_t*)ptr;
-        if (string_starts_with(header->signature, "APIC")) {
+        if (!madt_done && string_starts_with(header->signature, "APIC")) {
             if (validate_table(header, 1024 * 1024)) {
                 parse_madt((madt_t*)header);
-                return;
+                madt_done = 1;
+            }
+        } else if (!fadt_done && string_starts_with(header->signature, "FACP")) {
+            if (validate_table(header, 1024 * 1024)) {
+                acpi_process_fadt((fadt_t*)header);
+                fadt_done = 1;
             }
         }
     }
-    write_serial_string("[ACPI] MADT not found in RSDT!\n");
+    if (!madt_done) write_serial_string("[ACPI] MADT not found in RSDT!\n");
+    if (!fadt_done) write_serial_string("[ACPI] FADT not found in RSDT\n");
 }

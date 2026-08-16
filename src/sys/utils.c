@@ -37,6 +37,11 @@ uint32_t get_uptime_seconds() {
 void shutdown() {
     print("Shutting down...\n", 0x0C);
     __asm__ volatile("cli");
+    // v38.45: real ACPI S5 first — PM1a/b control blocks + the \_S5 sleeping
+    // type parsed from the firmware's own FADT/DSDT (acpi.c). Returns only
+    // when there is no usable FADT or the write did not take, in which case
+    // the legacy hardcoded ports below still cover QEMU/VirtualBox.
+    acpi_poweroff();
     outw(0xB004, 0x2000);   // ACPI PM1a_CNT (QEMU PIIX4)
     outw(0x604, 0x2000);    // QEMU isa-debug-exit
     outw(0x4004, 0x3400);   // VirtualBox fallback
