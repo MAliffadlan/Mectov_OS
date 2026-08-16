@@ -314,6 +314,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         __asm__ volatile("sti");
 
         if (mx != prev_mx || my != prev_my || btn != prev_btn) {
+            // Idle auto-lock (v38.51): any mouse activity restarts the
+            // `locktimeout` countdown.
+            extern void security_note_input(void);
+            security_note_input();
             extern int cursor_draw_x, cursor_draw_y;
             cursor_draw_x = mx;
             cursor_draw_y = my;
@@ -418,6 +422,12 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             // reading it here turns "shift-7" into '7'. See keyboard.c.
             uint8_t kbd_mods = 0;
             uint8_t sc = k_get_scancode_ex(&kbd_mods);
+            // Idle auto-lock (v38.51): any key press (incl. auto-repeat and
+            // the Ctrl+Alt+L combo itself) restarts the countdown.
+            if (sc != 0) {
+                extern void security_note_input(void);
+                security_note_input();
+            }
             // Windowed DOOM (v38.29): while the DOOM window holds focus, every
             // raw scancode — press AND release — goes straight to DOOM's key
             // queue. The normal character path below only forwards press
@@ -590,6 +600,11 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         // 1000 Hz timer => 1000 ticks = 1 second
         if (now - last_clock_tick >= 1000) {
             last_clock_tick = now;
+            // Idle auto-lock (v38.51): 1 s granularity check next to the
+            // clock tick — fires pending_lock after `locktimeout` seconds of
+            // no keyboard/mouse input.
+            extern void security_auto_lock_tick(uint32_t);
+            security_auto_lock_tick(now);
             wm_tick_all();
             // Reap zombie processes whose parent never waited for them
             // (safety net; waitpid() reaps them normally when it is used).
@@ -654,6 +669,12 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             start_menu_open = 0;
             calendar_open = 0;
             gui_login();
+            // Restart the idle countdown after unlocking, so an armed
+            // `locktimeout` does not re-lock the freshly-unlocked desktop
+            // (the password keystrokes happen inside gui_login, outside the
+            // main-loop input hooks).
+            extern void security_reset_idle(void);
+            security_reset_idle();
             mark_dirty(0, 0, fb_width, fb_height);
             full_redraw();
         }

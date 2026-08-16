@@ -171,6 +171,7 @@ void cmd_flappy(void);
 void cmd_doom(void);
 void cmd_taskmgr(void);
 void cmd_lock(void);
+void cmd_locktimeout(void);
 void cmd_date(void);
 void cmd_color(void);
 int  cmd_run(void);          // returns 1 on the foreground path (skip b_idx reset)

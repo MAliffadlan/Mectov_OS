@@ -84,6 +84,15 @@ jobs:
           # then lock again via Ctrl+Alt+L.
           python3 scripts/lock_test.py --timeout 480
 
+      - name: Idle auto-lock (locktimeout) regression (TCG)
+        run: |
+          # v38.51: `locktimeout 20` arms the idle timer; with no
+          # keyboard/mouse input the login gate appears on its own, unlock
+          # restores the session without re-locking (countdown re-anchored),
+          # and `locktimeout 0` disables the timer (a longer quiet window
+          # passes with no lock).
+          python3 scripts/autolock_test.py --timeout 480
+
       - name: Taskbar window buttons + hover regression (TCG)
         run: |
           # v38.39: clicking a focused window's taskbar button minimizes it

@@ -259,7 +259,7 @@ const char* cmd_list[] = {
     "edit","nano",
     "sh","source","export","alias","unalias","history","ps","kill","ulimit",
     "jobs","fg","bg",
-    "echo","beep","tone","sleep","date","color","lock",
+    "echo","beep","tone","sleep","date","color","lock","locktimeout",
     "uname","whoami","passwd","hostname","env","seq","wc","type","yes",
     "printf","sort","uniq","tee","find",
     "run","snake","taskmgr","flappy","doom","lspci","ipconfig","man",
@@ -774,6 +774,9 @@ else if (strcmp(cmd_b, "doom") == 0 || strncmp(cmd_b, "doom ", 5) == 0) { cmd_do
 else if (strcmp(cmd_b, "taskmgr") == 0) cmd_taskmgr();
 // --- LOCK (kunci) ---
 else if (strcmp(cmd_b, "lock") == 0 || strcmp(cmd_b, "kunci") == 0) cmd_lock();
+// --- LOCKTIMEOUT (v38.51 idle auto-lock) ---
+else if (strncmp(cmd_b, "locktimeout", 11) == 0 &&
+         (cmd_b[11] == ' ' || cmd_b[11] == '\0')) cmd_locktimeout();
 // --- DATE (waktu) ---
 else if (strcmp(cmd_b, "date") == 0 || strcmp(cmd_b, "waktu") == 0) { cmd_date(); }
 // --- COLOR (warna) ---
