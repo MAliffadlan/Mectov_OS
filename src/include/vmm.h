@@ -67,9 +67,6 @@ int vmm_unmap_page(uint32_t page_dir, uint32_t vaddr);
 // Allocate a physical frame and map it at vaddr in the given page directory
 uint32_t vmm_alloc_page_at(uint32_t page_dir, uint32_t vaddr, uint32_t flags);
 
-// Find a free virtual address range in a page directory
-uint32_t vmm_find_free_region(uint32_t page_dir, uint32_t size);
-
 // Clone an address space (for fork/spawn — COW)
 uint32_t vmm_clone_address_space(uint32_t src_page_dir);
 

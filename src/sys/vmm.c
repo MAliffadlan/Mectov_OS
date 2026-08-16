@@ -27,6 +27,7 @@ static spinlock_t vmm_lock = SPINLOCK_INIT;
 static uint8_t frame_bitmap[PHYS_MAX_PAGES / 8];
 uint8_t frame_ref_count[PHYS_MAX_PAGES];
 static uint32_t phys_total_pages = 0;   // actual RAM / 4KB, from multiboot
+static uint32_t phys_used_count = 0;    // maintained used-frame total (O(1) meminfo)
 static int vmm_initialized = 0;
 
 // Shared zero page for lazy zero-fill (heap + user stack demand paging).
@@ -67,6 +68,8 @@ void phys_init(uint32_t total_pages) {
         bitmap_set(i);
         frame_ref_count[i] = 1;
     }
+    phys_used_count = (KERNEL_RESERVED_PAGES < phys_total_pages)
+                          ? KERNEL_RESERVED_PAGES : phys_total_pages;
 
     write_serial_string("[PHYS] allocator: ");
     write_serial_hex(phys_total_pages * 4096);
@@ -81,6 +84,7 @@ void phys_init(uint32_t total_pages) {
             phys_zero_page = i * 4096;
             bitmap_set(i);
             frame_ref_count[i] = 255;  // pinned: never sole-owner, never freed
+            phys_used_count++;
             memset((void*)(uintptr_t)phys_zero_page, 0, 4096);
             write_serial_string("[PHYS] shared zero page @ ");
             write_serial_hex(phys_zero_page);
@@ -105,6 +109,7 @@ void phys_reserve_region(uint32_t start, uint32_t len) {
     uint32_t last = (start + len + 4095) / 4096;
     if (last > phys_total_pages) last = phys_total_pages;
     for (uint32_t i = first; i < last; i++) {
+        if (frame_ref_count[i] == 0) phys_used_count++;  // overlapping reserves count once
         bitmap_set(i);
         frame_ref_count[i] = 1;
     }
@@ -114,16 +119,14 @@ void phys_reserve_region(uint32_t start, uint32_t len) {
 
 // Real used-frame count (reserved kernel region + live allocations) for
 // /proc/meminfo — replaces the old `24MB + heap_used` approximation.
+// v38.47: O(1) — the counter is maintained by phys_init / phys_reserve_region
+// / frame_alloc / frame_free. Direct refcount bumps (COW copies, SysV shm
+// attaches, fork clones) never move a frame between free and used, so they
+// correctly leave it alone. Aligned uint32 reads are atomic on x86, so the
+// read needs no lock — /proc no longer scans 131k entries under a spinlock
+// with IRQs off.
 uint32_t phys_get_used_pages(void) {
-    uint32_t eflags;
-    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
-    spin_lock(&vmm_lock);
-    uint32_t used = 0;
-    for (uint32_t i = 0; i < phys_total_pages; i++)
-        if (frame_ref_count[i] > 0) used++;
-    spin_unlock(&vmm_lock);
-    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
-    return used;
+    return phys_used_count;
 }
 
 void vmm_init(void) {
@@ -156,6 +159,7 @@ uint32_t frame_alloc(void) {
         if (!bitmap_test(i)) {
             bitmap_set(i);
             frame_ref_count[i] = 1;
+            phys_used_count++;
             spin_unlock(&vmm_lock);
             __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
             return (uint32_t)i * 4096;
@@ -179,6 +183,7 @@ void frame_free(uint32_t paddr) {
             frame_ref_count[idx]--;
             if (frame_ref_count[idx] == 0) {
                 bitmap_clear(idx);
+                phys_used_count--;
             }
         }
     }
@@ -455,19 +460,6 @@ uint32_t vmm_alloc_page_at(uint32_t page_dir, uint32_t vaddr, uint32_t flags) {
         return 0;
     }
     return vaddr;
-}
-
-uint32_t vmm_find_free_region(uint32_t page_dir, uint32_t size) {
-    (void)page_dir;
-    // Simple: allocate starting from 0x08000000 (128MB)
-    // For now, this just returns the next available region
-    // In a real implementation, we'd scan page tables
-    static uint32_t next_region = 0x08000000;
-    uint32_t result = next_region;
-    next_region += size;
-    // Align to 4KB
-    next_region = (next_region + 0xFFF) & 0xFFFFF000;
-    return result;
 }
 
 uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
