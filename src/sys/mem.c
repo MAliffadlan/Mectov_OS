@@ -58,9 +58,13 @@ pte_t boot_pdpt[PDPT_ENTRIES] __attribute__((aligned(4096)));
 pte_t boot_pds[PDPT_ENTRIES][PT_ENTRIES] __attribute__((aligned(4096)));
 static pte_t page_tables[256][PT_ENTRIES] __attribute__((aligned(4096)));
 static pte_t fb_page_tables[2][PT_ENTRIES] __attribute__((aligned(4096)));
-// APIC MMIO PTs: 0xFEC00000 (I/O APIC) and 0xFEE00000 (LAPIC) sit in
-// DIFFERENT 2MB PD regions under PAE (they shared one 4MB PDE before).
-static pte_t apic_page_tables[2][PT_ENTRIES] __attribute__((aligned(4096)));
+// APIC + device MMIO PTs: one PT per 2MB region covering the whole
+// 0xFE000000..0xFF000000 PCI MMIO window (LAPIC 0xFEE00000, I/O APIC
+// 0xFEC00000, and controller BARs like AHCI BAR5 land here on QEMU).
+// 8 PTs, mapped from boot, strongly uncached (PCD|PWT).
+#define MMIO_WINDOW_BASE 0xFE000000u
+#define MMIO_WINDOW_PT   8
+static pte_t mmio_page_tables[MMIO_WINDOW_PT][PT_ENTRIES] __attribute__((aligned(4096)));
 
 // 1 once EFER.NXE is enabled on the BSP (CPUID-gated). Filled by
 // paging_init; consulted by page fillers before setting PAGE_NX.
@@ -154,17 +158,15 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     // out as a free frame.
     phys_reserve_region(fb_paddr, fb_size);
 
-    // Map APIC MMIO: 0xFEC00000 (I/O APIC) and 0xFEE00000 (LAPIC) each own
-    // a 2MB PT under PAE. Both PD entries live in PDPT slot 3.
-    for (int i = 0; i < 2; i++) {
-        uint64_t base = 0xFEC00000ULL + (uint64_t)i * 0x200000;
+    // Map the PCI MMIO window (includes both APICs) — strongly uncached.
+    for (int i = 0; i < MMIO_WINDOW_PT; i++) {
+        uint64_t base = MMIO_WINDOW_BASE + (uint64_t)i * 0x200000;
         for (uint32_t j = 0; j < PT_ENTRIES; j++) {
-            apic_page_tables[i][j] = (base + j * 0x1000) | PAGE_PRESENT | PAGE_RW;
+            mmio_page_tables[i][j] = (base + j * 0x1000)
+                                     | PAGE_PRESENT | PAGE_RW | 0x18;
         }
-        // Strong uncached (PCD|PWT) on the register page of each region.
-        apic_page_tables[i][0] |= 0x18;
-        uint32_t idx = pd_index((uint32_t)base);
-        boot_pds[3][idx] = ((uint32_t)(uintptr_t)apic_page_tables[i]) | PAGE_PRESENT | PAGE_RW;
+        boot_pds[3][pd_index(MMIO_WINDOW_BASE) + i] =
+            ((uint32_t)(uintptr_t)mmio_page_tables[i]) | PAGE_PRESENT | PAGE_RW;
     }
     if (!(boot_pdpt[3] & PAGE_PRESENT)) {
         boot_pdpt[3] = ((uint32_t)(uintptr_t)boot_pds[3]) | PAGE_PRESENT | PAGE_RW;
@@ -207,10 +209,12 @@ void page_map(uint32_t vaddr, uint32_t paddr, uint32_t flags) {
         uint32_t pde_flags = PAGE_PRESENT | PAGE_RW;
         if (flags & PAGE_USER) pde_flags |= PAGE_USER;
         boot_pds[0][di] = ((uint32_t)(uintptr_t)page_tables[di]) | pde_flags;
-    } else if (vaddr >= 0xFEC00000 && vaddr < 0xFF000000) {
-        // The two APIC MMIO regions own PD slots in PDPT slot 3.
-        int which = (vaddr >= 0xFEE00000) ? 1 : 0;
-        apic_page_tables[which][ti] = (paddr & 0xFFFFF000ULL) | flags;
+    } else if (vaddr >= MMIO_WINDOW_BASE && vaddr < MMIO_WINDOW_BASE + MMIO_WINDOW_PT * 0x200000) {
+        // The PCI MMIO window (APICs, AHCI BAR5, ...) owns static PTs here —
+        // map the physical page at its own (identity) virtual address.
+        int which = (vaddr - MMIO_WINDOW_BASE) >> 21;
+        mmio_page_tables[which][pt_index(vaddr)] =
+            (paddr & 0xFFFFF000ULL) | flags;
     }
 }
 

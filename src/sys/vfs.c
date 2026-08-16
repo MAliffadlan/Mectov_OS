@@ -2580,7 +2580,12 @@ int vfs_is_dir(int node) {
 
 static int vfs_is_file_unlocked(int node) {
     if (node < 0 || node >= MAX_NODES) return 0;
-    return fs_nodes[node].in_use && (fs_nodes[node].type == FS_FILE || fs_nodes[node].type == FS_EXT2_FILE);
+    // FS_FAT32_FILE: files on a runtime-mounted FAT32 volume (v38.42)
+    // populate as their own node type — file ops (cp, cat, ...) must accept
+    // them exactly like ext2 files. Missed at mount time, so every file op
+    // on a mounted FAT32 volume used to report "source not found".
+    return fs_nodes[node].in_use && (fs_nodes[node].type == FS_FILE ||
+        fs_nodes[node].type == FS_EXT2_FILE || fs_nodes[node].type == FS_FAT32_FILE);
 }
 int vfs_is_file(int node) {
     vfs_lock_acquire();

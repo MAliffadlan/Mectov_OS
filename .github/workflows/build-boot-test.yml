@@ -142,6 +142,15 @@ jobs:
         run: |
           python3 scripts/mount_test.py --timeout 240
 
+      - name: AHCI/SATA driver regression (ich9-ahci + drive 4, TCG)
+        run: |
+          # Boots with an ich9-ahci controller + FAT32 SATA disk (drive 4),
+          # asserts the controller registers the port, then `mount /sata
+          # fat32 4` (BPB read through AHCI), `cp` a file inside the volume
+          # (read + write through AHCI), and byte-compares COPY.TXT on the
+          # host with mtools — proving the data actually landed on disk.
+          python3 scripts/ahci_test.py --timeout 360
+
       - name: POSIX socket regression (user-net + hostfwd, TCG)
         run: |
           python3 scripts/socktest.py --timeout 300

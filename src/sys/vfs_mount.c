@@ -17,6 +17,7 @@
 #include "../include/vfs.h"
 #include "../include/serial.h"
 #include "../include/utils.h"
+#include "../include/ahci.h"   // AHCI_DRIVE_BASE: SATA ports are drives 4+
 
 static mount_t mounts[MAX_MOUNTS];
 
@@ -92,7 +93,9 @@ int vfs_mount_path(const char* path, const char* fstype, int drive) {
         write_serial_string("[MOUNT] unknown fstype\n");
         return -1;
     }
-    if (drive < 0 || drive > 3) return -1;
+    // Drives 0-3 are IDE; 4..7 are AHCI ports (v38.50) routed through the
+    // same sector API, so ext2/fat32 mount on SATA volumes unchanged.
+    if (drive < 0 || drive >= AHCI_DRIVE_BASE + AHCI_MAX_PORTS) return -1;
 
     vfs_lock_acquire();
 

@@ -5,6 +5,7 @@
 #include "../include/mem.h"
 #include "../include/serial.h"
 #include "../include/utils.h"   // memcpy for the DMA bounce path
+#include "../include/ahci.h"    // drives >= AHCI_DRIVE_BASE route to SATA
 
 // ata_lock serializes the shared IDE controller: two cores issuing command
 // sequences concurrently would interleave port writes and corrupt the
@@ -41,6 +42,7 @@ int ata_wait_drq() { return ata_wait_drq_drive(0); }
 volatile int hdd_activity = 0;
 
 int ata_read_sector_drive(int drive, unsigned int lba, unsigned char* b) {
+    if (drive >= AHCI_DRIVE_BASE) return ahci_read_sectors(drive, lba, 1, b);
     uint16_t base = ata_base_port(drive);
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10;
@@ -69,6 +71,7 @@ int ata_read_sector_drive(int drive, unsigned int lba, unsigned char* b) {
 // sector LBA boundary per the ATA spec (a multi-sector transfer may not
 // cross it) — QEMU tolerates crossing, real drives may not.
 int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char* b) {
+    if (drive >= AHCI_DRIVE_BASE) return ahci_read_sectors(drive, lba, count, b);
     uint16_t base = ata_base_port(drive);
     if (count < 1) return -1;
     count = ata_batch_limit(lba, count);
@@ -104,6 +107,7 @@ int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char
 // Multi-sector PIO write — the mirror of ata_read_sectors_drive: one
 // command, DRQ pulses per sector, data written in count*512-byte chunks.
 int ata_write_sectors_drive(int drive, unsigned int lba, int count, const unsigned char* b) {
+    if (drive >= AHCI_DRIVE_BASE) return ahci_write_sectors(drive, lba, count, b);
     uint16_t base = ata_base_port(drive);
     if (count < 1) return -1;
     count = ata_batch_limit(lba, count);
@@ -363,6 +367,7 @@ void ata_read_sector(unsigned int lba, unsigned char* b) {
     ata_read_sector_drive(0, lba, b);
 }
 int ata_write_sector_drive(int drive, unsigned int lba, unsigned char* b) {
+    if (drive >= AHCI_DRIVE_BASE) return ahci_write_sectors(drive, lba, 1, b);
     uint16_t base = ata_base_port(drive);
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10; // set activity frames

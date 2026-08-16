@@ -212,6 +212,12 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     extern void ata_dma_irq_secondary(registers_t*);
     register_interrupt_handler(46, ata_dma_irq_primary);
     register_interrupt_handler(47, ata_dma_irq_secondary);
+    // SATA (v38.50): bring up any AHCI controller next to the IDE one. Ports
+    // with disks become drives 4+ on the same sector API, so ext2/FAT32 and
+    // mount() work on SATA volumes unchanged. Absent controller = log only.
+    write_serial_string("[K] ahci\n");
+    extern void ahci_init(void);
+    ahci_init();
     write_serial_string("[K] sb16\n");
     extern void sb16_init(void);
     sb16_init();
