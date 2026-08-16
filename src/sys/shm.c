@@ -149,12 +149,13 @@ uint32_t shm_at(int shmid) {
             // Roll back the pages mapped so far.
             for (uint32_t j = 0; j < i; j++) {
                 uint32_t rva = va + j * 4096;
-                uint32_t pd_idx = rva >> 22;
-                uint32_t pt_idx = (rva >> 12) & 0x3FF;
-                uint32_t* pd_ent = (uint32_t*)(uintptr_t)pd;
-                if (pd_ent[pd_idx] & PAGE_PRESENT) {
-                    uint32_t* pt = (uint32_t*)(uintptr_t)(pd_ent[pd_idx] & 0xFFFFF000);
-                    pt[pt_idx] = 0;
+                pte_t* pdpt = (pte_t*)(uintptr_t)pd;
+                if (pdpt[pdpt_index(rva)] & PAGE_PRESENT) {
+                    pte_t* pde = (pte_t*)(uintptr_t)(uint32_t)(pdpt[pdpt_index(rva)] & PTE_ADDR_MASK);
+                    if (pde[pd_index(rva)] & PAGE_PRESENT) {
+                        pte_t* pt = (pte_t*)(uintptr_t)(uint32_t)(pde[pd_index(rva)] & PTE_ADDR_MASK);
+                        pt[pt_index(rva)] = 0;
+                    }
                 }
                 frame_free(s->frames[j]);
             }
@@ -209,14 +210,15 @@ int shm_dt(uint32_t addr) {
     // Unmap + drop the task's reference on each frame.
     for (uint32_t i = 0; i < s->nframes; i++) {
         uint32_t va = addr + i * 4096;
-        uint32_t pd_idx = va >> 22;
-        uint32_t pt_idx = (va >> 12) & 0x3FF;
-        uint32_t* pd_ent = (uint32_t*)(uintptr_t)pd;
-        if (pd_ent[pd_idx] & PAGE_PRESENT) {
-            uint32_t* pt = (uint32_t*)(uintptr_t)(pd_ent[pd_idx] & 0xFFFFF000);
-            if (pt[pt_idx] & PAGE_PRESENT) {
-                pt[pt_idx] = 0;
-                frame_free(s->frames[i]);   // drops the mapping refcount
+        pte_t* pdpt = (pte_t*)(uintptr_t)pd;
+        if (pdpt[pdpt_index(va)] & PAGE_PRESENT) {
+            pte_t* pde = (pte_t*)(uintptr_t)(uint32_t)(pdpt[pdpt_index(va)] & PTE_ADDR_MASK);
+            if (pde[pd_index(va)] & PAGE_PRESENT) {
+                pte_t* pt = (pte_t*)(uintptr_t)(uint32_t)(pde[pd_index(va)] & PTE_ADDR_MASK);
+                if (pt[pt_index(va)] & PAGE_PRESENT) {
+                    pt[pt_index(va)] = 0;
+                    frame_free(s->frames[i]);   // drops the mapping refcount
+                }
             }
         }
         __asm__ __volatile__("invlpg (%0)" : : "r"(va));

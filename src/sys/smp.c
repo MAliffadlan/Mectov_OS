@@ -27,6 +27,12 @@ void ap_main(void) {
     //     runs here yet, so rebuilding the clean template is safe.
     extern void fpu_init_cpu(void);
     fpu_init_cpu();
+
+    // 1c. Per-core EFER.NXE (v38.49): MSRs are per-CPU. The trampoline
+    //     already set CR4.PAE; without NXE bit 63 of a PTE is reserved on
+    //     this core, so NX-marked user pages would fault spuriously.
+    extern void paging_enable_nxe(void);
+    paging_enable_nxe();
     
     // 2. Load IDT
     idt_load_ap();

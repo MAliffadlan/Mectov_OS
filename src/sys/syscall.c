@@ -221,15 +221,17 @@ void win_mouse_cb(int id, int cx, int cy, int btn) {
 // an unrecoverable panic. So materialise the page here, at validation time,
 // while we can still fail cleanly and return -1 to the caller.
 static int user_page_ok(uint32_t pd_paddr, uint32_t va, uint32_t heap_top) {
-    uint32_t* pd = (uint32_t*)(uintptr_t)(pd_paddr & 0xFFFFF000);
-    uint32_t pde = pd[va >> 22];
-
-    if ((pde & (PAGE_PRESENT | PAGE_USER)) == (PAGE_PRESENT | PAGE_USER)) {
-        uint32_t* pt = (uint32_t*)(uintptr_t)(pde & 0xFFFFF000);
-        uint32_t pte = pt[(va >> 12) & 0x3FF];
-        // PAGE_USER is required at both levels; a COW page is fine here, the
-        // fault handler in idt.c copies it when the write actually happens.
-        if ((pte & (PAGE_PRESENT | PAGE_USER)) == (PAGE_PRESENT | PAGE_USER)) return 1;
+    pte_t* pdpt = (pte_t*)(uintptr_t)pd_paddr;
+    if (pdpt[pdpt_index(va)] & PAGE_PRESENT) {
+        pte_t* pd = (pte_t*)(uintptr_t)(uint32_t)(pdpt[pdpt_index(va)] & PTE_ADDR_MASK);
+        pte_t pde = pd[pd_index(va)];
+        if ((pde & (PAGE_PRESENT | PAGE_USER)) == (PAGE_PRESENT | PAGE_USER)) {
+            pte_t* pt = (pte_t*)(uintptr_t)(uint32_t)(pde & PTE_ADDR_MASK);
+            pte_t pte = pt[pt_index(va)];
+            // PAGE_USER is required at every level; a COW page is fine here,
+            // the fault handler in idt.c copies it when the write happens.
+            if ((pte & (PAGE_PRESENT | PAGE_USER)) == (PAGE_PRESENT | PAGE_USER)) return 1;
+        }
     }
 
     // Not mapped. The only addresses we will fault in on the caller's behalf
@@ -859,14 +861,15 @@ static void syscall_handler(registers_t* regs) {
             uint32_t pd = task_get_page_dir(tid);
             // vmm_unmap_page() frees the PTE but NOT the frame — release the
             // frame first so unmap+free doesn't leak a physical page per call.
-            uint32_t pd_idx = vaddr >> 22;
-            uint32_t pt_idx = (vaddr >> 12) & 0x3FF;
-            uint32_t* pd_ent = (uint32_t*)(uintptr_t)pd;
-            if (pd_ent[pd_idx] & PAGE_PRESENT) {
-                uint32_t* pt = (uint32_t*)(uintptr_t)(pd_ent[pd_idx] & 0xFFFFF000);
-                if (pt[pt_idx] & PAGE_PRESENT) {
-                    extern void frame_free(uint32_t);
-                    frame_free(pt[pt_idx] & 0xFFFFF000);
+            pte_t* pdpt = (pte_t*)(uintptr_t)pd;
+            if (pdpt[pdpt_index(vaddr)] & PAGE_PRESENT) {
+                pte_t* pd_ent = (pte_t*)(uintptr_t)(uint32_t)(pdpt[pdpt_index(vaddr)] & PTE_ADDR_MASK);
+                if (pd_ent[pd_index(vaddr)] & PAGE_PRESENT) {
+                    pte_t* pt = (pte_t*)(uintptr_t)(uint32_t)(pd_ent[pd_index(vaddr)] & PTE_ADDR_MASK);
+                    if (pt[pt_index(vaddr)] & PAGE_PRESENT) {
+                        extern void frame_free(uint32_t);
+                        frame_free((uint32_t)(pt[pt_index(vaddr)] & PTE_ADDR_MASK));
+                    }
                 }
             }
             regs->eax = (uint32_t)vmm_unmap_page(pd, vaddr);

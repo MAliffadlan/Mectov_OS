@@ -394,6 +394,10 @@ void vfs_init() {
         extern uint8_t _binary_fputest_mct_start[];
         extern uint8_t _binary_fputest_mct_end[];
         changed += vfs_update_file_if_needed("apps/fputest.mct", (const char*)_binary_fputest_mct_start, _binary_fputest_mct_end - _binary_fputest_mct_start);
+        // W^X regression (v38.49): executing stack code must SIGSEGV
+        extern uint8_t _binary_nxtest_mct_start[];
+        extern uint8_t _binary_nxtest_mct_end[];
+        changed += vfs_update_file_if_needed("apps/nxtest.mct", (const char*)_binary_nxtest_mct_start, _binary_nxtest_mct_end - _binary_nxtest_mct_start);
 
         // Exec demo (fork + exec + waitpid)
         extern uint8_t _binary_execdemo_mct_start[];
@@ -665,6 +669,10 @@ void vfs_init() {
     extern uint8_t _binary_fputest_mct_end[];
     vfs_create_file("apps/fputest.mct");
     vfs_write_file("apps/fputest.mct", (const char*)_binary_fputest_mct_start, _binary_fputest_mct_end - _binary_fputest_mct_start);
+    extern uint8_t _binary_nxtest_mct_start[];
+    extern uint8_t _binary_nxtest_mct_end[];
+    vfs_create_file("apps/nxtest.mct");
+    vfs_write_file("apps/nxtest.mct", (const char*)_binary_nxtest_mct_start, _binary_nxtest_mct_end - _binary_nxtest_mct_start);
 
     // Exec demo apps
     extern uint8_t _binary_execdemo_mct_start[];

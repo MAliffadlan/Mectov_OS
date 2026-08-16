@@ -594,15 +594,18 @@ uint32_t task_stack_top(int tid) {
 // cleared entries (see init_tasking). invlpg keeps the current TLB coherent
 // if this runs on the active directory.
 void task_install_stack_guards(uint32_t page_dir) {
-    uint32_t* pd = (uint32_t*)(uintptr_t)(page_dir & 0xFFFFF000);
+    pte_t* pdpt = (pte_t*)(uintptr_t)page_dir;
     for (int tid = 0; tid < MAX_TASKS; tid++) {
         uint32_t va = kstack_guard(tid);
-        uint32_t pd_idx = va >> 22;
-        uint32_t pt_idx = (va >> 12) & 0x3FF;
-        if (!(pd[pd_idx] & PAGE_PRESENT)) continue;
-        uint32_t* pt = (uint32_t*)(uintptr_t)(pd[pd_idx] & 0xFFFFF000);
-        if (pt[pt_idx] & PAGE_PRESENT) {
-            pt[pt_idx] = 0;
+        uint32_t pi = pdpt_index(va);
+        uint32_t di = pd_index(va);
+        uint32_t ti = pt_index(va);
+        if (!(pdpt[pi] & PAGE_PRESENT)) continue;
+        pte_t* pd = (pte_t*)(uintptr_t)(uint32_t)(pdpt[pi] & PTE_ADDR_MASK);
+        if (!(pd[di] & PAGE_PRESENT)) continue;
+        pte_t* pt = (pte_t*)(uintptr_t)(uint32_t)(pd[di] & PTE_ADDR_MASK);
+        if (pt[ti] & PAGE_PRESENT) {
+            pt[ti] = 0;
             __asm__ __volatile__("invlpg (%0)" : : "r"(va));
         }
     }
@@ -2819,26 +2822,27 @@ int task_mmap_handle_fault(uint32_t addr, uint32_t cr3, uint32_t err) {
         if (addr < b || addr >= b + r->size) continue;
 
         uint32_t va = addr & ~0xFFFu;
-        uint32_t pd_idx = va >> 22;
-        uint32_t pt_idx = (va >> 12) & 0x3FF;
-        uint32_t* pd = (uint32_t*)(uintptr_t)cr3;
+        pte_t* pdpt = (pte_t*)(uintptr_t)cr3;
 
         // Page already present: only a write to a read-only file page needs
         // action (mark dirty + upgrade to writable). A present page can never
         // be missing its entry, so this early-out is just the RO→RW upgrade
         // for file pages and a safety net for everything else.
-        if ((pd[pd_idx] & PAGE_PRESENT) && (pd[pd_idx] & 0xFFFFF000)) {
-            uint32_t* pt = (uint32_t*)(uintptr_t)(pd[pd_idx] & 0xFFFFF000);
-            if (pt[pt_idx] & PAGE_PRESENT) {
-                if (write_fault && !(pt[pt_idx] & PAGE_RW)) {
-                    if (r->map_flags == MMAP_FILE_SHARED) {
-                        uint32_t page = (va - b) / 4096;
-                        r->dirty[page / 8] |= (uint8_t)(1u << (page % 8));
+        if (pdpt[pdpt_index(va)] & PAGE_PRESENT) {
+            pte_t* pd = (pte_t*)(uintptr_t)(uint32_t)(pdpt[pdpt_index(va)] & PTE_ADDR_MASK);
+            if (pd[pd_index(va)] & PAGE_PRESENT) {
+                pte_t* pt = (pte_t*)(uintptr_t)(uint32_t)(pd[pd_index(va)] & PTE_ADDR_MASK);
+                if (pt[pt_index(va)] & PAGE_PRESENT) {
+                    if (write_fault && !(pt[pt_index(va)] & PAGE_RW)) {
+                        if (r->map_flags == MMAP_FILE_SHARED) {
+                            uint32_t page = (va - b) / 4096;
+                            r->dirty[page / 8] |= (uint8_t)(1u << (page % 8));
+                        }
+                        pt[pt_index(va)] |= PAGE_RW;
+                        __asm__ __volatile__("invlpg (%0)" : : "r"(va));
                     }
-                    pt[pt_idx] |= PAGE_RW;
-                    __asm__ __volatile__("invlpg (%0)" : : "r"(va));
+                    return 1;
                 }
-                return 1;
             }
         }
 
@@ -2918,16 +2922,15 @@ uint32_t task_munmap(uint32_t addr) {
         // Free every frame that was faulted in. The page fault handler maps
         // exactly the pages in [base, base+size), so walk the PTEs.
         for (uint32_t va = addr; va < addr + size; va += 4096) {
-            uint32_t pd_idx = va >> 22;
-            uint32_t pt_idx = (va >> 12) & 0x3FF;
-            uint32_t* pd = (uint32_t*)(uintptr_t)page_dir;
-            if (!(pd[pd_idx] & PAGE_PRESENT)) continue;
-            uint32_t pt_paddr = pd[pd_idx] & 0xFFFFF000;
-            uint32_t* pt = (uint32_t*)(uintptr_t)pt_paddr;
-            if (pt[pt_idx] & PAGE_PRESENT) {
-                uint32_t paddr = pt[pt_idx] & 0xFFFFF000;
+            pte_t* pdpt = (pte_t*)(uintptr_t)page_dir;
+            if (!(pdpt[pdpt_index(va)] & PAGE_PRESENT)) continue;
+            pte_t* pd = (pte_t*)(uintptr_t)(uint32_t)(pdpt[pdpt_index(va)] & PTE_ADDR_MASK);
+            if (!(pd[pd_index(va)] & PAGE_PRESENT)) continue;
+            pte_t* pt = (pte_t*)(uintptr_t)(uint32_t)(pd[pd_index(va)] & PTE_ADDR_MASK);
+            if (pt[pt_index(va)] & PAGE_PRESENT) {
+                uint32_t paddr = (uint32_t)(pt[pt_index(va)] & PTE_ADDR_MASK);
                 if (paddr >= (KERNEL_RESERVED_PAGES * 4096)) frame_free(paddr);
-                pt[pt_idx] = 0;
+                pt[pt_index(va)] = 0;
                 __asm__ __volatile__("invlpg (%0)" : : "r"(va));
             }
         }

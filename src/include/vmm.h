@@ -58,14 +58,15 @@ uint32_t frame_alloc(void);
 void frame_free(uint32_t paddr);
 extern uint8_t frame_ref_count[];
 
-// Map a virtual address to a physical frame in a specific page directory
-int vmm_map_page(uint32_t page_dir, uint32_t vaddr, uint32_t paddr, uint32_t flags);
+// Map a virtual address to a physical frame in a specific address space
+// (page_dir = PDPT frame under PAE). flags is uint64 so PAGE_NX fits.
+int vmm_map_page(uint32_t page_dir, uint32_t vaddr, uint32_t paddr, uint64_t flags);
 
-// Unmap a virtual address in a specific page directory
+// Unmap a virtual address in a specific address space
 int vmm_unmap_page(uint32_t page_dir, uint32_t vaddr);
 
-// Allocate a physical frame and map it at vaddr in the given page directory
-uint32_t vmm_alloc_page_at(uint32_t page_dir, uint32_t vaddr, uint32_t flags);
+// Allocate a physical frame and map it at vaddr in the given address space
+uint32_t vmm_alloc_page_at(uint32_t page_dir, uint32_t vaddr, uint64_t flags);
 
 // Clone an address space (for fork/spawn — COW)
 uint32_t vmm_clone_address_space(uint32_t src_page_dir);

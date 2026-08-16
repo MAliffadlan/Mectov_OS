@@ -74,6 +74,7 @@ def main():
     # path (DHCP never runs there).
     qemu_cmd = [
         "qemu-system-i386",
+        "-cpu", "qemu32,+nx",
         "-vga", "std",
         "-cdrom", args.iso,
         "-m", "128",

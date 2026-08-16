@@ -117,6 +117,10 @@ jobs:
         run: |
           python3 scripts/fputest.py --timeout 240
 
+      - name: PAE + NX (W^X) regression (TCG)
+        run: |
+          python3 scripts/nxtest.py --timeout 240
+
       - name: Fork KVM 4-core — mandatory SMP keyboard regression
         run: |
           # Most GitHub-hosted ubuntu-latest runners expose /dev/kvm; guard

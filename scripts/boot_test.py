@@ -69,6 +69,7 @@ def main():
 
     qemu = subprocess.Popen([
         "qemu-system-i386",
+        "-cpu", "qemu32,+nx",
         "-vga", "std",
         "-cdrom", args.iso,
         "-m", "128",

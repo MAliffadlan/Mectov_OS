@@ -33,10 +33,16 @@ protected_mode:
     mov gs, ax
     mov ss, ax
 
+    ; Enable PAE paging (v38.49): CR4.PAE must be set before PG — the CR3
+    ; passed at 0x7FF8 is a PDPT now, and PG without PAE would interpret it
+    ; as the old 2-level format.
+    mov eax, 0x20
+    mov cr4, eax
+
     ; Enable Paging using CR3 passed at 0x7FF8
     mov eax, [0x7FF8]
     mov cr3, eax
-    
+
     mov eax, cr0
     or eax, 0x80000000
     mov cr0, eax

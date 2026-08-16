@@ -274,17 +274,22 @@ uint32_t irq_handler(uint32_t esp) {
 // duplicates it. Returns 1 when the fault is resolved (resume the faulting
 // instruction), 0 when no frame could be produced (fall through to kill).
 // Runs in exception context (fault stack, IF=0) — logging is try-write only.
+// v38.49: heap/stack pages are DATA — mark them no-execute when EFER.NXE is
+// on, so executing from either faults (W^X for the default user layout).
 static int demand_map_zero(uint32_t cr3_val, uint32_t addr, uint32_t err_code) {
+    uint64_t nx = 0;
+    extern int paging_nx_enabled(void);
+    if (paging_nx_enabled()) nx = PAGE_NX;
     uint32_t phys;
     if (err_code & 2) {  // write fault -> private zeroed frame
         phys = frame_alloc();
         if (phys == 0) return 0;
-        vmm_map_page(cr3_val, addr, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+        vmm_map_page(cr3_val, addr, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER | nx);
         memset((void*)(addr & 0xFFFFF000), 0, 4096);
     } else {  // read fault -> shared zero page (RO + COW marker)
         phys = phys_get_zero_page();
         if (phys == 0) return 0;
-        vmm_map_page(cr3_val, addr, phys, PAGE_PRESENT | PAGE_USER | PAGE_COW);
+        vmm_map_page(cr3_val, addr, phys, PAGE_PRESENT | PAGE_USER | PAGE_COW | nx);
     }
     char b[96];
     char* q = b;
@@ -359,87 +364,110 @@ void isr_handler(registers_t *r) {
 
         uint32_t cr3_val;
         __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3_val));
-        
-        uint32_t* pd = (uint32_t*)(uintptr_t)(cr3_val & 0xFFFFF000);
-        uint32_t pd_idx = faulting_address >> 22;
-        
-        if (pd[pd_idx] & PAGE_PRESENT) {
-            uint32_t* pt = (uint32_t*)(uintptr_t)(pd[pd_idx] & 0xFFFFF000);
-            uint32_t pt_idx = (faulting_address >> 12) & 0x3FF;
-            
-            if (pt[pt_idx] & PAGE_PRESENT) {
-                uint32_t entry = pt[pt_idx];
-                if (entry & PAGE_COW) {
-                    uint32_t old_paddr = entry & 0xFFFFF000;
-                    
-                    // Sole ownership optimization. The refcount read is locked
-                    // against frame_alloc/frame_free on other cores (kernel
-                    // locking audit): an unlocked read could observe a torn
-                    // count mid-update and wrongly promote a still-shared page.
-                    extern void vmm_lock_acquire_irq(void);
-                    extern void vmm_lock_release_irq(void);
-                    vmm_lock_acquire_irq();
-                    int sole_owner = (frame_ref_count[old_paddr / 4096] == 1);
-                    vmm_lock_release_irq();
-                    if (sole_owner) {
-                        uint32_t flags = entry & 0xFFF;
-                        flags |= PAGE_RW;
-                        flags &= ~PAGE_COW;
-                        pt[pt_idx] = old_paddr | flags;
-                        __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
-                        
-                        // Exception context (fault stack, IF=0): atomic try-write
-                        // so logging can never self-deadlock on serial_lock.
-                        char b1[96];
-                        char* q1 = b1;
-                        q1 = str_append(q1, "[COW] Promoted sole-owned page to writable at ");
-                        q1 = hex_append(q1, faulting_address);
-                        q1 = str_append(q1, "\n");
-                        // Routine diagnostic: skip when the serial lock is
-                        // contended so this log never garbles another core's
-                        // locked line with raw bytes (seen: "fork: child"
-                        // split under real SMP). Panic/error paths should
-                        // keep write_serial_try's raw fallback.
-                        write_serial_if_free(b1, (int)(q1 - b1));
-                        return; // Resume execution
-                    }
-                    
-                    // Duplicate page
-                    uint32_t new_paddr = frame_alloc();
-                    if (new_paddr == 0) {
-                        char b2[96];
-                        char* q2 = b2;
-                        q2 = str_append(q2, "[COW] OOM during COW fault at ");
-                        q2 = hex_append(q2, faulting_address);
-                        q2 = str_append(q2, " - falling through to kill task\n");
-                        write_serial_try(b2, (int)(q2 - b2));
-                        // Falls through to the unhandled-exception path below,
-                        // which calls task_exit() for Ring 3 or panics for Ring 0.
-                    } else {
-                        memcpy((void*)(uintptr_t)new_paddr, (void*)(uintptr_t)old_paddr, 4096);
-                        
-                        uint32_t flags = entry & 0xFFF;
-                        flags |= PAGE_RW;
-                        flags &= ~PAGE_COW;
-                        pt[pt_idx] = new_paddr | flags;
-                        
-                        frame_free(old_paddr);
-                        __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
-                        
-                        char b3[128];
-                        char* q3 = b3;
-                        q3 = str_append(q3, "[COW] Duplicated page at ");
-                        q3 = hex_append(q3, faulting_address);
-                        q3 = str_append(q3, " (Old: ");
-                        q3 = hex_append(q3, old_paddr);
-                        q3 = str_append(q3, " -> New: ");
-                        q3 = hex_append(q3, new_paddr);
-                        q3 = str_append(q3, ")\n");
-                        // Routine diagnostic: skip when serial lock is
-                        // contended (same rationale as above).
-                        write_serial_if_free(b3, (int)(q3 - b3));
-                        return; // Resume execution
-                    }
+
+        // Instruction-fetch fault (err bit 4 = I/D): with W^X active this is
+        // an execute-from-data violation — a present NX page, or an unmapped
+        // fetch target. NEVER demand-map it (mapping zeroed data and running
+        // it is exactly what NX exists to prevent): log once and fall to the
+        // generic path below, which delivers SIGSEGV (Ring 3) or panics
+        // (Ring 0). There is no demand-paged CODE in this kernel — images
+        // and the signal trampoline are mapped eagerly — so every fetch
+        // fault is genuine.
+        if (r->err_code & 0x10) {
+            char w[96];
+            char* wp = w;
+            wp = str_append(wp, "[W^X] execute fault at ");
+            wp = hex_append(wp, faulting_address);
+            wp = str_append(wp, " EIP=");
+            wp = hex_append(wp, r->eip);
+            wp = str_append(wp, "\n");
+            write_serial_try(w, (int)(wp - w));
+        } else {
+
+        // PAE walk: CR3 -> PDPT -> PD -> PT (v38.49). All structures live in
+        // the identity map, so the physical pointers dereference directly.
+        pte_t* pdpt = (pte_t*)(uintptr_t)cr3_val;
+        pte_t* pd = 0;
+        pte_t* pt = 0;
+        uint32_t pt_idx = pt_index(faulting_address);
+
+        if (pdpt[pdpt_index(faulting_address)] & PAGE_PRESENT) {
+            pd = (pte_t*)(uintptr_t)(uint32_t)(pdpt[pdpt_index(faulting_address)] & PTE_ADDR_MASK);
+            if (pd[pd_index(faulting_address)] & PAGE_PRESENT) {
+                pt = (pte_t*)(uintptr_t)(uint32_t)(pd[pd_index(faulting_address)] & PTE_ADDR_MASK);
+            }
+        }
+
+        if (pt && (pt[pt_idx] & PAGE_PRESENT)) {
+            pte_t entry = pt[pt_idx];
+            if (entry & PAGE_COW) {
+                uint32_t old_paddr = (uint32_t)(entry & PTE_ADDR_MASK);
+
+                // Sole ownership optimization. The refcount read is locked
+                // against frame_alloc/frame_free on other cores (kernel
+                // locking audit): an unlocked read could observe a torn
+                // count mid-update and wrongly promote a still-shared page.
+                extern void vmm_lock_acquire_irq(void);
+                extern void vmm_lock_release_irq(void);
+                vmm_lock_acquire_irq();
+                int sole_owner = (frame_ref_count[old_paddr / 4096] == 1);
+                vmm_lock_release_irq();
+                if (sole_owner) {
+                    // Keep every non-address flag (incl. PAGE_NX) exactly as
+                    // it was; only RW/COW change.
+                    entry = (entry & ~PTE_ADDR_MASK & ~PAGE_COW) | PAGE_RW | old_paddr;
+                    pt[pt_idx] = entry;
+                    __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
+
+                    // Exception context (fault stack, IF=0): atomic try-write
+                    // so logging can never self-deadlock on serial_lock.
+                    char b1[96];
+                    char* q1 = b1;
+                    q1 = str_append(q1, "[COW] Promoted sole-owned page to writable at ");
+                    q1 = hex_append(q1, faulting_address);
+                    q1 = str_append(q1, "\n");
+                    // Routine diagnostic: skip when the serial lock is
+                    // contended so this log never garbles another core's
+                    // locked line with raw bytes (seen: "fork: child"
+                    // split under real SMP). Panic/error paths should
+                    // keep write_serial_try's raw fallback.
+                    write_serial_if_free(b1, (int)(q1 - b1));
+                    return; // Resume execution
+                }
+
+                // Duplicate page
+                uint32_t new_paddr = frame_alloc();
+                if (new_paddr == 0) {
+                    char b2[96];
+                    char* q2 = b2;
+                    q2 = str_append(q2, "[COW] OOM during COW fault at ");
+                    q2 = hex_append(q2, faulting_address);
+                    q2 = str_append(q2, " - falling through to kill task\n");
+                    write_serial_try(b2, (int)(q2 - b2));
+                    // Falls through to the unhandled-exception path below,
+                    // which calls task_exit() for Ring 3 or panics for Ring 0.
+                } else {
+                    memcpy((void*)(uintptr_t)new_paddr, (void*)(uintptr_t)old_paddr, 4096);
+
+                    entry = (entry & ~PTE_ADDR_MASK & ~PAGE_COW) | PAGE_RW | new_paddr;
+                    pt[pt_idx] = entry;
+
+                    frame_free(old_paddr);
+                    __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
+
+                    char b3[128];
+                    char* q3 = b3;
+                    q3 = str_append(q3, "[COW] Duplicated page at ");
+                    q3 = hex_append(q3, faulting_address);
+                    q3 = str_append(q3, " (Old: ");
+                    q3 = hex_append(q3, old_paddr);
+                    q3 = str_append(q3, " -> New: ");
+                    q3 = hex_append(q3, new_paddr);
+                    q3 = str_append(q3, ")\n");
+                    // Routine diagnostic: skip when serial lock is
+                    // contended (same rationale as above).
+                    write_serial_if_free(b3, (int)(q3 - b3));
+                    return; // Resume execution
                 }
             }
         }
@@ -489,6 +517,7 @@ void isr_handler(registers_t *r) {
                 write_serial_try("[VMM] OUT OF MEMORY during Stack Demand Paging!\n", (int)strlen("[VMM] OUT OF MEMORY during Stack Demand Paging!\n"));
             }
         }
+        }  // end of the non-fetch (data) fault paths
     }
 
     if (interrupt_handlers[r->int_no] != 0) {

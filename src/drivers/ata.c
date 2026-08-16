@@ -4,6 +4,7 @@
 #include "../include/pci.h"
 #include "../include/mem.h"
 #include "../include/serial.h"
+#include "../include/utils.h"   // memcpy for the DMA bounce path
 
 // ata_lock serializes the shared IDE controller: two cores issuing command
 // sequences concurrently would interleave port writes and corrupt the

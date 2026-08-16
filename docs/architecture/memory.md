@@ -48,3 +48,32 @@ Mectov OS implements a two-tier memory manager comprising a Physical Memory Mana
 
 2. **Ext2 VFS Traversal Bounds Check (`src/sys/ext2.c`)**:
    - Validates node indices (`new_dir >= 0` and `new_file >= 0`) during Ext2 VFS tree population to prevent array underflow writes (`fs_nodes[-1]`) when maximum VFS node limit (64) is reached.
+
+---
+
+## 🛡️ PAE + NX / W^X (v38.49)
+
+The kernel moved from 2-level (1024-entry, 32-bit PTE) paging to **PAE
+3-level** — PDPT (4 × 512MB) → PD (512 × 2MB) → PT (512 × 4KB) — with
+64-bit entries (`pte_t`), and enables **EFER.NXE** so bit 63 of an entry
+means no-execute.
+
+- **Layout**: every address space is a PDPT frame (`task.page_dir` / CR3);
+  the boot structures are static identity globals (`boot_pdpt` /
+  `boot_pds` / 256×2MB identity PTs in `mem.c`). CR4.PAE is set before
+  CR0.PG; the SMP trampoline sets it per-AP before enabling paging, and
+  every AP repeats the EFER.NXE MSR write (`paging_enable_nxe`).
+- **W^X policy**: user heap + stack demand-zero pages and anonymous mmap
+  pages are mapped PAGE_NX; images and the signal trampoline stay
+  executable. A page-fault with the I/D bit set (instruction fetch) is
+  NEVER demand-mapped — it logs `[W^X] execute fault` and kills the task
+  with SIGSEGV (or panics in Ring 0). `apps/nxtest.mct` places a `ret` on
+  its stack and calls it; CI (`scripts/nxtest.py`) asserts the kill.
+- **Fork fix found during migration**: the old clone path re-allocated a
+  fresh PT for every kernel-region PDE and overwrote the copy
+  `vmm_create_address_space` had just made — leaking ~120 frames (≈0.5MB)
+  per fork. The PAE clone COW-copies only the USER ptes inside
+  kernel-region tables and reuses the create-time copies.
+- **QEMU note**: the default `qemu32` CPU model lacks the NX CPUID bit —
+  all harnesses now pass `-cpu qemu32,+nx` (the kernel degrades cleanly
+  to PAE-without-NX and logs `NX unavailable` if the feature is absent).

@@ -92,6 +92,7 @@ def main():
 
     qemu_cmd = [
         "qemu-system-i386",
+        "-cpu", "qemu32,+nx",
         "-vga", "std",
         "-cdrom", "mectov.iso",
         "-m", "128",

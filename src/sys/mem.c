@@ -4,6 +4,7 @@
 #include "../include/utils.h"
 #include "../include/serial.h"
 #include "../include/spinlock.h"
+#include "../include/msr.h"
 
 static spinlock_t heap_lock = SPINLOCK_INIT;
 
@@ -49,15 +50,46 @@ static void heap_panic(const char* what, uint32_t addr, uint32_t caller_ra) {
 }
 
 
-static uint32_t page_directory[1024] __attribute__((aligned(4096)));
-static uint32_t page_tables[128][1024] __attribute__((aligned(4096)));  // 128 × 4MB = 512MB identity map
-static uint32_t fb_page_tables[2][1024] __attribute__((aligned(4096))); 
+// ---- Boot (kernel) paging structures (PAE, v38.49) ----
+// 4 PDs (one per 512MB PDPT slot) + 256 identity PTs (each covers 2MB —
+// 256 × 2MB = the 512MB ceiling) + 2 framebuffer PTs. All static BSS with
+// virt == phys, so their addresses can be written into entries directly.
+pte_t boot_pdpt[PDPT_ENTRIES] __attribute__((aligned(4096)));
+pte_t boot_pds[PDPT_ENTRIES][PT_ENTRIES] __attribute__((aligned(4096)));
+static pte_t page_tables[256][PT_ENTRIES] __attribute__((aligned(4096)));
+static pte_t fb_page_tables[2][PT_ENTRIES] __attribute__((aligned(4096)));
+// APIC MMIO PTs: 0xFEC00000 (I/O APIC) and 0xFEE00000 (LAPIC) sit in
+// DIFFERENT 2MB PD regions under PAE (they shared one 4MB PDE before).
+static pte_t apic_page_tables[2][PT_ENTRIES] __attribute__((aligned(4096)));
+
+// 1 once EFER.NXE is enabled on the BSP (CPUID-gated). Filled by
+// paging_init; consulted by page fillers before setting PAGE_NX.
+static int nx_enabled = 0;
+int paging_nx_enabled(void) { return nx_enabled; }
+
+// get_cid() lives in task.c (needs LAPIC MMIO up). paging_init runs long
+// before tasking, so a local read of the LAPIC id is the honest way to say
+// "this is the BSP" during early boot. Safe pre-paging: identity access.
+static int get_cid_safe(void) {
+    return (*(volatile uint32_t*)0xFEE00020 >> 24) & 15;
+}
+
+// EFER.NXE on the CURRENT cpu. MSR writes are cheap and idempotent; the
+// BSP does this inside paging_init before CR0.PG, every AP in ap_main.
+void paging_enable_nxe(void) {
+    uint32_t a, b, c, d;
+    __asm__ __volatile__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                         : "a"(0x80000001));
+    if (!(d & (1u << 20))) return;   // no NX feature -> leave bit 63 reserved
+    wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_NXE);
+    if (get_cid_safe() == 0) nx_enabled = 1;
+}
 
 // total_pages is the SINGLE source of truth for physical RAM: kernel_main
 // reads it from the multiboot header, init_mem stores it, phys_init (vmm.c)
 // sizes the frame allocator from it, and paging_init identity-maps it.
 static uint32_t total_pages = 0;
-static uint32_t identity_tables = 8;  // how many 4MB tables paging_init mapped
+static uint32_t identity_tables = 8;  // how many 2MB PTs paging_init mapped
 
 void init_mem(uint32_t mem_size) {
     total_pages = mem_size / PAGE_SIZE;
@@ -70,12 +102,14 @@ void init_mem(uint32_t mem_size) {
 
 void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     (void)fb_size;
-    memset(page_directory, 0, sizeof(page_directory));
-    
-    // Map available physical memory (up to the 512MB ceiling)
-    uint32_t num_tables = (total_pages + 1023) / 1024;
-    if (num_tables == 0) num_tables = 8;
-    if (num_tables > 128) num_tables = 128;
+    memset(boot_pdpt, 0, sizeof(boot_pdpt));
+    memset(boot_pds, 0, sizeof(boot_pds));
+
+    // Map available physical memory (up to the 512MB ceiling). One PT per
+    // 2MB region under PAE (was one per 4MB).
+    uint32_t num_tables = (total_pages + (PT_ENTRIES - 1)) / PT_ENTRIES;
+    if (num_tables == 0) num_tables = 4;
+    if (num_tables > 256) num_tables = 256;
     identity_tables = num_tables;
 
     // KERNEL-ONLY: no PAGE_USER here. This map covers kernel .text, .data,
@@ -87,21 +121,30 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     // Pages a process is genuinely allowed to touch get PAGE_USER individually
     // from vmm_map_page(): its image and heap at 0x08000000, its stack at
     // USER_STACK_TOP, and the framebuffer tables built below.
-    for(uint32_t t = 0; t < num_tables; t++) {
-        for(unsigned int j = 0; j < 1024; j++) {
-            page_tables[t][j] = ((t * 1024 + j) * 4096) | PAGE_PRESENT | PAGE_RW;
+    for (uint32_t t = 0; t < num_tables; t++) {
+        for (uint32_t j = 0; j < PT_ENTRIES; j++) {
+            page_tables[t][j] = ((uint64_t)(t * PT_ENTRIES + j) * 4096)
+                                | PAGE_PRESENT | PAGE_RW;
         }
-        page_directory[t] = ((uint32_t)page_tables[t]) | PAGE_PRESENT | PAGE_RW;
+        boot_pds[0][t] = ((uint32_t)(uintptr_t)page_tables[t]) | PAGE_PRESENT | PAGE_RW;
     }
+    boot_pdpt[0] = ((uint32_t)(uintptr_t)boot_pds[0]) | PAGE_PRESENT | PAGE_RW;
 
-    // Map Framebuffer separately if it's above our identity mapped RAM
-    if (fb_paddr >= (num_tables * 4 * 1024 * 1024)) {
-        uint32_t fb_pde_idx = fb_paddr >> 22;
+    // Map Framebuffer separately if it's above our identity mapped RAM.
+    // The fb sits around ~4GB on QEMU -> PDPT slot 3.
+    if (fb_paddr >= (num_tables * 2 * 1024 * 1024)) {
+        uint32_t fbi = pdpt_index(fb_paddr);
+        uint32_t fbd = pd_index(fb_paddr);
         for (int i = 0; i < 2; i++) {
-            for (int j = 0; j < 1024; j++) {
-                fb_page_tables[i][j] = (fb_paddr + i * 0x400000 + j * 0x1000) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+            for (uint32_t j = 0; j < PT_ENTRIES; j++) {
+                fb_page_tables[i][j] = ((uint64_t)fb_paddr + i * 0x200000 + j * 0x1000)
+                                       | PAGE_PRESENT | PAGE_RW | PAGE_USER;
             }
-            page_directory[fb_pde_idx + i] = ((uint32_t)fb_page_tables[i]) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+            boot_pds[fbi][fbd + i] = ((uint32_t)(uintptr_t)fb_page_tables[i])
+                                     | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+        }
+        if (!(boot_pdpt[fbi] & PAGE_PRESENT)) {
+            boot_pdpt[fbi] = ((uint32_t)(uintptr_t)boot_pds[fbi]) | PAGE_PRESENT | PAGE_RW;
         }
     }
 
@@ -111,18 +154,32 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     // out as a free frame.
     phys_reserve_region(fb_paddr, fb_size);
 
-    // Map APIC (0xFEE00000) and IOAPIC (0xFEC00000)
-    // They both fall into the same 4MB page directory entry (0x3FB, which is 1019)
-    static uint32_t apic_page_table[1024] __attribute__((aligned(4096)));
-    for (int j = 0; j < 1024; j++) {
-        apic_page_table[j] = (0xFEC00000 + j * 0x1000) | PAGE_PRESENT | PAGE_RW;
+    // Map APIC MMIO: 0xFEC00000 (I/O APIC) and 0xFEE00000 (LAPIC) each own
+    // a 2MB PT under PAE. Both PD entries live in PDPT slot 3.
+    for (int i = 0; i < 2; i++) {
+        uint64_t base = 0xFEC00000ULL + (uint64_t)i * 0x200000;
+        for (uint32_t j = 0; j < PT_ENTRIES; j++) {
+            apic_page_tables[i][j] = (base + j * 0x1000) | PAGE_PRESENT | PAGE_RW;
+        }
+        // Strong uncached (PCD|PWT) on the register page of each region.
+        apic_page_tables[i][0] |= 0x18;
+        uint32_t idx = pd_index((uint32_t)base);
+        boot_pds[3][idx] = ((uint32_t)(uintptr_t)apic_page_tables[i]) | PAGE_PRESENT | PAGE_RW;
     }
-    // Set caching disabled for APIC regions
-    apic_page_table[0x200] |= 0x18; // 0xFEE00000 offset 0x200 pages
-    apic_page_table[0x000] |= 0x18; // 0xFEC00000 offset 0
-    page_directory[1019] = ((uint32_t)apic_page_table) | PAGE_PRESENT | PAGE_RW;
+    if (!(boot_pdpt[3] & PAGE_PRESENT)) {
+        boot_pdpt[3] = ((uint32_t)(uintptr_t)boot_pds[3]) | PAGE_PRESENT | PAGE_RW;
+    }
 
-    __asm__ __volatile__("mov %0, %%cr3": : "r"(page_directory));
+    // Enable PAE (CR4.PAE) BEFORE paging, then EFER.NXE (so bit 63 means
+    // no-execute rather than reserved), then load the PDPT and set PG/WP.
+    // NXE is per-CPU; APs repeat it in ap_main via paging_enable_nxe().
+    uint32_t cr4;
+    __asm__ __volatile__("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= 0x00000020;   // PAE
+    __asm__ __volatile__("mov %0, %%cr4" : : "r"(cr4));
+    paging_enable_nxe();
+
+    __asm__ __volatile__("mov %0, %%cr3" : : "r"(boot_pdpt));
     uint32_t cr0;
     __asm__ __volatile__("mov %%cr0, %0": "=r"(cr0));
     cr0 |= 0x80000000;  // PG  — enable paging
@@ -131,21 +188,29 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
                         // read-only page, which would skip the COW handler in
                         // idt.c whenever the kernel is the one writing.
     __asm__ __volatile__("mov %0, %%cr0": : "r"(cr0));
+
+    write_serial_string("[MEM] PAE paging on (NX ");
+    write_serial_string(nx_enabled ? "enabled)\n" : "unavailable)\n");
 }
 
-// Map a virtual address to a physical address explicitly
+// Map a virtual address to a physical address explicitly in the BOOT tables.
+// Two families of caller: identity-range tweaks (SMP trampoline pages) and
+// APIC MMIO pages (apic.c) — both regions are static here.
 void page_map(uint32_t vaddr, uint32_t paddr, uint32_t flags) {
-    uint32_t pd_idx = vaddr >> 22;
-    uint32_t pt_idx = (vaddr >> 12) & 0x3FF;
-    
-    // Update the static identity-map tables (covers 0..RAM, up to 512MB).
-    if (pd_idx < identity_tables) {
-        page_tables[pd_idx][pt_idx] = (paddr & 0xFFFFF000) | flags;
-        // Keep the PDE kernel-only unless this mapping explicitly asked to be
-        // user-reachable — see the note in paging_init().
+    uint32_t pi = pdpt_index(vaddr);
+    uint32_t di = pd_index(vaddr);
+    uint32_t ti = pt_index(vaddr);
+
+    if (pi == 0 && di < identity_tables) {
+        page_tables[di][ti] = (paddr & 0xFFFFF000ULL) | flags;
+        // Keep the PD entry kernel-only unless asked to be user-reachable.
         uint32_t pde_flags = PAGE_PRESENT | PAGE_RW;
         if (flags & PAGE_USER) pde_flags |= PAGE_USER;
-        page_directory[pd_idx] = ((uint32_t)page_tables[pd_idx]) | pde_flags;
+        boot_pds[0][di] = ((uint32_t)(uintptr_t)page_tables[di]) | pde_flags;
+    } else if (vaddr >= 0xFEC00000 && vaddr < 0xFF000000) {
+        // The two APIC MMIO regions own PD slots in PDPT slot 3.
+        int which = (vaddr >= 0xFEE00000) ? 1 : 0;
+        apic_page_tables[which][ti] = (paddr & 0xFFFFF000ULL) | flags;
     }
 }
 
