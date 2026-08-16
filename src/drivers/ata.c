@@ -322,39 +322,39 @@ static int ata_dma_transfer(int drive, unsigned int lba, int count,
     return 0;
 }
 
-// Public DMA entry points. The bounce buffer is kmalloc'd (identity-mapped,
-// physically contiguous) because PRD addresses must be physical and callers
-// may pass user-space buffers. `buf` is the caller's buffer (any address).
-// Returns 0 on success, -2 when DMA is unavailable (caller keeps PIO), -1 on
-// transfer failure (caller may fall back to PIO for the same range).
+// Public DMA entry points. The bounce buffer is a preallocated 64K-aligned
+// static buffer (identity-mapped, so its address IS its physical address and
+// a <=64K transfer never crosses a 64K boundary — the PRDT is always a
+// single region). v38.47: this replaces a per-I/O kmalloc/kfree plus a
+// byte-at-a-time copy loop of up to 64K; the copy itself stays under
+// ata_lock because the buffer is now shared by all CPUs.
+// `buf` is the caller's buffer (any address). Returns 0 on success, -2 when
+// DMA is unavailable (caller keeps PIO), -1 on transfer failure (caller may
+// fall back to PIO for the same range).
+static unsigned char dma_bounce[65536] __attribute__((aligned(65536)));
+
 int ata_dma_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char* buf) {
     if (!ata_dma_ready() || count < 1 || count > ATA_DMA_BATCH_MAX) return -2;
-    unsigned char* bounce = (unsigned char*)kmalloc((uint32_t)count * 512);
-    if (!bounce) return -1;
 
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10;
-    int rc = ata_dma_transfer(drive, lba, count, bounce, 0);
+    int rc = ata_dma_transfer(drive, lba, count, dma_bounce, 0);
     if (rc == 0) {
-        for (int i = 0; i < count * 512; i++) buf[i] = bounce[i];
+        memcpy(buf, dma_bounce, (uint32_t)count * 512);
     }
     spin_unlock_irqrestore(&ata_lock, ata_eflags);
-    kfree(bounce);
     (void)ata_prdt;   // PRDT inspected by the driver; nothing else reads it
     return rc;
 }
 
 int ata_dma_write_sectors_drive(int drive, unsigned int lba, int count, const unsigned char* buf) {
     if (!ata_dma_ready() || count < 1 || count > ATA_DMA_BATCH_MAX) return -2;
-    unsigned char* bounce = (unsigned char*)kmalloc((uint32_t)count * 512);
-    if (!bounce) return -1;
-    for (int i = 0; i < count * 512; i++) bounce[i] = buf[i];
 
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10;
-    int rc = ata_dma_transfer(drive, lba, count, bounce, 1);
+    memcpy(dma_bounce, buf, (uint32_t)count * 512);
+    int rc = ata_dma_transfer(drive, lba, count, dma_bounce, 1);
     spin_unlock_irqrestore(&ata_lock, ata_eflags);
-    kfree(bounce);
     return rc;
 }
 
