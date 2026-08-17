@@ -403,10 +403,9 @@ static void draw_login(int pass_len, int shake, int err, int cap_lock) {
 }
 
 int gui_login() {
-    // Password comes from /etc/passwd (see sys_get_password); the hardcoded
-    // default is only a fallback for a fresh disk with no file yet.
-    char pass[PASSWD_MAX_LEN + 1];
-    sys_get_password(pass, (int)sizeof(pass));
+    // Verification goes through sys_verify_password (salt+sha256 in
+    // /etc/passwd since v38.52; plaintext fallback for legacy files and the
+    // hardcoded default for a fresh disk with no file yet).
     char input[32];
     int idx = 0, shake = 0, err = 0, cap_lock_active = 0;
     int locked = 1;                 // destination screen: 1 = lock, 0 = password
@@ -532,7 +531,7 @@ int gui_login() {
 
                 if (c == '\n') {
                     input[idx] = '\0';
-                    if (strcmp(input, pass) == 0) { beep(); free_login_buffers(); return 1; }
+                    if (sys_verify_password(input)) { beep(); free_login_buffers(); return 1; }
                     err = 1; shake = 10; idx = 0;
                 } else if (c == '\b') {
                     if (idx > 0) { idx--; err = 0; }
@@ -572,7 +571,7 @@ int gui_login() {
                 mouse_x >= bbx2 && mouse_x < bbx2 + LOGIN_PW - 64 &&
                 mouse_y >= bby2 && mouse_y < bby2 + 30) {
                 input[idx] = '\0';
-                if (strcmp(input, pass) == 0) { beep(); free_login_buffers(); return 1; }
+                if (sys_verify_password(input)) { beep(); free_login_buffers(); return 1; }
                 err = 1; shake = 10; idx = 0;
             }
         }

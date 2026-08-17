@@ -68,6 +68,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/flappy_mct.o \
        $(OBJ_DIR)/forkdemo_mct.o \
        $(OBJ_DIR)/fputest_mct.o \
+       $(OBJ_DIR)/hardening_test_mct.o \
        $(OBJ_DIR)/nxtest_mct.o \
        $(OBJ_DIR)/execdemo_mct.o \
        $(OBJ_DIR)/execchild_mct.o \
@@ -196,6 +197,9 @@ forkdemo.mct: apps/forkdemo.c $(MCT_LIBC_H)
 
 fputest.mct: apps/fputest.c $(MCT_LIBC_H)
 	MCT_CFLAGS_EXTRA="-msse -msse2" python3 scripts/build_mct.py apps/fputest.c fputest.mct
+
+hardening_test.mct: apps/hardening_test.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/hardening_test.c hardening_test.mct
 
 nxtest.mct: apps/nxtest.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/nxtest.c nxtest.mct
@@ -330,6 +334,9 @@ $(OBJ_DIR)/forkdemo_mct.o: forkdemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/fputest_mct.o: fputest.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 fputest.mct $(OBJ_DIR)/fputest_mct.o
+
+$(OBJ_DIR)/hardening_test_mct.o: hardening_test.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 hardening_test.mct $(OBJ_DIR)/hardening_test_mct.o
 
 $(OBJ_DIR)/nxtest_mct.o: nxtest.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 nxtest.mct $(OBJ_DIR)/nxtest_mct.o

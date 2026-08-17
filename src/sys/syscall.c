@@ -27,6 +27,7 @@
 #include "../include/net.h"
 #include "../include/shell.h"
 #include "../include/spinlock.h"
+#include "../include/entropy.h"
 
 // SMP: Ring-3 apps run on APs while the BSP GUI loop replays their display
 // lists. The struct copies in SYS_UPDATE_WINDOW and the replay in
@@ -720,6 +721,16 @@ static void syscall_handler(registers_t* regs) {
             ts->tv_sec = us / 1000000;
             ts->tv_nsec = (us % 1000000) * 1000;
             regs->eax = 0;
+            break;
+        }
+
+        // ----- SYS_GETRANDOM (117): kernel CSPRNG -> user buffer -----
+        case SYS_GETRANDOM: {
+            char* buf = (char*)regs->ebx;
+            uint32_t len = (uint32_t)regs->ecx;
+            if (len == 0 || !validate_user_ptr(buf, len)) { regs->eax = (uint32_t)-1; break; }
+            extern int get_random_bytes(void*, uint32_t);
+            regs->eax = (uint32_t)get_random_bytes(buf, len);
             break;
         }
 

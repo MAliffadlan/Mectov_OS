@@ -192,6 +192,9 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] syscalls\n");
     extern void init_syscalls(void);
     init_syscalls();
+    write_serial_string("[K] entropy\n");
+    extern void entropy_init(void);
+    entropy_init();
     write_serial_string("[K] timer\n");
     init_timer(1000); // 1000 Hz PIT for 1ms precision ticks
     write_serial_string("[K] kbd\n");

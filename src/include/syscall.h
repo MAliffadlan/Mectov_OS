@@ -182,6 +182,10 @@ typedef struct {
 #define SYS_MOUNT        115 // EBX=path (mount point), ECX="ext2"|"fat32", EDX=ATA drive -> 0 or -1 (root only)
 #define SYS_UMOUNT       116 // EBX=path -> 0 or -1 (root only)
 
+// Kernel CSPRNG (entropy.c): fill a user buffer with cryptographically random
+// bytes from the ChaCha8 DRBG. Mirrors POSIX getrandom(, , 0).
+#define SYS_GETRANDOM    117 // EBX=buf, ECX=buflen -> 0 or -1
+
 // POSIX socket API (v38.43) — fd-integrated: socket()/accept() return file
 // descriptors, so read/write/close/poll/select work on sockets uniformly.
 #define SYS_SOCKET       108 // EBX=domain (AF_INET), ECX=type (SOCK_*) -> fd or -1

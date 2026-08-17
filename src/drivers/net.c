@@ -3,6 +3,7 @@
 #include "../include/utils.h"
 #include "../include/timer.h"
 #include "../include/serial.h"
+#include "../include/entropy.h"   // get_random_u32() — unpredictable TCP ISN
 
 
 // Static defaults (QEMU slirp layout). A successful DHCP exchange overwrites
@@ -386,7 +387,11 @@ static void tcp_start_conn(tcp_conn_t* c, uint8_t* target_ip, uint16_t port) {
         memcpy(c->remote_ip, target_ip, 4);
         c->remote_port = port;
     }
-    c->seq = get_ticks() * 12345 + c->local_port; // random-ish ISN per connection
+    // Unpredictable ISN (v38.52): CSPRNG output. The get_ticks fallback only
+    // runs in the microseconds before boot seeding completes, so the ISN is
+    // never a bare 0.
+    c->seq = get_random_u32();
+    if (c->seq == 0) c->seq = get_ticks() * 12345 + c->local_port;
     c->ack = 0;
     c->rx_len = 0;
     c->eof = 0;
@@ -454,7 +459,9 @@ int net_tcp_listen(uint16_t port) {
     c->in_use = 1;
     c->state = TCP_LISTEN;
     c->local_port = port;
-    c->seq = get_ticks() * 54321 + port; // ISN for our SYN-ACK
+    // Unpredictable SYN-ACK ISN (v38.52), same CSPRNG as the client path.
+    c->seq = get_random_u32();
+    if (c->seq == 0) c->seq = get_ticks() * 54321 + port;
     c->rx_len = 0;
     c->eof = 0;
     c->unacked_len = 0;

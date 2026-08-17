@@ -9,9 +9,7 @@ void cmd_passwd(void) {
         if (!old || !new) {
             print("passwd: usage: passwd <current> <new>\n", 0x0C);
         } else {
-            char cur[PASSWD_MAX_LEN + 1];
-            sys_get_password(cur, (int)sizeof(cur));
-            if (strcmp(old, cur) != 0) {
+            if (!sys_verify_password(old)) {
                 print("passwd: current password incorrect\n", 0x0C);
             } else if (new[0] == '\0') {
                 print("passwd: new password cannot be empty\n", 0x0C);

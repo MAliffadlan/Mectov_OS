@@ -17,6 +17,7 @@
 #include "../include/spinlock.h"
 #include "../include/pcache.h"
 #include "../include/mount.h"
+#include "../include/entropy.h"   // get_random_bytes() for /dev/random
 
 // ---- Reentrant irqsave lock (kernel locking audit v38.4) ----
 //
@@ -394,6 +395,10 @@ void vfs_init() {
         extern uint8_t _binary_fputest_mct_start[];
         extern uint8_t _binary_fputest_mct_end[];
         changed += vfs_update_file_if_needed("apps/fputest.mct", (const char*)_binary_fputest_mct_start, _binary_fputest_mct_end - _binary_fputest_mct_start);
+        // Entropy/passwd-hash regression (v38.52)
+        extern uint8_t _binary_hardening_test_mct_start[];
+        extern uint8_t _binary_hardening_test_mct_end[];
+        changed += vfs_update_file_if_needed("apps/hardening_test.mct", (const char*)_binary_hardening_test_mct_start, _binary_hardening_test_mct_end - _binary_hardening_test_mct_start);
         // W^X regression (v38.49): executing stack code must SIGSEGV
         extern uint8_t _binary_nxtest_mct_start[];
         extern uint8_t _binary_nxtest_mct_end[];
@@ -669,6 +674,10 @@ void vfs_init() {
     extern uint8_t _binary_fputest_mct_end[];
     vfs_create_file("apps/fputest.mct");
     vfs_write_file("apps/fputest.mct", (const char*)_binary_fputest_mct_start, _binary_fputest_mct_end - _binary_fputest_mct_start);
+    extern uint8_t _binary_hardening_test_mct_start[];
+    extern uint8_t _binary_hardening_test_mct_end[];
+    vfs_create_file("apps/hardening_test.mct");
+    vfs_write_file("apps/hardening_test.mct", (const char*)_binary_hardening_test_mct_start, _binary_hardening_test_mct_end - _binary_hardening_test_mct_start);
     extern uint8_t _binary_nxtest_mct_start[];
     extern uint8_t _binary_nxtest_mct_end[];
     vfs_create_file("apps/nxtest.mct");
@@ -1830,13 +1839,10 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
         } else if (strcmp(fs_nodes[node].name, "null") == 0) {
             return 0; // EOF immediately
         } else if (strcmp(fs_nodes[node].name, "random") == 0) {
-            // Very simple PRNG for /dev/random (since we don't have a real entropy pool)
-            static uint32_t seed = 0x12345678;
-            for (int i = 0; i < max_size; i++) {
-                seed = (1103515245 * seed + 12345);
-                buf[i] = (char)(seed & 0xFF);
-            }
-            return max_size;
+            // Kernel CSPRNG (v38.52): ChaCha8 DRBG fed from timer/kbd/mouse
+            // jitter, seeded at boot. Cannot fail by the time user apps read.
+            if (get_random_bytes(buf, (uint32_t)max_size) == 0) return max_size;
+            return 0;   // unseeded (should not happen post-boot)
         }
         return -2; // Unknown device
     }

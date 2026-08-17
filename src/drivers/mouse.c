@@ -3,6 +3,7 @@
 #include "../include/idt.h"
 #include "../include/vga.h"
 #include "../include/keyboard.h"   // ps2_drain()
+#include "../include/entropy.h"   // entropy_add() — kernel CSPRNG feed
 
 volatile int mouse_x = 400, mouse_y = 300;
 volatile uint8_t mouse_btn = 0;
@@ -34,6 +35,8 @@ static void mouse_set_sample_rate(uint8_t rate) {
 // IRQ12 or via IRQ1 — the 8042 has a single output buffer shared by both
 // devices, so whichever IRQ runs first can pick up the other device's byte.
 void mouse_feed_byte(uint8_t data) {
+    // Mix the raw PS/2 byte + IRQ timing into the entropy pool (v38.52).
+    entropy_add(data);
     switch (mouse_cycle) {
         case 0:
             mouse_bytes[0] = (int8_t)data;

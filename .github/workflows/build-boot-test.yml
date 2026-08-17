@@ -93,6 +93,17 @@ jobs:
           # passes with no lock).
           python3 scripts/autolock_test.py --timeout 480
 
+      - name: Kernel hardening regression (CSPRNG + salted passwd) (TCG)
+        run: |
+          # v38.52: kernel ChaCha8 CSPRNG seeded from timer/kbd/mouse at
+          # boot; /dev/random and TCP ISNs use it; /etc/passwd stores
+          # <salt_hex>:<sha256> instead of plaintext. `passwd mectov123
+          # hunter2` then the NEW password unlocks and the OLD one is
+          # rejected; apps/hardening_test.mct proves from Ring 3 that
+          # SYS_GETRANDOM succeeds with fresh bytes, /dev/random reads
+          # differ, and the passwd file is salted+hashed with no plaintext.
+          python3 scripts/hardening_test.py --timeout 480
+
       - name: Taskbar window buttons + hover regression (TCG)
         run: |
           # v38.39: clicking a focused window's taskbar button minimizes it

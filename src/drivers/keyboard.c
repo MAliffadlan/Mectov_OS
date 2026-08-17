@@ -4,6 +4,7 @@
 #include "../include/vga.h"
 #include "../include/mouse.h"   // mouse_feed_byte()
 #include "../include/spinlock.h"
+#include "../include/entropy.h"   // entropy_add() — kernel CSPRNG feed
 
 int shift_p = 0, caps_a = 0;
 int keyboard_ctrl_held = 0;
@@ -44,6 +45,8 @@ int keyboard_take_esc(void) {
 }
 
 static void keyboard_feed_byte(uint8_t scancode) {
+    // Mix the scancode + IRQ timing into the entropy pool (v38.52).
+    entropy_add(scancode);
     // Update modifier state (plain ints; atomic, see header comment)
     if (scancode == 0x01) esc_pressed = 1;              // ESC press
     else if (scancode == 0x2A || scancode == 0x36) shift_p = 1;

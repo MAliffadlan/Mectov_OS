@@ -7,13 +7,14 @@
 #define PASSWD_MAX_LEN   31   // matches the login input buffer ceiling
 #define PASSWD_PATH      "/etc/passwd"
 
-// Read the current password into out (NUL-terminated, at most max-1 chars).
-// Returns 0 when it came from /etc/passwd, 1 when the file was missing or
-// empty and PASSWD_DEFAULT was used instead.
-int sys_get_password(char* out, int max);
+// Verify pw against /etc/passwd. The stored file is "<salt_hex>:<sha256
+// hex>" since v38.52; a legacy plaintext file (no ':') and a missing/empty
+// file (PASSWD_DEFAULT) are still verified so an existing disk keeps working
+// until the next `passwd`. Returns 1 on match, 0 otherwise.
+int sys_verify_password(const char* pw);
 
-// Store pw in /etc/passwd, creating /etc and the file if needed. Rejects an
-// empty password. Returns 0 on success, -1 on failure.
+// Store pw in /etc/passwd as salt+sha256, creating /etc and the file if
+// needed. Rejects an empty password. Returns 0 on success, -1 on failure.
 int sys_set_password(const char* pw);
 
 #endif

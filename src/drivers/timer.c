@@ -4,6 +4,7 @@
 #include "../include/apic.h"
 #include "../include/rtc.h"
 #include "../include/serial.h"   // write_serial() (locked — multi-CPU safe)
+#include "../include/entropy.h"   // entropy_add() — kernel CSPRNG feed
 
 // volatile: written by the IRQ0 handler, read by wait loops in thread context.
 // Without it the compiler may hoist the load out of a polling loop and spin on
@@ -84,6 +85,10 @@ static void timer_handler(registers_t* regs) {
     // times per tick just because IRQ0 is now broadcast to every core.
     if (get_cid() != 0) return;
     timer_ticks++;
+
+    // Feed the kernel entropy pool (v38.52): tick counter + TSC low bits mix
+    // in continuously (1000 Hz), reseeding the ChaCha8 DRBG every 8 samples.
+    entropy_add(timer_ticks);
     
     // Heartbeat: send '.' every 1000 ticks (1 second). write_serial() takes
     // the serial lock, so the dot can never split a log line from another CPU.

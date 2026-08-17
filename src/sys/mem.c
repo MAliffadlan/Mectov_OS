@@ -89,6 +89,23 @@ void paging_enable_nxe(void) {
     if (get_cid_safe() == 0) nx_enabled = 1;
 }
 
+// Enable SMEP on the CURRENT cpu if the feature is present (leaf 7, EBX bit 7).
+// SMEP forbids the kernel from fetching instructions from user pages — a
+// ret2usr payload can no longer pivot Ring 0 execution into a user-mapped
+// buffer. CPUID-gated like NXE: QEMU -cpu host advertises it under KVM, and
+// the default qemu32 TCG model does not. Called from paging_init (BSP) and
+// ap_main (every AP) so the flag lands on all cores.
+void paging_enable_smep(void) {
+    uint32_t a, b, c, d;
+    __asm__ __volatile__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                         : "a"(7), "c"(0));
+    if (!(b & (1u << 7))) return;    // no SMEP -> nothing to enable
+    __asm__ __volatile__("mov %%cr4, %0" : "=r"(d));
+    d |= 0x00100000;                  // CR4.SMEP (bit 20)
+    __asm__ __volatile__("mov %0, %%cr4" : : "r"(d));
+    write_serial_string("[MEM] SMEP enabled\n");
+}
+
 // total_pages is the SINGLE source of truth for physical RAM: kernel_main
 // reads it from the multiboot header, init_mem stores it, phys_init (vmm.c)
 // sizes the frame allocator from it, and paging_init identity-maps it.
@@ -180,6 +197,7 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     cr4 |= 0x00000020;   // PAE
     __asm__ __volatile__("mov %0, %%cr4" : : "r"(cr4));
     paging_enable_nxe();
+    paging_enable_smep();
 
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(boot_pdpt));
     uint32_t cr0;
