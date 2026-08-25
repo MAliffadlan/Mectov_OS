@@ -70,13 +70,17 @@ int task_rlimit_as_allows(uint32_t additional);
 // mmap flags (SYS_MMAP_FILE). Only shared file-backed mappings exist today:
 // dirty pages write back to the VFS file on msync()/munmap().
 #define MMAP_FILE_SHARED 1
+// Device mapping (SYS_FB_MAP): pages are MMIO mapped eagerly with PAGE_DEV
+// PTEs — no fault-in, no dirty tracking, never written back, skipped by the
+// fork COW/refcount walker and the address-space free walkers.
+#define MMAP_FLAG_DEVICE 2
 
 typedef struct {
     uint32_t base;      // page-aligned start VA (0 = free slot)
     uint32_t size;      // page-aligned size in bytes
     uint32_t file_size; // file length at map time (bytes); 0 for anonymous
     int      vfs_node;  // VFS node backing a file mapping (-1 = anonymous)
-    uint32_t map_flags; // 0 = anonymous, MMAP_FILE_SHARED = file-backed
+    uint32_t map_flags; // 0=anonymous, MMAP_FILE_SHARED=file, MMAP_FLAG_DEVICE=MMIO
     uint8_t* dirty;     // per-page dirty bitmap (kmalloc'd, file mappings)
 } mmap_region_t;
 

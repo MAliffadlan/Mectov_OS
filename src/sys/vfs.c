@@ -403,6 +403,10 @@ void vfs_init() {
         extern uint8_t _binary_nxtest_mct_start[];
         extern uint8_t _binary_nxtest_mct_end[];
         changed += vfs_update_file_if_needed("apps/nxtest.mct", (const char*)_binary_nxtest_mct_start, _binary_nxtest_mct_end - _binary_nxtest_mct_start);
+        // Ring 3 direct-framebuffer demo (display-server foundation)
+        extern uint8_t _binary_fbmap_mct_start[];
+        extern uint8_t _binary_fbmap_mct_end[];
+        changed += vfs_update_file_if_needed("apps/fbmap.mct", (const char*)_binary_fbmap_mct_start, _binary_fbmap_mct_end - _binary_fbmap_mct_start);
 
         // Exec demo (fork + exec + waitpid)
         extern uint8_t _binary_execdemo_mct_start[];
@@ -682,6 +686,10 @@ void vfs_init() {
     extern uint8_t _binary_nxtest_mct_end[];
     vfs_create_file("apps/nxtest.mct");
     vfs_write_file("apps/nxtest.mct", (const char*)_binary_nxtest_mct_start, _binary_nxtest_mct_end - _binary_nxtest_mct_start);
+    extern uint8_t _binary_fbmap_mct_start[];
+    extern uint8_t _binary_fbmap_mct_end[];
+    vfs_create_file("apps/fbmap.mct");
+    vfs_write_file("apps/fbmap.mct", (const char*)_binary_fbmap_mct_start, _binary_fbmap_mct_end - _binary_fbmap_mct_start);
 
     // Exec demo apps
     extern uint8_t _binary_execdemo_mct_start[];

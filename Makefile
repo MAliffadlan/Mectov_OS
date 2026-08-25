@@ -70,6 +70,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/fputest_mct.o \
        $(OBJ_DIR)/hardening_test_mct.o \
        $(OBJ_DIR)/nxtest_mct.o \
+       $(OBJ_DIR)/fbmap_mct.o \
        $(OBJ_DIR)/execdemo_mct.o \
        $(OBJ_DIR)/execchild_mct.o \
        $(OBJ_DIR)/tcpserver_mct.o \
@@ -203,6 +204,9 @@ hardening_test.mct: apps/hardening_test.c $(MCT_LIBC_H)
 
 nxtest.mct: apps/nxtest.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/nxtest.c nxtest.mct
+
+fbmap.mct: apps/fbmap.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/fbmap.c fbmap.mct
 
 execdemo.mct: apps/execdemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/execdemo.c execdemo.mct
@@ -340,6 +344,9 @@ $(OBJ_DIR)/hardening_test_mct.o: hardening_test.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/nxtest_mct.o: nxtest.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 nxtest.mct $(OBJ_DIR)/nxtest_mct.o
+
+$(OBJ_DIR)/fbmap_mct.o: fbmap.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 fbmap.mct $(OBJ_DIR)/fbmap_mct.o
 
 $(OBJ_DIR)/execdemo_mct.o: execdemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 execdemo.mct $(OBJ_DIR)/execdemo_mct.o

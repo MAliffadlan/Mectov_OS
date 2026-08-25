@@ -143,13 +143,15 @@ uint32_t handle_syscall_gui(registers_t* regs) {
             // Single-consumer keyboard (v38.9): the main loop (task 0) is the
             // only reader of kbd_buffer and resolves keys with the feed-time
             // modifier snapshot. While a foreground app owns the terminal it
-            // queues the resolved char here; SYS_GET_KEY pops it. This
-            // replaces the old direct k_get_scancode_ex() read, which raced
-            // with the main loop on SMP and lost keys nondeterministically.
-            // Only the foreground app may read the terminal; anything else
-            // gets 0 (background tasks are stopped by SIGTTIN above).
+            // queues the resolved char here; SYS_GET_KEY pops it. The Ring 3
+            // scanout holder (SYS_FB_MAP compositor) is an equal consumer:
+            // while it owns pixels, keystrokes belong to it even if it was
+            // not launched from a terminal. Only the foreground app / scanout
+            // owner may read the terminal; anything else gets 0 (background
+            // tasks are stopped by SIGTTIN above).
+            extern int fb_owner_current(void);
             uint8_t k = 0;
-            if (term_app_running && me == term_app_task_id) {
+            if ((term_app_running && me == term_app_task_id) || me == fb_owner_current()) {
                 k = term_app_pop_key();
             }
             regs->eax = (uint32_t)k;

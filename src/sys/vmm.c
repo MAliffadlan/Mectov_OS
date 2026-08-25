@@ -337,6 +337,7 @@ void vmm_free_address_space(uint32_t page_dir) {
                     (pte_t*)(uintptr_t)(uint32_t)(boot_pds[pi][j] & PTE_ADDR_MASK);
                 for (uint32_t e = 0; e < PT_ENTRIES; e++) {
                     if ((pt[e] & PAGE_PRESENT) &&
+                        !(pt[e] & PAGE_DEV) &&
                         (pt[e] & 0x000FFFFFFFFFF007ULL) != (boot_pt[e] & 0x000FFFFFFFFFF007ULL)) {
                         uint32_t page_paddr = (uint32_t)(pt[e] & PTE_ADDR_MASK);
                         if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
@@ -347,7 +348,7 @@ void vmm_free_address_space(uint32_t page_dir) {
             } else {
                 // Entirely user-created: free ALL present page frames.
                 for (uint32_t e = 0; e < PT_ENTRIES; e++) {
-                    if (pt[e] & PAGE_PRESENT) {
+                    if ((pt[e] & PAGE_PRESENT) && !(pt[e] & PAGE_DEV)) {
                         uint32_t page_paddr = (uint32_t)(pt[e] & PTE_ADDR_MASK);
                         if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
                             frame_free(page_paddr);
@@ -477,6 +478,13 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
                 for (uint32_t e = 0; e < PT_ENTRIES; e++) {
                     pte_t spe = src_pt[e];
                     if (!(spe & PAGE_PRESENT) || !(spe & PAGE_USER)) continue;
+                    // Device/PFN mappings (PAGE_DEV, e.g. the Ring 3
+                    // framebuffer): the frame is MMIO outside the RAM
+                    // allocator — never COW it and never refcount it (the
+                    // old unbounded refcount bump would write out of the
+                    // bitmap for a PA above phys_total_pages). The child
+                    // does not inherit the mapping.
+                    if (spe & PAGE_DEV) continue;
                     if ((spe & PAGE_RW) && !(spe & PAGE_SHARED)) {
                         src_pt[e] = (spe & ~PAGE_RW) | PAGE_COW;   // COW the source
                         spe = src_pt[e];
@@ -508,6 +516,7 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
                 for (uint32_t e = 0; e < PT_ENTRIES; e++) {
                     pte_t spe = src_pt[e];
                     if (!(spe & PAGE_PRESENT)) continue;
+                    if (spe & PAGE_DEV) continue;  // device mapping: not inherited, never refcounted
                     if ((spe & PAGE_USER) && (spe & PAGE_RW) && !(spe & PAGE_SHARED)) {
                         src_pt[e] = (spe & ~PAGE_RW) | PAGE_COW;   // COW the source
                         spe = src_pt[e];
