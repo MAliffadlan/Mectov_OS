@@ -52,26 +52,106 @@ void sync_init(void) {
     write_serial_string("[SYNC] init\n");
 }
 
-// Wake the first waiter of `list`. Returns 1 if someone was woken.
+// Drop every waiter entry for `tid`. DEFERRED (v38.55): the obvious hook —
+// calling this straight from task_cleanup — deadlocks on SMP. Signal-driven
+// teardown (SIGKILL of a parked thread, etc.) runs WITH task_lock held, while
+// sem_wait/futex_wait hold sync_lock across task_set_state (documented order
+// sync_lock > task_lock): eager cleanup there is a classic AB-BA spin with
+// interrupts off on both cores. Instead, teardown only SETS a pending bit
+// (cli-scoped, no spinlocks) and the BSP main loop drains it with no other
+// lock held.
+static volatile uint32_t cleanup_pending_lo = 0;  // tids 1..31
+static volatile uint32_t cleanup_pending_hi = 0;  // tids 32..63
+
+void sync_task_cleanup_defer(int tid) {
+    if (tid <= 0 || tid > 63) return;   // MAX_TASKS is 64 (task.c)
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; popl %0; cli" : "=r"(eflags) : : "memory");
+    if (tid < 32) cleanup_pending_lo |= (1u << tid);
+    else          cleanup_pending_hi |= (1u << (tid - 32));
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+}
+
+void sync_task_cleanup(int tid) {
+    if (tid <= 0 || tid > 63) return;   // MAX_TASKS is 64 (task.c)
+    __asm__ volatile("cli");
+    spin_lock(&sync_lock);
+    for (int i = 0; i < MAX_SEMS; i++) {
+        if (!sems[i].in_use || sems[i].waiter_count == 0) continue;
+        int w = 0;
+        for (int k = 0; k < sems[i].waiter_count; k++) {
+            if (sems[i].waiters[k] != tid) sems[i].waiters[w++] = sems[i].waiters[k];
+        }
+        sems[i].waiter_count = w;
+    }
+    for (int i = 0; i < MAX_FUTEX; i++) {
+        if (!futexes[i].in_use || futexes[i].waiter_count == 0) continue;
+        int w = 0;
+        for (int k = 0; k < futexes[i].waiter_count; k++) {
+            if (futexes[i].waiters[k] != tid) futexes[i].waiters[w++] = futexes[i].waiters[k];
+        }
+        futexes[i].waiter_count = w;
+    }
+    spin_unlock(&sync_lock);
+    __asm__ volatile("sti");
+}
+
+// Drain pending cleanups. Called from the BSP main loop ONLY (never from
+// teardown/scheduler context): takes sync_lock alone, so the documented
+// ordering stays intact. Runs every main-loop iteration, so a dead task's
+// stale entries live for well under a millisecond.
+void sync_drain_pending(void) {
+    if (cleanup_pending_lo == 0 && cleanup_pending_hi == 0) return;
+    uint32_t lo, hi;
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; popl %0; cli" : "=r"(eflags) : : "memory");
+    lo = cleanup_pending_lo; hi = cleanup_pending_hi;
+    cleanup_pending_lo = 0; cleanup_pending_hi = 0;
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+    while (lo) {
+        int tid = __builtin_ctz(lo);   // BSF: no libgcc call on i386
+        lo &= lo - 1;
+        sync_task_cleanup(tid);
+    }
+    while (hi) {
+        int tid = 32 + __builtin_ctz(hi);
+        hi &= hi - 1;
+        sync_task_cleanup(tid);
+    }
+}
+
+// Wake the first LIVE waiter of `list`. Returns 1 if someone was woken.
+// v38.55: dead tasks (ZOMBIE/FREE — killed while parked, or exited via the
+// signal paths) are dropped without waking; before this, a wake spent on a
+// corpse silently lost its token and wedged the remaining waiters.
 static int wake_one(int* waiters, int* waiter_count) {
-    if (*waiter_count <= 0) return 0;
-    int tid = waiters[0];
-    // An idle task in a waiter list is corruption (it can never legitimately
-    // call futex_wait). task_set_state already refuses to wake it; dropping it
-    // here keeps the bogus entry from wedging the queue forever.
-    if (tid > 0) {
-        extern int task_is_idle(int);
-        if (task_is_idle(tid)) {
+    extern int task_is_alive(int);
+    while (*waiter_count > 0) {
+        int tid = waiters[0];
+        // An idle task in a waiter list is corruption (it can never legitimately
+        // call futex_wait). task_set_state already refuses to wake it; dropping it
+        // here keeps the bogus entry from wedging the queue forever.
+        if (tid > 0) {
+            extern int task_is_idle(int);
+            if (task_is_idle(tid)) {
+                for (int i = 1; i < *waiter_count; i++) waiters[i - 1] = waiters[i];
+                (*waiter_count)--;
+                continue;
+            }
+        }
+        if (tid <= 0 || !task_is_alive(tid)) {
+            // Dead waiter: drop and look at the next one.
             for (int i = 1; i < *waiter_count; i++) waiters[i - 1] = waiters[i];
             (*waiter_count)--;
-            return 0;
+            continue;
         }
+        // shift queue (FIFO fairness)
+        for (int i = 1; i < *waiter_count; i++) waiters[i - 1] = waiters[i];
+        (*waiter_count)--;
+        task_set_state(tid, TASK_STATE_READY);
+        return 1;
     }
-    // shift queue (FIFO fairness)
-    for (int i = 1; i < *waiter_count; i++) waiters[i - 1] = waiters[i];
-    (*waiter_count)--;
-    task_set_state(tid, TASK_STATE_READY);
-    return 1;
+    return 0;
 }
 
 // ============================================================

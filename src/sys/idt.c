@@ -408,20 +408,43 @@ void isr_handler(registers_t *r) {
             if (entry & PAGE_COW) {
                 uint32_t old_paddr = (uint32_t)(entry & PTE_ADDR_MASK);
 
-                // Sole ownership optimization. The refcount read is locked
-                // against frame_alloc/frame_free on other cores (kernel
-                // locking audit): an unlocked read could observe a torn
-                // count mid-update and wrongly promote a still-shared page.
+                // Speculative destination frame for the duplicate path,
+                // allocated BEFORE the lock: frame_alloc() itself takes
+                // vmm_lock, and holding that lock across the entire
+                // check-through-PTE-update is what makes COW resolution
+                // atomic across CPUs (v38.55). Two cores faulting the same
+                // shared page used to interleave between the sole-owner
+                // check and the PTE rewrite: both copied, the second store
+                // clobbered the first thread's mapping (silent data loss)
+                // and leaked a frame.
+                uint32_t new_paddr = frame_alloc();
+
                 extern void vmm_lock_acquire_irq(void);
                 extern void vmm_lock_release_irq(void);
                 vmm_lock_acquire_irq();
-                int sole_owner = (frame_ref_count[old_paddr / 4096] == 1);
-                vmm_lock_release_irq();
-                if (sole_owner) {
+                // Re-read the PTE under the lock: a peer core may have
+                // resolved this very fault between our walk and now.
+                pte_t cur = pt[pt_idx];
+                if (!(cur & PAGE_COW)) {
+                    // Peer already promoted/duplicated this page. Our TLB
+                    // was simply stale — drop the speculative frame, flush,
+                    // resume.
+                    vmm_lock_release_irq();
+                    if (new_paddr) frame_free(new_paddr);
+                    __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
+                    return; // Resume execution
+                }
+                old_paddr = (uint32_t)(cur & PTE_ADDR_MASK);
+
+                // Sole ownership: promote in place. Kept fully inside the
+                // critical section so a concurrent fork's refcount bump or
+                // another COW fault cannot interleave with the decision.
+                if (frame_ref_count[old_paddr / 4096] == 1) {
                     // Keep every non-address flag (incl. PAGE_NX) exactly as
                     // it was; only RW/COW change.
-                    entry = (entry & ~PTE_ADDR_MASK & ~PAGE_COW) | PAGE_RW | old_paddr;
-                    pt[pt_idx] = entry;
+                    pt[pt_idx] = (cur & ~PTE_ADDR_MASK & ~PAGE_COW) | PAGE_RW | old_paddr;
+                    vmm_lock_release_irq();
+                    if (new_paddr) frame_free(new_paddr);
                     __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
 
                     // Exception context (fault stack, IF=0): atomic try-write
@@ -431,18 +454,19 @@ void isr_handler(registers_t *r) {
                     q1 = str_append(q1, "[COW] Promoted sole-owned page to writable at ");
                     q1 = hex_append(q1, faulting_address);
                     q1 = str_append(q1, "\n");
-                    // Routine diagnostic: skip when the serial lock is
-                    // contended so this log never garbles another core's
-                    // locked line with raw bytes (seen: "fork: child"
-                    // split under real SMP). Panic/error paths should
-                    // keep write_serial_try's raw fallback.
                     write_serial_if_free(b1, (int)(q1 - b1));
                     return; // Resume execution
                 }
 
-                // Duplicate page
-                uint32_t new_paddr = frame_alloc();
+                // Shared with peers: duplicate into the speculative frame.
+                // The 4KB copy runs under the lock (IF=0, ~1us): peers spin
+                // briefly, but the PTE/refcount pair can never tear. The old
+                // frame is released AFTER unlocking — frame_free() takes
+                // vmm_lock itself. Between unlock and that free another
+                // copier may see the not-yet-decremented count and copy
+                // again; wasteful at worst, never incorrect.
                 if (new_paddr == 0) {
+                    vmm_lock_release_irq();
                     char b2[96];
                     char* q2 = b2;
                     q2 = str_append(q2, "[COW] OOM during COW fault at ");
@@ -453,9 +477,8 @@ void isr_handler(registers_t *r) {
                     // which calls task_exit() for Ring 3 or panics for Ring 0.
                 } else {
                     memcpy((void*)(uintptr_t)new_paddr, (void*)(uintptr_t)old_paddr, 4096);
-
-                    entry = (entry & ~PTE_ADDR_MASK & ~PAGE_COW) | PAGE_RW | new_paddr;
-                    pt[pt_idx] = entry;
+                    pt[pt_idx] = (cur & ~PTE_ADDR_MASK & ~PAGE_COW) | PAGE_RW | new_paddr;
+                    vmm_lock_release_irq();
 
                     frame_free(old_paddr);
                     __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
@@ -469,12 +492,24 @@ void isr_handler(registers_t *r) {
                     q3 = str_append(q3, " -> New: ");
                     q3 = hex_append(q3, new_paddr);
                     q3 = str_append(q3, ")\n");
-                    // Routine diagnostic: skip when serial lock is
-                    // contended (same rationale as above).
                     write_serial_if_free(b3, (int)(q3 - b3));
                     return; // Resume execution
                 }
             }
+        }
+
+        // --- Stale-TLB guard (v38.55) ---
+        // A Ring 3 WRITE fault whose PTE is already PRESENT|RW|USER means a
+        // peer core promoted/duplicated the page under us and only our TLB
+        // is stale. It MUST NOT reach the demand-zero paths below: the old
+        // code let it fall into demand_map_zero, which replaced a LIVE page
+        // with a fresh zeroed frame (silently destroying sibling data and
+        // leaking the old frame).
+        if ((r->cs & 3) == 3 && (r->err_code & 2) && pt &&
+            (pt[pt_idx] & PAGE_PRESENT) && (pt[pt_idx] & PAGE_RW) &&
+            (pt[pt_idx] & PAGE_USER)) {
+            __asm__ __volatile__("invlpg (%0)" : : "r"(faulting_address));
+            return; // Resume execution — the peer's mapping applies now
         }
         // --- Demand Paging for mmap() regions ---
         // Reserved mmap ranges live at 0x40000000..0x80000000 with no frames;

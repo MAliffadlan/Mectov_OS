@@ -481,6 +481,14 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
                 // kernel PT per fork.)
                 pte_t* src_pt = (pte_t*)(uintptr_t)(uint32_t)(src_pd[j] & PTE_ADDR_MASK);
                 pte_t* dst_pt = (pte_t*)(uintptr_t)(uint32_t)(dst_pd[j] & PTE_ADDR_MASK);
+                // vmm_lock (v38.55): this walk both COW-marks SOURCE ptes and
+                // bumps frame_ref_count — the same state a COW fault on
+                // another core mutates under vmm_lock. Unlocked, a faulting
+                // peer could promote a page between our read and our
+                // RO+COW store, or bump a refcount that frame_free was about
+                // to drop to zero. No frame_alloc inside, so the whole walk
+                // is one short critical section.
+                vmm_lock_acquire_irq();
                 for (uint32_t e = 0; e < PT_ENTRIES; e++) {
                     pte_t spe = src_pt[e];
                     if (!(spe & PAGE_PRESENT) || !(spe & PAGE_USER)) continue;
@@ -496,6 +504,7 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
                         // At 255 the frame is pinned — never freed. Acceptable.
                     }
                 }
+                vmm_lock_release_irq();
                 // Propagate any USER widening the source had on the PD.
                 // (PDPTEs carry no flags — see the PDPTE flag rule above.)
                 dst_pd[j] |= (src_pd[j] & PAGE_USER);
@@ -512,6 +521,9 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
                 pte_t* src_pt = (pte_t*)(uintptr_t)(uint32_t)(src_pd[j] & PTE_ADDR_MASK);
                 pte_t* dst_pt = (pte_t*)(uintptr_t)dst_pt_paddr;
 
+                // Same vmm_lock discipline as the kernel-region walk above;
+                // frame_alloc/zero_phys_page deliberately run outside it.
+                vmm_lock_acquire_irq();
                 for (uint32_t e = 0; e < PT_ENTRIES; e++) {
                     pte_t spe = src_pt[e];
                     if (!(spe & PAGE_PRESENT)) continue;
@@ -527,6 +539,7 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
                         // At 255 the frame is pinned — never freed. Acceptable.
                     }
                 }
+                vmm_lock_release_irq();
                 dst_pd[j] = (uint64_t)dst_pt_paddr | (src_pd[j] & 0xFFF);
             }
         }
@@ -538,6 +551,16 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
     if (active_cr3 == src_page_dir) {
         __asm__ __volatile__("mov %0, %%cr3" : : "r"(src_page_dir));
     }
+    // NOTE (v38.55): there is no TLB-shootdown IPI yet. A sibling thread
+    // running this address space on another core can keep WRITABLE TLB
+    // entries for pages we just COW-marked here. The exposure is bounded:
+    // schedule() reloads CR3 UNCONDITIONALLY on every context switch, so the
+    // stale writable mapping dies at that core's next preemption (<= 1-2
+    // timer ticks at 1kHz). Within that window a peer write bypasses COW and
+    // skews refcounts; combined with the atomic fault handler above the
+    // worst case is one divergent page, never a crash or double-free. A real
+    // shootdown IPI (vector + per-CPU CR3-reload handler + ack protocol)
+    // remains follow-up work for when threads share hot written pages.
 
     write_serial_string("[VMM] Cloned COW address space successfully\n");
     return dst_pdpt_paddr;

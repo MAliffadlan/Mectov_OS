@@ -19,4 +19,11 @@ int futex_wake(uint32_t addr, int max_waiters);
 
 void sync_init(void);
 
+// v38.55: remove a dying task from every sem/futex waiter list. Teardown
+// calls the _defer variant (safe under task_lock); the BSP main loop calls
+// sync_drain_pending() each iteration to do the actual removal.
+void sync_task_cleanup(int tid);
+void sync_task_cleanup_defer(int tid);
+void sync_drain_pending(void);
+
 #endif

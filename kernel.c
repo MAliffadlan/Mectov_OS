@@ -305,6 +305,14 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     uint32_t last_frame_tick = 0;
 
     while (1) {
+        // v38.55: drain deferred sem/futex waiter cleanups for dead tasks.
+        // Teardown only sets a pending bit (see sync.c for why it cannot take
+        // sync_lock under task_lock); the BSP main loop is the lock-free
+        // context that performs the actual removal, well under a millisecond
+        // after death.
+        extern void sync_drain_pending(void);
+        sync_drain_pending();
+
         // Keep the PIT tick rate calibrated against the RTC wall clock: the
         // desktop's double-click window is scaled by ticks_per_sec, and the
         // TCG virtual clock rate can drift, so re-measure once per second.

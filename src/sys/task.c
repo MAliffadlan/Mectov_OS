@@ -702,7 +702,18 @@ extern void tss_set_kernel_stack(uint32_t stack);
 // Shared cleanup for task termination (exit or kill)
 static void task_cleanup(int tid) {
     if (tid <= 0 || tid >= MAX_TASKS) return;
-    
+
+    // 0. Drop this task from every sem/futex waiter list (v38.55). Dead
+    //    waiters used to linger; after slot recycle a wake flipped the
+    //    UNRELATED new owner of the tid. Runs first, before anything can
+    //    observe the dying task's state transitions.
+    extern void sync_task_cleanup_defer(int tid);
+    // v38.55: DEFERRED — see sync.c. Signal teardown paths reach us with
+    // task_lock held; an eager sync_lock take here inverts the documented
+    // sync_lock > task_lock order and deadlocks two cores with IF=0. The
+    // BSP main loop drains the pending bit within one iteration.
+    sync_task_cleanup_defer(tid);
+
     // 1. Clean up windows owned by this task
     extern void wm_cleanup_task(int tid);
     wm_cleanup_task(tid);
@@ -2157,10 +2168,27 @@ int task_waitpid(int pid, int* status, int options) {
         }
 
         if (zombie >= 0) {
+            // Reap under task_lock (v38.55): the scan above is a snapshot.
+            // Two sibling threads in waitpid() could both pick the same
+            // zombie and double-reap (state=FREE twice, num_tasks underflow,
+            // TLS descriptors cleared for a slot already recycled to a new
+            // task). Re-validate under the lock and re-scan if we lost the
+            // race. Lock order note: this path holds no other locks, and
+            // terminate_task's wake flips our state under the same lock.
+            __asm__ volatile("cli");
+            spin_lock(&task_lock);
+            if (tasks[zombie].state != TASK_STATE_ZOMBIE ||
+                tasks[zombie].parent != self) {
+                spin_unlock(&task_lock);
+                __asm__ volatile("sti");
+                continue;   // peer reaped it mid-scan — restart the search
+            }
             *status = tasks[zombie].exit_code;
             tasks[zombie].state = TASK_STATE_FREE;
             num_tasks--;
             gdt_tls_clear(zombie);   // slot freed: drop its TLS descriptors
+            spin_unlock(&task_lock);
+            __asm__ volatile("sti");
             return zombie;
         }
         if (!found_child) return -1;          // ECHILD
