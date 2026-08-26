@@ -218,9 +218,16 @@ static void zero_phys_page(uint32_t paddr) {
 
 // ---- PAE walk helpers (v38.49) ----
 // An address space is a PDPT frame (page_dir). `space_pt` resolves the PT
-// for vaddr, optionally creating the PD/PT frames on the way. Parent entries
-// are widened to PAGE_USER when a user page is being mapped (the CPU checks
-// U/S at every level). Returns the PT's kernel VA (identity) or 0.
+// for vaddr, optionally creating the PD/PT frames on the way. Parent PD/PTE
+// entries are widened to PAGE_USER when a user page is being mapped (the
+// CPU checks U/S at every level EXCEPT the PDPTE level — see below).
+// Returns the PT's kernel VA (identity) or 0.
+//
+// PDPTE flag rule (KVM boot fix): PAE PDPTEs may carry ONLY the P bit.
+// R/W and U/S are architecturally "ignored" there, but this host's KVM
+// treats them as reserved bits and raises #GP(0) on every `mov cr3` into
+// such a space — which is exactly what app launch does right after
+// "switching cr3". Permissions live in the PD/PTE levels below.
 static pte_t* space_pd(pte_t* pdpt, uint32_t vaddr, int create) {
     uint32_t pi = pdpt_index(vaddr);
     if (!(pdpt[pi] & PAGE_PRESENT)) {
@@ -228,7 +235,7 @@ static pte_t* space_pd(pte_t* pdpt, uint32_t vaddr, int create) {
         uint32_t pd_frame = frame_alloc();
         if (pd_frame == 0) return 0;
         zero_phys_page(pd_frame);
-        pdpt[pi] = (uint64_t)pd_frame | PAGE_PRESENT | PAGE_RW;
+        pdpt[pi] = (uint64_t)pd_frame | PAGE_PRESENT;
     }
     return (pte_t*)(uintptr_t)(uint32_t)(pdpt[pi] & PTE_ADDR_MASK);
 }
@@ -246,10 +253,10 @@ static pte_t* space_pt(uint32_t pdpt_paddr, uint32_t vaddr, int create, int user
         pd[di] = (uint64_t)pt_frame | PAGE_PRESENT | PAGE_RW;
     }
     if (user) {
-        // The CPU requires PAGE_USER at EVERY level; identity-mapped PTEs
-        // inside a cloned kernel PT still lack PAGE_USER individually, so
-        // widening the parents keeps kernel memory protected.
-        pdpt[pdpt_index(vaddr)] |= PAGE_USER;
+        // The CPU requires PAGE_USER at every level from the PD down (the
+        // PDPTE level ignores flags entirely). Identity-mapped PTEs inside a
+        // cloned kernel PT still lack PAGE_USER individually, so widening
+        // the PD keeps kernel memory protected.
         pd[di] |= PAGE_USER;
     }
     return (pte_t*)(uintptr_t)(uint32_t)(pd[di] & PTE_ADDR_MASK);
@@ -489,8 +496,8 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
                         // At 255 the frame is pinned — never freed. Acceptable.
                     }
                 }
-                // Propagate any USER widening the source had on the parents.
-                dst_pdpt[pi] |= (src_pdpt[pi] & PAGE_USER);
+                // Propagate any USER widening the source had on the PD.
+                // (PDPTEs carry no flags — see the PDPTE flag rule above.)
                 dst_pd[j] |= (src_pd[j] & PAGE_USER);
             } else {
                 // Purely user region: allocate a fresh PT for dst and COW

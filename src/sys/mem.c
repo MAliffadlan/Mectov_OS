@@ -149,7 +149,13 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
         }
         boot_pds[0][t] = ((uint32_t)(uintptr_t)page_tables[t]) | PAGE_PRESENT | PAGE_RW;
     }
-    boot_pdpt[0] = ((uint32_t)(uintptr_t)boot_pds[0]) | PAGE_PRESENT | PAGE_RW;
+    // PDPTE flag rule (fixes KVM boot, v38.52 regression): a PAE PDPTE may
+    // carry ONLY the P bit. R/W and U/S are architecturally "ignored" in
+    // PDPTEs, but this host's KVM treats them as reserved bits and raises
+    // #GP(0) at the CR0.PG 0->1 transition -> instant triple fault (TCG does
+    // not validate this, which is why the bug only showed under -enable-kvm).
+    // Permissions actually live in the PD/PTE levels below.
+    boot_pdpt[0] = ((uint32_t)(uintptr_t)boot_pds[0]) | PAGE_PRESENT;
 
     // Map Framebuffer separately if it's above our identity mapped RAM.
     // The fb sits around ~4GB on QEMU -> PDPT slot 3.
@@ -165,7 +171,7 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
                                      | PAGE_PRESENT | PAGE_RW | PAGE_USER;
         }
         if (!(boot_pdpt[fbi] & PAGE_PRESENT)) {
-            boot_pdpt[fbi] = ((uint32_t)(uintptr_t)boot_pds[fbi]) | PAGE_PRESENT | PAGE_RW;
+            boot_pdpt[fbi] = ((uint32_t)(uintptr_t)boot_pds[fbi]) | PAGE_PRESENT;
         }
     }
 
@@ -186,7 +192,7 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
             ((uint32_t)(uintptr_t)mmio_page_tables[i]) | PAGE_PRESENT | PAGE_RW;
     }
     if (!(boot_pdpt[3] & PAGE_PRESENT)) {
-        boot_pdpt[3] = ((uint32_t)(uintptr_t)boot_pds[3]) | PAGE_PRESENT | PAGE_RW;
+        boot_pdpt[3] = ((uint32_t)(uintptr_t)boot_pds[3]) | PAGE_PRESENT;
     }
 
     // Enable PAE (CR4.PAE) BEFORE paging, then EFER.NXE (so bit 63 means
