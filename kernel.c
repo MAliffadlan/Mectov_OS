@@ -168,8 +168,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     fpu_init_cpu();
 
     write_serial_string("[K] gdbstub\n");
-    extern void gdb_stub_init(void);
-    gdb_stub_init();
+    extern int cmdline_nogdb(void);
+    if (!cmdline_nogdb()) {
+        extern void gdb_stub_init(void);
+        gdb_stub_init();
+    } else {
+        write_serial_string("[GDB] disabled (nogdb)\n");
+    }
     
     write_serial_string("[K] apic\n");
     extern void apic_init(void);

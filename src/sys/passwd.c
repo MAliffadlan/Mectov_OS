@@ -13,6 +13,7 @@
 #include "../include/utils.h"
 #include "../include/sha256.h"
 #include "../include/entropy.h"
+#include "../include/serial.h"
 
 #define SALT_BYTES 8
 #define SALT_HEX   (SALT_BYTES * 2)   // 16
@@ -58,7 +59,10 @@ int sys_verify_password(const char* pw) {
     char buf[LINE_LEN + 2];
     int n = read_passwd_file(buf, (int)sizeof(buf) - 1);
     if (n <= 0) {
-        // Missing or empty file: fall back to the default.
+        // Missing or empty file: fall back to the default. Unreachable in
+        // practice since passwd_ensure_initialized() writes the salted hash
+        // at first login and the delete guard (v38.53) keeps non-root from
+        // removing /etc/passwd afterwards — kept for fresh-disk robustness.
         return strcmp(pw, PASSWD_DEFAULT) == 0;
     }
 
@@ -112,4 +116,25 @@ int sys_set_password(const char* pw) {
         if (vfs_create_file(PASSWD_PATH) < 0) return -1;
     }
     return vfs_write_file(PASSWD_PATH, line, LINE_LEN);
+}
+
+// v38.53 auth-bypass fix: materialize the default password as a real salted
+// hash file at first login. Previously a MISSING /etc/passwd silently
+// re-armed the plaintext PASSWD_DEFAULT fallback — and since root-owned dirs
+// are 0777 (deliberate in this single-user OS), any app could delete the
+// file and log in with the hardcoded default. Now: first login writes the
+// hash file, and afterwards the VFS protected-path guard blocks non-root
+// from deleting/renaming it. Call once from the login screen before the
+// first verification.
+void passwd_ensure_initialized(void) {
+    static int ensured = 0;
+    if (ensured) return;
+    ensured = 1;
+    char buf[LINE_LEN + 2];
+    if (read_passwd_file(buf, (int)sizeof(buf) - 1) > 0) return; // already there
+    if (sys_set_password(PASSWD_DEFAULT) == LINE_LEN) {
+        write_serial_string("[PASSWD] default salted hash written to ");
+        write_serial_string(PASSWD_PATH);
+        write_serial_string("\n");
+    }
 }

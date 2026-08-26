@@ -344,6 +344,14 @@ static int finish_loaded_task(const char* filename, const char* arg,
     // interrupts are still disabled, same window as launch_arg above.
     extern void task_set_uid(int tid, int uid);
     task_set_uid(task_id, USER_UID);
+    // Trusted shell-host flag (v38.53): computed by the kernel from the
+    // resolved image identity and THIS spawner's trust — never from the
+    // launch_arg string, which a hostile app can set to anything via
+    // SYS_EXEC. Gates SYS_EXEC_CMD / SYS_KILL_TASK (see syscall_proc.c).
+    extern void task_set_trusted_shell(int tid, int trusted);
+    extern int get_current_task(void);
+    task_set_trusted_shell(task_id,
+                           task_grant_trusted_shell(get_current_task(), filename));
     __asm__ volatile("sti");
 
     write_serial_string("[LOADER] task ");

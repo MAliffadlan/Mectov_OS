@@ -87,6 +87,14 @@ int vfs_mkdir(const char* path);
 int vfs_create_file(const char* path);
 int vfs_delete_node(const char* path);
 int vfs_rename(const char* old_path, const char* new_path);
+// uid-aware variants (v38.53): enforce protected-path rules (e.g.
+// /etc/passwd is undeletable/unrenamable by non-root — deleting it would
+// re-arm the default-password login fallback). The plain forms above act as
+// the logged-in user (USER_UID) for shell builtins; syscall handlers pass
+// the real caller uid here; kernel-internal callers pass ROOT_UID.
+#define PASSWD_PROTECT_PATH "/etc/passwd"
+int vfs_delete_node_as(const char* path, int acting_uid);
+int vfs_rename_as(const char* old_path, const char* new_path, int acting_uid);
 int vfs_write_file(const char* path, const char* data, int size);
 int vfs_read_file(const char* path, char* buf, int max_size);
 // Offset-aware read by node index WITHOUT taking vfs_lock (callers that

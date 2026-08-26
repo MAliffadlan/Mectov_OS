@@ -108,10 +108,13 @@ int do_sys_read(int fd, char* buf, int size) {
             return -1;
         }
         int node = global_fds[gfd].vfs_node;
-        if (fs_nodes[node].type == FS_FILE) {
+        int t = fs_nodes[node].type;
+        if (t == FS_FILE || t == FS_EXT2_FILE || t == FS_FAT32_FILE) {
             // Offset-aware read at the descriptor's position, then advance it
-            // (POSIX sequential read). vfs_read_file_offset takes only
-            // ata_lock — safe under fd_lock, matching the existing pattern.
+            // (POSIX sequential read). vfs_read_file_offset dispatches per
+            // backend (native / ext2 / FAT32 range reads, v38.53) and takes
+            // only ata_lock — safe under fd_lock, matching the existing
+            // pattern.
             int off = global_fds[gfd].offset;
             int r = vfs_read_file_offset(node, off, buf, size);
             if (r >= 0) global_fds[gfd].offset = off + r;
@@ -183,25 +186,45 @@ int do_sys_write(int fd, const char* buf, int size) {
         }
         char path[256];
         if (vfs_get_abs_path(global_fds[gfd].vfs_node, path, 256) < 0) { fd_lock_release(); return -1; }
-        // vfs_write_file() always writes from the START of the file, so a
-        // second write(1, ...) from an app would clobber the first. Track an
-        // offset per descriptor and append: read the existing content, splice
-        // the new bytes at the descriptor's offset, write back the whole file.
+        // Offset-aware write (v38.53 fix). The old path spliced into a fixed
+        // char whole[4096] and rewrote the file from it — every write to a
+        // file larger than 4095 bytes silently DESTROYED everything past the
+        // first 4KB (data loss on all backends). Now the existing content is
+        // read into a right-sized dynamic buffer, the new bytes are spliced
+        // at the descriptor offset, and the whole file is written back.
+        // Backends only expose whole-file writes today, so this stays a
+        // read-modify-write — correctness first; an in-place backend range
+        // write is future optimization. VFS_FD_MAX_FILE bounds the buffer so
+        // a huge ext2 file can't OOM the 24MB kernel heap.
         int off = global_fds[gfd].offset;
-        int oldsz = 0;
-        char whole[4096];
-        int r = vfs_read_file(path, whole, 4095);
-        if (r < 0) r = 0;
-        oldsz = r;
+        int oldsz = fs_nodes[global_fds[gfd].vfs_node].size;
+        if (oldsz < 0) oldsz = 0;
         // O_APPEND: every write lands at the end of the file, regardless of
         // the descriptor offset (POSIX).
         if (global_fds[gfd].flags & O_APPEND) off = oldsz;
-        if (off + size > 4095) size = 4095 - off;
-        if (size <= 0) { fd_lock_release(); return 0; }
-        for (int i = 0; i < size; i++) whole[off + i] = buf[i];
         int newsz = (off + size > oldsz) ? off + size : oldsz;
+        if (newsz > VFS_FD_MAX_FILE) {
+            // Partial write up to the cap (POSIX-style short write), never
+            // truncation of what already exists.
+            newsz = VFS_FD_MAX_FILE;
+            size = newsz - off;
+            if (size <= 0) { fd_lock_release(); return -1; }   // offset beyond cap: EFBIG-ish
+        }
+        char* whole = (char*)kmalloc((uint32_t)newsz + 1);
+        if (!whole) { fd_lock_release(); return -1; }
+        if (oldsz > 0) {
+            int r = vfs_read_file(path, whole, oldsz);
+            if (r < 0) r = 0;
+            if (r < oldsz) {
+                // Sparse tail reads as zeros (short backend read)
+                int z = oldsz - r;
+                for (int i = 0; i < z; i++) whole[r + i] = 0;
+            }
+        }
+        for (int i = 0; i < size; i++) whole[off + i] = buf[i];
         whole[newsz] = '\0';
         int w = vfs_write_file(path, whole, newsz);
+        kfree(whole);
         if (w >= 0) global_fds[gfd].offset = off + size;
         fd_lock_release();
         return (w >= 0) ? size : w;

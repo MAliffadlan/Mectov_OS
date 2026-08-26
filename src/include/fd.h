@@ -4,6 +4,13 @@
 #include "types.h"
 #include "syscall.h"  // stat_t
 
+// Upper bound for the descriptor write path's read-modify-write buffer
+// (v38.53). Backends only expose whole-file writes, so do_sys_write splices
+// into a right-sized heap buffer; this cap keeps that allocation far below
+// the 24MB kernel heap ceiling. Writes past it return a short count/error
+// instead of silently truncating existing content.
+#define VFS_FD_MAX_FILE (8 * 1024 * 1024)
+
 #define MAX_FDS_PER_TASK 16
 // Global table (v38.44): 256 entries — socket-heavy apps (one fd per
 // accepted connection) plus pipes/files easily exceeded the old 128.

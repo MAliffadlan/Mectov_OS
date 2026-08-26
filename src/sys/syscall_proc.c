@@ -57,15 +57,17 @@ typedef struct {
 extern win_event_queue_t win_queues[];
 extern win_canvas_t win_canvases[];
 
-// Basename comparison for the privileged-app whitelist. The old substring check
-// let ANY app whose path merely CONTAINED "terminal.mct" (e.g. faketerminal.mct)
-// run SYS_KILL_TASK / SYS_EXEC_CMD. Only the exact filename component matches.
-static int launch_arg_is(const char* arg, const char* name) {
-    const char* base = arg;
-    for (const char* p = arg; *p; p++) {
-        if (*p == '/') base = p + 1;
-    }
-    return strcmp(base, name) == 0;
+// Privilege gate for the shell-host syscalls (v38.53). The launch_arg STRING
+// is attacker-controlled (any app can exec "terminal.mct" with an arbitrary
+// arg and the loader stores it verbatim), so it must never decide privilege.
+// The kernel-computed trusted_shell flag — set from the resolved image
+// identity plus parent trust (task.c) — is the real input now. Kernel-space
+// tasks and uid 0 keep access.
+static int caller_shell_host(int tid) {
+    if (tid < 0) return 0;
+    if (task_in_kernel_space(tid)) return 1;
+    if (task_get_uid(tid) == ROOT_UID) return 1;
+    return task_is_trusted_shell(tid);
 }
 
 uint32_t handle_syscall_proc(registers_t* regs) {
@@ -254,18 +256,25 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             int tid = (int)regs->ebx;
             if (tid <= 0) { regs->eax = (uint32_t)-1; break; }
             
-            // Privilege check
+            // Privilege check (v38.53): only shell hosts / root may use this
+            // privileged syscall, AND a non-root caller can only kill tasks
+            // of its own uid outside the kernel — the old code let any
+            // forged-arg app kill the uid-0 shell or kernel tasks.
             int caller_tid = get_current_task();
-            if (!task_in_kernel_space(caller_tid)) {
-                const char* launch_arg = task_get_launch_arg(caller_tid);
-                if (!launch_arg_is(launch_arg, "terminal.mct") && 
-                    !launch_arg_is(launch_arg, "explorer.mct") && 
-                    !launch_arg_is(launch_arg, "taskmgr.mct")) {
-                    write_serial_string("[SYS] Access denied for SYS_KILL_TASK from TID=");
-                    write_serial_hex(caller_tid);
-                    write_serial_string(" (");
-                    write_serial_string(launch_arg);
-                    write_serial_string(")\n");
+            if (!caller_shell_host(caller_tid)) {
+                write_serial_string("[SYS] Access denied for SYS_KILL_TASK from TID=");
+                write_serial_hex(caller_tid);
+                write_serial_string("\n");
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            if (!task_in_kernel_space(caller_tid) &&
+                task_get_uid(caller_tid) != ROOT_UID) {
+                if (task_in_kernel_space(tid) ||
+                    task_get_uid(tid) != task_get_uid(caller_tid)) {
+                    write_serial_string("[SYS] SYS_KILL_TASK denied: cross-uid target TID=");
+                    write_serial_hex(tid);
+                    write_serial_string("\n");
                     regs->eax = (uint32_t)-1;
                     break;
                 }
@@ -298,19 +307,15 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             if (pid <= 0 || sig <= 0 || sig >= SIG_MAX) { regs->eax = (uint32_t)-1; break; }
             int caller = get_current_task();
 
-            // No UID model yet, so authorize by process relationship (POSIX
-            // kill's same-UID rule approximated with the process graph): a
-            // plain app may signal itself, its own descendants, or a task in
-            // its own process group. The whitelisted system apps (terminal /
-            // explorer / taskmgr) keep full access — they already hold
-            // SYS_KILL_TASK, and the kernel shell / Ctrl+C paths call
-            // task_signal directly and are unaffected.
-            if (!task_in_kernel_space(caller)) {
-                const char* launch_arg = task_get_launch_arg(caller);
-                if (!launch_arg_is(launch_arg, "terminal.mct") &&
-                    !launch_arg_is(launch_arg, "explorer.mct") &&
-                    !launch_arg_is(launch_arg, "taskmgr.mct")) {
-                    int allowed = (pid == caller);
+            // Authorize by process relationship (POSIX kill's same-UID rule
+            // approximated with the process graph): a plain app may signal
+            // itself, its own descendants, or a task in its own process
+            // group. Shell hosts (kernel-computed trusted_shell flag,
+            // v38.53) keep full access — they already hold SYS_KILL_TASK —
+            // and the kernel shell / Ctrl+C paths call task_signal directly
+            // and are unaffected.
+            if (!caller_shell_host(caller)) {
+                int allowed = (pid == caller);
                     extern int task_get_parent(int);
                     extern int task_get_pgrp(int);
                     if (!allowed) {
@@ -334,7 +339,6 @@ uint32_t handle_syscall_proc(registers_t* regs) {
                         regs->eax = (uint32_t)-1;
                         break;
                     }
-                }
             }
             extern int task_signal(int tid, int sig);
             regs->eax = (uint32_t)task_signal(pid, sig);
@@ -636,20 +640,15 @@ uint32_t handle_syscall_proc(registers_t* regs) {
             const char* cmd_str = (const char*)regs->ebx;
             if (safe_strlen(cmd_str, CMD_BUF_SIZE) < 0) { regs->eax = (uint32_t)-1; break; }
             
-            // Privilege check
+            // Privilege check (v38.53): kernel-computed shell-host trust —
+            // the forgeable launch_arg string no longer decides anything.
             int caller_tid = get_current_task();
-            if (!task_in_kernel_space(caller_tid)) {
-                const char* launch_arg = task_get_launch_arg(caller_tid);
-                if (!launch_arg_is(launch_arg, "terminal.mct") && 
-                    !launch_arg_is(launch_arg, "explorer.mct")) {
-                    write_serial_string("[SYS] Access denied for SYS_EXEC_CMD from TID=");
-                    write_serial_hex(caller_tid);
-                    write_serial_string(" (");
-                    write_serial_string(launch_arg);
-                    write_serial_string(")\n");
-                    regs->eax = (uint32_t)-1;
-                    break;
-                }
+            if (!caller_shell_host(caller_tid)) {
+                write_serial_string("[SYS] Access denied for SYS_EXEC_CMD from TID=");
+                write_serial_hex(caller_tid);
+                write_serial_string("\n");
+                regs->eax = (uint32_t)-1;
+                break;
             }
             
             extern char cmd_b[CMD_BUF_SIZE];

@@ -49,6 +49,9 @@ void panic_finish(void);
 
 // 1 when booted with `panic=reboot` (used by CI to keep QEMU from hanging).
 int panic_reboot_enabled(void);
+// 1 when the boot cmdline contained "nogdb" — kernel_main skips gdb_stub_init
+// so the in-kernel GDB stub never listens on COM2.
+int cmdline_nogdb(void);
 
 // CI self-test: when booted with `panic_self_test`, triggers a deliberate
 // kernel panic once the desktop loop is running (so all APs are up), so the

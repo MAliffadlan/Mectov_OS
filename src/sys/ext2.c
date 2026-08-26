@@ -646,6 +646,39 @@ int ext2_write_file_data(uint32_t inode_num, const char* buf, int size) {
     return (int)written;
 }
 
+// Offset-aware read (v38.53 fd fix): copy len bytes starting at logical byte
+// `offset` of the file into buf. Walks only the blocks the window touches
+// (unlike ext2_read_file_data's whole-file read), so lseek()+read() on an
+// /ext2 file no longer restarts at offset 0 and a big sequential read is not
+// O(n^2). Sparse holes read as zeros. Returns bytes copied (>=0) or -1.
+int ext2_read_file_range(uint32_t inode_num, uint32_t offset, char* buf, int len) {
+    if (len <= 0) return 0;
+    ext2_inode_t inode;
+    if (ext2_read_inode(inode_num, &inode) != 0) return -1;
+    if (offset >= inode.i_size) return 0;
+    uint32_t avail = inode.i_size - offset;
+    if ((uint32_t)len > avail) len = (int)avail;
+
+    unsigned char bbuf[4096];   // block_size <= 4096 (same bound as the writer)
+    uint32_t done = 0;
+    while (done < (uint32_t)len) {
+        uint32_t pos = offset + done;
+        uint32_t lb = pos / block_size;
+        uint32_t inb = pos % block_size;
+        uint32_t blk = ext2_get_block(&inode, lb, 0);
+        uint32_t chunk = block_size - inb;
+        if (chunk > (uint32_t)len - done) chunk = (uint32_t)len - done;
+        if (blk == 0) {
+            memset(buf + done, 0, chunk);           // sparse hole
+        } else {
+            ext2_read_block(blk, bbuf);
+            memcpy(buf + done, bbuf + inb, chunk);
+        }
+        done += chunk;
+    }
+    return (int)done;
+}
+
 // --- Directory entry manipulation ---
 
 // On-disk record length for a name (8 header + name, padded to 4 bytes).

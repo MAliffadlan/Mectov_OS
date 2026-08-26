@@ -404,8 +404,12 @@ static void draw_login(int pass_len, int shake, int err, int cap_lock) {
 
 int gui_login() {
     // Verification goes through sys_verify_password (salt+sha256 in
-    // /etc/passwd since v38.52; plaintext fallback for legacy files and the
-    // hardcoded default for a fresh disk with no file yet).
+    // /etc/passwd since v38.52). v38.53: materialize the default password as
+    // a real salted-hash file BEFORE the first verify — a missing file used
+    // to re-arm the plaintext fallback, which made deleting /etc/passwd an
+    // auth bypass. Idempotent; no-op when the hash file already exists.
+    extern void passwd_ensure_initialized(void);
+    passwd_ensure_initialized();
     char input[32];
     int idx = 0, shake = 0, err = 0, cap_lock_active = 0;
     int locked = 1;                 // destination screen: 1 = lock, 0 = password

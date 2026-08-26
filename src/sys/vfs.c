@@ -1478,7 +1478,7 @@ static void vfs_remove_fat32_entry(int node) {
     fat32_remove_entry((uint32_t)fs_nodes[p].data_sector, fs_nodes[node].name);
 }
 
-static int vfs_delete_node_unlocked(const char* path) {
+static int vfs_delete_node_unlocked(const char* path, int acting_uid) {
     int node = vfs_get_node(path);
     if (node < 0) return -1;
     if (node == 0) return -3; // Cannot delete root
@@ -1487,6 +1487,23 @@ static int vfs_delete_node_unlocked(const char* path) {
     // whole tree down until the next boot recreates it.
     if (fs_nodes[node].type == FS_DIR && fs_nodes[node].parent == 0 &&
         strcmp(fs_nodes[node].name, "proc") == 0) return -7;
+
+    // Protected system files (v38.53 auth-bypass fix): /etc/passwd must not
+    // be removable by non-root. Deleting it re-arms the PASSWD_DEFAULT login
+    // fallback, and the file's own 0644 mode cannot help because the delete
+    // decision rides on the PARENT directory's write bit — root-owned dirs
+    // are deliberately 0777 in this single-user OS. Kernel-internal callers
+    // pass ROOT_UID; user-originated paths pass USER_UID / the caller's uid.
+    if (acting_uid != ROOT_UID) {
+        char ap[MAX_PATH];
+        if (vfs_get_abs_path(node, ap, MAX_PATH) == 0 &&
+            strcmp(ap, PASSWD_PROTECT_PATH) == 0) {
+            write_serial_string("[VFS] delete denied (protected): ");
+            write_serial_string(ap);
+            write_serial_string("\n");
+            return -8;
+        }
+    }
 
     // Refuse to delete while any open fd references the node: its slot would
     // be reused by the next create, and reads/writes on the stale fd would
@@ -1548,8 +1565,15 @@ static int vfs_delete_node_unlocked(const char* path) {
     return 0;
 }
 int vfs_delete_node(const char* path) {
+    // Legacy entry point: acts as the logged-in user (uid 1000), which is
+    // what shell builtins executing on a user's behalf mean. Kernel-internal
+    // or root-authorized callers use vfs_delete_node_as().
+    return vfs_delete_node_as(path, USER_UID);
+}
+
+int vfs_delete_node_as(const char* path, int acting_uid) {
     vfs_lock_acquire();
-    int r = vfs_delete_node_unlocked(path);
+    int r = vfs_delete_node_unlocked(path, acting_uid);
     vfs_lock_release();
     return r;
 }
@@ -1562,10 +1586,19 @@ int vfs_delete_node(const char* path) {
 //   Untuk file kecil (< 512 bytes), cukup 1 sektor.
 //   Sektor terakhir berisi data file (tidak harus full 512 bytes).
 
-static int vfs_rename_unlocked(const char* old_path, const char* new_path) {
+static int vfs_rename_unlocked(const char* old_path, const char* new_path,
+                               int acting_uid) {
     int node = vfs_get_node(old_path);
     if (node < 0) return -1;
     if (node == 0) return -3; // Cannot rename root
+
+    // Protected system files (v38.53): renaming /etc/passwd (as source or as
+    // overwrite target) is equivalent to deleting it — see the delete guard.
+    if (acting_uid != ROOT_UID) {
+        char ap[MAX_PATH];
+        if (vfs_get_abs_path(node, ap, MAX_PATH) == 0 &&
+            strcmp(ap, PASSWD_PROTECT_PATH) == 0) return -8;
+    }
     
     char new_parent_path[MAX_PATH];
     char new_filename[MAX_FILENAME];
@@ -1595,10 +1628,10 @@ static int vfs_rename_unlocked(const char* old_path, const char* new_path) {
         if (p == node) return -4;
     }
     
-    // Delete existing target if any
+    // Delete existing target if any (same acting uid as the rename itself)
     int existing = vfs_find_in_dir(new_filename, new_parent);
     if (existing >= 0) {
-        vfs_delete_node(new_path);
+        vfs_delete_node_as(new_path, acting_uid);
     }
     
     // Ext2-backed node: rename the on-disk entry too. Only same-directory
@@ -1639,8 +1672,14 @@ static int vfs_rename_unlocked(const char* old_path, const char* new_path) {
     return 0;
 }
 int vfs_rename(const char* old_path, const char* new_path) {
+    // Legacy entry point: acts as the logged-in user (uid 1000) — shell
+    // builtins. Root/kernel-internal callers use vfs_rename_as().
+    return vfs_rename_as(old_path, new_path, USER_UID);
+}
+
+int vfs_rename_as(const char* old_path, const char* new_path, int acting_uid) {
     vfs_lock_acquire();
-    int r = vfs_rename_unlocked(old_path,  new_path);
+    int r = vfs_rename_unlocked(old_path, new_path, acting_uid);
     vfs_lock_release();
     return r;
 }
@@ -1935,10 +1974,32 @@ int vfs_read_file(const char* path, char* buf, int max_size) {
 int vfs_read_file_offset(int node, int offset, char* buf, int len) {
     if (node < 0 || node >= MAX_NODES) return -1;
     if (!fs_nodes[node].in_use) return -1;
-    if (fs_nodes[node].type != FS_FILE) return -1;
     if (offset < 0 || len <= 0) return -1;
 
     int size = fs_nodes[node].size;
+
+    // Backend files (v38.53 fd fix): ext2/FAT32 get real offset-aware reads
+    // via range helpers, so descriptor offsets (lseek + sequential read)
+    // work on mounted volumes exactly like on native FS_FILE nodes. Only
+    // ata_lock is taken below — same leaf-lock rule as the native path.
+    if (fs_nodes[node].type == FS_EXT2_FILE) {
+        if (offset >= size) return 0;
+        if (len > size - offset) len = size - offset;
+        extern int ext2_read_file_range(uint32_t inode_num, uint32_t offset,
+                                        char* buf, int len);
+        return ext2_read_file_range(fs_nodes[node].ext2_inode, (uint32_t)offset,
+                                    buf, len);
+    }
+    if (fs_nodes[node].type == FS_FAT32_FILE) {
+        if (offset >= size) return 0;
+        if (len > size - offset) len = size - offset;
+        extern int fat32_read_file_range(uint32_t first_cluster, int offset,
+                                         char* buf, int len);
+        return fat32_read_file_range((uint32_t)fs_nodes[node].data_sector,
+                                     offset, buf, len);
+    }
+
+    if (fs_nodes[node].type != FS_FILE) return -1;
     if (offset >= size) return 0;
     if (len > size - offset) len = size - offset;
     if (len <= 0) return 0;

@@ -160,10 +160,15 @@ void idt_init() {
     // (e.g. #DF/#TS/#SS) silently triple-faulted instead of panicking with
     // a real int_no. All are DPL=0 interrupt gates so Ring 3 cannot invoke
     // them directly.
+    // v38.53: #DB and #BP are now DPL=0 like every other fault. The GDB stub
+    // is entered from the kernel side (F12 in the main loop, the serial poll
+    // path, and real kernel traps), so Ring 3 never needed these gates open —
+    // and with DPL=3 ANY user program could fire `int3`/`int1` and walk the
+    // machine into the debugger loop (freeze / full register+memory control).
     idt_set_gate(0,  (uint32_t)isr0,  0x08, 0x8E);  // #DE Division by Zero
-    idt_set_gate(1,  (uint32_t)isr1,  0x08, 0xEE);  // #DB Debug/single-step (DPL=3 for GDB)
+    idt_set_gate(1,  (uint32_t)isr1,  0x08, 0x8E);  // #DB Debug/single-step
     idt_set_gate(2,  (uint32_t)isr2,  0x08, 0x8E);  // NMI
-    idt_set_gate(3,  (uint32_t)isr3,  0x08, 0xEE);  // #BP Breakpoint (DPL=3 for GDB)
+    idt_set_gate(3,  (uint32_t)isr3,  0x08, 0x8E);  // #BP Breakpoint
     idt_set_gate(4,  (uint32_t)isr4,  0x08, 0xEE);  // #OF Overflow (DPL=3, INTO from Ring 3)
     idt_set_gate(5,  (uint32_t)isr5,  0x08, 0x8E);  // #BR Bound Range Exceeded
     idt_set_gate(6,  (uint32_t)isr6,  0x08, 0x8E);  // #UD Invalid Opcode

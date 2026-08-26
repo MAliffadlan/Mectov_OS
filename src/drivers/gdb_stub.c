@@ -321,7 +321,13 @@ static int gdb_handle_packet(registers_t* r, char* pkt, int len) {
             if (i < len && pkt[i] == ',') i++;
             uint32_t count = 0;
             while (i < len && hexval(pkt[i]) >= 0) { count = count * 16 + hexval(pkt[i]); i++; }
-            if (count > 1024 || !gdb_mem_ok(addr, count)) {
+            // v38.53 fix: each byte becomes two hex chars in `reply`, so the
+            // old `count <= 1024` bound let `m addr,400` write 2048 bytes
+            // into reply[512] — a kernel-stack smash reachable by ANYONE
+            // connected to COM2 (no auth). Bound it to the buffer instead;
+            // real GDB splits large reads anyway.
+            if (count == 0 || count > (uint32_t)(sizeof(reply) / 2) - 8 ||
+                !gdb_mem_ok(addr, count)) {
                 gdb_send_packet("E01", 3);
             } else {
                 for (uint32_t k = 0; k < count; k++) {

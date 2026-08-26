@@ -231,8 +231,14 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
-            extern int vfs_delete_node(const char* path);
-            regs->eax = (uint32_t)vfs_delete_node(path);
+            // uid-aware delete (v38.53): non-root cannot remove protected
+            // system files (/etc/passwd) even though the parent dir is 0777.
+            {
+                int ctid = get_current_task();
+                int cuid = task_in_kernel_space(ctid) ? ROOT_UID : task_get_uid(ctid);
+                extern int vfs_delete_node_as(const char* path, int acting_uid);
+                regs->eax = (uint32_t)vfs_delete_node_as(path, cuid);
+            }
             break;
         }
 
@@ -281,8 +287,13 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
-            extern int vfs_rename(const char* old_path, const char* new_path);
-            regs->eax = (uint32_t)vfs_rename(old_path, new_path);
+            extern int vfs_rename_as(const char* old_path, const char* new_path,
+                                     int acting_uid);
+            {
+                int ctid = get_current_task();
+                int cuid = task_in_kernel_space(ctid) ? ROOT_UID : task_get_uid(ctid);
+                regs->eax = (uint32_t)vfs_rename_as(old_path, new_path, cuid);
+            }
             break;
         }
 

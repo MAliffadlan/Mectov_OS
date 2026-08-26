@@ -78,6 +78,12 @@ typedef struct {
     uint32_t page_dir;     // per-process page directory (0 = global identity)
     int      fd_table[16]; // local file descriptors mapped to global FDs
     char     launch_arg[128]; // command-line argument passed at launch
+    int      trusted_shell; // 1 = verified shell host (terminal/explorer/taskmgr).
+                            // Gates SYS_EXEC_CMD/SYS_KILL_TASK. Set ONLY by the
+                            // kernel from the resolved image identity + parent
+                            // trust (task_grant_trusted_shell) — the launch_arg
+                            // string itself is user-controlled and forgeable,
+                            // so it must never be a privilege input again.
     int      current_dir;  // per-task working directory
     uint32_t heap_ptr;     // current heap break (e.g. 0x08000000)
     // === NEW: process model ===
@@ -503,6 +509,7 @@ void init_tasking() {
         tasks[i].page_dir = 0;
         tasks[i].heap_ptr = 0x08000000;
         tasks[i].launch_arg[0] = '\0';
+        tasks[i].trusted_shell = 0;
         tasks[i].current_dir = 0;
         tasks[i].parent = 0;
         tasks[i].exit_code = 0;
@@ -1752,6 +1759,9 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         memcpy(tasks[i].sig_flags, tasks[parent].sig_flags, sizeof(tasks[i].sig_flags));
         memcpy(tasks[i].fd_table, tasks[parent].fd_table, sizeof(tasks[i].fd_table));
         memcpy(tasks[i].launch_arg, tasks[parent].launch_arg, sizeof(tasks[i].launch_arg));
+        // Trust inherits with the image (fork of a shell host is another
+        // instance of the same host program), matching launch_arg semantics.
+        tasks[i].trusted_shell = tasks[parent].trusted_shell;
         tasks[i].current_dir = tasks[parent].current_dir;
         tasks[i].heap_ptr = tasks[parent].heap_ptr;
         // Resource limits are inherited by the child (POSIX fork semantics).
@@ -1932,6 +1942,11 @@ int task_exec(const char* path, const char* arg, void* frame) {
     } else {
         task_set_launch_arg(tid, path);
     }
+
+    // Recompute shell-host trust for the NEW image (v38.53): the parent in
+    // the rule is this task's own pre-exec flag, so exec'ing a host binary
+    // from an untrusted app does not confer trust.
+    tasks[tid].trusted_shell = task_grant_trusted_shell(tid, path);
 
     // ---- Patch the LIVE syscall return frame ----
     // The task is inside SYS_EXEC (interrupt gate, IF=0), so its registers_t
@@ -2555,6 +2570,57 @@ void task_set_launch_arg(int tid, const char* arg) {
 const char* task_get_launch_arg(int tid) {
     if (tid < 0 || tid >= MAX_TASKS) return "";
     return tasks[tid].launch_arg;
+}
+
+// ---- Trusted shell hosts (v38.53 privilege fix) ----
+// SYS_EXEC_CMD and SYS_KILL_TASK are privileged: their builtins call VFS
+// internals that bypass permission checks, and KILL_TASK can hit any task.
+// The old gate compared the caller's launch_arg STRING against a whitelist —
+// but any Ring 3 app can SYS_EXEC("apps/terminal.mct", "terminal.mct") and
+// have the loader store that exact string, so the gate was forgeable. Trust
+// is now a kernel-computed flag:
+//
+//   granted = image basename is a shell host
+//             AND (spawner is kernel-space / uid 0 / already trusted)
+//
+// A rogue app exec'ing terminal.mct itself stays untrusted because its own
+// flag is 0; the real terminal spawning another host (or `run` inside the
+// terminal) keeps working. Fork inherits, exec recomputes.
+static int shell_host_image(const char* path) {
+    static const char* const hosts[] = {
+        "terminal.mct", "explorer.mct", "taskmgr.mct",
+    };
+    if (!path) return 0;
+    const char* base = path;
+    for (const char* p = path; *p; p++) {
+        if (*p == '/') base = p + 1;
+    }
+    for (int i = 0; i < (int)(sizeof(hosts) / sizeof(hosts[0])); i++) {
+        const char* h = hosts[i];
+        const char* b = base;
+        while (*h && *b && *h == *b) { h++; b++; }
+        if (*h == '\0' && *b == '\0') return 1;
+    }
+    return 0;
+}
+
+int task_grant_trusted_shell(int parent_tid, const char* image_name) {
+    if (!shell_host_image(image_name)) return 0;
+    if (parent_tid < 0 || parent_tid >= MAX_TASKS) return 1;   // kernel spawn
+    if (tasks[parent_tid].state == TASK_STATE_FREE) return 1;  // pre-init spawn
+    if (task_in_kernel_space(parent_tid)) return 1;
+    if (tasks[parent_tid].uid == ROOT_UID) return 1;
+    return tasks[parent_tid].trusted_shell;
+}
+
+int task_is_trusted_shell(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    return tasks[tid].trusted_shell;
+}
+
+void task_set_trusted_shell(int tid, int trusted) {
+    if (tid < 0 || tid >= MAX_TASKS) return;
+    tasks[tid].trusted_shell = trusted ? 1 : 0;
 }
 
 uint32_t task_get_heap_ptr(int tid) {

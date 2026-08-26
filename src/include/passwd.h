@@ -17,4 +17,10 @@ int sys_verify_password(const char* pw);
 // needed. Rejects an empty password. Returns 0 on success, -1 on failure.
 int sys_set_password(const char* pw);
 
+// v38.53: write the default password as a salted hash if /etc/passwd does
+// not exist yet (fresh disk). Call once before the first login verify —
+// afterwards the file exists, so deleting it (blocked by the VFS protected-
+// path guard for non-root) can no longer re-arm the plaintext fallback.
+void passwd_ensure_initialized(void);
+
 #endif

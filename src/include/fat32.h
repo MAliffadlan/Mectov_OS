@@ -94,4 +94,7 @@ void fat32_populate_vfs(uint32_t root_cluster, int vfs_parent_node);
 int fat32_get_stats(uint32_t* total_clusters, uint32_t* free_clusters,
                     uint32_t* cluster_bytes);
 
+// Offset-aware read window (v38.53): bytes [offset, offset+len) of the chain.
+int fat32_read_file_range(uint32_t first_cluster, int offset, char* buf, int len);
+
 #endif

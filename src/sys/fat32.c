@@ -411,6 +411,45 @@ int fat32_read_file(uint32_t first_cluster, char* buf, int max_size) {
     return total;
 }
 
+// Offset-aware read (v38.53 fd fix): copy len bytes starting at byte `offset`
+// of the cluster chain into buf. Skips whole clusters with the chain walk,
+// then streams only the sectors inside the window, so lseek()+read() on a
+// /fat32 file no longer restarts at offset 0. Returns bytes copied (>=0).
+int fat32_read_file_range(uint32_t first_cluster, int offset, char* buf, int len) {
+    if (len <= 0 || offset < 0) return 0;
+    uint32_t csz = (uint32_t)fat32_spc * 512;
+    uint32_t skip = (uint32_t)offset / csz;
+    uint32_t in_off = (uint32_t)offset % csz;
+
+    uint32_t cluster = first_cluster;
+    int guard = 0;
+    while (skip > 0 && guard++ < (1 << 20)) {
+        if (cluster < FAT32_ROOT_CLUSTER || cluster > fat32_max_cluster ||
+            cluster >= FAT32_EOC_MIN) return 0;          // offset past EOF
+        cluster = fat32_get_next(cluster);
+    }
+
+    int total = 0;
+    guard = 0;
+    while (total < len && guard++ < (1 << 20)) {
+        if (cluster < FAT32_ROOT_CLUSTER || cluster > fat32_max_cluster ||
+            cluster >= FAT32_EOC_MIN) break;             // EOF mid-window
+        uint32_t sector = fat32_cluster_sector(cluster);
+        for (uint32_t i = in_off / 512; i < fat32_spc && total < len; i++) {
+            unsigned char tmp[512];
+            fat32_read_sectors(sector + i, tmp, 1);
+            uint32_t s_off = (i == in_off / 512) ? in_off % 512 : 0;
+            int chunk = len - total;
+            if (chunk > 512 - (int)s_off) chunk = 512 - (int)s_off;
+            memcpy(buf + total, tmp + s_off, chunk);
+            total += chunk;
+        }
+        in_off = 0;
+        cluster = fat32_get_next(cluster);
+    }
+    return total;
+}
+
 int fat32_write_file(uint32_t first_cluster, const char* buf, int size) {
     static unsigned char cbuf[FAT32_MAX_SPC * 512];
     if (size <= 0) {

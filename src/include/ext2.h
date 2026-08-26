@@ -131,4 +131,7 @@ int ext2_get_stats(uint32_t* total_blocks, uint32_t* free_blocks,
                    uint32_t* total_inodes, uint32_t* free_inodes,
                    uint32_t* block_size);
 
+// Offset-aware read window (v38.53): bytes [offset, offset+len) of the file.
+int ext2_read_file_range(uint32_t inode_num, uint32_t offset, char* buf, int len);
+
 #endif

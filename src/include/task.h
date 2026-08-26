@@ -286,6 +286,13 @@ typedef struct {
 int get_task_info(int tid, task_info_t* info);
 void task_set_launch_arg(int tid, const char* arg);
 const char* task_get_launch_arg(int tid);
+
+// Trusted shell-host flag (v38.53): kernel-computed from the resolved image
+// identity + parent trust; gates SYS_EXEC_CMD / SYS_KILL_TASK. Never derive
+// it from the user-controlled launch_arg string.
+int task_grant_trusted_shell(int parent_tid, const char* image_name);
+int task_is_trusted_shell(int tid);
+void task_set_trusted_shell(int tid, int trusted);
 // Enumerate live tasks: returns the first live task with id > `after` and
 // fills `info` (like get_task_info), or -1 when no more tasks exist. Start
 // with after = -1 to include the kernel task (tid 0). Used by /proc/tasks.
