@@ -23,10 +23,10 @@ Mectov OS implements a two-tier memory manager comprising a Physical Memory Mana
 
 ## 🌐 Virtual Memory Manager (VMM) & Paging (`src/sys/vmm.c`)
 
-1. **Two-Level Paging Architecture**:
-   - **Page Directory (1024 PDE entries)**: Points to 1024 Page Tables.
-   - **Page Table (1024 PTE entries)**: Maps virtual addresses to 4KB physical frames.
-   - Virtual Address Breakdown: `[PDE Index (10 bits) | PTE Index (10 bits) | Offset (12 bits)]`.
+1. **PAE 3-Level Paging (v38.49+, 64-bit PTEs)**:
+   - **PDPT (4 entries) → PD (512) → PT (512)**: `pte_t` 64-bit, `PAGE_NX` (63), `PAGE_DEV` (11, scanout), `PAGE_COW`/`PAGE_SHARED`.
+   - Virtual Address Breakdown: `[PDPT 2 bits | PD 9 bits | PT 9 bits | Offset 12 bits]` — CR4.PAE + EFER.NXE, `-cpu qemu32,+nx`.
+   - Legacy 2-level description kept for history; current kernel is PAE-only.
 
 2. **Identity Mapping & Special Regions**:
    - `0x00000000` – `0x00400000` (First 4MB): Identity mapped for Kernel Code & System Data structures (Present, Read/Write, Supervisor).

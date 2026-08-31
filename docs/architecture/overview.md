@@ -18,10 +18,13 @@ Mectov OS is an x86 (i386) 32-bit monolithic operating system kernel written fro
 +-----------------------------------------------------------------------------+
 |  Physical Mem (PMM)|  Virtual Mem (VMM)|  Heap Sandbox |  Ext2 Filesystem   |
 +-----------------------------------------------------------------------------+
+|  AHCI SATA (4+)   |  xHCI USB 3.0 (8+)|  FAT32 / pcache|  VFS Mount Table   |
++-----------------------------------------------------------------------------+
 |  VBE Framebuffer  |  Double Buffer    |  Window Mgr    |  Desktop & Taskbar |
 +-----------------------------------------------------------------------------+
 |  RTL8139 NIC      |  Ethernet/IP/UDP  |  DNS/TCP/Proxy |  Ring 3 MCT Apps   |
 +-----------------------------------------------------------------------------+
+|  PAGE_DEV Scanout |  FB_MAP/RELEASE   |  PAGE_NX W^X   |  PAE 3-level Paging|
 ```
 
 ---
@@ -54,8 +57,8 @@ Mectov OS is an x86 (i386) 32-bit monolithic operating system kernel written fro
 
 * `kernel.c` — Main kernel entry point and initialization loop.
 * `boot.asm` — Multiboot assembly entry and stack allocation.
-* `src/sys/` — System management (GDT, IDT, Task Scheduler, VMM, PMM, ACPI, APIC, SMP, Syscalls, VFS, Ext2).
-* `src/drivers/` — Hardware device drivers (VGA/VBE, Keyboard, Mouse, PIT Timer, RTL8139 NIC, ATA, SB16, Serial).
+* `src/sys/` — System management (GDT, IDT, Task Scheduler, VMM, PMM, ACPI, APIC, SMP, Syscalls, VFS, Ext2, FAT32, FB_MAP).
+* `src/drivers/` — Hardware device drivers (VGA/VBE, Keyboard, Mouse, PIT Timer, RTL8139 NIC, ATA, AHCI, xHCI, SB16, Serial).
 * `src/gui/` — Graphical user interface (Window Manager, Desktop, Taskbar, Login Screen).
 * `src/apps/` — Built-in Ring 0 & Ring 3 wrapper applications.
 * `apps/` — Userland Ring 3 executable sources (`.c`) compiled to `.mct` binaries.
