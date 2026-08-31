@@ -104,6 +104,17 @@ jobs:
           # differ, and the passwd file is salted+hashed with no plaintext.
           python3 scripts/hardening_test.py --timeout 480
 
+      - name: Ring 3 scanout takeover regression (TCG)
+        run: |
+          # v38.53: SYS_FB_MAP maps the VBE framebuffer into a Ring 3 task
+          # (PAGE_DEV device PTEs, active-session authorization) and while it
+          # is held the kernel desktop stops presenting frames. One boot,
+          # two scenarios: (A) grant -> interactive takeover -> typed key
+          # routed through the pump -> clean release -> desktop restored;
+          # (B) relaunch and Ctrl+C the holder mid-takeover -> ownership
+          # drops via task_cleanup -> desktop restored, no panic.
+          python3 scripts/fbmap_test.py --timeout 480
+
       - name: Taskbar window buttons + hover regression (TCG)
         run: |
           # v38.39: clicking a focused window's taskbar button minimizes it

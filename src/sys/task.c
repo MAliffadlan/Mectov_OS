@@ -184,6 +184,45 @@ static int boot_current_dir = 0;
 static int kernel_fg_pgrp = 0;
 
 // ============================================================
+// Ring 3 scanout ownership (SYS_FB_MAP / display-server foundation)
+// ============================================================
+// fb_owner_tid is the task currently holding the VBE framebuffer mapping.
+// Written under fb_map_lock (acquire/release); read WITHOUT the lock from
+// the kernel main loop and SYS_GET_KEY — an aligned int read is atomic and a
+// one-tick-stale answer is benign (same policy as mouse_x/y, see
+// docs/kernel-locking.md "Known remaining gaps"). -1 = desktop owns pixels.
+static int fb_owner_tid = -1;
+static spinlock_t fb_map_lock = SPINLOCK_INIT;
+
+// Current scanout holder's tid, or -1. Used by SYS_GET_KEY to route
+// keystrokes to the active compositor.
+int fb_owner_current(void) { return fb_owner_tid; }
+
+// 1 when a LIVE task holds the scanout. The kernel main loop suppresses its
+// own desktop rendering while this is true — the Ring 3 compositor owns
+// every pixel — and restores the desktop the first tick after it goes false.
+int fb_scanout_active(void) {
+    int t = fb_owner_tid;
+    return (t >= 0 && t < MAX_TASKS && tasks[t].state != TASK_STATE_FREE &&
+            tasks[t].state != TASK_STATE_ZOMBIE);
+}
+
+// Drop scanout ownership if `tid` held it. Called from task_cleanup (exit /
+// kill) and the exec reset path: the dying/replaced address space loses the
+// PAGE_DEV mappings with its page tables, so only the ownership bookkeeping
+// needs clearing here. The next main-loop tick notices the handback and
+// repaints the desktop.
+void fb_cleanup_task(int tid) {
+    if (fb_owner_tid == tid) {
+        fb_owner_tid = -1;
+        write_serial_string("[FBMAP] owner tid ");
+        write_serial_hex((uint32_t)tid);
+        write_serial_string(" gone - scanout returns to the desktop\n");
+    }
+}
+
+
+// ============================================================
 // Per-CPU runqueues (Fase 3: SMP scheduler)
 // ============================================================
 // Each CPU owns a runqueue of runnable tasks (READY or RUNNING). A task is
@@ -717,6 +756,10 @@ static void task_cleanup(int tid) {
     // 1. Clean up windows owned by this task
     extern void wm_cleanup_task(int tid);
     wm_cleanup_task(tid);
+
+    // 1a. If this task held the Ring 3 scanout (SYS_FB_MAP), drop ownership
+    //     so the kernel main loop restores the desktop next tick.
+    fb_cleanup_task(tid);
 
     // 1b. If this was the terminal's foreground app, release the terminal
     //     (so a later Ctrl+C is a no-op and the terminal is free again).
@@ -1927,6 +1970,10 @@ int task_exec(const char* path, const char* arg, void* frame) {
     // file-backed dirty bitmaps first (exec discards mappings without
     // writeback, POSIX-style).
     mmap_free_dirty_bitmaps(tid);
+    // exec replaces the image: the old PAGE_DEV scanout mapping (if any) is
+    // discarded with the region table — release ownership too, so the next
+    // image does not silently keep pixels it never asked for.
+    fb_cleanup_task(tid);
     for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[tid].mmap_regions[j].base = 0;
 
     // Reset signal state per POSIX: caught handlers revert to default, ignored
@@ -2820,6 +2867,176 @@ uint32_t task_mmap_file(int fd, int flags) {
     write_serial_string("\n");
     return base;
 }
+
+// SYS_FB_MAP: map the VBE linear framebuffer READ/WRITE into the calling
+// task's address space — the foundation a Ring 3 display server builds on.
+// The mapping is DEVICE memory: every PTE carries PAGE_DEV, so fork never
+// COWs or refcounts it (the clone walker skips PAGE_DEV entries; the frame
+// address is MMIO far above the RAM bitmap), the free walkers skip it, and
+// the child does not inherit the scanout. Pages are mapped EAGERLY (no
+// demand-fill fault will ever fire for this VA range) with RW+USER and, per
+// the v38.49 W^X policy, NX when EFER.NXE is active — pixel data must never
+// be executable.
+//
+// Authorization (logind-style, not setuid-style): the scanout goes to the
+// task that owns the ACTIVE console session — uid 0 (kernel services and the
+// future compositor) or whoever is the controlling terminal's foreground
+// process group right now. Background jobs are refused: they must not read
+// pixels of windows they are not presenting. When Mectov grows real seats /
+// multiuser this check narrows to the active SEAT; the call site is one if.
+//
+// The reservation goes through the normal mmap region table so it counts
+// against RLIMIT_AS and is torn down on exec/exit like any other.
+//
+// Locking: fb_map_lock serializes the owner-check + reserve + eager-map
+// sequence across cores (process-context discipline: irqsave, per
+// docs/kernel-locking.md). It is always acquired BEFORE vmm_lock (taken
+// inside vmm_map_page) and nowhere else, so no ordering cycle exists.
+
+int task_fb_map(fb_info_t* uinfo) {
+    extern uint32_t* fb_addr;
+    extern uint32_t  fb_width, fb_height, fb_pitch;
+    extern uint8_t   fb_bpp;
+    extern int       is_vbe;
+    extern int validate_user_ptr(const void* ptr, uint32_t size);
+
+    if (!uinfo || !validate_user_ptr(uinfo, sizeof(fb_info_t))) return -1;
+    int cid = get_cid();
+    if (current_task[cid] < 0) return -1;
+    int tid = current_task[cid];
+    // A kernel task (page_dir 0 = boot identity map) must never take the
+    // scanout: mapping device pages into the SHARED boot page tables would
+    // expose them to every address space and outlive the caller.
+    if (tasks[tid].page_dir == 0) return -1;
+    if (!is_vbe || !fb_addr || fb_width == 0 || fb_height == 0) return -1;
+
+    // Active-session authorization (see block comment above): root, or the
+    // controlling terminal's foreground process group.
+    int fg = task_get_fg_pgrp();
+    if (tasks[tid].uid != ROOT_UID &&
+        !(fg > 0 && tasks[tid].pgrp == fg)) {
+        write_serial_string("[FBMAP] denied: tid ");
+        write_serial_hex((uint32_t)tid);
+        write_serial_string(" is not the active session (uid!=0, pgrp!=fg)\n");
+        return -1;
+    }
+
+    // One page-aligned span covering the whole scanout buffer.
+    uint32_t fb_bytes = fb_pitch * fb_height;
+    uint32_t size = (fb_bytes + 0xFFF) & ~0xFFFu;
+    if (size == 0 || size > (MMAP_END - MMAP_BASE)) return -1;
+    if (!task_rlimit_as_allows(size)) return -1;
+
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&fb_map_lock);
+
+    // A display server is a singleton for now: one live fb mapping at a time
+    // keeps "who owns the scanout" unambiguous. Re-map by the same task is
+    // fine (idempotent); a DEAD previous owner frees the seat implicitly.
+    if (fb_owner_tid >= 0 && fb_owner_tid != tid && task_is_alive(fb_owner_tid)) {
+        write_serial_string("[FBMAP] busy: held by TID ");
+        write_serial_hex((uint32_t)fb_owner_tid);
+        write_serial('\n');
+        goto out_busy;
+    }
+
+    int slot;
+    uint32_t base;
+    if (!mmap_region_alloc(tid, size, &slot, &base)) goto out_busy;
+
+    tasks[tid].mmap_regions[slot].base = base;
+    tasks[tid].mmap_regions[slot].size = size;
+    tasks[tid].mmap_regions[slot].file_size = 0;
+    tasks[tid].mmap_regions[slot].vfs_node = -1;
+    tasks[tid].mmap_regions[slot].map_flags = MMAP_FLAG_DEVICE;
+    tasks[tid].mmap_regions[slot].dirty = NULL;
+
+    uint32_t nx = paging_nx_enabled() ? PAGE_NX : 0;
+    uint64_t flags = PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_DEV | nx;
+    for (uint32_t off = 0; off < size; off += 4096) {
+        if (vmm_map_page(tasks[tid].page_dir, base + off,
+                         (uint32_t)(uintptr_t)fb_addr + off, flags) != 0) {
+            // Roll back what was mapped so no half-window survives.
+            for (uint32_t undo = 0; undo < off; undo += 4096)
+                vmm_unmap_page(tasks[tid].page_dir, base + undo);
+            tasks[tid].mmap_regions[slot].base = 0;
+            tasks[tid].mmap_regions[slot].size = 0;
+            goto out_busy;
+        }
+    }
+    fb_owner_tid = tid;
+
+    uinfo->base   = base;
+    uinfo->width  = fb_width;
+    uinfo->height = fb_height;
+    uinfo->pitch  = fb_pitch;
+    uinfo->bpp    = fb_bpp;
+
+    write_serial_string("[FBMAP] tid=");
+    write_serial_hex((uint32_t)tid);
+    write_serial_string(" va=");
+    write_serial_hex(base);
+    write_serial_string(" pa=");
+    write_serial_hex((uint32_t)(uintptr_t)fb_addr);
+    write_serial_string(" wxh=");
+    write_serial_hex(fb_width);
+    write_serial('x');
+    write_serial_hex(fb_height);
+    write_serial_string(" bpp=");
+    write_serial_hex(fb_bpp);
+    write_serial('\n');
+    spin_unlock(&fb_map_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+    return 0;
+
+out_busy:
+    spin_unlock(&fb_map_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+    return -1;
+}
+
+// SYS_FB_RELEASE: give the scanout back. Unmaps the device pages from the
+// caller's address space, frees the region slot, and clears ownership so the
+// kernel main loop repaints the desktop on its next tick. Only the current
+// owner may release (a non-owner cannot yank someone else's scanout).
+int task_fb_release(void) {
+    int cid = get_cid();
+    if (current_task[cid] < 0) return -1;
+    int tid = current_task[cid];
+
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&fb_map_lock);
+
+    if (fb_owner_tid != tid) {
+        spin_unlock(&fb_map_lock);
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return -1;
+    }
+
+    // Find this task's device region and tear it down page by page.
+    for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+        mmap_region_t* r = &tasks[tid].mmap_regions[j];
+        if (r->base == 0 || r->map_flags != MMAP_FLAG_DEVICE) continue;
+        for (uint32_t off = 0; off < r->size; off += 4096)
+            vmm_unmap_page(tasks[tid].page_dir, r->base + off);
+        r->base = 0;
+        r->size = 0;
+        r->map_flags = 0;
+        break;  // singleton ownership: exactly one device region exists
+    }
+
+    fb_owner_tid = -1;
+    spin_unlock(&fb_map_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+
+    write_serial_string("[FBMAP] released by tid ");
+    write_serial_hex((uint32_t)tid);
+    write_serial('\n');
+    return 0;
+}
+
 
 // Write every dirty page of a file-backed mapping back to its VFS file. Runs
 // in syscall context (msync/munmap), so the locked VFS paths are fine. The

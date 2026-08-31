@@ -310,6 +310,9 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     int prev_mx   = mouse_x, prev_my = mouse_y;
     uint32_t last_clock_tick = 0;
     uint32_t last_frame_tick = 0;
+    // Ring 3 scanout handback detector: set when fb_scanout_active() was true
+    // last iteration and is false now (release / exit / exec of the owner).
+    int fb_was_active = 0;
 
     while (1) {
         // v38.55: drain deferred sem/futex waiter cleanups for dead tasks.
@@ -325,6 +328,63 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         // TCG virtual clock rate can drift, so re-measure once per second.
         extern void timer_update_rate_if_second(void);
         timer_update_rate_if_second();
+
+        // ---- Ring 3 scanout takeover ----
+        // While a compositor holds the framebuffer (SYS_FB_MAP), the desktop
+        // stops presenting frames entirely: no full_redraw, no cursor, no WM
+        // input processing. The holder paints every pixel from Ring 3 and
+        // reads keystrokes via SYS_GET_KEY (pumped below) plus raw mouse
+        // state via SYS_GET_MOUSE. Kernel duties that are not pixel-bound
+        // keep running here so the takeover cannot starve them.
+        extern int fb_scanout_active(void);
+        int fb_active = fb_scanout_active();
+        if (fb_was_active && !fb_active) {
+            // Handback: one forced repaint brings the desktop back.
+            write_serial_string("[FBMAP] desktop restored\n");
+            needs_redraw = 1;
+            prev_mx = -1; prev_my = -1; prev_btn = -1;   // force cursor redraw
+        }
+        fb_was_active = fb_active;
+
+        if (fb_active) {
+            // Pump resolved keystrokes to the scanout holder's queue
+            // (SYS_GET_KEY pops them). Same feed-time modifier snapshot as
+            // the normal path; Ctrl+C/Z combos are deliberately NOT
+            // intercepted during a takeover — the compositor sees the chars.
+            uint8_t kbd_mods_fb = 0;
+            uint8_t sc_fb = k_get_scancode_ex(&kbd_mods_fb);
+            if (sc_fb != 0) {
+                extern void security_note_input(void);
+                security_note_input();
+                if ((kbd_mods_fb & 2) && !(kbd_mods_fb & 1) && sc_fb == 0x2E) {
+                    // Ctrl+C still interrupts the foreground job even while
+                    // it owns the screen — killing a wedged compositor must
+                    // not require another console.
+                    extern int task_get_fg_pgrp(void);
+                    extern int task_signal_pgrp(int pgrp, int sig);
+                    int fg_pgrp = task_get_fg_pgrp();
+                    if (fg_pgrp > 0) task_signal_pgrp(fg_pgrp, SIGINT);
+                } else if (sc_fb < 0x80 || sc_fb == 0xE0) {
+                    char c_fb = scancode_to_char_mods(sc_fb, kbd_mods_fb);
+                    extern void term_app_push_key(unsigned char);
+                    if (c_fb != 0) term_app_push_key((unsigned char)c_fb);
+                }
+            }
+            extern void gdb_stub_poll(void);
+            gdb_stub_poll();
+            extern void net_poll();
+            net_poll();
+            uint32_t now_fb = get_ticks();
+            if (now_fb - last_clock_tick >= 1000) {
+                last_clock_tick = now_fb;
+                extern void security_auto_lock_tick(uint32_t);
+                security_auto_lock_tick(now_fb);
+                extern void task_reap_zombies(void);
+                task_reap_zombies();
+            }
+            __asm__ __volatile__ ("hlt");
+            continue;
+        }
 
         // Snapshot mouse state with interrupts off: x/y/btn are written by
         // IRQ12 and reading them separately can tear (x from one update, y

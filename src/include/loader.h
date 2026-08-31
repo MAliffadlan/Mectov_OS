@@ -23,7 +23,14 @@ typedef struct {
 } loader_image_t;
 
 int load_mct_app(const char* filename);
+// `become_foreground` closes the spawn/handoff race: the new task's pgrp is
+// set to its own tid and, when foreground, it becomes the controlling
+// terminal's fg group INSIDE the same interrupts-disabled window that seeds
+// uid/launch_arg — so no other core can ever see (or run) the task before its
+// terminal identity is final. cmd_run passes !shell_bg_flag; kernel-side
+// launchers pass 0.
 int load_mct_app_with_arg(const char* filename, const char* arg);
+int load_mct_app_fg(const char* filename, const char* arg, int become_foreground);
 // Build an image WITHOUT creating a task (used by exec). The caller owns
 // img->page_dir on success. `filename` must be a kernel-side copy.
 int loader_build_image(const char* filename, const char* arg, loader_image_t* img);

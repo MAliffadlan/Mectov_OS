@@ -30,6 +30,10 @@ static inline uint32_t pt_index(uint32_t v)   { return (v >> 12) & 0x1FF; }
 #define PAGE_USER    0x4
 #define PAGE_COW     0x200
 #define PAGE_SHARED  0x400   // shared memory page (never COW'd on fork)
+// Device/PFN-mapped page (MMIO e.g. the VBE framebuffer): the frame address
+// is outside the RAM allocator's range, so clone/free walkers must never
+// refcount or free it — and a child must not inherit the mapping.
+#define PAGE_DEV     0x800
 
 void init_mem(uint32_t mem_size);
 void paging_init(uint32_t fb_addr, uint32_t fb_size);

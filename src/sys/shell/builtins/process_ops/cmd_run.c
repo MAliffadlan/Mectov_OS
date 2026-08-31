@@ -24,26 +24,24 @@ int cmd_run(void) {
             print("File not found: ", 0x0C); print(fname, 0x0C); print("\n", 0x0C);
         } else {
             print("Launching MCT app: ", 0x0A); print(fname, 0x0A); print("\n", 0x0A);
-            int res = load_mct_app_with_arg(fname, arg);
+            // Foreground handoff happens inside the loader's cli window
+            // (load_mct_app_fg): pgrp + fg are final before the task can
+            // run on any core, so authorization checks (SYS_FB_MAP) never
+            // race the terminal handoff.
+            int res = load_mct_app_fg(fname, arg, !shell_bg_flag);
             if (res >= 0) {
-                // Give the app its own process group: a foreground app becomes
-                // the controlling terminal's foreground group (Ctrl+C/Z now
-                // target the group via task_signal_pgrp); a background app gets
-                // its own group so SIGTTIN stops it from reading the terminal.
-                extern int task_set_pgrp(int, int);
-                extern void task_set_fg_pgrp(int);
-                task_set_pgrp(res, res);
+                // pgrp/fg handoff already happened inside the loader's cli
+                // window (see load_mct_app_fg). A foreground app owns the
+                // terminal (Ctrl+C/Z target its group); a background app
+                // keeps a group != fg, so reading the terminal stops it.
                 if (shell_bg_flag) {
-                    // `run app.mct &` — the app runs on its own; don't grab
-                    // the terminal, just track it as a background job. It keeps
-                    // its own pgrp (!= fg), so reading the terminal stops it.
                     int jn = register_job(res, fname);
                     print("[+] App in background [", 0x0A);
                     p_int(jn, 0x0A); print("] (Task ID: ", 0x0A);
                     p_int(res, 0x0A); print(")\n", 0x0A);
                 } else {
                     print("[+] User Mode Task Created! (Task ID: ", 0x0A); p_int(res, 0x0A); print(")\n", 0x0A);
-                    
+
                     extern int term_app_running;
                     extern int term_app_task_id;
                     extern void term_app_key_clear(void);
@@ -53,7 +51,6 @@ int cmd_run(void) {
                     term_app_key_clear();
                     term_app_running = 1;
                     term_app_task_id = res;
-                    task_set_fg_pgrp(res);   // foreground group owns the terminal
                     return 1; // DO NOT PRINT PROMPT
                 }
             } else {

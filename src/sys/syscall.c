@@ -734,6 +734,20 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_FB_MAP (118): map the VBE framebuffer into the caller -----
+        // ----- (active-session authz; PAGE_DEV mapping, display-server foundation) -----
+        case SYS_FB_MAP: {
+            extern int task_fb_map(fb_info_t* uinfo);
+            regs->eax = (uint32_t)task_fb_map((fb_info_t*)regs->ebx);
+            break;
+        }
+        // ----- SYS_FB_RELEASE (119): hand the scanout back to the desktop -----
+        case SYS_FB_RELEASE: {
+            extern int task_fb_release(void);
+            regs->eax = (uint32_t)task_fb_release();
+            break;
+        }
+
         // ----- SYS_GET_PCI_INFO (36) -----
         case SYS_GET_PCI_INFO: {
             pci_device_t* array = (pci_device_t*)regs->ebx;

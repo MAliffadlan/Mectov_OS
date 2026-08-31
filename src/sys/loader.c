@@ -51,7 +51,7 @@ typedef struct {
 // ============================================================
 
 static int finish_loaded_task(const char* filename, const char* arg,
-                              loader_image_t* img);
+                              loader_image_t* img, int become_foreground);
 
 // Build the address space + copy the image. Returns 0 on success; on failure
 // returns a negative error and frees any partially built address space.
@@ -241,7 +241,7 @@ static int build_elf_image(const char* filename, const char* arg,
 // Public entry — format auto-detected (MCT1 vs ELF)
 // ============================================================
 
-int load_mct_app_with_arg(const char* filename, const char* arg) {
+int load_mct_app_fg(const char* filename, const char* arg, int become_foreground) {
     write_serial_string("[LOADER] start\n");
 
     // Use new VFS API
@@ -280,7 +280,7 @@ int load_mct_app_with_arg(const char* filename, const char* arg) {
         rc = build_elf_image(filename, arg, buf, sz, &img);
         kfree(buf);
         if (rc < 0) return rc;
-        return finish_loaded_task(filename, arg, &img);
+        return finish_loaded_task(filename, arg, &img, 0);
     }
 
     // ---- MCT format ----
@@ -309,13 +309,13 @@ int load_mct_app_with_arg(const char* filename, const char* arg) {
     rc = build_mct_image(filename, arg, buf, header, total_size, &img);
     kfree(buf);
     if (rc < 0) return rc;
-    return finish_loaded_task(filename, arg, &img);
+    return finish_loaded_task(filename, arg, &img, become_foreground);
 }
 
 // Create a new task for a built image: thread_create + launch arg + heap.
 // Shared by the MCT and ELF build paths above.
 static int finish_loaded_task(const char* filename, const char* arg,
-                              loader_image_t* img) {
+                              loader_image_t* img, int become_foreground) {
     // CRITICAL: Set launch arg BEFORE creating the task to prevent race condition.
     // thread_create() leaves interrupts disabled at the end, and the scheduler
     // could run the new task before we get to set the arg.
@@ -352,6 +352,18 @@ static int finish_loaded_task(const char* filename, const char* arg,
     extern int get_current_task(void);
     task_set_trusted_shell(task_id,
                            task_grant_trusted_shell(get_current_task(), filename));
+    // Terminal identity is finalized in this SAME cli window (see
+    // load_mct_app_fg): pgrp = own tid always; fg handoff only when the
+    // launcher asked for it. Doing it here — not after thread_create
+    // returns to the shell — means no core can schedule the task before its
+    // authorization identity (fg membership) exists. SYS_FB_MAP and any
+    // future active-session checks can rely on it.
+    extern int task_set_pgrp(int tid, int pgrp);
+    task_set_pgrp(task_id, task_id);
+    if (become_foreground) {
+        extern void task_set_fg_pgrp(int pgrp);
+        task_set_fg_pgrp(task_id);
+    }
     __asm__ volatile("sti");
 
     write_serial_string("[LOADER] task ");
@@ -362,6 +374,10 @@ static int finish_loaded_task(const char* filename, const char* arg,
 
 int load_mct_app(const char* filename) {
     return load_mct_app_with_arg(filename, "");
+}
+
+int load_mct_app_with_arg(const char* filename, const char* arg) {
+    return load_mct_app_fg(filename, arg, 0);
 }
 
 // ============================================================

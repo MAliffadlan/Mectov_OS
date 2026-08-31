@@ -37,4 +37,16 @@ typedef struct {
     uint32_t max;   // hard limit (ceiling for raising cur; root may raise max)
 } rlimit_t;
 
+// Framebuffer geometry (SYS_FB_MAP, display-server foundation). Shared by
+// the kernel (task.c: task_fb_map fills it) and the Ring 3 ABI (syscall.h:
+// sys_fb_map wrapper), so it lives here — the common base both include.
+// `base` is the user VA of the scanout buffer; pitch is BYTES per scanline.
+typedef struct {
+    uint32_t base;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint8_t  bpp;
+} fb_info_t;
+
 #endif

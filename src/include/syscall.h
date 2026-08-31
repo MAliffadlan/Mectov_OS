@@ -186,6 +186,22 @@ typedef struct {
 // bytes from the ChaCha8 DRBG. Mirrors POSIX getrandom(, , 0).
 #define SYS_GETRANDOM    117 // EBX=buf, ECX=buflen -> 0 or -1
 
+// Direct framebuffer access (display-server foundation). SYS_FB_MAP maps the
+// VBE linear framebuffer READ/WRITE into the CALLING task's address space —
+// device memory via PAGE_DEV PTEs (never COW'd on fork, never refcounted or
+// freed by the frame allocator) — and returns the geometry in *info. While
+// a live task holds the scanout, the kernel desktop stops presenting frames
+// and keystrokes route to the holder (SYS_FB_RELEASE / exit / exec hands
+// the pixels back).
+// Authorized like logind grants DRM master: uid 0, or the controlling
+// terminal's FOREGROUND process group (the active console session). A
+// background job is refused.
+#define SYS_FB_MAP       118 // EBX=fb_info_t* -> 0 or -1
+#define SYS_FB_RELEASE   119 // (no args) -> 0 or -1; only the current owner
+
+// fb_info_t is defined in types.h (the common base of kernel task.h and this
+// Ring 3 ABI header) so both sides share one definition.
+
 // POSIX socket API (v38.43) — fd-integrated: socket()/accept() return file
 // descriptors, so read/write/close/poll/select work on sockets uniformly.
 #define SYS_SOCKET       108 // EBX=domain (AF_INET), ECX=type (SOCK_*) -> fd or -1
@@ -382,6 +398,20 @@ static inline int sys_mount(const char* path, const char* fstype, int drive) {
 static inline int sys_umount(const char* path) {
     return syscall(SYS_UMOUNT, (int)path, 0, 0);
 }
+
+// Map the VBE linear framebuffer into THIS task (root only). On success the
+// geometry is written to *info and 0 is returned; -1 on failure (not root,
+// no VBE fb, out of address-space slots or RLIMIT_AS).
+static inline int sys_fb_map(fb_info_t* info) {
+    return syscall(SYS_FB_MAP, (int)info, 0, 0);
+}
+
+// Give the scanout back (only the current owner may). The kernel desktop
+// repaints on the next tick. 0 or -1.
+static inline int sys_fb_release(void) {
+    return syscall(SYS_FB_RELEASE, 0, 0, 0);
+}
+
 
 // POSIX sockets (v38.43) — fd-integrated: read()/write()/close()/poll()
 // work on the returned descriptors. accept() is non-blocking (poll first);
