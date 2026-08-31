@@ -122,7 +122,7 @@ Mectov OS is a from-scratch i386 operating system with:
 +--------------------------------------------------------------------+
 |  ACPI (RSDT/XSDT/MADT)  |  SMP (APIC/IOAPIC, 4 cores)              |
 +--------------------------------------------------------------------+
-|  Per-CPU Runqueues  |  Semaphores & Futexes  |  VFS + ATA PIO      |
+|  Per-CPU Runqueues  |  Semaphores & Futexes  |  VFS + ATA PIO + AHCI + xHCI USB |
 +--------------------------------------------------------------------+
 |  VGA/VESA Driver   |  Window Manager  |  RTL8139 NIC (IRQ-driven)  |
 +--------------------------------------------------------------------+
@@ -172,13 +172,13 @@ src/
   drivers/
     vga.c font8x16.c   Framebuffer compositor, primitives, font
     keyboard.c mouse.c serial.c rtc.c timer.c speaker.c
-    ata.c pci.c net.c rtl8139.c sb16.c dma.c gdb_stub.c
+    ata.c ahci.c xhci.c pci.c net.c rtl8139.c sb16.c dma.c gdb_stub.c
   gui/
     wm.c desktop.c taskbar.c login.c   Window manager + desktop shell
   include/             Public headers (syscall.h, task.h, vmm.h, ...)
 
 apps/                  Ring 3 user applications
-  terminal.c nano.c notepad.c explorer.c sysinfo.c taskmgr.c browser.c
+  terminal.c nano.c notepad.c explorer.c sysinfo.c taskmgr.c browser.c fbmap.c
   clock.c calc.c gcalc.c snake.c flappy.c pci.c mplayer.c volume.c
   hello.c elfdemo.c syncdemo.elf udptest.elf    (ELF32 demos)
   forkdemo.c execdemo.c shmdemo.c mmapdemo.c mmapfiledemo.c lseekfiledemo.c
@@ -190,7 +190,7 @@ apps/                  Ring 3 user applications
   lib/libc.c libc.h    Homegrown dynamic shared library (libc.mct)
 
 scripts/               build_mct.py, build_elf.py, inject_vfs.py, gateway.py,
-                       boot_test.py, debug.py (serial log reader)
+                       boot_test.py, usb_test.py, ahci_test.py, fbmap_test.py, debug.py (serial log reader)
 docs/architecture/     scheduler.md, memory.md, syscalls.md, smp_and_apic.md
 .github/workflows/     build-boot-test.yml (CI boot test)
 doom/                  Embedded DOOM engine (GPLv2)
