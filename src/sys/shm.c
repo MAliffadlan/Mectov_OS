@@ -163,7 +163,8 @@ uint32_t shm_at(int shmid) {
             __asm__ volatile("sti");
             return 0;
         }
-        frame_ref_count[s->frames[i] / 4096]++;
+        if (frame_ref_count[s->frames[i] / 4096] < 255)
+            frame_ref_count[s->frames[i] / 4096]++;
     }
     s->attach_count++;
 

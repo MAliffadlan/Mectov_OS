@@ -970,6 +970,16 @@ uint32_t ext2_create_entry(uint32_t parent_inode, const char* name, uint8_t file
     inode.i_links_count = (file_type == EXT2_FT_DIR) ? 2 : 1;
     inode.i_size = (file_type == EXT2_FT_DIR) ? block_size : 0;
     inode.i_atime = inode.i_ctime = inode.i_mtime = 0x5F000000;
+    // Ownership must match the VFS node (v38.23) — otherwise the file reverts
+    // to root (0) after reboot when ext2_populate overwrites the VFS uid.
+    {
+        extern int get_current_task(void);
+        extern int task_get_uid(int);
+        int ctask = get_current_task();
+        int cuid = (ctask >= 0) ? task_get_uid(ctask) : 0;
+        inode.i_uid = (uint16_t)cuid;
+        inode.i_gid = 0;
+    }
     
     if (file_type == EXT2_FT_DIR) {
         uint32_t blk = ext2_alloc_block();

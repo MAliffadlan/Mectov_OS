@@ -22,6 +22,7 @@
 #include "../include/vmm.h"
 #include "../include/task.h"
 #include "../include/fd.h"
+#include "../include/mem.h"
 #include "../include/speaker.h"
 #include "../include/rtc.h"
 #include "../include/net.h"
@@ -242,7 +243,9 @@ static int user_page_ok(uint32_t pd_paddr, uint32_t va, uint32_t heap_top) {
     uint32_t phys = frame_alloc();
     if (phys == 0) return 0;
     memset((void*)(uintptr_t)phys, 0, 4096);  // zero via the kernel identity map
-    if (vmm_map_page(pd_paddr, va, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER) != 0) {
+    uint32_t flags = PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    if (paging_nx_enabled()) flags |= PAGE_NX;
+    if (vmm_map_page(pd_paddr, va, phys, flags) != 0) {
         frame_free(phys);
         return 0;
     }

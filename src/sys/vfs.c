@@ -1541,6 +1541,15 @@ static int vfs_delete_node_unlocked(const char* path, int acting_uid) {
                     p = fs_nodes[p].parent;
                 }
                 if (is_descendant) {
+                    // Protected file check for every descendant (v38.53 deep-delete fix):
+                    // deleting /etc must not silently remove /etc/passwd via recursion.
+                    if (acting_uid != ROOT_UID) {
+                        char ap2[MAX_PATH];
+                        if (vfs_get_abs_path(i, ap2, MAX_PATH) == 0 &&
+                            strcmp(ap2, PASSWD_PROTECT_PATH) == 0) {
+                            return -8;
+                        }
+                    }
                     // Only delete if this node has no children itself
                     int has_children = 0;
                     for (int j = 0; j < MAX_NODES; j++) {

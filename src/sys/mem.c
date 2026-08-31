@@ -158,17 +158,20 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     boot_pdpt[0] = ((uint32_t)(uintptr_t)boot_pds[0]) | PAGE_PRESENT;
 
     // Map Framebuffer separately if it's above our identity mapped RAM.
-    // The fb sits around ~4GB on QEMU -> PDPT slot 3.
+    // The fb sits around ~4GB on QEMU -> PDPT slot 3. Must be kernel-only
+    // and PAGE_DEV so it is not inherited on fork (otherwise Ring 3 could
+    // bypass SYS_FB_MAP auth at the physical VA 0xE0000000 and the clone
+    // walker would OOB frame_ref_count[4GB/4096] > PHYS_MAX).
     if (fb_paddr >= (num_tables * 2 * 1024 * 1024)) {
         uint32_t fbi = pdpt_index(fb_paddr);
         uint32_t fbd = pd_index(fb_paddr);
         for (int i = 0; i < 2; i++) {
             for (uint32_t j = 0; j < PT_ENTRIES; j++) {
                 fb_page_tables[i][j] = ((uint64_t)fb_paddr + i * 0x200000 + j * 0x1000)
-                                       | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+                                       | PAGE_PRESENT | PAGE_RW | PAGE_DEV;
             }
             boot_pds[fbi][fbd + i] = ((uint32_t)(uintptr_t)fb_page_tables[i])
-                                     | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+                                     | PAGE_PRESENT | PAGE_RW;
         }
         if (!(boot_pdpt[fbi] & PAGE_PRESENT)) {
             boot_pdpt[fbi] = ((uint32_t)(uintptr_t)boot_pds[fbi]) | PAGE_PRESENT;

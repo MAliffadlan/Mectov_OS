@@ -202,7 +202,22 @@ int do_sys_write(int fd, const char* buf, int size) {
         // O_APPEND: every write lands at the end of the file, regardless of
         // the descriptor offset (POSIX).
         if (global_fds[gfd].flags & O_APPEND) off = oldsz;
-        int newsz = (off + size > oldsz) ? off + size : oldsz;
+        // Overflow + cap check (v38.54 HIGH fix): off+size may wrap signed int
+        // and make newsz small, leading to heap OOB at whole[off+i].
+        if (off < 0 || size < 0 || off > VFS_FD_MAX_FILE || size > VFS_FD_MAX_FILE) {
+            fd_lock_release(); return -1;
+        }
+        int64_t off_plus = (int64_t)off + (int64_t)size;
+        if (off_plus < 0 || off_plus > VFS_FD_MAX_FILE) {
+            // Clamp to cap if it would exceed, otherwise overflow -> deny
+            if (off_plus > VFS_FD_MAX_FILE) {
+                // Partial write up to cap, like below
+                off_plus = VFS_FD_MAX_FILE;
+            } else {
+                fd_lock_release(); return -1;
+            }
+        }
+        int newsz = (off_plus > oldsz) ? (int)off_plus : oldsz;
         if (newsz > VFS_FD_MAX_FILE) {
             // Partial write up to the cap (POSIX-style short write), never
             // truncation of what already exists.
@@ -220,6 +235,17 @@ int do_sys_write(int fd, const char* buf, int size) {
                 int z = oldsz - r;
                 for (int i = 0; i < z; i++) whole[r + i] = 0;
             }
+        } else if (newsz > 0) {
+            // No old content but hole may exist (off>0) — ensure determinism
+            // even if kmalloc returns garbage.
+            for (int i = 0; i < newsz && i < off; i++) whole[i] = 0;
+        }
+        // Zero-fill sparse hole between old EOF and new write offset
+        // (POSIX requires hole reads as zeros, not heap garbage).
+        if (off > oldsz) {
+            int gap = off - oldsz;
+            if (gap > newsz - oldsz) gap = newsz - oldsz;
+            for (int i = 0; i < gap; i++) whole[oldsz + i] = 0;
         }
         for (int i = 0; i < size; i++) whole[off + i] = buf[i];
         whole[newsz] = '\0';
@@ -284,15 +310,16 @@ int do_sys_lseek(int fd, int offset, int whence) {
 
     int node = global_fds[gfd].vfs_node;
     int filesz = fs_nodes[node].in_use ? fs_nodes[node].size : 0;
-    int newoff;
+    int64_t newoff64;
     switch (whence) {
-        case SEEK_SET: newoff = offset; break;
-        case SEEK_CUR: newoff = global_fds[gfd].offset + offset; break;
-        case SEEK_END: newoff = filesz + offset; break;
+        case SEEK_SET: newoff64 = (int64_t)offset; break;
+        case SEEK_CUR: newoff64 = (int64_t)global_fds[gfd].offset + (int64_t)offset; break;
+        case SEEK_END: newoff64 = (int64_t)filesz + (int64_t)offset; break;
         default: fd_lock_release(); return -1;
     }
-    if (newoff < 0) { fd_lock_release(); return -1; }  // EINVAL
+    if (newoff64 < 0 || newoff64 > VFS_FD_MAX_FILE) { fd_lock_release(); return -1; }  // EINVAL / EFBIG
 
+    int newoff = (int)newoff64;
     global_fds[gfd].offset = newoff;
     fd_lock_release();
     return newoff;

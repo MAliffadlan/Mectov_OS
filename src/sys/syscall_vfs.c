@@ -201,7 +201,7 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
             char pp[MAX_PATH];
             extern int vfs_get_node(const char* path);
             int pnode = -1;
-            if (vfs_get_parent(path, pp, MAX_PATH) == 0) pnode = vfs_get_node(pp);
+            if (vfs_get_parent(path, pp, MAX_PATH) >= 0) pnode = vfs_get_node(pp);
             if (pnode >= 0 && !vfs_check_perm(pnode, S_IWUSR)) {
                 regs->eax = (uint32_t)-1;
                 break;
@@ -255,7 +255,7 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
             char pp[MAX_PATH];
             extern int vfs_get_node(const char* path);
             int pnode = -1;
-            if (vfs_get_parent(path, pp, MAX_PATH) == 0) pnode = vfs_get_node(pp);
+            if (vfs_get_parent(path, pp, MAX_PATH) >= 0) pnode = vfs_get_node(pp);
             if (pnode >= 0 && !vfs_check_perm(pnode, S_IWUSR)) {
                 regs->eax = (uint32_t)-1;
                 break;
@@ -281,7 +281,7 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
             extern int vfs_get_node(const char* path);
             int onode = vfs_get_node(old_path);
             int dpnode = -1;
-            if (vfs_get_parent(new_path, pp, MAX_PATH) == 0) dpnode = vfs_get_node(pp);
+            if (vfs_get_parent(new_path, pp, MAX_PATH) >= 0) dpnode = vfs_get_node(pp);
             if ((onode >= 0 && !vfs_check_perm(onode, S_IWUSR)) ||
                 (dpnode >= 0 && !vfs_check_perm(dpnode, S_IWUSR))) {
                 regs->eax = (uint32_t)-1;

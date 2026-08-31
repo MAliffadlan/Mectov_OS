@@ -2912,6 +2912,8 @@ int task_fb_map(fb_info_t* uinfo) {
 
     // Active-session authorization (see block comment above): root, or the
     // controlling terminal's foreground process group.
+    // First check before lock for fast path, re-checked after lock to close
+    // TOCTOU where fg switches between check and map.
     int fg = task_get_fg_pgrp();
     if (tasks[tid].uid != ROOT_UID &&
         !(fg > 0 && tasks[tid].pgrp == fg)) {
@@ -2931,9 +2933,35 @@ int task_fb_map(fb_info_t* uinfo) {
     __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
     spin_lock(&fb_map_lock);
 
+    // Re-check auth after taking the lock (closes TOCTOU vs concurrent
+    // task_set_fg_pgrp from shell run).
+    fg = task_get_fg_pgrp();
+    if (tasks[tid].uid != ROOT_UID &&
+        !(fg > 0 && tasks[tid].pgrp == fg)) {
+        write_serial_string("[FBMAP] denied (raced fg): tid ");
+        write_serial_hex((uint32_t)tid);
+        write_serial_string("\n");
+        goto out_busy;
+    }
+
     // A display server is a singleton for now: one live fb mapping at a time
     // keeps "who owns the scanout" unambiguous. Re-map by the same task is
-    // fine (idempotent); a DEAD previous owner frees the seat implicitly.
+    // idempotent — return the existing mapping instead of leaking a new slot.
+    if (fb_owner_tid == tid) {
+        for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+            if (tasks[tid].mmap_regions[j].map_flags == MMAP_FLAG_DEVICE &&
+                tasks[tid].mmap_regions[j].base != 0) {
+                uinfo->base   = tasks[tid].mmap_regions[j].base;
+                uinfo->width  = fb_width;
+                uinfo->height = fb_height;
+                uinfo->pitch  = fb_pitch;
+                uinfo->bpp    = fb_bpp;
+                spin_unlock(&fb_map_lock);
+                __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+                return 0;
+            }
+        }
+    }
     if (fb_owner_tid >= 0 && fb_owner_tid != tid && task_is_alive(fb_owner_tid)) {
         write_serial_string("[FBMAP] busy: held by TID ");
         write_serial_hex((uint32_t)fb_owner_tid);
