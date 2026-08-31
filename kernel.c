@@ -226,6 +226,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] ahci\n");
     extern void ahci_init(void);
     ahci_init();
+    // USB 3.0 (v38.56): any xHCI controller + attached mass-storage. BOT
+    // units become drives 8+ on the same sector API — `mount /usb fat32 8`
+    // works on a USB stick exactly like the SATA flow. Absent controller
+    // or empty ports = log only. Must run after pci_scan and ahci_init.
+    write_serial_string("[K] xhci\n");
+    extern void xhci_init(void);
+    xhci_init();
     write_serial_string("[K] sb16\n");
     extern void sb16_init(void);
     sb16_init();

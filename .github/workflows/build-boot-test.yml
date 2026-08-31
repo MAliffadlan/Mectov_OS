@@ -171,6 +171,16 @@ jobs:
           # host with mtools — proving the data actually landed on disk.
           python3 scripts/ahci_test.py --timeout 360
 
+      - name: xHCI/USB 3.0 driver regression (qemu-xhci + drive 8, TCG)
+        run: |
+          # Boots with a qemu-xhci controller + FAT32 stick on the
+          # SuperSpeed bus (drive 8): asserts the controller comes up and
+          # the device enumerates at speed 5000 (PORTSC speed = 4), then
+          # `mount /usb fat32 8` (BPB read through xHCI -> BOT -> SCSI
+          # READ(10)), `cp` inside the volume (read + write through the
+          # same path), and byte-compares COPY.TXT on the host with mtools.
+          python3 scripts/usb_test.py --timeout 360
+
       - name: POSIX socket regression (user-net + hostfwd, TCG)
         run: |
           python3 scripts/socktest.py --timeout 300

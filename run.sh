@@ -20,6 +20,15 @@ if [ ! -f "fat32.img" ]; then
     mkfs.fat -F 32 -S 512 fat32.img > /dev/null 2>&1
 fi
 
+# USB 3.0 stick (v38.56): FAT32 image behind qemu-xhci, attached to the
+# SuperSpeed bus. The kernel registers it as drive 8; mount it from the
+# shell with `mount /usb fat32 8`.
+if [ ! -f "usb.img" ]; then
+    echo "[!] Membuat usb.img baru..."
+    dd if=/dev/zero of=usb.img bs=1M count=16 2>/dev/null
+    mkfs.fat -F 32 -S 512 usb.img > /dev/null 2>&1
+fi
+
 # Rebuild kernel (akan mengompilasi semua MCT dinamis secara bersih)
 make
 
@@ -81,7 +90,10 @@ qemu-system-i386 -enable-kvm -cpu host \
     -chardev socket,id=char0,host=127.0.0.1,port=45454,server=on,wait=off,logfile=serial_debug.log -serial chardev:char0 \
     -drive file=disk.img,format=raw,index=0,media=disk \
     -drive file=ext2.img,format=raw,index=1,media=disk \
-    -drive file=fat32.img,format=raw,index=3,media=disk
+    -drive file=fat32.img,format=raw,index=3,media=disk \
+    -device qemu-xhci,id=xhci0 \
+    -drive file=usb.img,format=raw,if=none,id=usbd0 \
+    -device usb-storage,drive=usbd0,bus=xhci0.0
 
 echo "[*] Menghentikan Mectov Web Gateway Proxy..."
 kill $GATEWAY_PID 2>/dev/null
