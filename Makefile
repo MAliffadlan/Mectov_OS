@@ -2,7 +2,17 @@ CC = gcc
 AS = nasm
 LD = ld
 
-CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g -msoft-float -mno-80387 -mno-sse -mno-mmx -MMD -MP
+CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g -msoft-float -mno-80387 -mno-sse -mno-mmx -march=i686 -fno-pie -fno-pic -MMD -MP
+# -march=i686: this GCC's -m32 default is already i686 (Ubuntu builds with
+# --with-arch-32=i686), but pin it so a toolchain whose default is plain
+# i386 (cmov-less, no scheduling for P6) can't silently downgrade the
+# kernel. Requires CMOV — every CPU this OS boots on (PAE+NX era, qemu32)
+# has it.
+# -fno-pie -fno-pic: the kernel is linked at fixed 1M by linker.ld and
+# never relocated, yet GCC's default-PIE distro builds add -fPIE even to
+# -c compiles, forcing every global access through the GOT via
+# __x86.get_pc_thunk stubs (myos.bin carried a .got/.got.plt). Explicitly
+# disabling PIC drops all that indirection.
 # -MMD -MP: emit per-object .d dependency files so a header change (e.g.
 # MAX_WINDOWS in wm.h) rebuilds every object that includes it. Without this,
 # touching a header left stale .o files and the change silently never
@@ -25,7 +35,7 @@ ASFLAGS = -f elf32
 # compositor. (Was 1024x768 when DOOM owned the whole framebuffer.)
 DOOM_CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -MMD -MP \
               -isystem doom/include_override -Idoom \
-              -fno-builtin \
+              -fno-builtin -march=i686 -fno-pie -fno-pic \
               -DDOOMGENERIC_RESX=640 -DDOOMGENERIC_RESY=400 \
               -DFEATURE_SOUND \
               -w
