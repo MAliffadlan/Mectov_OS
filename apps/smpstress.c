@@ -45,12 +45,13 @@ void _start() {
         int pid = sys_fork();
         if (pid == 0) {
             // ---- child i ----
-            unsigned long acc = 0x12345678ul;
-            // 1) CPU burn (~1s of core time, checksummed so it can't be
-            //    optimized away by the compiler).
+            // 1) CPU burn (~1s of core time). The accumulator must be
+            //    volatile: with a plain local the loop's result is dead and
+            //    -O2 eliminates the whole burn, silently gutting the stress.
+            volatile unsigned long v_acc = 0x12345678ul;
             for (int t = 0; t < 300; t++) {
                 for (int j = 0; j < 3000; j++) {
-                    acc = acc * 31u + (unsigned long)j + (acc >> 17);
+                    v_acc = v_acc * 31u + (unsigned long)j + (v_acc >> 17);
                 }
             }
             // 2) sleep slices (wake-from-sleep path on the runqueues)

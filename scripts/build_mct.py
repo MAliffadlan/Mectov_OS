@@ -40,7 +40,7 @@ SECTIONS {
     # (with -mno-sse the compiler rejects %%xmm register names outright).
     extra_flags = os.environ.get("MCT_CFLAGS_EXTRA", "").split()
     try:
-        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic", "-static", "-O0", "-g", "-msoft-float", "-mno-80387", "-mno-sse", "-mno-mmx", "-I.", "-c", c_file, "-o", o_file] + extra_flags, check=True)
+        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic", "-static", "-O2", "-msoft-float", "-mno-80387", "-mno-sse", "-mno-mmx", "-I.", "-c", c_file, "-o", o_file] + extra_flags, check=True)
     except subprocess.CalledProcessError:
         print("[!] Compilation failed!")
         return

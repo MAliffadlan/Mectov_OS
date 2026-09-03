@@ -289,12 +289,12 @@ typedef struct {
 #define SYS_VMM_MAP        29  // EBX=vaddr, ECX=paddr, EDX=flags → return 0/-1
 static inline void* sys_mmap(uint32_t size) {
     void* ret;
-    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MMAP), "b"(size));
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MMAP), "b"(size) : "memory");
     return ret;
 }
 static inline int sys_munmap(void* addr) {
     int ret;
-    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MUNMAP), "b"(addr));
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MUNMAP), "b"(addr) : "memory");
     return ret;
 }
 // File-backed mmap of an open file fd (flags: MMAP_FILE_SHARED). The mapping
@@ -302,14 +302,14 @@ static inline int sys_munmap(void* addr) {
 // (the generic syscall() helper is declared below this point).
 static inline void* sys_mmap_file(int fd, int flags) {
     void* ret;
-    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MMAP_FILE), "b"(fd), "c"(flags));
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MMAP_FILE), "b"(fd), "c"(flags) : "memory");
     return ret;
 }
 // Flush dirty pages of a file-backed mapping back to its file. Returns 1 if
 // everything was written (or there was nothing to write), 0 on failure.
 static inline int sys_msync(void* addr) {
     int ret;
-    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MSYNC), "b"(addr));
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MSYNC), "b"(addr) : "memory");
     return ret;
 }
 #define SYS_VMM_ALLOC      30  // EBX=vaddr, ECX=flags → return vaddr or 0
@@ -335,6 +335,7 @@ static inline int syscall(int num, int arg1, int arg2, int arg3) {
         "int $0x80"
         : "=a"(ret)
         : "a"(num), "b"(arg1), "c"(arg2), "d"(arg3)
+        : "memory"
     );
     return ret;
 }
@@ -346,6 +347,7 @@ static inline int syscall5(int num, int arg1, int arg2, int arg3, int arg4, int 
         "int $0x80"
         : "=a"(ret)
         : "a"(num), "b"(arg1), "c"(arg2), "d"(arg3), "S"(arg4), "D"(arg5)
+        : "memory"
     );
     return ret;
 }
@@ -435,14 +437,16 @@ static inline int sys_sendto(int fd, const void* buf, int len, sockaddr_t* sa) {
     int ret;
     __asm__ __volatile__("int $0x80"
         : "=a"(ret)
-        : "a"(SYS_SENDTO), "b"(fd), "c"(buf), "d"(len), "S"(sa));
+        : "a"(SYS_SENDTO), "b"(fd), "c"(buf), "d"(len), "S"(sa)
+        : "memory");
     return ret;
 }
 static inline int sys_recvfrom(int fd, void* buf, int max, uint8_t* src_ip, uint16_t* src_port) {
     int ret;
     __asm__ __volatile__("int $0x80"
         : "=a"(ret)
-        : "a"(SYS_RECVFROM), "b"(fd), "c"(buf), "d"(max), "S"(src_ip), "D"(src_port));
+        : "a"(SYS_RECVFROM), "b"(fd), "c"(buf), "d"(max), "S"(src_ip), "D"(src_port)
+        : "memory");
     return ret;
 }
 
@@ -580,6 +584,7 @@ static inline mouse_state_t sys_get_mouse(void) {
         "int $0x80"
         : "=a"(rx), "=b"(ry), "=c"(rb)
         : "a"(SYS_GET_MOUSE)
+        : "memory"
     );
     m.x = rx;
     m.y = ry;
@@ -589,73 +594,73 @@ static inline mouse_state_t sys_get_mouse(void) {
 
 // New Phase 1 syscalls
 static inline void sys_get_time(rtc_time_t* out_time) {
-    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_GET_TIME), "b"(out_time));
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_GET_TIME), "b"(out_time) : "memory");
 }
 static inline void sys_play_sound(int freq, int duration_ms) {
-    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_PLAY_SOUND), "b"(freq), "c"(duration_ms));
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_PLAY_SOUND), "b"(freq), "c"(duration_ms) : "memory");
 }
 static inline void sys_set_volume(int vol) {
-    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_SET_VOLUME), "b"(vol));
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_SET_VOLUME), "b"(vol) : "memory");
 }
 static inline int sys_get_volume(void) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_VOLUME));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_VOLUME) : "memory");
     return ret;
 }
 static inline void sys_play_wav(void* pcm_data, uint32_t length, uint16_t sample_rate) {
-    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_PLAY_WAV), "b"(pcm_data), "c"(length), "d"(sample_rate));
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_PLAY_WAV), "b"(pcm_data), "c"(length), "d"(sample_rate) : "memory");
 }
 static inline void sys_stop_wav(void) {
-    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_STOP_WAV));
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_STOP_WAV) : "memory");
 }
 
 static inline void sys_get_sysinfo(sysinfo_t* out_info) {
-    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_GET_SYSINFO), "b"(out_info));
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_GET_SYSINFO), "b"(out_info) : "memory");
 }
 static inline int sys_get_pci_info(pci_device_t* out_array, int max_count) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_PCI_INFO), "b"(out_array), "c"(max_count));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_PCI_INFO), "b"(out_array), "c"(max_count) : "memory");
     return ret;
 }
 static inline int sys_list_dir(dir_entry_t* out_array, int max_count, int parent_node) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_LIST_DIR), "b"(out_array), "c"(max_count), "d"(parent_node));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_LIST_DIR), "b"(out_array), "c"(max_count), "d"(parent_node) : "memory");
     return ret;
 }
 static inline int sys_stat_file(const char* path) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_STAT_FILE), "b"(path));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_STAT_FILE), "b"(path) : "memory");
     return ret;
 }
 
 // Network syscalls
 static inline void sys_dns_resolve(const char* domain) {
-    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_DNS_RESOLVE), "b"(domain));
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_DNS_RESOLVE), "b"(domain) : "memory");
 }
 // Returns the connection id (0..7) or -1 on failure.
 static inline int sys_tcp_connect(uint8_t* ip, int port) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_CONNECT), "b"(ip), "c"(port));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_CONNECT), "b"(ip), "c"(port) : "memory");
     return ret;
 }
 static inline int sys_tcp_send(int conn_id, const void* data, int len) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_SEND), "b"(data), "c"(len), "d"(conn_id));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_SEND), "b"(data), "c"(len), "d"(conn_id) : "memory");
     return ret;
 }
 static inline int sys_tcp_recv(int conn_id, void* buf, int max_len) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_RECV), "b"(buf), "c"(max_len), "d"(conn_id));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_RECV), "b"(buf), "c"(max_len), "d"(conn_id) : "memory");
     return ret;
 }
 static inline int sys_tcp_close(int conn_id) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_CLOSE), "b"(conn_id));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_CLOSE), "b"(conn_id) : "memory");
     return ret;
 }
 static inline int sys_tcp_listen(int port) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_LISTEN), "b"(port));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_TCP_LISTEN), "b"(port) : "memory");
     return ret;
 }
 
@@ -666,40 +671,40 @@ typedef struct {
 } net_status_t;
 
 static inline void sys_net_status(net_status_t* out) {
-    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_NET_STATUS), "b"(out));
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_NET_STATUS), "b"(out) : "memory");
 }
 
 // Terminal IPC syscalls
 static inline void sys_set_stdout_ipc(int qid) {
-    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_SET_STDOUT_IPC), "b"(qid));
+    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_SET_STDOUT_IPC), "b"(qid) : "memory");
 }
 static inline int sys_exec_cmd(const char* cmd) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_EXEC_CMD), "b"(cmd));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_EXEC_CMD), "b"(cmd) : "memory");
     return ret;
 }
 
 static inline int sys_get_tasks(sys_task_info_t* array, int max_count) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_TASKS), "b"(array), "c"(max_count));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_TASKS), "b"(array), "c"(max_count) : "memory");
     return ret;
 }
 
 static inline int sys_get_windows(sys_win_info_t* array, int max_count) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_WINDOWS), "b"(array), "c"(max_count));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_WINDOWS), "b"(array), "c"(max_count) : "memory");
     return ret;
 }
 
 static inline int sys_kill_task(int tid) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_KILL_TASK), "b"(tid));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_KILL_TASK), "b"(tid) : "memory");
     return ret;
 }
 
 static inline int sys_get_launch_arg(char* buf, int max_len) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_LAUNCH_ARG), "b"(buf), "c"(max_len));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_GET_LAUNCH_ARG), "b"(buf), "c"(max_len) : "memory");
     return ret;
 }
 
@@ -761,7 +766,7 @@ static inline int sys_udp_recv(void* buf, int max_len) {
 // IPC syscalls (stubs for Ring 3)
 static inline int sys_ipc_create(int key) {
     int ret;
-    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_IPC_CREATE), "b"(key));
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret) : "a"(SYS_IPC_CREATE), "b"(key) : "memory");
     return ret;
 }
 static inline int sys_ipc_try_recv(int qid, void* data, int max_len) {

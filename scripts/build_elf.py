@@ -41,7 +41,7 @@ SECTIONS {
         subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector",
                         "-msoft-float", "-mno-80387", "-mno-sse", "-mno-mmx",
                         "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic",
-                        "-static", "-O0", "-I.", "-c", c_file, "-o", o_file],
+                        "-static", "-O2", "-I.", "-c", c_file, "-o", o_file],
                        check=True)
         subprocess.run(["ld", "-m", "elf_i386", "-T", ld_file, "-s", o_file,
                         "-o", output_elf], check=True)
