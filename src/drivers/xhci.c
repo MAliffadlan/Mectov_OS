@@ -58,6 +58,11 @@
 
 static spinlock_t xhci_lock = SPINLOCK_INIT;
 static uint32_t xhci_eflags;
+// Event-ring trace (type/slot/epid/cc per consumed event) — on during
+// bring-up + enumeration only, off before the data path starts. Every
+// CBW/data/CSW phase consumes an event; printing them for real I/O would
+// drown the serial log and stall sector transfers behind polled writes.
+static int xhci_evt_trace = 1;
 
 // ---- capability registers (at BAR0) ----
 #define XHCI_CAP_CAPLENGTH 0x00  // byte 0: op-base; bytes 2-3: HCIVERSION
@@ -356,16 +361,19 @@ static int event_wait(xhci_evt_t* out, int want_type, int want_slot,
         rt_reg_w(XHCI_IR0 + XHCI_IR_ERDP, dp | ERDP_EHB);
 
         int type = (e->control >> TRB_TYPE_SHIFT) & 0x3F;
-        // Bring-up trace: every consumed event (small, boot-time only).
-        write_serial_string("[XHCI] evt type=");
-        write_serial_hex((uint32_t)type);
-        write_serial_string(" slot=");
-        write_serial_hex((uint32_t)out->slot);
-        write_serial_string(" epid=");
-        write_serial_hex((uint32_t)out->epid);
-        write_serial_string(" cc=");
-        write_serial_hex(out->cc);
-        write_serial_string("\n");
+        // Bring-up trace: every consumed event (boot-time only; see
+        // xhci_evt_trace — cleared once enumeration is done).
+        if (xhci_evt_trace) {
+            write_serial_string("[XHCI] evt type=");
+            write_serial_hex((uint32_t)type);
+            write_serial_string(" slot=");
+            write_serial_hex((uint32_t)out->slot);
+            write_serial_string(" epid=");
+            write_serial_hex((uint32_t)out->epid);
+            write_serial_string(" cc=");
+            write_serial_hex(out->cc);
+            write_serial_string("\n");
+        }
         if (type == want_type &&
             (want_slot < 0 || out->slot == want_slot) &&
             (want_epid < 0 || out->epid == want_epid)) {
@@ -837,6 +845,20 @@ static int usb_enumerate(usb_dev_t* d, int port, int speed) {
         write_serial_string("[XHCI] no MSC BOT interface\n");
         return -1;
     }
+    // The context arrays only hold DCI <= 8 (bulk EP number <= 4 OUT /
+    // <= 3 IN): a descriptor claiming higher bulk EPs would make Configure
+    // Endpoint write `ictx` past its end (and the xHC DMA-reads the input
+    // context past it too, leaking kernel memory). QEMU's usb-storage uses
+    // EP1/EP2; anything bigger is rejected instead of corrupting the
+    // adjacent DMA structures.
+    if (d->bulk_out_dci > 8 || d->bulk_in_dci > 8) {
+        write_serial_string("[XHCI] bulk EP number too high (DCI ");
+        write_serial_hex((uint32_t)d->bulk_in_dci);
+        write_serial_string("/");
+        write_serial_hex((uint32_t)d->bulk_out_dci);
+        write_serial_string(" > 8), device skipped\n");
+        return -1;
+    }
 
     // 5. Set Configuration, then Configure Endpoint with the two bulk
     //    endpoint contexts. Add flags: A0 (slot, required by QEMU) + the
@@ -1117,6 +1139,7 @@ void xhci_init(void) {
             write_serial_string(" blocks)\n");
             xhci_ndrives++;
         }
+        xhci_evt_trace = 0;   // data path starts now — no per-event trace
         write_serial_string(xhci_ndrives ? "[XHCI] ready\n"
                                          : "[XHCI] no mass-storage devices\n");
         return;
