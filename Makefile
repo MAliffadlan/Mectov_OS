@@ -494,4 +494,26 @@ clean:
 clean_all: clean
 	rm -f *.mct *.elf
 
-.PHONY: all clean clean_all
+# --- Local test battery (CI parity with .github/workflows/build-boot-test.yml) ---
+# `make check` builds kernel + ISO, recreates fresh disk/ext2/fat32 images
+# (same as CI), runs every suite in CI order and prints a concise table.
+#   make check                full battery (~25 min TCG)
+#   make check-quick          fast high-signal subset (~6-8 min)
+#   make check CHECK_ARGS=--keep-images   keep current disk images
+#   make check CHECK_ARGS=--only=boot     single suite
+#   make check CHECK_ARGS=--kvm          include fork/fputest KVM regressions
+#                                        (opt-in: some hosts' KVM stalls the qemu32
+#                                        machine at AP wake even with /dev/kvm)
+iso: myos.bin
+	@mkdir -p iso/boot/grub
+	cp myos.bin iso/boot/
+	@printf 'set timeout=0\nset default=0\nmenuentry "Mectov OS" {\n    multiboot /boot/myos.bin\n    boot\n}\n' > iso/boot/grub/grub.cfg
+	grub-mkrescue -o mectov.iso iso
+
+check: iso
+	python3 scripts/check.py $(CHECK_ARGS)
+
+check-quick: iso
+	python3 scripts/check.py --quick $(CHECK_ARGS)
+
+.PHONY: all clean clean_all check check-quick iso

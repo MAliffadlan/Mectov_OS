@@ -35,6 +35,7 @@ scratch/
 
 # Logs & Debug output
 *.log
+.check/
 *.txt
 !README.md
 !docs/**/*.md

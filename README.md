@@ -459,6 +459,8 @@ gdb myos.bin -ex "target remote :2345" -ex "c"
 
 The project is tested on QEMU under **both KVM (4-core)** and TCG:
 
+Run the whole battery locally with **`make check`** (builds the kernel + ISO, recreates fresh `disk.img`/`ext2.img`/`fat32.img` exactly like CI, runs every suite in CI order, and prints a concise pass/fail table in `.check/summary.txt`). **`make check-quick`** runs a fast high-signal subset (~6–8 min); `make check CHECK_ARGS=--keep-images` keeps the current disk images and `make check CHECK_ARGS=--only=<suite>` runs one suite. The fork/fputest KVM regressions are opt-in via `make check CHECK_ARGS=--kvm` — some hosts' KVM cannot run the `qemu32` machine even with `/dev/kvm` present (the guest stalls at AP wake); CI runs them on runners where KVM works.
+
 | Suite | What it verifies |
 |---|---|
 | `scripts/boot_test.py` | Boot → login → `BOOTED KERNEL LOOP` smoke window |
