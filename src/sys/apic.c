@@ -106,6 +106,25 @@ void apic_send_eoi(void) {
     }
 }
 
+// Directed fixed-delivery IPI (physical destination mode, no shorthand):
+// interrupts one specific LAPIC on `vector`. Unlike the NMI delivery used
+// by the panic path this is a normal interrupt — the target must have IF=1
+// to take it, and its own interrupt gate clears IF on entry. Used by the
+// watchdog self-test (watchdog.c) to make one AP drop into a cli spin.
+void apic_send_fixed_ipi(uint8_t lapic_id, uint8_t vector) {
+    if (!smp_lapic_addr) return;
+    volatile uint32_t* icr_high = (volatile uint32_t*)(smp_lapic_addr + LAPIC_ICR_HIGH);
+    volatile uint32_t* icr_low  = (volatile uint32_t*)(smp_lapic_addr + LAPIC_ICR_LOW);
+
+    *icr_high = ((uint32_t)lapic_id << 24);   // physical destination
+    *icr_low  = vector;                        // fixed delivery (000), no shorthand
+
+    // Wait for delivery to complete.
+    while (*icr_low & (1u << 12)) {
+        __asm__ __volatile__("pause");
+    }
+}
+
 uint32_t apic_get_id(void) {
     if (smp_lapic_addr == 0) return 0;
     return lapic_read(LAPIC_ID) >> 24;

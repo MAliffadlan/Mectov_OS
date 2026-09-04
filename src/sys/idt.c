@@ -4,6 +4,7 @@
 #include "../include/utils.h"
 #include "../include/serial.h"
 #include "../include/panic.h"
+#include "../include/watchdog.h"
 
 idt_entry_t idt[256];
 idt_ptr_t   idt_ptr;
@@ -40,6 +41,7 @@ extern void irq11();
 extern void irq12();
 extern void irq14();
 extern void irq15();
+extern void irq_wd_hang();
 extern void idt_flush(uint32_t);
 
 // Per-CPU exception stacks (interrupt_entry.asm): one 4KB stack per CPU so
@@ -211,6 +213,12 @@ void idt_init() {
     // handlers while preserving every existing frame-layout assumption.
     idt_set_gate(0x80, (uint32_t)isr128, 0x08, 0xEF);
 
+    // Watchdog hang-IPI (v38.64): DPL=0 interrupt gate so only the kernel's
+    // own directed IPI (wd_self_test) can enter it. The handler lives in
+    // watchdog.c and drops the target core into a cli spin; the BSP's
+    // watchdog then finds it via the NMI dump.
+    idt_set_gate(0x60, (uint32_t)irq_wd_hang, 0x08, 0x8E);
+
     idt_flush((uint32_t)&idt_ptr);
 
     // Register Overflow handler (Exception 4) — just ignore and return
@@ -227,6 +235,11 @@ void idt_init() {
     // working. Registered here so every CPU (APs reload the same IDT) can
     // answer the BSP's NMI-IPI during a multi-core panic dump.
     register_interrupt_handler(2, panic_nmi_handler);
+
+    // Watchdog hang-IPI (v38.64): the wd_self_test target lands here and
+    // drops into a cli spin. Registered through the shared handler table, so
+    // every core (APs reload the same IDT) can be the target.
+    register_interrupt_handler(WD_HANG_VECTOR, wd_hang_ipi_handler);
 }
 
 void register_interrupt_handler(uint8_t n, isr_t handler) {

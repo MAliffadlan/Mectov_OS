@@ -111,11 +111,14 @@ void kernel_main(uint32_t magic, uint32_t addr) {
 
     // Parse the GRUB command line BEFORE paging is enabled: cmdline sits in
     // low physical memory (still identity-mapped at this point). Enables
-    // `panic=reboot` (CI: QEMU exits instead of hanging on a kernel panic)
-    // and `panic_self_test` (deliberate panic once the desktop is up).
+    // `panic=reboot` (CI: QEMU exits instead of hanging on a kernel panic),
+    // `panic_self_test` (deliberate panic once the desktop is up) and
+    // `wd_self_test` (deliberate AP hard-lockup for the watchdog, v38.64).
     extern void panic_parse_cmdline(const char* cmd);
+    extern void watchdog_parse_cmdline(const char* cmd);
     if (magic == 0x2BADB002 && mbi != NULL && (mbi->flags & 4) && mbi->cmdline) {
         panic_parse_cmdline((const char*)mbi->cmdline);
+        watchdog_parse_cmdline((const char*)mbi->cmdline);
     }
 
     write_serial_string("1\n");
@@ -282,6 +285,15 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] cal\n");
     extern void timer_calibrate_ticks_per_sec(void);
     timer_calibrate_ticks_per_sec();
+
+    // v38.64 watchdog self-test: booted with `wd_self_test`, hang the first
+    // AP with a directed fixed IPI (it cli-spins forever). The BSP's timer
+    // watchdog — live since init_timer — must detect the stall ~3 s later,
+    // NMI-dump every core (the hung AP answers from inside its spin) and
+    // reboot via `panic=reboot`. With QEMU -no-reboot the reset exits CI
+    // cleanly instead of hanging until the workflow timeout.
+    extern void watchdog_self_test_tick(void);
+    watchdog_self_test_tick();
 
     write_serial_string("[K] mouse\n");
     init_mouse();

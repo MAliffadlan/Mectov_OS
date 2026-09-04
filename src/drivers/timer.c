@@ -5,6 +5,7 @@
 #include "../include/rtc.h"
 #include "../include/serial.h"   // write_serial() (locked — multi-CPU safe)
 #include "../include/entropy.h"   // entropy_add() — kernel CSPRNG feed
+#include "../include/watchdog.h"  // per-core heartbeat + hard-lockup detector
 
 // volatile: written by the IRQ0 handler, read by wait loops in thread context.
 // Without it the compiler may hoist the load out of a polling loop and spin on
@@ -81,14 +82,31 @@ static inline int get_cid(void) {
 
 static void timer_handler(registers_t* regs) {
     (void)regs;
+    int cid = get_cid();
+
+    // v38.64 hard-lockup watchdog: every core's vector-32 interrupt (PIT on
+    // the BSP, local APIC timer on the APs) bumps its own heartbeat slot
+    // FIRST, before the BSP-only branch. A core stuck with IF=0 can never
+    // deliver this interrupt, so its heartbeat freezes — that is the signal
+    // the BSP detector watches for (see watchdog.c).
+    watchdog_tick(cid);
+
     // BSP only: the wall clock, heartbeat and GUI updates must not run four
     // times per tick just because IRQ0 is now broadcast to every core.
-    if (get_cid() != 0) return;
+    if (cid != 0) return;
     timer_ticks++;
 
     // Feed the kernel entropy pool (v38.52): tick counter + TSC low bits mix
     // in continuously (1000 Hz), reseeding the ChaCha8 DRBG every 8 samples.
     entropy_add(timer_ticks);
+
+    // v38.64: hard-lockup detector — every 100 BSP ticks, check that every
+    // AP's heartbeat is still advancing. On a stall it prints a [WATCHDOG]
+    // marker and panics (multi-core NMI dump + panic=reboot). Lock-free and
+    // IRQ-context safe; no-op until every core has been seen ticking.
+    if ((timer_ticks % WD_CHECK_INTERVAL) == 0) {
+        watchdog_check();
+    }
     
     // Heartbeat: send '.' every 1000 ticks (1 second). write_serial() takes
     // the serial lock, so the dot can never split a log line from another CPU.

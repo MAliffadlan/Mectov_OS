@@ -80,7 +80,14 @@ void panic_nmi_handler(registers_t* r) {
     panic_states[cid].valid  = 1;
     panic_states[cid].eip    = r->eip;
     panic_states[cid].cs     = r->cs;
-    panic_states[cid].esp    = r->useresp ? r->useresp : r->esp;
+    // v38.64: only a Ring 3 frame has useresp/ss on the stack. Reading
+    // r->useresp unconditionally dereferences 8 bytes ABOVE a Ring 0 frame
+    // (registers_t offset 0x40) — safe mid-stack, but when the NMI catches a
+    // freshly-switched task near its stack top (esp0-8) that read crosses the
+    // top edge into the unmapped guard page and faults INSIDE the panic dump
+    // (spurious "stack overflow" + a half-written slot). Branch on CS RPL and
+    // never touch useresp for a Ring 0 frame.
+    panic_states[cid].esp    = (r->cs & 3) ? r->useresp : r->esp;
     panic_states[cid].eflags = r->eflags;
     panic_states[cid].eax    = r->eax;
     panic_states[cid].ebx    = r->ebx;

@@ -252,6 +252,10 @@ jobs:
         run: |
           python3 scripts/lseekfile_test.py --timeout 240
 
+      - name: Watchdog hard-lockup self-test (TCG)
+        if: always()
+        run: |
+          python3 scripts/watchdog_test.py --timeout 240
       - name: Multi-core panic dump + panic=reboot self-test (TCG)
         run: |
           # Boots with `panic_self_test panic=reboot` and -no-reboot: the

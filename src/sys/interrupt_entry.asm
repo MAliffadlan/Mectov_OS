@@ -306,6 +306,19 @@ IRQ 14, 46   ; IDE primary channel (BMIDE DMA)
 IRQ 15, 47   ; IDE secondary channel (BMIDE DMA)
 
 ; ============================================================
+; Watchdog hang-IPI (v38.64): directed fixed IPI on vector 0x60 that drops
+; the target core into a cli spin (wd_self_test). Same layout as a hardware
+; IRQ (dummy err code + int_no + irq_common_stub), so the C side gets an
+; EOI before dispatch and int_no != 32 means no scheduler switch. 96 fits a
+; sign-extended push byte (unlike 128).
+; ============================================================
+global irq_wd_hang
+irq_wd_hang:
+    push byte 0           ; dummy err_code
+    push byte 96          ; int_no = 0x60
+    jmp irq_common_stub
+
+; ============================================================
 ; Syscall entry: int 0x80
 ; ============================================================
 ; Separate path — no scheduler, no EOI. Just dispatch and return.

@@ -36,6 +36,9 @@
 void apic_init(void);
 void apic_send_eoi(void);
 uint32_t apic_get_id(void);
+// Directed fixed-delivery IPI to one LAPIC (physical destination mode).
+// Used by the watchdog self-test to hang one AP on a chosen vector.
+void apic_send_fixed_ipi(uint8_t lapic_id, uint8_t vector);
 void ioapic_init(void);
 void ioapic_set_entry(uint8_t index, uint64_t data);
 
