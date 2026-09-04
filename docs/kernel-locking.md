@@ -34,11 +34,20 @@ VFS node could corrupt the node table.
 ### Global lock ordering (never acquire in reverse)
 
 ```
-task_lock  >  shell_lock  >  fd_lock  >  vfs_lock  >  ata_lock
+task_lock  >  shell_lock  >  fd_lock  >  vfs_lock  >  blkcache_lock  >  ata_lock
 task_lock  >  wm_lock     >  gui_lock
 task_lock  >  vmm_lock            (fork clones address space under task_lock)
-vmm / heap / sync / kbd / clipboard / net (rtl_lock) / shm — leaf locks
+vmm / heap / sync / kbd / clipboard / net (rtl_lock) / shm / pcache — leaf locks
 ```
+
+`blkcache_lock` (v38.62, blkcache.c) sits between vfs_lock and ata_lock:
+its read-miss path in the ata.c wrappers holds it across the real ATA op
+(nests blkcache_lock > ata_lock; the ATA layer serializes every transfer
+under ata_lock anyway, and no code takes blkcache_lock while holding
+ata_lock — write invalidation runs AFTER the ATA call returns). It is a
+leaf in every other respect: cache data lives in static .bss, so the
+#PF handler's lock-free VFS read path (vfs_read_file_offset → ATA) can
+take it safely — no fault can recur while it is held.
 
 Justification, from the code:
 - `terminate_task()` (task.c:507) calls `wm_cleanup_task()` → wm_lock, while
@@ -64,6 +73,7 @@ Justification, from the code:
 | `global_fds[]`, `pipes[]` | fd.c | VFS/file syscalls, fork fd-rewire, shell redirection | `fd_lock` (NEW) |
 | `fs_nodes[]`, current dir, disk image | vfs.c, ext2.c | VFS/file syscalls, shell builtins, loader, passwd, boot | `vfs_lock` (reentrant, NEW) |
 | ATA controller (IDE ports) | ata.c | VFS save/load, ext2, loader | `ata_lock` (NEW) |
+| sector read cache (`blkcache[]`) | blkcache.c | ata.c read/write wrappers, all FS reads incl. the #PF path | `blkcache_lock` (v38.62; read-miss nests > ata_lock) |
 | `kbd_buffer`, head/tail, `esc_pressed` | keyboard.c | IRQ 33 (push), main loop + SYS_GET_KEY (pop) | `kbd_lock` (NEW) |
 | clipboard | clipboard.c | syscalls | `clipboard_lock` (NEW) |
 | shell globals (`cmd_b`, env, alias, history) | shell/ | SYS_EXEC_CMD (any terminal task) | `shell_lock` (reentrant, NEW) |

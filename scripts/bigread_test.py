@@ -150,6 +150,27 @@ def main():
             return 1
         print("[OK] bigread completed ([BIGREAD] ALL PASS)")
 
+        # v38.62 block-cache verdict: read0 is the cold disk read; read1/read2
+        # must come back several times faster (served from the sector cache).
+        import re
+        reads = {}
+        for m in re.finditer(r"\[BIGREAD\] read(\d+)_us=(-?\d+)", log_text):
+            reads[int(m.group(1))] = int(m.group(2))
+        if 0 not in reads or len(reads) < 3:
+            print("[FAIL] could not parse bigread timing lines")
+            return 1
+        r0 = reads[0]
+        if r0 == 0:
+            print("[FAIL] read0_us is 0 (timing broken)")
+            return 1
+        hot_min = min(v for k, v in reads.items() if k > 0 and v >= 0)
+        if hot_min * 4 >= r0:
+            print(f"[FAIL] block cache ineffective: cold={r0}us hot={hot_min}us "
+                  f"(expected >=4x faster)")
+            return 1
+        print(f"[OK] block cache serving hot reads "
+              f"(cold={r0}us best_hot={hot_min}us)")
+
         if "[PANIC]" in log_text:
             print("[FAIL] kernel panicked during the big-read run")
             return 1

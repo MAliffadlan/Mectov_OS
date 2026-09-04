@@ -42,7 +42,7 @@ int ata_wait_drq() { return ata_wait_drq_drive(0); }
 
 volatile int hdd_activity = 0;
 
-int ata_read_sector_drive(int drive, unsigned int lba, unsigned char* b) {
+static int ata_read_sector_drive_io(int drive, unsigned int lba, unsigned char* b) {
     if (drive >= USB_DRIVE_BASE) return usb_read_sectors(drive, lba, 1, b);
     if (drive >= AHCI_DRIVE_BASE) return ahci_read_sectors(drive, lba, 1, b);
     uint16_t base = ata_base_port(drive);
@@ -66,13 +66,27 @@ int ata_read_sector_drive(int drive, unsigned int lba, unsigned char* b) {
     return 0;
 }
 
+// v38.62 sector cache wrapper: the real I/O below is only reached on a cache
+// miss; hits are a memcpy from static .bss. See blkcache.h for coherence.
+int ata_read_sector_drive(int drive, unsigned int lba, unsigned char* b) {
+    extern int blkcache_read(int drive, uint32_t lba, int count,
+                             unsigned char* buf, uint32_t* gen_out);
+    extern void blkcache_commit(int drive, uint32_t lba, int count,
+                                const unsigned char* buf, uint32_t gen);
+    uint32_t gen;
+    if (blkcache_read(drive, lba, 1, b, &gen)) return 0;
+    int rc = ata_read_sector_drive_io(drive, lba, b);
+    if (rc == 0) blkcache_commit(drive, lba, 1, b, gen);
+    return rc;
+}
+
 // Multi-sector PIO read (v38.25). One command transfers up to ATA_BATCH_MAX
 // contiguous sectors; the drive asserts DRQ once per sector, so the per-
 // sector overhead (command setup + BSY latency) is paid once for the whole
 // batch instead of once per sector. Sector count is clamped to the 128-
 // sector LBA boundary per the ATA spec (a multi-sector transfer may not
 // cross it) — QEMU tolerates crossing, real drives may not.
-int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char* b) {
+static int ata_read_sectors_drive_io(int drive, unsigned int lba, int count, unsigned char* b) {
     if (drive >= USB_DRIVE_BASE) return usb_read_sectors(drive, lba, count, b);
     if (drive >= AHCI_DRIVE_BASE) return ahci_read_sectors(drive, lba, count, b);
     uint16_t base = ata_base_port(drive);
@@ -107,9 +121,24 @@ int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char
     return 0;
 }
 
+// v38.62 sector cache wrapper — see the single-sector wrapper above.
+int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char* b) {
+    extern int blkcache_read(int drive, uint32_t lba, int count,
+                             unsigned char* buf, uint32_t* gen_out);
+    extern void blkcache_commit(int drive, uint32_t lba, int count,
+                                const unsigned char* buf, uint32_t gen);
+    if (count < 1) return -1;
+    count = ata_batch_limit(lba, count);   // same clamp the I/O applies
+    uint32_t gen;
+    if (blkcache_read(drive, lba, count, b, &gen)) return 0;
+    int rc = ata_read_sectors_drive_io(drive, lba, count, b);
+    if (rc == 0) blkcache_commit(drive, lba, count, b, gen);
+    return rc;
+}
+
 // Multi-sector PIO write — the mirror of ata_read_sectors_drive: one
 // command, DRQ pulses per sector, data written in count*512-byte chunks.
-int ata_write_sectors_drive(int drive, unsigned int lba, int count, const unsigned char* b) {
+static int ata_write_sectors_drive_io(int drive, unsigned int lba, int count, const unsigned char* b) {
     if (drive >= USB_DRIVE_BASE) return usb_write_sectors(drive, lba, count, b);
     if (drive >= AHCI_DRIVE_BASE) return ahci_write_sectors(drive, lba, count, b);
     uint16_t base = ata_base_port(drive);
@@ -140,6 +169,16 @@ int ata_write_sectors_drive(int drive, unsigned int lba, int count, const unsign
     ata_wait_bsy_drive(drive);
     spin_unlock_irqrestore(&ata_lock, ata_eflags);
     return 0;
+}
+
+// v38.62 sector cache wrapper (writes): the data reached the disk above, so
+// drop any stale cached copy of the range AFTER the write (and bump the
+// write generation so an in-flight reader cannot insert bytes older than it).
+int ata_write_sectors_drive(int drive, unsigned int lba, int count, const unsigned char* b) {
+    extern void blkcache_invalidate(int drive, uint32_t lba, int count);
+    int rc = ata_write_sectors_drive_io(drive, lba, count, b);
+    if (rc == 0) blkcache_invalidate(drive, lba, count);
+    return rc;
 }
 
 // ============================================================================
@@ -370,7 +409,7 @@ int ata_dma_write_sectors_drive(int drive, unsigned int lba, int count, const un
 void ata_read_sector(unsigned int lba, unsigned char* b) {
     ata_read_sector_drive(0, lba, b);
 }
-int ata_write_sector_drive(int drive, unsigned int lba, unsigned char* b) {
+static int ata_write_sector_drive_io(int drive, unsigned int lba, unsigned char* b) {
     if (drive >= USB_DRIVE_BASE) return usb_write_sectors(drive, lba, 1, b);
     if (drive >= AHCI_DRIVE_BASE) return ahci_write_sectors(drive, lba, 1, b);
     uint16_t base = ata_base_port(drive);
@@ -388,6 +427,15 @@ int ata_write_sector_drive(int drive, unsigned int lba, unsigned char* b) {
     outb(base + 7, 0xE7); ata_wait_bsy_drive(drive);
     spin_unlock_irqrestore(&ata_lock, ata_eflags);
     return 0;
+}
+
+// v38.62 sector cache wrapper (single-sector writes) — same contract as the
+// multi-sector wrapper: invalidate AFTER the data reached the disk.
+int ata_write_sector_drive(int drive, unsigned int lba, unsigned char* b) {
+    extern void blkcache_invalidate(int drive, uint32_t lba, int count);
+    int rc = ata_write_sector_drive_io(drive, lba, b);
+    if (rc == 0) blkcache_invalidate(drive, lba, 1);
+    return rc;
 }
 void ata_write_sector(unsigned int lba, unsigned char* b) {
     ata_write_sector_drive(0, lba, b);

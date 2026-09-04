@@ -145,6 +145,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     init_mem(mem_size);
     write_serial_string("[K] paging\n");
     paging_init(fb_p, fb_s);
+    // v38.62: sector-level LRU read cache for the ATA block layer (ext2 /
+    // FAT32 / over-pcache reads). Static .bss, usable immediately; the call
+    // only prints the banner.
+    {
+        extern void blkcache_init(void);
+        blkcache_init();
+    }
     // CR3 is now live: point the #DF task-gate TSS at the kernel page tables
     // so a double-fault task switch can actually run its handler.
     {
