@@ -5,6 +5,7 @@
 #include "../include/vmm.h"
 #include "../include/utils.h"
 #include "../include/serial.h"
+#include "../include/entropy.h"  // get_random_u32() — ASLR load bias
 
 // ============================================================
 // ELF32 structures (executable & linking format, i386)
@@ -12,8 +13,29 @@
 #define ELFCLASS32     1
 #define ELFDATA2LSB    1
 #define ET_EXEC        2
+#define ET_DYN         3   // PIE: p_vaddr is an offset; loader adds a bias (ASLR)
 #define EM_386         3
 #define PT_LOAD        1
+
+// i386 ABI relocation types (only needed for PIE images that carry a
+// .rel.dyn/.rel.plt — gcc -fPIE static links emit none, but a loader that
+// claims to support ET_DYN must handle them if they ever appear).
+#define R_386_32        1   // S + A
+#define R_386_PC32      2   // S + A - P  (link-time resolved; skip)
+#define R_386_GLOB_DAT  6   // S          (GOT slot)
+#define R_386_JMP_SLOT  7   // S          (PLT slot)
+#define R_386_RELATIVE  8   // B + A      (addend stored in the field)
+#define SHT_REL        9
+
+// ASLR window (v38.63) for PIE images. Every user-range check in this kernel
+// (validate_user_ptr fault-in, #PF demand paging, signal/EIP validation) uses
+// 0x08000000 as the low bound of "user text+heap", SYS_MALLOC hard-caps the
+// heap at 0x08F00000, and shared libraries sit at 0x09000000 — so the bias is
+// page-aligned in [0x08000000, 0x08E00000): up to 3584 distinct bases, with
+// >= 1 MB of heap headroom left under the cap. Freestanding apps are a few
+// KB..tens of KB, so the span barely shrinks the window.
+#define ASLR_BASE_MIN   0x08000000u
+#define ASLR_BASE_TOP   0x08E00000u
 
 // NOTE: e_ident is a full 16-byte array — e_type sits at offset 16. Shrinking
 // e_ident (e.g. only magic+class+data+version) misaligns every later field and
@@ -45,6 +67,24 @@ typedef struct {
     uint32_t p_flags;
     uint32_t p_align;
 } elf32_phdr_t;
+
+typedef struct {
+    uint32_t sh_name;
+    uint32_t sh_type;      // SHT_REL for .rel.dyn/.rel.plt
+    uint32_t sh_flags;
+    uint32_t sh_addr;
+    uint32_t sh_offset;
+    uint32_t sh_size;
+    uint32_t sh_link;
+    uint32_t sh_info;
+    uint32_t sh_addralign;
+    uint32_t sh_entsize;
+} elf32_shdr_t;
+
+typedef struct {
+    uint32_t r_offset;     // VA of the word to fix (relative to the load base)
+    uint32_t r_info;       // symbol<<8 | type
+} elf32_rel_t;
 
 // ============================================================
 // MCT loader (existing proprietary format)
@@ -110,7 +150,8 @@ static int build_mct_image(const char* filename, const char* arg,
 }
 
 // ============================================================
-// ELF loader — maps PT_LOAD segments at their p_vaddr
+// ELF loader — maps PT_LOAD segments; ET_DYN (PIE) at an ASLR bias, legacy
+// ET_EXEC at its absolute p_vaddr (bias 0). See build_elf_image below.
 // ============================================================
 
 static int build_elf_image(const char* filename, const char* arg,
@@ -127,8 +168,14 @@ static int build_elf_image(const char* filename, const char* arg,
         write_serial_string("[LOADER] ELF bad ident\n");
         return -21;
     }
-    if (eh->e_type != ET_EXEC || eh->e_machine != EM_386) {
-        write_serial_string("[LOADER] ELF not i386 ET_EXEC\n");
+    // v38.63: ET_DYN (PIE) is accepted alongside legacy ET_EXEC. An ET_EXEC
+    // carries absolute link-time addresses and is mapped exactly at its
+    // p_vaddr (bias 0 — it cannot be moved); an ET_DYN's p_vaddr is an
+    // offset, so the loader picks a random page-aligned bias (ASLR) and
+    // fixes up any dynamic relocations against it.
+    if ((eh->e_type != ET_EXEC && eh->e_type != ET_DYN) ||
+        eh->e_machine != EM_386) {
+        write_serial_string("[LOADER] ELF not i386 EXEC/DYN\n");
         return -22;
     }
     if (eh->e_phnum == 0 || eh->e_phentsize < sizeof(elf32_phdr_t)) {
@@ -144,11 +191,14 @@ static int build_elf_image(const char* filename, const char* arg,
         return -24;
     }
 
-    // First pass: compute total memory footprint so we can size the heap.
-    // Clamp segment sizes: a crafted p_memsz of 4GB would make the mapping
-    // loop below churn through a million pages (or wrap) and trivially DoS the
-    // kernel. Everything this loader runs is a small freestanding app.
-    uint32_t max_end = 0;
+    // First pass: find the page range the PT_LOAD segments span, relative to
+    // the image's link base (0 for ET_DYN, absolute for ET_EXEC — a bias of 0
+    // collapses the two). Clamp segment sizes: a crafted p_memsz of 4GB would
+    // make the mapping loop churn through a million pages (or wrap) and
+    // trivially DoS the kernel. Everything this loader runs is a small
+    // freestanding app.
+    uint32_t span_min = 0xFFFFFFFFu;
+    uint32_t span_max = 0;
     for (int i = 0; i < eh->e_phnum; i++) {
         elf32_phdr_t* ph = (elf32_phdr_t*)(buf + eh->e_phoff + i * eh->e_phentsize);
         if (ph->p_type != PT_LOAD) continue;
@@ -156,16 +206,50 @@ static int build_elf_image(const char* filename, const char* arg,
             write_serial_string("[LOADER] ELF segment too large\n");
             return -25;
         }
+        // Stay well below the 0x09000000 lib region (legacy bound, kept for
+        // the absolute ET_EXEC case; for ET_DYN it caps the p_vaddr offset
+        // space — the bias window then still lands far under the stack top).
         uint64_t end64 = (uint64_t)ph->p_vaddr + ph->p_memsz;
-        if (end64 > 0x0FFFFFFF) { // stay well below the 0x09000000 lib region
+        if (end64 > 0x0FFFFFFF) {
             write_serial_string("[LOADER] ELF segment past limit\n");
             return -25;
         }
+        if (ph->p_vaddr < span_min) span_min = ph->p_vaddr;
         uint32_t end = (uint32_t)end64;
-        if (end > max_end) max_end = end;
+        if (end > span_max) span_max = end;
     }
-    if (max_end == 0) {
+    if (span_max == 0) {
         write_serial_string("[LOADER] ELF no loadable segments\n");
+        return -25;
+    }
+
+    // ASLR (v38.63): pick the random load bias for PIE images from the kernel
+    // CSPRNG (entropy.c, seeded at boot from TSC jitter + timer/kbd/mouse).
+    uint32_t bias = 0;
+    if (eh->e_type == ET_DYN) {
+        uint32_t span = (span_max - span_min + 0xFFF) & ~0xFFFu;
+        uint32_t win = ASLR_BASE_TOP - ASLR_BASE_MIN;
+        if (span >= win) {
+            bias = ASLR_BASE_MIN;   // absurdly large image: fall back to base
+        } else {
+            // Choose among the page slots that leave the whole span inside
+            // [ASLR_BASE_MIN, ASLR_BASE_TOP), so heap_start = bias + span
+            // stays below the 0x08F00000 SYS_MALLOC cap by >= 1 MB.
+            uint32_t slots = (win - span) / 0x1000;
+            if (slots == 0) slots = 1;
+            bias = ASLR_BASE_MIN + (get_random_u32() % slots) * 0x1000;
+        }
+        write_serial_string("[ASLR] PIE base=");
+        write_serial_hex(bias);
+        write_serial_string("\n");
+    }
+
+    uint32_t map_first = bias + (span_min & ~0xFFFu);
+    uint32_t map_last  = bias + ((span_max + 0xFFF) & ~0xFFFu);
+    // Crafted-file sanity: the per-segment end64 cap above bounds the span,
+    // so this can only trip on a malformed header — never on a real binary.
+    if (map_last < map_first || map_last > 0x1F000000u) {
+        write_serial_string("[LOADER] ELF base+span overflow\n");
         return -25;
     }
 
@@ -175,19 +259,15 @@ static int build_elf_image(const char* filename, const char* arg,
     if (page_dir == 0) return -26;
     out->page_dir = page_dir;
 
-    // Map every page covered by any PT_LOAD segment
+    // Map every page the segments cover (one contiguous region; the legacy
+    // per-segment loop left inter-segment gaps unmapped, which is equivalent
+    // for the loader's purposes and simpler to reason about).
     write_serial_string("[LOADER] ELF mapping segments...\n");
-    for (int i = 0; i < eh->e_phnum; i++) {
-        elf32_phdr_t* ph = (elf32_phdr_t*)(buf + eh->e_phoff + i * eh->e_phentsize);
-        if (ph->p_type != PT_LOAD) continue;
-        uint32_t start = ph->p_vaddr & ~0xFFFu;
-        uint32_t end   = (ph->p_vaddr + ph->p_memsz + 0xFFF) & ~0xFFFu;
-        for (uint32_t a = start; a < end; a += 4096) {
-            if (!vmm_alloc_page_at(page_dir, a, PAGE_PRESENT | PAGE_RW | PAGE_USER)) {
-                write_serial_string("[LOADER] ELF out of memory mapping segments\n");
-                vmm_free_address_space(page_dir);
-                return -26;
-            }
+    for (uint32_t a = map_first; a < map_last; a += 4096) {
+        if (!vmm_alloc_page_at(page_dir, a, PAGE_PRESENT | PAGE_RW | PAGE_USER)) {
+            write_serial_string("[LOADER] ELF out of memory mapping segments\n");
+            vmm_free_address_space(page_dir);
+            return -26;
         }
     }
 
@@ -212,27 +292,67 @@ static int build_elf_image(const char* filename, const char* arg,
             return -27;
         }
         if (ph->p_filesz > 0) {
-            memcpy((void*)(uintptr_t)ph->p_vaddr, buf + ph->p_offset, ph->p_filesz);
+            memcpy((void*)(uintptr_t)(bias + ph->p_vaddr),
+                   buf + ph->p_offset, ph->p_filesz);
         }
         // Zero-fill the BSS remainder (.bss within the segment)
         if (ph->p_memsz > ph->p_filesz) {
-            memset((void*)(uintptr_t)(ph->p_vaddr + ph->p_filesz), 0,
+            memset((void*)(uintptr_t)(bias + ph->p_vaddr + ph->p_filesz), 0,
                    ph->p_memsz - ph->p_filesz);
+        }
+    }
+
+    // Fix up dynamic relocations (ET_DYN only), while we are still switched
+    // into the new address space. gcc -fPIE static links emit no relocations
+    // today — every internal reference is PC-relative, which is why a plain
+    // bias works at all — but if a .rel.dyn/.rel.plt ever appears (different
+    // toolchain, -fPIC objects, shared-symbol growth), every absolute word
+    // must be biased or the image silently mispoints. The link base is 0, so
+    // each supported type's runtime value is exactly (stored word) + bias;
+    // PC-relative types were already resolved by the linker and are skipped.
+    if (eh->e_type == ET_DYN && eh->e_shoff != 0 &&
+        eh->e_shentsize >= sizeof(elf32_shdr_t)) {
+        uint64_t shdrs_end = (uint64_t)eh->e_shoff +
+                             (uint64_t)eh->e_shnum * eh->e_shentsize;
+        if (shdrs_end <= (uint64_t)sz) {
+            for (uint32_t si = 0; si < eh->e_shnum; si++) {
+                elf32_shdr_t* sh = (elf32_shdr_t*)(buf + eh->e_shoff +
+                                                   si * eh->e_shentsize);
+                if (sh->sh_type != SHT_REL ||
+                    sh->sh_entsize < sizeof(elf32_rel_t) || sh->sh_size == 0)
+                    continue;
+                if ((uint64_t)sh->sh_offset + sh->sh_size > (uint64_t)sz)
+                    continue;   // corrupt table: skip, never crash the kernel
+                for (uint32_t ro = 0; ro + sizeof(elf32_rel_t) <= sh->sh_size;
+                     ro += sh->sh_entsize) {
+                    elf32_rel_t* rel =
+                        (elf32_rel_t*)(buf + sh->sh_offset + ro);
+                    uint32_t type = rel->r_info & 0xFFu;
+                    if (type == R_386_32 || type == R_386_GLOB_DAT ||
+                        type == R_386_JMP_SLOT || type == R_386_RELATIVE) {
+                        uint32_t dest = bias + rel->r_offset;
+                        if (dest >= map_first && dest + 4 <= map_last) {
+                            *(uint32_t*)(uintptr_t)dest += bias;
+                        }
+                    }
+                    // R_386_PC32 and unknown types: link-time resolved or
+                    // unsupported — ignored.
+                }
+            }
         }
     }
 
     vmm_switch_page_dir(old_cr3);
     __asm__ volatile("sti");
 
-    void (*entry_point)() = (void (*)())(uintptr_t)eh->e_entry;
+    uint32_t entry = bias + eh->e_entry;
     write_serial_string("[LOADER] ELF entry=");
-    write_serial_hex(eh->e_entry);
+    write_serial_hex(entry);
     write_serial_string("\n");
 
-    (void)entry_point;
     (void)arg;
-    out->entry = eh->e_entry;
-    out->heap_start = (max_end + 0xFFF) & ~0xFFFu;
+    out->entry = entry;
+    out->heap_start = (bias + span_max + 0xFFF) & ~0xFFFu;
     write_serial_string("[LOADER] ELF OK\n");
     return 0;
 }

@@ -449,22 +449,25 @@ $(OBJ_DIR)/bgread_mct.o: bgread.mct | $(OBJ_DIR)
 $(OBJ_DIR)/music_wav.o: apps/music.wav | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 apps/music.wav $(OBJ_DIR)/music_wav.o
 
-# ELF demo app: built as a real ELF32 ET_EXEC and embedded for VFS injection
-elfdemo.elf: apps/elfdemo.c
+# ELF demo app: built as a real ELF32 binary (v38.63: ET_DYN PIE at offset
+# 0 — the kernel loader applies an ASLR bias) and embedded for VFS injection.
+# Depends on the builder script too, so a toolchain change (e.g. ET_EXEC ->
+# PIE) forces the app binaries to rebuild.
+elfdemo.elf: apps/elfdemo.c scripts/build_elf.py
 	python3 scripts/build_elf.py apps/elfdemo.c elfdemo.elf
 
 $(OBJ_DIR)/elfdemo_elf.o: elfdemo.elf | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 elfdemo.elf $(OBJ_DIR)/elfdemo_elf.o
 
-# Sync demo (semaphore + futex test, built as ELF)
-syncdemo.elf: apps/syncdemo.c
+# Sync demo (semaphore + futex test, built as ELF PIE)
+syncdemo.elf: apps/syncdemo.c scripts/build_elf.py
 	python3 scripts/build_elf.py apps/syncdemo.c syncdemo.elf
 
 $(OBJ_DIR)/syncdemo_elf.o: syncdemo.elf | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 syncdemo.elf $(OBJ_DIR)/syncdemo_elf.o
 
-# UDP test app (validates the UDP syscall API)
-udptest.elf: apps/udptest.c
+# UDP test app (validates the UDP syscall API, ELF PIE)
+udptest.elf: apps/udptest.c scripts/build_elf.py
 	python3 scripts/build_elf.py apps/udptest.c udptest.elf
 
 $(OBJ_DIR)/udptest_elf.o: udptest.elf | $(OBJ_DIR)

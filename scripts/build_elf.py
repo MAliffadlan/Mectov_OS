@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
-scripts/build_elf.py — build a freestanding ELF32 executable for Mectov OS.
+scripts/build_elf.py — build a freestanding PIE ELF32 executable for Mectov OS.
 
 Unlike build_mct.py (proprietary MCT header + raw blob), this produces a
-standard ELF32 ET_EXEC binary that the in-kernel ELF loader parses directly:
+standard ELF32 binary that the in-kernel ELF loader parses directly:
 
   python3 scripts/build_elf.py apps/elfdemo.c elfdemo.elf
 
-The binary is linked at 0x08000000 with entry point _start, exactly like the
-MCT layout, so existing Ring 3 apps compile unchanged — only the container
-format differs (ELF program headers instead of a flat header+blob).
+v38.63: the binary is now an ET_DYN **PIE** linked at offset 0, compiled with
+-fPIE. The i386 -fPIE codegen is PC-relative (every global/function reference
+goes through __x86.get_pc_thunk addressing computed from the runtime PC), and
+a static link emits NO dynamic relocations, so the kernel can load the image
+at any page-aligned virtual base and apply ASLR (random base from the kernel
+CSPRNG) with zero fix-ups. Legacy ET_EXEC binaries linked at an absolute
+address still load (unrandomized, as before — their code cannot move).
+
+The linker script is deliberately NOT used: `ld -pie` requires its default
+PHDR layout ("PHDR segment not covered by LOAD segment" with a custom
+SECTIONS script). ENTRY is passed via -e _start instead.
 """
 import os
 import subprocess
@@ -21,41 +29,29 @@ def build_elf(c_file, output_elf):
 
     base_name = os.path.splitext(c_file)[0]
     o_file = f"{base_name}.o"
-    ld_file = f"{base_name}.ld"
-
-    with open(ld_file, "w") as f:
-        f.write("""
-OUTPUT_FORMAT("elf32-i386")
-ENTRY(_start)
-SECTIONS {
-    . = 0x08000000;
-    .text : { *(.text*) }
-    .rodata : { *(.rodata*) }
-    .data : { *(.data*) }
-    .bss : { *(.bss*) *(COMMON) }
-    /DISCARD/ : { *(.eh_frame) *(.note*) *(.comment) *(.symtab) *(.strtab) *(.shstrtab) }
-}
-""")
 
     try:
+        # -fPIE (was -fno-pie -fno-pic): position-independent codegen whose
+        # references are all PC-relative — the property ASLR relies on.
         subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector",
                         "-msoft-float", "-mno-80387", "-mno-sse", "-mno-mmx",
-                        "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic",
+                        "-fno-asynchronous-unwind-tables", "-fPIE",
                         "-static", "-O2", "-I.", "-c", c_file, "-o", o_file],
                        check=True)
-        subprocess.run(["ld", "-m", "elf_i386", "-T", ld_file, "-s", o_file,
-                        "-o", output_elf], check=True)
+        # ld -pie + -e _start: ET_DYN at offset 0. -s strips the symtab; the
+        # loader applies relocations from stored addends, so it is not needed.
+        subprocess.run(["ld", "-m", "elf_i386", "-pie", "-e", "_start", "-s",
+                        o_file, "-o", output_elf], check=True)
     except subprocess.CalledProcessError:
         print("[!] build failed")
         return 1
     finally:
-        for p in (o_file, ld_file):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+        try:
+            os.remove(o_file)
+        except OSError:
+            pass
 
-    print(f"[+] {output_elf} created (ELF32 ET_EXEC at 0x08000000)")
+    print(f"[+] {output_elf} created (ELF32 ET_DYN PIE at offset 0, ASLR-ready)")
     return 0
 
 

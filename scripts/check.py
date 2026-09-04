@@ -77,6 +77,7 @@ SUITES = [
     ("rlimit",           "rlimit_test.py",            360),
     ("ulimit",           "ulimit_test.py",            360),
     ("bigread",          "bigread_test.py",           420),
+    ("aslr",             "aslr_test.py",              300),
 ]
 
 # Fast, high-signal subset for local iteration (~6-8 min TCG).

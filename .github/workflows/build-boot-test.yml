@@ -315,3 +315,13 @@ jobs:
           # controller engaged and zero failed DMA transfers, and that the
           # byte pattern survives every read.
           python3 scripts/bigread_test.py --timeout 420
+
+      - name: ASLR regression — PIE ELF base randomized across boots (TCG)
+        run: |
+          # v38.63: ET_DYN PIE ELF images load at a random page-aligned base
+          # drawn from the kernel CSPRNG. Two consecutive boots each run the
+          # PIE syncdemo.elf (semaphore + futex workers sharing globals — a
+          # wrong relocation or non-PC-relative reference would crash it)
+          # twice; the test asserts the first-run bases differ across the
+          # boots AND the two runs within one boot differ.
+          python3 scripts/aslr_test.py --timeout 300
