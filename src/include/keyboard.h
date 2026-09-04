@@ -12,6 +12,13 @@ void init_keyboard();
 // the mouse based on the AUX status bit. Called by BOTH IRQ1 and IRQ12 — never
 // read port 0x60 directly from an IRQ handler.
 void ps2_drain(void);
+// Inject one set-1 scancode exactly as if ps2_drain() had read it from the
+// 8042 (same modifier tracking, same ring push, same feed-time mods snapshot,
+// same entropy feed). This is the sink the USB HID keyboard driver (xhci.c)
+// feeds its translated boot-protocol reports into, so every existing consumer
+// — terminal, login gate, WM, doom, SYS_GET_KEY — works unchanged and PS/2
+// stays the fallback when no USB keyboard exists.
+void kbd_feed_scancode(uint8_t sc);
 // Returns 1 once per ESC press, then clears. For code that must notice ESC
 // while busy without reading port 0x60 itself.
 int keyboard_take_esc(void);

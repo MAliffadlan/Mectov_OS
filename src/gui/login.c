@@ -428,6 +428,14 @@ int gui_login() {
     uint32_t last_draw = 0;
 
     while (1) {
+        // USB HID keyboard/mouse (v38.60): the kernel main loop is parked
+        // inside gui_login() while the gate is up (boot, lock, logout), so
+        // the xHC reports must be drained here or a USB keyboard/mouse could
+        // not dismiss the gate. No-op when no xHCI/HID device exists (PS/2
+        // fallback).
+        extern void xhci_hid_poll(void);
+        xhci_hid_poll();
+
         uint32_t now = get_ticks();
         if (now - last_draw >= 16) {
             last_draw = now;

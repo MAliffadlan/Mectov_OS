@@ -36,13 +36,31 @@
 //   * USBCMD.HCRST completes synchronously (CNR never sets)
 
 #define USB_DRIVE_BASE 8          // drives 0-3 IDE, 4-7 AHCI, 8+ USB
-#define USB_MAX_DRIVES 4          // USB devices we bring up (slots)
+#define USB_MAX_DRIVES 4          // mass-storage units we bring up
+#define USB_MAX_HID 4             // HID keyboard/mouse devices we bring up
 
-// Detect + bring up the controller and every mass-storage device behind
-// it (call after pci_scan, next to ahci_init). Safe when no controller
-// exists: logs and leaves. Registered drives report 1 from usb_present.
+// What usb_enumerate found behind a port (kind field of the device struct).
+#define USB_KIND_NONE    0
+#define USB_KIND_STORAGE 1
+#define USB_KIND_HID_KBD 2   // HID boot-protocol keyboard (iface 03/01/01)
+#define USB_KIND_HID_MOUSE 3 // HID boot-protocol mouse    (iface 03/01/02)
+
+// Detect + bring up the controller and every mass-storage / HID device
+// behind it (call after pci_scan, next to ahci_init). Safe when no
+// controller exists: logs and leaves. Registered drives report 1 from
+// usb_present. HID devices are left armed; the main loop keeps the stream
+// alive by calling xhci_hid_poll().
 void xhci_init(void);
 int  usb_present(void);
+
+// Drain pending HID interrupt-IN reports into the shared keyboard scancode
+// queue / mouse state (see keyboard.h kbd_feed_scancode + mouse.h
+// mouse_hid_report). No-op in microseconds when there is no controller or
+// no HID device. Must be called from the same single-writer contexts the
+// PS/2 IRQs feed from — the kernel main loop and the login gate, once per
+// iteration, before input is read. PS/2 remains the fallback: when no USB
+// HID keyboard/mouse is present the PS/2 devices are the only feeders.
+void xhci_hid_poll(void);
 
 // Sector API on a USB drive number (drive as passed to the ATA layer,
 // i.e. USB_DRIVE_BASE + device). count is clamped like the IDE batch API.

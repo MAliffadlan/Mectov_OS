@@ -149,3 +149,23 @@ void init_mouse() {
     // IRQ12 = interrupt vector 44 (0x2C)
     register_interrupt_handler(44, mouse_handler);
 }
+
+// USB HID boot-protocol pointer report -> the shared cursor state (see
+// mouse.h). Keeps the exact clamp/scroll semantics of the PS/2 path: buttons
+// bit0=left bit1=right bit2=middle (same layout as the HID button byte),
+// wheel sign as in the report (+ = up, matching mouse_scroll). The PS/2
+// overflow-drop rule does not apply — HID deltas are already sign-extended.
+void mouse_hid_report(uint8_t btn, int8_t dx, int8_t dy, int8_t wheel) {
+    entropy_add((uint32_t)(uint8_t)dx);
+    entropy_add((uint32_t)(uint8_t)dy);
+    mouse_btn = btn & 0x07;
+    mouse_x += dx;
+    mouse_y += dy;
+    if (mouse_x < 0)               mouse_x = 0;
+    if (mouse_x >= (int)fb_width)  mouse_x = (int)fb_width  - 1;
+    if (mouse_y < 0)               mouse_y = 0;
+    if (mouse_y >= (int)fb_height) mouse_y = (int)fb_height - 1;
+    if (wheel) mouse_scroll = wheel;
+    mouse_updated = 1;
+}
+

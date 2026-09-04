@@ -315,6 +315,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     int fb_was_active = 0;
 
     while (1) {
+        // USB HID (v38.60): drain xHC interrupt-IN reports into the shared
+        // keyboard scancode queue + mouse state BEFORE the frame reads input
+        // below. No-op (a compare + a couple of reads) when there is no xHCI
+        // controller or no HID device, so the PS/2-only boot is unaffected.
+        extern void xhci_hid_poll(void);
+        xhci_hid_poll();
+
         // v38.55: drain deferred sem/futex waiter cleanups for dead tasks.
         // Teardown only sets a pending bit (see sync.c for why it cannot take
         // sync_lock under task_lock); the BSP main loop is the lock-free

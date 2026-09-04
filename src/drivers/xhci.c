@@ -21,9 +21,30 @@
 //                 TRBs on the bulk rings, doorbell, event-ring poll
 //   enumeration  port reset -> device/config descriptors -> MSC
 //                 interface (class 8 / subclass 6 / BOT) -> bulk EPs
+//                 (or HID boot interface 3/1/1|2 -> interrupt IN EP)
 //   mass-storage  BOT: CBW -> data -> CSW around SCSI INQUIRY /
 //                 TEST UNIT READY / READ CAPACITY(10) / READ(10) /
 //                 WRITE(10)
+//   HID (v38.60) USB HID boot-protocol keyboard/mouse: the interrupt IN
+//                 endpoint is configured (type 7, interval in EP ctx dw0
+//                 bits 16..23 — QEMU asserts it nonzero) and one Normal-IN
+//                 TRB is kept armed; each completion event (keyboard: 8-byte
+//                 boot report; mouse: up to 4 bytes) is translated into the
+//                 same set-1 scancode queue / mouse state the PS/2 devices
+//                 feed, so the whole UI works unchanged with PS/2 as the
+//                 fallback. HID events that land while a bulk transfer is
+//                 being awaited are dispatched by event_wait's discard path
+//                 (never lost); the main loop drains the rest via
+//                 xhci_hid_poll(). QEMU facts (v8.2.2 hw/usb/dev-hid.c + hw/
+//                 input/hid.c): usb-kbd/usb-mouse default usb_version=2 =
+//                 high-speed, EP1 IN mps 8/4, bInterval 7, protocol 1 (boot)
+//                 already; the report is 8 bytes (mods, rsvd, 6 usages) resp.
+//                 buttons/dx/dy/wheel with the wheel sign already corrected.
+//                 Input routing: QEMU sends sendkey/mouse events to the first
+//                 ACTIVE handler only, and activating the USB kbd/mouse (its
+//                 first interrupt-IN poll) moves it ahead of PS/2, so a USB
+//                 keyboard/mouse genuinely takes over while PS/2 stays as the
+//                 fallback when none is present.
 //
 // Every register/TRB/context bit position below is verified against the
 // actual hardware this driver runs on: QEMU 8.2.2's hw/usb/hcd-xhci.c
@@ -55,6 +76,8 @@
 #include "../include/serial.h"
 #include "../include/utils.h"    // memcpy/memset
 #include "../include/spinlock.h"
+#include "../include/keyboard.h"  // kbd_feed_scancode — HID report sink
+#include "../include/mouse.h"     // mouse_hid_report — HID report sink
 
 static spinlock_t xhci_lock = SPINLOCK_INIT;
 static uint32_t xhci_eflags;
@@ -192,6 +215,7 @@ typedef struct {
 #define EP_TYPE_CTRL 4
 #define EP_TYPE_BULK_OUT 2
 #define EP_TYPE_BULK_IN  6
+#define EP_TYPE_INTR_IN 7          // interrupt IN endpoint context type
 
 // slot context dword 0: route string = bits 19:0 (nibbles = hub port numbers
 // along the path from the root; a device DIRECTLY on a root port has an
@@ -228,9 +252,12 @@ typedef struct {
     uint32_t cycle;      // cycle bit currently written into fresh TRBs
 } xhci_ring_t;
 
-// One USB device (a mass-storage BOT unit).
+// One USB device (mass-storage BOT unit or HID boot keyboard/mouse). The
+// storage fields are only meaningful for USB_KIND_STORAGE, the hid_* fields
+// only for USB_KIND_HID_*.
 typedef struct {
     int     in_use;
+    int     kind;               // USB_KIND_* (filled by usb_enumerate)
     int     slot_id;
     int     port;               // root port, 1-based
     int     speed;
@@ -243,6 +270,19 @@ typedef struct {
     int     bulk_in_mps;
     uint32_t max_lba;           // READ CAPACITY(10): last valid block
     int     sector_size;
+
+    // HID keyboard/mouse: interrupt IN endpoint + boot-protocol state.
+    int     hid_intr_dci;       // 2*ep + 1
+    int     hid_intr_ep;        // endpoint NUMBER from the descriptor
+    int     hid_intr_mps;       // wMaxPacketSize (8 kbd / 4 mouse on QEMU)
+    uint8_t hid_interval;       // raw bInterval from the EP descriptor
+    int     hid_armed;          // an IN TRB is currently on the ring
+    int     hid_first_evt;      // one-shot "[HID] first report" serial log
+    uint8_t hid_prev_eff;       // effective mods of the last fed report
+                                // (bit0 ctrl, bit1 shift, bit2 alt)
+    uint8_t hid_prev_keys[6];   // key usages of the last fed report
+    uint8_t hid_report[16] __attribute__((aligned(64))); // DMA target
+    xhci_ring_t hid_ring;       // interrupt IN transfer ring
 
     uint32_t dctx[DCTX_DWORDS] __attribute__((aligned(64)));
     uint32_t ictx[ICTX_DWORDS] __attribute__((aligned(64)));
@@ -257,7 +297,12 @@ static trb_t xhci_cmd_ring[XHCI_RING_TRBS] __attribute__((aligned(64)));
 static trb_t xhci_event_ring[XHCI_RING_TRBS] __attribute__((aligned(64)));
 // ERST: one segment descriptor — 64-bit base then {size, reserved}.
 static uint32_t xhci_erst[4] __attribute__((aligned(64)));
-static usb_dev_t xhci_devs[USB_MAX_DRIVES];
+// Device pool: storage units first (they back drives USB_DRIVE_BASE+N via
+// xhci_drive_slot), then HID devices — discovery order is by root port, so a
+// keyboard on a lower port must not displace a storage drive's slot.
+static usb_dev_t xhci_devs[USB_MAX_DRIVES + USB_MAX_HID];
+// storage ordinal (drive - USB_DRIVE_BASE) -> pool slot
+static int xhci_drive_slot[USB_MAX_DRIVES];
 // Bounce buffer for the sector API: 64K-aligned so one Normal TRB of a
 // full 128-sector batch never crosses a 64K boundary.
 static uint8_t xhci_bounce[65536] __attribute__((aligned(65536)));
@@ -273,6 +318,7 @@ static int xhci_db_off = 0;
 static int xhci_rt_off = 0;
 static int xhci_max_ports = 0;
 static int xhci_ndrives = 0;
+static int xhci_nhid = 0;       // live HID devices (xhci_hid_poll fast-out)
 
 // command ring producer state (the consumer is the controller)
 static int cmd_enqueue;
@@ -338,45 +384,63 @@ typedef struct {
     uint32_t cc;
     int      slot;
     int      epid;
+    int      type;
 } xhci_evt_t;
+
+// Consume one event from the ring head (cycle-bit match), advance ERDP so
+// the controller knows the slot is free, and trace it. Returns 1 when an
+// event was consumed, 0 when the ring is empty.
+static int event_consume(xhci_evt_t* out) {
+    trb_t* e = &xhci_event_ring[evt_dequeue];
+    if ((e->control & TRB_CYCLE) != evt_cycle) return 0;   // no event
+    out->trb  = *e;
+    out->cc   = TRB_CC(*e);
+    out->slot = (int)TRB_SLOT(*e);
+    out->epid = (int)TRB_EPID(*e);
+    out->type = (int)((e->control >> TRB_TYPE_SHIFT) & 0x3F);
+    evt_dequeue++;
+    if (evt_dequeue >= XHCI_RING_TRBS) {
+        evt_dequeue = 0;          // event ring wraps WITHOUT a link TRB:
+        evt_cycle ^= 1;          // the cycle bit alone marks the lap
+    }
+    // Advance ERDP so the controller knows the slot is free (QEMU uses it
+    // for its event-ring-full check).
+    uint32_t dp = (uint32_t)(uintptr_t)&xhci_event_ring[evt_dequeue];
+    rt_reg_w(XHCI_IR0 + XHCI_IR_ERDP, dp | ERDP_EHB);
+    // Bring-up trace: every consumed event (boot-time only; see
+    // xhci_evt_trace — cleared once enumeration is done).
+    if (xhci_evt_trace) {
+        write_serial_string("[XHCI] evt type=");
+        write_serial_hex((uint32_t)out->type);
+        write_serial_string(" slot=");
+        write_serial_hex((uint32_t)out->slot);
+        write_serial_string(" epid=");
+        write_serial_hex((uint32_t)out->epid);
+        write_serial_string(" cc=");
+        write_serial_hex(out->cc);
+        write_serial_string("\n");
+    }
+    return 1;
+}
+
+// Forward decl — defined with the HID code below.
+static int xhci_hid_dispatch(xhci_evt_t* ev);
 
 static int event_wait(xhci_evt_t* out, int want_type, int want_slot,
                       int want_epid, int timeout) {
     while (--timeout > 0) {
-        trb_t* e = &xhci_event_ring[evt_dequeue];
-        if ((e->control & TRB_CYCLE) != evt_cycle) continue;   // no event
-        // consume it
-        out->trb  = *e;
-        out->cc   = TRB_CC(*e);
-        out->slot = (int)TRB_SLOT(*e);
-        out->epid = (int)TRB_EPID(*e);
-        evt_dequeue++;
-        if (evt_dequeue >= XHCI_RING_TRBS) {
-            evt_dequeue = 0;          // event ring wraps WITHOUT a link TRB:
-            evt_cycle ^= 1;          // the cycle bit alone marks the lap
-        }
-        // Advance ERDP so the controller knows the slot is free (QEMU
-        // uses it for its event-ring-full check).
-        uint32_t dp = (uint32_t)(uintptr_t)&xhci_event_ring[evt_dequeue];
-        rt_reg_w(XHCI_IR0 + XHCI_IR_ERDP, dp | ERDP_EHB);
-
-        int type = (e->control >> TRB_TYPE_SHIFT) & 0x3F;
-        // Bring-up trace: every consumed event (boot-time only; see
-        // xhci_evt_trace — cleared once enumeration is done).
-        if (xhci_evt_trace) {
-            write_serial_string("[XHCI] evt type=");
-            write_serial_hex((uint32_t)type);
-            write_serial_string(" slot=");
-            write_serial_hex((uint32_t)out->slot);
-            write_serial_string(" epid=");
-            write_serial_hex((uint32_t)out->epid);
-            write_serial_string(" cc=");
-            write_serial_hex(out->cc);
-            write_serial_string("\n");
-        }
-        if (type == want_type &&
-            (want_slot < 0 || out->slot == want_slot) &&
-            (want_epid < 0 || out->epid == want_epid)) {
+        xhci_evt_t ev;
+        if (!event_consume(&ev)) continue;   // ring empty
+        // A HID interrupt-IN completion that is NOT the transfer we are
+        // waiting for (e.g. a keystroke landing while a bulk SCSI phase is
+        // in flight) must still be translated + re-armed here, or the HID
+        // device stalls silently: the controller already wrote the report
+        // into hid_report and retired the TRB, and the event is gone.
+        if (ev.type == TRB_TRANSFER_EVENT && xhci_hid_dispatch(&ev)) continue;
+        if (ev.type == want_type &&
+            (want_slot < 0 || ev.slot == want_slot) &&
+            (want_epid < 0 || ev.epid == want_epid)) {
+            *out = ev;
             return 0;
         }
         // Not the event we wanted (e.g. a PORT_STATUS_CHANGE from another
@@ -732,10 +796,206 @@ static int usb_scsi_rw10(usb_dev_t* d, int is_write, uint32_t lba,
     return usb_scsi(d, cdb, 10, bounce, (uint32_t)count * 512, !is_write);
 }
 
+// ============================================================
+// USB HID boot protocol — keyboard + mouse (v38.60)
+// ============================================================
+// Boot-protocol reports are translated into the EXACT byte stream the PS/2
+// path would have produced (set-1 make/break scancodes through
+// kbd_feed_scancode, pointer deltas through mouse_hid_report), so every
+// consumer — terminal, login gate, WM, doom, SYS_GET_KEY, auto-lock — works
+// unchanged. PS/2 stays as the fallback: when no USB HID device is present
+// the 8042 devices are the only feeders, and on hardware where a USB
+// keyboard/mouse is attached it simply adds to the same queues.
+
+// USB HID usage code -> set-1 make scancode. 0 = unmapped (GUI keys,
+// media keys, non-US layout keys, and PrintScreen/Pause whose set-1
+// encoding is a multi-code E0 sequence this stack has no E0 state for).
+// Navigation keys map to their plain set-1 code WITHOUT the E0 prefix —
+// consumers here either ignore those codes (main loop) or act on the plain
+// code (doom's arrow handling), so E0 would only add junk bytes.
+static const uint8_t xhci_usb2ps2[0x100] = {
+    // letters A-Z (0x04..0x1D)
+    [0x04]=0x1E,[0x05]=0x30,[0x06]=0x2E,[0x07]=0x20,[0x08]=0x12,[0x09]=0x21,
+    [0x0A]=0x22,[0x0B]=0x23,[0x0C]=0x17,[0x0D]=0x24,[0x0E]=0x25,[0x0F]=0x26,
+    [0x10]=0x32,[0x11]=0x31,[0x12]=0x18,[0x13]=0x19,[0x14]=0x10,[0x15]=0x13,
+    [0x16]=0x1F,[0x17]=0x14,[0x18]=0x16,[0x19]=0x2F,[0x1A]=0x11,[0x1B]=0x2D,
+    [0x1C]=0x15,[0x1D]=0x2C,
+    // digits 1-0 (0x1E..0x27)
+    [0x1E]=0x02,[0x1F]=0x03,[0x20]=0x04,[0x21]=0x05,[0x22]=0x06,[0x23]=0x07,
+    [0x24]=0x08,[0x25]=0x09,[0x26]=0x0A,[0x27]=0x0B,
+    // Enter Esc Backspace Tab Space - = [ ] \ (0x28..0x31)
+    [0x28]=0x1C,[0x29]=0x01,[0x2A]=0x0E,[0x2B]=0x0F,[0x2C]=0x39,[0x2D]=0x0C,
+    [0x2E]=0x0D,[0x2F]=0x1A,[0x30]=0x1B,[0x31]=0x2B,
+    // ; ' ` , . / (0x33..0x38)
+    [0x33]=0x27,[0x34]=0x28,[0x35]=0x29,[0x36]=0x33,[0x37]=0x34,[0x38]=0x35,
+    // CapsLock + F1-F12 (0x39..0x45)
+    [0x39]=0x3A,[0x3A]=0x3B,[0x3B]=0x3C,[0x3C]=0x3D,[0x3D]=0x3E,[0x3E]=0x3F,
+    [0x3F]=0x40,[0x40]=0x41,[0x41]=0x42,[0x42]=0x43,[0x43]=0x44,[0x44]=0x57,
+    [0x45]=0x58,
+    // PrintScreen(unmapped) ScrollLock Pause(unmapped)
+    [0x47]=0x46,
+    // Insert Home PgUp Delete End PgDn Right Left Down Up (0x49..0x52)
+    [0x49]=0x52,[0x4A]=0x47,[0x4B]=0x49,[0x4C]=0x53,[0x4D]=0x4F,[0x4E]=0x51,
+    [0x4F]=0x4D,[0x50]=0x4B,[0x51]=0x50,[0x52]=0x48,
+    // NumLock KP/ KP* KP- KP+ KPEnter KP1..KP9 KP0 KP. (0x53..0x63)
+    [0x53]=0x45,[0x54]=0x35,[0x55]=0x37,[0x56]=0x4A,[0x57]=0x4E,[0x58]=0x1C,
+    [0x59]=0x4F,[0x5A]=0x50,[0x5B]=0x51,[0x5C]=0x4B,[0x5D]=0x4C,[0x5E]=0x4D,
+    [0x5F]=0x47,[0x60]=0x48,[0x61]=0x49,[0x62]=0x52,[0x63]=0x53,
+};
+
+// Effective modifier byte -> set-1 make codes (order: ctrl, shift, alt).
+static const uint8_t xhci_mod_make[3] = { 0x1D, 0x2A, 0x38 };
+
+static void xhci_hid_log_first(usb_dev_t* d, const char* what) {
+    if (!d->hid_first_evt) return;
+    d->hid_first_evt = 0;
+    write_serial_string("[HID] ");
+    write_serial_string(what);
+    write_serial_string(" first report (slot ");
+    write_serial_hex((uint32_t)d->slot_id);
+    write_serial_string(")\n");
+}
+
+// Translate one boot-protocol keyboard report (8 bytes: modifiers, rsvd,
+// up to 6 key usages) into set-1 make/break scancodes. A USB report is a
+// STATE, not an event stream, so every transition out of the previous report
+// is fed: keys/modifiers newly present become makes, missing ones become
+// breaks (sc | 0x80). Modifier makes precede key makes so the key's
+// feed-time modifier snapshot already carries shift/ctrl/alt (see
+// keyboard.c), exactly as a PS/2 key-after-shift sequence would.
+static void xhci_hid_kbd_report(usb_dev_t* d, const uint8_t* r, uint32_t len) {
+    xhci_hid_log_first(d, "kbd");
+    if (len < 2) return;
+    uint8_t mods = r[0];
+    // Collapse L/R sides into one tracked modifier each (set-1 without E0
+    // has a single Ctrl/Shift/Alt code): releasing one side while the other
+    // stays held must not clear the effective modifier.
+    int eff = ((mods & 0x01) || (mods & 0x10)) ? 1 : 0;   // LCtrl|RCtrl
+    eff    |= ((mods & 0x02) || (mods & 0x20)) ? 2 : 0;   // LShift|RShift
+    eff    |= ((mods & 0x04) || (mods & 0x40)) ? 4 : 0;   // LAlt|RAlt
+    int nkeys = (len > 8) ? 8 : (int)len;   // r[2..] hold the key usages
+    nkeys -= 2;
+    if (nkeys > 6) nkeys = 6;
+
+    // 1. modifier releases
+    for (int b = 0; b < 3; b++)
+        if ((d->hid_prev_eff & (1u << b)) && !(eff & (1u << b)))
+            kbd_feed_scancode((uint8_t)(xhci_mod_make[b] | 0x80));
+    // 2. key releases (anything held before but gone now)
+    for (int i = 0; i < 6; i++) {
+        uint8_t u = d->hid_prev_keys[i];
+        if (!u) continue;
+        int still = 0;
+        for (int j = 0; j < nkeys; j++)
+            if (r[2 + j] == u) { still = 1; break; }
+        if (!still) {
+            uint8_t sc = xhci_usb2ps2[u];
+            if (sc) kbd_feed_scancode((uint8_t)(sc | 0x80));
+        }
+    }
+    // 3. modifier makes
+    for (int b = 0; b < 3; b++)
+        if (!(d->hid_prev_eff & (1u << b)) && (eff & (1u << b)))
+            kbd_feed_scancode(xhci_mod_make[b]);
+    // 4. key makes
+    for (int j = 0; j < nkeys; j++) {
+        uint8_t u = r[2 + j];
+        if (!u) continue;                 // empty slot / rollover marker
+        int was = 0;
+        for (int i = 0; i < 6; i++)
+            if (d->hid_prev_keys[i] == u) { was = 1; break; }
+        if (!was) {
+            uint8_t sc = xhci_usb2ps2[u];
+            if (sc) kbd_feed_scancode(sc);
+        }
+    }
+    d->hid_prev_eff = (uint8_t)eff;
+    for (int i = 0; i < 6; i++)
+        d->hid_prev_keys[i] = (i < nkeys) ? r[2 + i] : 0;
+}
+
+// Translate one boot-protocol mouse report (buttons, dx, dy, [wheel]) into
+// the shared cursor state. HID axes are +x right / +y DOWN; the fb origin is
+// top-left, so the y delta adds directly (the PS/2 path subtracts because
+// PS/2 y is inverted). QEMU already corrects the wheel sign so a positive
+// byte means scroll up, matching mouse_scroll.
+static void xhci_hid_mouse_report(usb_dev_t* d, const uint8_t* r, uint32_t len) {
+    xhci_hid_log_first(d, "mouse");
+    if (len < 3) return;
+    mouse_hid_report(r[0], (int8_t)r[1], (int8_t)r[2],
+                     len > 3 ? (int8_t)r[3] : 0);
+}
+
+// Arm one interrupt-IN Normal TRB (IOC, DIR_IN) on the HID ring and ring the
+// EP doorbell. The xHC keeps the transfer pending — NAK retries at the EP
+// interval — until the device delivers a report, then completes it with a
+// Transfer Event; re-arming on every completion (see xhci_hid_dispatch)
+// keeps the stream alive. One TRB in flight is the right depth for QEMU: a
+// NAKed transfer stays armed, and any input arriving while the host is busy
+// queues inside the device (QEMU's HID queue) instead of being lost.
+static void xhci_hid_arm(usb_dev_t* d) {
+    xhci_ring_t* r = &d->hid_ring;
+    trb_t* t = ring_next(r);
+    memset(t, 0, sizeof(trb_t));
+    t->param    = (uint32_t)(uintptr_t)&d->hid_report[0];
+    t->param_hi = 0;
+    t->status   = TRB_LEN((uint32_t)d->hid_intr_mps);
+    t->control  = r->cycle | TRB_TYPE(TRB_NORMAL) | TRB_IOC | TRB_DIR_IN
+                | TRB_SLOT_ID(d->slot_id);
+    ring_commit(r);
+    ring_doorbell(d->slot_id, d->hid_intr_dci);
+    d->hid_armed = 1;
+}
+
+// Translate + re-arm one Transfer Event for a HID interrupt-IN endpoint.
+// Returns 1 when the event belonged to a HID device and was fully handled,
+// 0 otherwise. Called from BOTH event_wait's discard path (a report landed
+// while a bulk transfer was awaited) and xhci_hid_poll (main loop / login).
+static int xhci_hid_dispatch(xhci_evt_t* ev) {
+    if (ev->type != TRB_TRANSFER_EVENT) return 0;
+    usb_dev_t* d = 0;
+    for (int i = 0; i < USB_MAX_DRIVES + USB_MAX_HID; i++) {
+        usb_dev_t* c = &xhci_devs[i];
+        if (c->in_use &&
+            (c->kind == USB_KIND_HID_KBD || c->kind == USB_KIND_HID_MOUSE) &&
+            c->slot_id == ev->slot && c->hid_intr_dci == ev->epid) {
+            d = c;
+            break;
+        }
+    }
+    if (!d) return 0;
+    d->hid_armed = 0;
+    // Transfer Event length field = the RESIDUE the device did not use
+    // (0 for a full-max-packet IN transfer — QEMU computes trb_len minus
+    // the received bytes). Bytes received = mps - residue, which is the
+    // true report size and is what a short-packet mouse (3 bytes) reports.
+    uint32_t got = (uint32_t)d->hid_intr_mps;
+    uint32_t res = ev->trb.status & 0x1FFFFu;
+    if (res <= got) got -= res; else got = 0;
+    if (got > sizeof(d->hid_report)) got = sizeof(d->hid_report);
+    if (d->kind == USB_KIND_HID_KBD)
+        xhci_hid_kbd_report(d, d->hid_report, got);
+    else
+        xhci_hid_mouse_report(d, d->hid_report, got);
+    if (d->in_use) xhci_hid_arm(d);
+    return 1;
+}
+
+// HID boot-protocol control request: SET_PROTOCOL(1) = boot protocol
+// (bmRequestType 0x21 class->interface, bRequest 0x0B, wValue = protocol).
+// QEMU's devices already default to boot protocol; real keyboards need it to
+// switch from their report-descriptor layout to the fixed 8-byte report.
+static int usb_hid_set_protocol(usb_dev_t* d, uint8_t proto) {
+    uint8_t setup[8] = { 0x21, 0x0B, proto, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    return usb_control(d, setup, 0, 0);
+}
+
 // ---- device enumeration ----
-// Enable a slot, address the device, read descriptors, find the MSC
-// BOT interface, configure the endpoints. Returns 0 when `d` is a usable
-// mass-storage device (bulk endpoints armed), -1 otherwise.
+// Enable a slot, address the device, read descriptors, classify (mass
+// storage vs HID boot keyboard/mouse) and configure the endpoints.
+// Returns the USB_KIND_* found on success, -1 when the device is not
+// usable / not supported. On a HID result the interrupt-IN transfer is
+// already armed and reports start flowing.
 static int usb_enumerate(usb_dev_t* d, int port, int speed) {
     d->port = port;
     d->speed = speed;
@@ -808,9 +1068,13 @@ static int usb_enumerate(usb_dev_t* d, int port, int speed) {
     uint8_t cfg_value = xhci_cfgdesc[5];
 
     int if_class = -1, if_sub = -1, if_proto = -1;
-    int msc_iface = -1;
+    int msc_iface = -1, hid_iface = -1;
     d->bulk_in_ep = d->bulk_out_ep = -1;
+    d->hid_intr_ep = -1;
+    d->hid_intr_mps = 0;
+    d->hid_interval = 0;
     int msc = 0;
+    int hid_kind = USB_KIND_NONE;
     for (uint32_t i = 0; i + 1 < total; ) {
         uint8_t len = xhci_cfgdesc[i];
         uint8_t type = xhci_cfgdesc[i + 1];
@@ -821,12 +1085,25 @@ static int usb_enumerate(usb_dev_t* d, int port, int speed) {
             if_proto = xhci_cfgdesc[i + 7];
             msc = (if_class == 0x08 && if_sub == 0x06 && if_proto == 0x50);
             if (msc && msc_iface < 0) msc_iface = (int)xhci_cfgdesc[i + 2];
-        } else if (type == 5 && len >= 7 && msc) {   // endpoint descriptor
-            uint8_t addr = xhci_cfgdesc[i + 2];
+            // HID boot-protocol keyboard/mouse (class 3, subclass 1 = boot,
+            // protocol 1 = keyboard / 2 = mouse). Report-protocol HID
+            // (subclass/proto 0) would need report-descriptor parsing and
+            // is logged + skipped for now.
+            if (if_class == 0x03 && if_sub == 0x01) {
+                int hk = (if_proto == 0x01) ? USB_KIND_HID_KBD
+                       : (if_proto == 0x02) ? USB_KIND_HID_MOUSE
+                                            : USB_KIND_NONE;
+                if (hk != USB_KIND_NONE && hid_iface < 0) {
+                    hid_kind = hk;
+                    hid_iface = (int)xhci_cfgdesc[i + 2];
+                }
+            }
+        } else if (type == 5 && len >= 7) {      // endpoint descriptor
+            uint8_t addr  = xhci_cfgdesc[i + 2];
             uint8_t attrs = xhci_cfgdesc[i + 3];
-            uint16_t mps = (uint16_t)(xhci_cfgdesc[i + 4]
-                                      | (xhci_cfgdesc[i + 5] << 8));
-            if ((attrs & 0x03) == 2) {                // bulk
+            uint16_t mps  = (uint16_t)(xhci_cfgdesc[i + 4]
+                                       | (xhci_cfgdesc[i + 5] << 8));
+            if (msc && (attrs & 0x03) == 2) {    // bulk (mass storage)
                 if (mps == 0) mps = (uint16_t)bulk_mps;
                 if (addr & 0x80) {
                     d->bulk_in_ep = addr & 0x0F;
@@ -837,77 +1114,151 @@ static int usb_enumerate(usb_dev_t* d, int port, int speed) {
                     d->bulk_out_dci = 2 * (addr & 0x0F);
                     d->bulk_out_mps = mps;
                 }
+            } else if (hid_kind != USB_KIND_NONE &&
+                       (attrs & 0x03) == 3 && (addr & 0x80) &&
+                       d->hid_intr_ep < 0) {
+                d->hid_intr_ep  = addr & 0x0F;
+                d->hid_intr_dci = 2 * (addr & 0x0F) + 1;
+                d->hid_intr_mps = mps;
+                d->hid_interval = xhci_cfgdesc[i + 6];   // bInterval
             }
         }
         i += len;
     }
-    if (msc_iface < 0 || d->bulk_in_ep < 0 || d->bulk_out_ep < 0) {
-        write_serial_string("[XHCI] no MSC BOT interface\n");
-        return -1;
-    }
-    // The context arrays only hold DCI <= 8 (bulk EP number <= 4 OUT /
-    // <= 3 IN): a descriptor claiming higher bulk EPs would make Configure
-    // Endpoint write `ictx` past its end (and the xHC DMA-reads the input
-    // context past it too, leaking kernel memory). QEMU's usb-storage uses
-    // EP1/EP2; anything bigger is rejected instead of corrupting the
-    // adjacent DMA structures.
-    if (d->bulk_out_dci > 8 || d->bulk_in_dci > 8) {
-        write_serial_string("[XHCI] bulk EP number too high (DCI ");
-        write_serial_hex((uint32_t)d->bulk_in_dci);
-        write_serial_string("/");
-        write_serial_hex((uint32_t)d->bulk_out_dci);
-        write_serial_string(" > 8), device skipped\n");
-        return -1;
+
+    // Classify: MSC BOT wins when both interfaces exist (combo device);
+    // otherwise a HID boot interface with an interrupt IN endpoint.
+    int kind = USB_KIND_NONE;
+    if (msc_iface >= 0 && d->bulk_in_ep > 0 && d->bulk_out_ep > 0)
+        kind = USB_KIND_STORAGE;
+    else if (hid_iface >= 0 && d->hid_intr_ep > 0 && d->hid_intr_mps > 0)
+        kind = hid_kind;
+
+    if (kind == USB_KIND_STORAGE) {
+        // The context arrays only hold DCI <= 8 (bulk EP number <= 4 OUT /
+        // <= 3 IN): a descriptor claiming higher bulk EPs would make
+        // Configure Endpoint write `ictx` past its end (and the xHC DMA-reads
+        // the input context past it too, leaking kernel memory). QEMU's
+        // usb-storage uses EP1/EP2; anything bigger is rejected instead of
+        // corrupting the adjacent DMA structures.
+        if (d->bulk_out_dci > 8 || d->bulk_in_dci > 8) {
+            write_serial_string("[XHCI] bulk EP number too high (DCI ");
+            write_serial_hex((uint32_t)d->bulk_in_dci);
+            write_serial_string("/");
+            write_serial_hex((uint32_t)d->bulk_out_dci);
+            write_serial_string(" > 8), device skipped\n");
+            return -1;
+        }
+
+        // 5. Set Configuration, then Configure Endpoint with the two bulk
+        //    endpoint contexts. Add flags: A0 (slot, required by QEMU) + the
+        //    two bulk DCIs; the slot context's Context Entries = highest DCI.
+        if (usb_set_configuration(d, cfg_value) < 0) return -1;
+
+        ring_reset(&d->bulk_out_ring);
+        ring_reset(&d->bulk_in_ring);
+        // Context Entries = the highest DCI in use (the bulk OUT DCI can
+        // exceed the IN one when the device uses different EP numbers).
+        int max_dci = d->bulk_out_dci > d->bulk_in_dci ? d->bulk_out_dci
+                                                       : d->bulk_in_dci;
+        memset(d->ictx, 0, sizeof(d->ictx));
+        d->ictx[ICTX_ADD] = ADD_FLAG(0) | ADD_FLAG(d->bulk_out_dci)
+                          | ADD_FLAG(d->bulk_in_dci);
+        sctx[0] = SLOT_CTX_ENTRIES(max_dci);
+        sctx[1] = SLOT_ROOT_PORT(port);
+        uint32_t* eo = &d->ictx[EPCTX_OFF(d->bulk_out_dci) / 4];
+        eo[1] = EPCTX1(EP_TYPE_BULK_OUT, d->bulk_out_mps);
+        eo[2] = EPCTX_DEQ(&d->bulk_out_ring.trbs[0]);
+        uint32_t* ei = &d->ictx[EPCTX_OFF(d->bulk_in_dci) / 4];
+        ei[1] = EPCTX1(EP_TYPE_BULK_IN, d->bulk_in_mps);
+        ei[2] = EPCTX_DEQ(&d->bulk_in_ring.trbs[0]);
+
+        if (xhci_command(&ev, TRB_CFG_EP, d->slot_id, 0,
+                         (uint32_t)(uintptr_t)d->ictx) < 0) return -1;
+
+        // 6. SCSI: the device must be ready, a direct-access block device,
+        //    and report 512-byte sectors — then it becomes a drive. A failed
+        //    command is followed by REQUEST SENSE (standard MSC recovery
+        //    flow, and it names the reason on the serial log).
+        int t;
+        for (t = 0; t < 3; t++) {
+            if (usb_scsi_test_unit_ready(d) == 0) break;
+            usb_scsi_request_sense(d);
+        }
+        if (t == 3) {
+            write_serial_string("[XHCI] TEST UNIT READY never passed\n");
+            return -1;
+        }
+        if (usb_scsi_inquiry(d) < 0) return -1;
+        if (usb_scsi_read_capacity(d) < 0) return -1;
+        if (d->sector_size != 512) {
+            write_serial_string("[XHCI] sector size != 512: ");
+            write_serial_hex((uint32_t)d->sector_size);
+            write_serial_string("\n");
+            return -1;
+        }
+        d->kind = USB_KIND_STORAGE;
+        return USB_KIND_STORAGE;
     }
 
-    // 5. Set Configuration, then Configure Endpoint with the two bulk
-    //    endpoint contexts. Add flags: A0 (slot, required by QEMU) + the
-    //    two bulk DCIs; the slot context's Context Entries = highest DCI.
-    if (usb_set_configuration(d, cfg_value) < 0) return -1;
+    if (kind == USB_KIND_HID_KBD || kind == USB_KIND_HID_MOUSE) {
+        // Same DCI ceiling as the bulk path: the context arrays hold DCI <= 8
+        // (interrupt IN EP number <= 3). QEMU's HID devices use EP1 (DCI 3).
+        if (d->hid_intr_dci > 8 || d->hid_intr_dci < 1) {
+            write_serial_string("[XHCI] HID interrupt EP number too high\n");
+            return -1;
+        }
+        if (d->hid_intr_mps == 0)
+            d->hid_intr_mps = (kind == USB_KIND_HID_KBD) ? 8 : 4;
+        if (d->hid_intr_mps > (int)sizeof(d->hid_report))
+            d->hid_intr_mps = (int)sizeof(d->hid_report);
 
-    ring_reset(&d->bulk_out_ring);
-    ring_reset(&d->bulk_in_ring);
-    // Context Entries = the highest DCI in use (the bulk OUT DCI can
-    // exceed the IN one when the device uses different EP numbers).
-    int max_dci = d->bulk_out_dci > d->bulk_in_dci ? d->bulk_out_dci
-                                                   : d->bulk_in_dci;
-    memset(d->ictx, 0, sizeof(d->ictx));
-    d->ictx[ICTX_ADD] = ADD_FLAG(0) | ADD_FLAG(d->bulk_out_dci)
-                      | ADD_FLAG(d->bulk_in_dci);
-    sctx[0] = SLOT_CTX_ENTRIES(max_dci);
-    sctx[1] = SLOT_ROOT_PORT(port);
-    uint32_t* eo = &d->ictx[EPCTX_OFF(d->bulk_out_dci) / 4];
-    eo[1] = EPCTX1(EP_TYPE_BULK_OUT, d->bulk_out_mps);
-    eo[2] = EPCTX_DEQ(&d->bulk_out_ring.trbs[0]);
-    uint32_t* ei = &d->ictx[EPCTX_OFF(d->bulk_in_dci) / 4];
-    ei[1] = EPCTX1(EP_TYPE_BULK_IN, d->bulk_in_mps);
-    ei[2] = EPCTX_DEQ(&d->bulk_in_ring.trbs[0]);
+        // 5. Set Configuration, then Configure Endpoint with the interrupt
+        //    IN context (type 7, max packet, transfer ring). dw0 bits 16..23
+        //    are the Interval exponent: QEMU computes the service interval as
+        //    1 << field (microframes) and asserts it nonzero — a high-speed
+        //    bInterval of 7 (8 ms) maps to field 6. CERR is left 0 like every
+        //    other endpoint context this driver builds (QEMU ignores it).
+        if (usb_set_configuration(d, cfg_value) < 0) return -1;
+        ring_reset(&d->hid_ring);
+        memset(d->ictx, 0, sizeof(d->ictx));
+        d->ictx[ICTX_ADD] = ADD_FLAG(0) | ADD_FLAG(d->hid_intr_dci);
+        sctx[0] = SLOT_CTX_ENTRIES(d->hid_intr_dci);
+        sctx[1] = SLOT_ROOT_PORT(port);
+        uint32_t* ei = &d->ictx[EPCTX_OFF(d->hid_intr_dci) / 4];
+        int ival = (d->hid_interval > 1) ? d->hid_interval - 1 : 6;
+        ei[0] = ((uint32_t)ival & 0xFFu) << 16;
+        ei[1] = EPCTX1(EP_TYPE_INTR_IN, (uint32_t)d->hid_intr_mps);
+        ei[2] = EPCTX_DEQ(&d->hid_ring.trbs[0]);
+        ei[3] = 0;
+        if (xhci_command(&ev, TRB_CFG_EP, d->slot_id, 0,
+                         (uint32_t)(uintptr_t)d->ictx) < 0) return -1;
 
-    if (xhci_command(&ev, TRB_CFG_EP, d->slot_id, 0,
-                     (uint32_t)(uintptr_t)d->ictx) < 0) return -1;
+        // 6. Boot protocol (idempotent on QEMU, which already defaults to
+        //    it; required on real keyboards) + arm the first IN transfer.
+        if (usb_hid_set_protocol(d, 1) < 0) {
+            write_serial_string("[XHCI] HID SET_PROTOCOL failed\n");
+            return -1;
+        }
+        d->kind = kind;
+        d->hid_prev_eff = 0;
+        memset(d->hid_prev_keys, 0, sizeof(d->hid_prev_keys));
+        d->hid_first_evt = 1;
+        write_serial_string(kind == USB_KIND_HID_KBD
+                                ? "[XHCI] HID keyboard ready (slot "
+                                : "[XHCI] HID mouse ready (slot ");
+        write_serial_hex((uint32_t)d->slot_id);
+        write_serial_string(", EP");
+        write_serial_hex((uint32_t)d->hid_intr_ep);
+        write_serial_string(" IN mps ");
+        write_serial_hex((uint32_t)d->hid_intr_mps);
+        write_serial_string(")\n");
+        xhci_hid_arm(d);
+        return kind;
+    }
 
-    // 6. SCSI: the device must be ready, a direct-access block device,
-    //    and report 512-byte sectors — then it becomes a drive. A failed
-    //    command is followed by REQUEST SENSE (standard MSC recovery flow,
-    //    and it names the reason on the serial log).
-    int t;
-    for (t = 0; t < 3; t++) {
-        if (usb_scsi_test_unit_ready(d) == 0) break;
-        usb_scsi_request_sense(d);
-    }
-    if (t == 3) {
-        write_serial_string("[XHCI] TEST UNIT READY never passed\n");
-        return -1;
-    }
-    if (usb_scsi_inquiry(d) < 0) return -1;
-    if (usb_scsi_read_capacity(d) < 0) return -1;
-    if (d->sector_size != 512) {
-        write_serial_string("[XHCI] sector size != 512: ");
-        write_serial_hex((uint32_t)d->sector_size);
-        write_serial_string("\n");
-        return -1;
-    }
-    return 0;
+    write_serial_string("[XHCI] no MSC BOT / HID boot interface\n");
+    return -1;
 }
 
 // ---- controller bring-up + port scan ----
@@ -1014,11 +1365,15 @@ static int xhci_port_reset(int port) {
 }
 
 void xhci_init(void) {
-    for (int i = 0; i < USB_MAX_DRIVES; i++) {
+    for (int i = 0; i < USB_MAX_DRIVES + USB_MAX_HID; i++) {
         xhci_devs[i].in_use = 0;
         xhci_devs[i].slot_id = 0;
+        xhci_devs[i].kind = USB_KIND_NONE;
+        xhci_devs[i].hid_armed = 0;
     }
+    for (int i = 0; i < USB_MAX_DRIVES; i++) xhci_drive_slot[i] = -1;
     xhci_ndrives = 0;
+    xhci_nhid = 0;
 
     // Bring-up diagnostic: what the PCI scan actually collected.
     for (int i = 0; i < pci_device_count; i++) {
@@ -1100,12 +1455,17 @@ void xhci_init(void) {
 
         if (xhci_bringup() < 0) return;
 
-        // Port scan: reset every connected USB2/USB3 port and try to
-        // enumerate it as mass storage. Full/low-speed devices would need
-        // the two-step MPS probe (read 8 dev-desc bytes at address 0) —
-        // logged and skipped for now; QEMU's storage sits on SS/HS ports.
-        for (int port = 1; port <= xhci_max_ports && xhci_ndrives < USB_MAX_DRIVES;
-             port++) {
+        // Port scan: reset every connected USB2/USB3 port and enumerate it
+        // as mass storage or HID boot keyboard/mouse. Full/low-speed devices
+        // would need the two-step MPS probe (read 8 dev-desc bytes at address
+        // 0) — logged and skipped for now; QEMU's storage + HID sit on SS/HS
+        // ports. Storage units register as drives 8+ (their pool slot is
+        // recorded in xhci_drive_slot so a HID device on a lower-numbered
+        // port can never displace a drive); HID devices register for the
+        // main loop's xhci_hid_poll().
+        int total_devs = USB_MAX_DRIVES + USB_MAX_HID;
+        for (int port = 1; port <= xhci_max_ports &&
+             xhci_ndrives + xhci_nhid < total_devs; port++) {
             volatile uint32_t* ps = portsc(port);
             uint32_t psc = *ps;
             if (!(psc & PORTSC_CCS)) continue;
@@ -1122,22 +1482,52 @@ void xhci_init(void) {
             if (speed < 0) continue;
             if (speed != SPEED_SUPER && speed != SPEED_HIGH) continue;
 
-            usb_dev_t* d = &xhci_devs[xhci_ndrives];
-            if (usb_enumerate(d, port, speed) < 0) {
+            // Grab the first free pool slot, then enumerate into it.
+            usb_dev_t* d = 0;
+            for (int i = 0; i < total_devs; i++) {
+                if (!xhci_devs[i].in_use) { d = &xhci_devs[i]; break; }
+            }
+            if (!d) {
+                write_serial_string("[XHCI] device pool full\n");
+                break;
+            }
+            memset(d, 0, sizeof(*d));   // fresh rings/contexts/state
+            d->in_use = 0;
+            int kind = usb_enumerate(d, port, speed);
+            if (kind < 0) {
                 d->in_use = 0;
+                d->kind = USB_KIND_NONE;
                 continue;
             }
             d->in_use = 1;
-            write_serial_string("[XHCI] port ");
-            write_serial_hex((uint32_t)port);
-            write_serial_string(" USB");
-            write_serial_string(speed == SPEED_SUPER ? "3" : "2");
-            write_serial_string(" -> drive ");
-            write_serial_hex((uint32_t)(USB_DRIVE_BASE + xhci_ndrives));
-            write_serial_string(" (");
-            write_serial_hex(d->max_lba + 1);
-            write_serial_string(" blocks)\n");
-            xhci_ndrives++;
+            if (kind == USB_KIND_STORAGE) {
+                if (xhci_ndrives >= USB_MAX_DRIVES) {
+                    write_serial_string("[XHCI] too many storage drives\n");
+                    d->in_use = 0;
+                    d->kind = USB_KIND_NONE;
+                    continue;
+                }
+                int ord = xhci_ndrives++;
+                xhci_drive_slot[ord] = (int)(d - xhci_devs);
+                write_serial_string("[XHCI] port ");
+                write_serial_hex((uint32_t)port);
+                write_serial_string(" USB");
+                write_serial_string(speed == SPEED_SUPER ? "3" : "2");
+                write_serial_string(" -> drive ");
+                write_serial_hex((uint32_t)(USB_DRIVE_BASE + ord));
+                write_serial_string(" (");
+                write_serial_hex(d->max_lba + 1);
+                write_serial_string(" blocks)\n");
+            } else {
+                xhci_nhid++;
+                write_serial_string("[XHCI] port ");
+                write_serial_hex((uint32_t)port);
+                write_serial_string(" USB");
+                write_serial_string(speed == SPEED_SUPER ? "3" : "2");
+                write_serial_string(" HID ");
+                write_serial_string(kind == USB_KIND_HID_KBD
+                                        ? "keyboard\n" : "mouse\n");
+            }
         }
         xhci_evt_trace = 0;   // data path starts now — no per-event trace
         write_serial_string(xhci_ndrives ? "[XHCI] ready\n"
@@ -1149,16 +1539,40 @@ void xhci_init(void) {
 
 int usb_present(void) { return xhci_ndrives > 0; }
 
-// ---- public sector API (drive = USB_DRIVE_BASE + device index) ----
+// Public HID drain (xhci.h): translate + re-arm every pending HID report.
+// Called once per kernel main-loop / login-gate iteration — the fast-out is
+// one pointer compare + one counter read, so the PS/2-only boot is
+// unaffected. Runs under xhci_lock with IRQs off, the same single-writer
+// discipline as the sector API; a report that lands while a storage transfer
+// holds the lock is dispatched inline by event_wait's discard path (see
+// xhci_hid_dispatch), so nothing is lost either way.
+void xhci_hid_poll(void) {
+    if (!xhci_base || xhci_nhid == 0) return;
+    uint32_t ef = spin_lock_irqsave(&xhci_lock);
+    xhci_evt_t ev;
+    while (event_consume(&ev)) {
+        if (!xhci_hid_dispatch(&ev)) {
+            // A non-HID event with no storage op in flight — stale port
+            // change or a wedged transfer. Consumed and dropped; a real
+            // problem surfaces as its own timeout/error log downstream.
+        }
+    }
+    spin_unlock_irqrestore(&xhci_lock, ef);
+}
+
+// ---- public sector API (drive = USB_DRIVE_BASE + storage ordinal) ----
 // Mirrors the AHCI sector API: batch clamp via ata_batch_limit, transfer
 // through the 64K-aligned bounce buffer, everything under xhci_lock with
 // IRQs off (the completion polls the event ring; an IRQ-context caller
-// would deadlock on the held spinlock, and nothing does that).
+// would deadlock on the held spinlock, and nothing does that). The ordinal
+// maps to a pool slot through xhci_drive_slot — HID devices discovered on
+// lower-numbered ports live in later slots and never displace a drive.
 
 int usb_read_sectors(int drive, uint32_t lba, int count, uint8_t* buf) {
-    int idx = drive - USB_DRIVE_BASE;
-    if (!xhci_base || idx < 0 || idx >= USB_MAX_DRIVES) return -1;
-    usb_dev_t* d = &xhci_devs[idx];
+    int ord = drive - USB_DRIVE_BASE;
+    if (!xhci_base || ord < 0 || ord >= USB_MAX_DRIVES ||
+        ord >= xhci_ndrives || xhci_drive_slot[ord] < 0) return -1;
+    usb_dev_t* d = &xhci_devs[xhci_drive_slot[ord]];
     if (!d->in_use || count < 1) return -1;
     if (count > 0 && lba + (uint32_t)count - 1 > d->max_lba) return -1;
 
@@ -1180,9 +1594,10 @@ int usb_read_sectors(int drive, uint32_t lba, int count, uint8_t* buf) {
 }
 
 int usb_write_sectors(int drive, uint32_t lba, int count, const uint8_t* buf) {
-    int idx = drive - USB_DRIVE_BASE;
-    if (!xhci_base || idx < 0 || idx >= USB_MAX_DRIVES) return -1;
-    usb_dev_t* d = &xhci_devs[idx];
+    int ord = drive - USB_DRIVE_BASE;
+    if (!xhci_base || ord < 0 || ord >= USB_MAX_DRIVES ||
+        ord >= xhci_ndrives || xhci_drive_slot[ord] < 0) return -1;
+    usb_dev_t* d = &xhci_devs[xhci_drive_slot[ord]];
     if (!d->in_use || count < 1) return -1;
     if (count > 0 && lba + (uint32_t)count - 1 > d->max_lba) return -1;
 

@@ -11,11 +11,24 @@ end, using the runtime mount table:
      + "port ... -> drive 8" + "[XHCI] ready")
   2. the stick really is USB 3.0               ("USB3 -> drive 0x00000008")
   3. `mount /usb fat32 8` mounts it            ("[MOUNT] mounted /usb") —
-     reading the FAT32 BPB through xHCI/BOT/SCSI is the read-path proof
-  4. `cp /usb/HELLO.TXT /usb/COPY.TXT` — data read + dirent/data write
+     reading the FAT32 BPB through xHCI/BOT/SCSI is the read-path proof        4. `cp /usb/HELLO.TXT /usb/COPY.TXT` — data read + dirent/data write
   5. the HOST reads COPY.TXT back with mtools and byte-compares it — the
      write-path proof (data actually landed on the USB disk)
   6. the OS stayed alive afterwards
+
+v38.60: the same boot also attaches a QEMU usb-kbd and usb-mouse behind the
+xHCI controller, and asserts the HID class driver end to end:
+  7. both enumerate as boot HID        ("[XHCI] HID keyboard/mouse ready")
+  8. the USB KEYBOARD really drives input — QEMU routes sendkey to the first
+     ACTIVE keyboard (the usb-kbd, activated when its transfer is armed), so
+     the login/terminal typing below exercises the whole path, and the
+     one-shot "[HID] kbd first report" marker proves a translated report was
+     delivered (PS/2 never logs it)
+  9. the USB MOUSE delivers a report too ("[HID] mouse first report" appears
+     once the pointer moves; PS/2 never logs it)
+
+If 8 or 9 fail while login itself succeeds, QEMU routed input to the PS/2
+side (fallback still works) and the USB markers are simply absent.
 
 Usage:
     python3 scripts/usb_test.py [--timeout 240]
@@ -160,11 +173,15 @@ def main():
         # IDE fleet (drives 0-3) + one USB3 stick behind qemu-xhci (drive 8):
         # bus=xhci0.0 is the SuperSpeed bus, so the device enumerates at
         # speed 5000 (PORTSC speed = 4) — a genuine USB 3.0 round trip.
+        # v38.60: usb-kbd + usb-mouse (usb_version=2 = high-speed, ports 5/6)
+        # exercise the HID class driver on the same controller.
         "-drive", f"file={args.disk},format=raw,index=0,media=disk",
         "-drive", f"file={args.ext2},format=raw,index=1,media=disk",
         "-device", "qemu-xhci,id=xhci0",
         "-drive", f"file={args.usb},format=raw,if=none,id=usbd0",
         "-device", "usb-storage,drive=usbd0,bus=xhci0.0",
+        "-device", "usb-kbd,bus=xhci0.0",
+        "-device", "usb-mouse,bus=xhci0.0",
         "-monitor", f"unix:{MON_SOCK},server,nowait",
     ]
     qemu = subprocess.Popen(qemu_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -185,9 +202,28 @@ def main():
             return 1
         print("[OK] xHCI controller + USB 3.0 stick as drive 8")
 
+        # v38.60: both HID devices must have enumerated during bring-up.
+        if not wait_for_in_file(SERIAL_LOG, "[XHCI] HID keyboard ready", 15):
+            print("[FAIL] USB keyboard did not enumerate as HID boot kbd")
+            return 1
+        if not wait_for_in_file(SERIAL_LOG, "[XHCI] HID mouse ready", 15):
+            print("[FAIL] USB mouse did not enumerate as HID boot mouse")
+            return 1
+        print("[OK] USB keyboard + mouse behind xHCI (HID boot protocol)")
+
         for k in LOGIN_KEYS:
             mon_cmd("sendkey " + k)
             time.sleep(0.15)
+
+        # The login keystrokes must have come THROUGH the USB keyboard:
+        # QEMU routes sendkey to the first active keyboard handler, which is
+        # the usb-kbd once its report transfer is armed. "[HID] kbd first
+        # report" is only ever logged by the xHCI HID path.
+        if not wait_for_in_file(SERIAL_LOG, "[HID] kbd first report", 30):
+            print("[FAIL] USB keyboard never delivered a report "
+                  "(sendkey routed to PS/2?)")
+            return 1
+        print("[OK] login typed through the USB HID keyboard")
 
         if not wait_for_in_file(SERIAL_LOG, "BOOTED KERNEL LOOP", 90):
             print("[FAIL] login did not complete")
@@ -203,6 +239,17 @@ def main():
             print("[FAIL] terminal never became ready")
             return 1
         time.sleep(1.0)
+
+        # v38.60: launch_terminal above drove the mouse to the icon, so any
+        # working pointer path should have produced a report by now. QEMU
+        # activates the usb-mouse on its first interrupt-IN poll (moving it
+        # ahead of the PS/2 handler), so the marker proves the reports came
+        # through xHCI — it is only ever logged by the HID driver.
+        if not wait_for_in_file(SERIAL_LOG, "[HID] mouse first report", 30):
+            print("[FAIL] USB mouse never delivered a report "
+                  "(mouse_move routed to PS/2?)")
+            return 1
+        print("[OK] USB HID mouse reports translated into cursor motion")
 
         mon_cmd("mouse_move 300 176")
         time.sleep(0.1)

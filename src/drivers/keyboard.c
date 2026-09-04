@@ -69,6 +69,11 @@ static void keyboard_feed_byte(uint8_t scancode) {
     spin_unlock(&kbd_lock);
 }
 
+// Public scancode feed for non-PS/2 keyboards (see keyboard.h).
+void kbd_feed_scancode(uint8_t sc) {
+    keyboard_feed_byte(sc);
+}
+
 // Drain the 8042 output buffer, routing every byte to the device it came from.
 //
 // The controller has ONE output buffer shared by the keyboard and the mouse.
