@@ -916,6 +916,12 @@ static void syscall_handler(registers_t* regs) {
                 }
             }
             regs->eax = (uint32_t)vmm_unmap_page(pd, vaddr);
+            // v38.66: sibling threads share this page_dir — a peer core's TLB
+            // may still map the just-freed page, and the frame is already
+            // released back to the allocator above. Flush peers so no stale
+            // mapping can ever touch the recycled frame.
+            extern void vmm_tlb_shootdown(uint32_t page_dir);
+            vmm_tlb_shootdown(pd);
             break;
         }
 

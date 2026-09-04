@@ -1710,6 +1710,24 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         return -1;
     }
 
+    // v38.66 TLB-shootdown need: the COW clone below marks the parent's user
+    // pages read-only. If a SIBLING thread of this process is running on
+    // another core right now, its TLB can hold a stale WRITABLE entry for a
+    // page we are about to COW-mark, letting it bypass the copy-on-write
+    // fault until its next tick reloads CR3. Remember whether any peer core
+    // runs a task with the parent's page_dir; the flush itself runs AFTER
+    // task_lock is dropped (it must not wait on peer acks while holding a
+    // lock those peers may be spinning on).
+    int need_tlb_flush = 0;
+    for (int c = 0; c < MAX_CPUS; c++) {
+        if (c == cid) continue;
+        if (current_task[c] > 0 && current_task[c] < MAX_TASKS &&
+            tasks[current_task[c]].page_dir == tasks[parent].page_dir) {
+            need_tlb_flush = 1;
+            break;
+        }
+    }
+
     // COW clone of the parent's address space. User writable pages are marked
     // read-only + PAGE_COW in BOTH directories, so writes fault and duplicate.
     uint32_t new_pd = vmm_clone_address_space(tasks[parent].page_dir);
@@ -1867,6 +1885,16 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
 
         spin_unlock(&task_lock);
         __asm__ volatile("sti");
+
+        // v38.66: if a sibling thread of the parent was running on another
+        // core during the clone (need_tlb_flush, checked under task_lock
+        // above), flush the parent address space there NOW — its TLB may
+        // still serve the pages clone just COW-marked as writable. Lock-free
+        // and IF=1 here, which vmm_tlb_shootdown requires.
+        if (need_tlb_flush) {
+            extern void vmm_tlb_shootdown(uint32_t page_dir);
+            vmm_tlb_shootdown(tasks[parent].page_dir);
+        }
 
         // Single locked buffer write: the COW #PF handler on another core
         // falls back to raw writes when serial_lock is busy, which interleaves
@@ -3090,10 +3118,11 @@ static void mmap_copy_page_from_owner(int tid, mmap_region_t* r, uint32_t page, 
 // a page's dirty bit the page MUST be RO again or the next write would slip
 // through without re-arming it (a silent data-loss window until the next
 // flush). In the self context (msync/fsync of the caller's own mapping) the
-// invlpg flushes our own TLB. In a cross-task flush the owner is not running
-// and its next context switch reloads CR3 — this OS has no TLB-shootdown IPI
-// (vmm.c v38.55 note), so the stale RW TLB entry cannot outlive the owner's
-// current run slice either way.
+// invlpg flushes our own TLB. In a cross-task flush the caller holds
+// task_lock with IF=0 and flushes only regions whose owner is not running
+// elsewhere (v38.61), so a peer cannot be executing this mapping — and a
+// task's CR3 is reloaded every tick anyway, so no stale RW entry outlives a
+// run slice (the v38.55 TLB-shootdown gap was closed by v38.66).
 static void mmap_page_make_ro(int tid, mmap_region_t* r, uint32_t page) {
     if (tasks[tid].page_dir == 0) return;   // kernel identity space: no user walk
     uint32_t va = r->base + page * 4096;
@@ -3419,6 +3448,13 @@ uint32_t task_munmap(uint32_t addr) {
                 __asm__ __volatile__("invlpg (%0)" : : "r"(va));
             }
         }
+
+        // v38.66: sibling threads of this process share page_dir — a peer
+        // core running one may still serve the just-unmapped VAs from its TLB,
+        // and the frames are now free for reuse. Flush this space on every
+        // peer so no stale mapping can touch a recycled frame.
+        extern void vmm_tlb_shootdown(uint32_t page_dir);
+        vmm_tlb_shootdown(page_dir);
 
         memset(r, 0, sizeof(*r));
         write_serial_string("[MMAP] unmapped ");

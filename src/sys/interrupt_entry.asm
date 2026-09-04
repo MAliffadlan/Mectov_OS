@@ -319,6 +319,32 @@ irq_wd_hang:
     jmp irq_common_stub
 
 ; ============================================================
+; TLB shootdown IPI (v38.66): directed fixed IPI on vector 0x61. A core that
+; mutated another address space's page tables (COW-mark in clone, unmap,
+; munmap) sends this to every peer; each peer's C handler reloads its CR3 if
+; it is currently running the target page directory (full TLB flush), then
+; acks. Same irq layout as the watchdog stub: irq_common_stub -> irq_handler
+; sends EOI before dispatch and int_no != 32 means no scheduler switch.
+; ============================================================
+global irq_tlb_sd
+irq_tlb_sd:
+    push byte 0           ; dummy err_code
+    push byte 97          ; int_no = 0x61
+    jmp irq_common_stub
+
+; ============================================================
+; TLB self-test park IPI (v38.66): booted with `tlb_self_test`, the BSP sends
+; this to one AP. The AP's C handler parks with IF=1 (so the 0x61 shootdown
+; IPI can nest in while it waits) while the BSP fires shootdowns at it and
+; asserts the per-core receive/reload counters afterwards.
+; ============================================================
+global irq_tlb_test
+irq_tlb_test:
+    push byte 0           ; dummy err_code
+    push byte 98          ; int_no = 0x62
+    jmp irq_common_stub
+
+; ============================================================
 ; Syscall entry: int 0x80
 ; ============================================================
 ; Separate path — no scheduler, no EOI. Just dispatch and return.

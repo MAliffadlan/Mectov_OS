@@ -3,6 +3,9 @@
 #include "../include/utils.h"
 #include "../include/serial.h"
 #include "../include/spinlock.h"
+#include "../include/acpi.h"   // smp_cpu_count / smp_lapic_ids (TLB shootdown)
+#include "../include/apic.h"   // apic_get_id / apic_send_fixed_ipi / smp_lapic_addr
+#include "../include/panic.h"  // panic_finish (tlb_self_test exit)
 
 static spinlock_t vmm_lock = SPINLOCK_INIT;
 
@@ -560,16 +563,16 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
     if (active_cr3 == src_page_dir) {
         __asm__ __volatile__("mov %0, %%cr3" : : "r"(src_page_dir));
     }
-    // NOTE (v38.55): there is no TLB-shootdown IPI yet. A sibling thread
-    // running this address space on another core can keep WRITABLE TLB
-    // entries for pages we just COW-marked here. The exposure is bounded:
-    // schedule() reloads CR3 UNCONDITIONALLY on every context switch, so the
-    // stale writable mapping dies at that core's next preemption (<= 1-2
-    // timer ticks at 1kHz). Within that window a peer write bypasses COW and
-    // skews refcounts; combined with the atomic fault handler above the
-    // worst case is one divergent page, never a crash or double-free. A real
-    // shootdown IPI (vector + per-CPU CR3-reload handler + ack protocol)
-    // remains follow-up work for when threads share hot written pages.
+    // NOTE (v38.55, closed v38.66): the COW-marking above can race a SIBLING
+    // thread running this address space on another core — its TLB may keep a
+    // stale WRITABLE entry for a page we just marked read-only, letting it
+    // bypass the COW fault until its next CR3 reload. schedule() reloads CR3
+    // every timer tick, so that exposure never exceeds ~1 tick; v38.66's TLB
+    // shootdown closes it immediately. The flush cannot run here: fork_common
+    // calls this function while holding task_lock with IF=0, and the shootdown
+    // waits on peer acks (a peer spinning IF=0 on task_lock could not answer).
+    // fork_common therefore detects the sibling-on-peer-core case under
+    // task_lock and fires vmm_tlb_shootdown() right after it drops the lock.
 
     write_serial_string("[VMM] Cloned COW address space successfully\n");
     return dst_pdpt_paddr;
@@ -579,4 +582,268 @@ void vmm_switch_page_dir(uint32_t page_dir) {
     if (page_dir != 0) {
         __asm__ __volatile__("mov %0, %%cr3" : : "r"(page_dir));
     }
+}
+
+// ============================================================
+// TLB shootdown IPI (v38.66)
+// ============================================================
+// The gap this closes (documented at v38.55 in vmm_clone_address_space):
+// when one core mutates an address space that a SIBLING thread runs on
+// another core (COW-marking at fork, unmap/munmap of shared page tables),
+// the peer's TLB can keep serving the OLD mapping until its next CR3 reload.
+// schedule() reloads CR3 on every timer tick (<= 1 ms), so the stale window
+// is bounded; the shootdown makes the flush immediate at the mutation.
+//
+// Protocol (all state is plain volatile — senders are serialized by
+// tlb_sd_lock, so exactly one shootdown is in flight system-wide):
+//   1. Sender bumps tlb_sd_gen, records tlb_sd_target_pd, then sends a
+//      directed fixed IPI on TLB_SD_VECTOR to every OTHER real core.
+//   2. Each peer's handler (irq_common_stub -> irq_handler, so EOI is sent
+//      before dispatch) records tlb_sd_seen[cid] = gen and — only if it is
+//      CURRENTLY RUNNING the target page_dir — reloads its own CR3 (a full
+//      TLB flush; under PAE without PCID, entries for any non-current CR3
+//      cannot exist, so the conditional is exact, not a heuristic).
+//   3. Sender waits until every target's seen >= gen (bounded).
+//
+// Locking: the sender runs cli + tlb_sd_lock for the whole send+wait, the
+// same cli-first discipline as frame_alloc/vmm_lock. This is deadlock-free
+// because (a) only one shootdown can be in flight (single lock, and nobody
+// ever waits on tlb_sd_lock while holding another lock — it is taken and
+// released entirely inside this function), and (b) a peer blocked IF=0 on
+// some OTHER lock finishes that section without needing tlb_sd_lock, then
+// takes the pending IPI. The ack wait is bounded; if it ever trips (a peer
+// genuinely hung IF=0 — which the watchdog would also catch), the sender
+// logs and proceeds, degrading to the pre-shootdown flush-at-next-reload
+// behavior instead of hanging.
+#define TLB_MAX_CORES 16
+static spinlock_t tlb_sd_lock = SPINLOCK_INIT;
+static volatile uint32_t tlb_sd_gen = 0;              // bumped per shootdown
+static volatile uint32_t tlb_sd_target_pd = 0;        // page_dir being flushed
+static volatile uint32_t tlb_sd_seen[TLB_MAX_CORES];  // per-core highest gen acked
+
+#define TLB_ACK_MAX_SPINS 20000000
+
+// CI self-test recorders (boot arg `tlb_self_test`, section below): declared
+// before the shootdown handler because it counts into them in test mode. All
+// plain volatile stores — the handler runs in IRQ context and the BSP reads
+// them only after the ack protocol proves the handler already ran.
+static int tlb_test_mode = 0;
+static volatile uint32_t tlb_test_recv[TLB_MAX_CORES];     // IPIs handled
+static volatile uint32_t tlb_test_reload[TLB_MAX_CORES];   // CR3 reloads done
+
+// Runs on every core (shared IDT + handler table). EOI already sent by
+// irq_handler. Reads the current shootdown request and acks it; reloads CR3
+// only when this core is running the target page directory (or the target is
+// the shared identity space, page_dir == 0).
+void vmm_tlb_sd_handler(registers_t* r) {
+    (void)r;
+    uint32_t cid = apic_get_id() & 15;
+    if (cid >= TLB_MAX_CORES) cid = 0;
+
+    uint32_t gen = tlb_sd_gen;
+    if (tlb_sd_seen[cid] < gen) {
+        tlb_sd_seen[cid] = gen;   // ack first: even a non-matching core answers
+        uint32_t cr3;
+        __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3));
+        uint32_t want = tlb_sd_target_pd;
+        if (want == 0 || (cr3 & 0xFFFFF000) == (want & 0xFFFFF000)) {
+            // Full flush: reloading CR3 with the same value invalidates every
+            // non-global TLB entry (no PCID on this target).
+            __asm__ __volatile__("mov %0, %%cr3" : : "r"(cr3));
+            if (tlb_test_mode && cid < TLB_MAX_CORES) tlb_test_reload[cid]++;
+        }
+    }
+    if (tlb_test_mode && cid < TLB_MAX_CORES) tlb_test_recv[cid]++;
+}
+
+// Wait for every target core to ack `gen`. Returns 0 when all acked, 1 on
+// bound trip (caller proceeds degraded).
+static int tlb_wait_acks(int ntargets, const uint8_t* targets, uint32_t gen) {
+    uint32_t spins = 0;
+    for (;;) {
+        int all = 1;
+        for (int t = 0; t < ntargets; t++) {
+            uint32_t cid = targets[t] & 15;
+            if (cid >= TLB_MAX_CORES) cid = 0;
+            if (tlb_sd_seen[cid] < gen) { all = 0; break; }
+        }
+        if (all) return 0;
+        if (++spins >= TLB_ACK_MAX_SPINS) return 1;
+        __asm__ __volatile__("pause");
+    }
+}
+
+void vmm_tlb_shootdown(uint32_t page_dir) {
+    extern uint32_t smp_lapic_addr;
+    if (smp_lapic_addr == 0 || smp_cpu_count <= 1) return;   // UP: no peers
+
+    uint32_t self = apic_get_id() & 15;
+    uint8_t targets[TLB_MAX_CORES];
+    int ntargets = 0;
+
+    uint32_t n = smp_cpu_count;
+    if (n > TLB_MAX_CORES) n = TLB_MAX_CORES;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t cid = smp_lapic_ids[i] & 15;
+        if (cid == self) continue;
+        if (ntargets < TLB_MAX_CORES) targets[ntargets++] = (uint8_t)smp_lapic_ids[i];
+    }
+    if (ntargets == 0) return;
+
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&tlb_sd_lock);
+
+    uint32_t gen = ++tlb_sd_gen;
+    tlb_sd_target_pd = page_dir;
+    for (int t = 0; t < ntargets; t++) {
+        apic_send_fixed_ipi(targets[t], TLB_SD_VECTOR);
+    }
+
+    if (tlb_wait_acks(ntargets, targets, gen) != 0) {
+        write_serial_string("[VMM] TLB shootdown: ack timeout on ");
+        write_serial_hex(page_dir);
+        write_serial_string(" - continuing degraded (flush at next CR3 reload)\n");
+    }
+
+    spin_unlock(&tlb_sd_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+}
+
+// ============================================================
+// CI self-test (`tlb_self_test` boot arg, v38.66)
+// ============================================================
+// Verifies the shootdown machinery deterministically (counter-based, immune
+// to TCG timing): the BSP parks the first AP inside the TLB_TEST_VECTOR
+// handler with IF=1, then fires two shootdowns at it:
+//   MATCH     vmm_tlb_shootdown(boot_cr3)   — the AP IS running that space,
+//             so its handler must reload CR3 (recv+1 AND reload+1).
+//   NO-MATCH  vmm_tlb_shootdown(scratch pd) — no core runs it, so the
+//             handler must ack but skip the reload (recv+1, reload +0).
+// The ack protocol is proven by vmm_tlb_shootdown itself returning only
+// after every target acked (a lost IPI would trip the bound and log).
+static volatile int tlb_test_parked = 0;   // AP inside the park handler
+static volatile int tlb_test_exit = 0;     // BSP asks the AP to leave
+static volatile int tlb_test_exited = 0;
+
+static int tlb_has_word(const char* cmd, const char* word) {
+    if (!cmd || !word) return 0;
+    int wlen = 0;
+    while (word[wlen]) wlen++;
+    const char* p = cmd;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        int i = 0;
+        while (p[i] && p[i] != ' ' && word[i] && p[i] == word[i]) i++;
+        if (!word[i] && (p[i] == ' ' || p[i] == '\0')) return 1;
+        while (*p && *p != ' ') p++;
+    }
+    return 0;
+}
+
+void vmm_parse_cmdline(const char* cmd) {
+    if (tlb_has_word(cmd, "tlb_self_test")) tlb_test_mode = 1;
+}
+
+// AP side: parks with IF=1 so the 0x61 shootdown IPI can nest in while the
+// BSP runs its assertions, then leaves when asked.
+void vmm_tlb_test_handler(registers_t* r) {
+    (void)r;
+    if (!tlb_test_mode) return;
+    __asm__ __volatile__("sti");
+    tlb_test_parked = 1;
+    while (!tlb_test_exit) {
+        __asm__ __volatile__("pause");
+    }
+    tlb_test_exited = 1;
+}
+
+static void tlb_test_wait_volatile(volatile int* flag, int want) {
+    uint32_t spins = 0;
+    while (*flag != want) {
+        if (++spins >= TLB_ACK_MAX_SPINS) return;  // bound: fail open, report below
+        __asm__ __volatile__("pause");
+    }
+}
+
+void vmm_self_test_tick(void) {
+    if (!tlb_test_mode) return;
+
+    extern uint32_t smp_lapic_addr;
+    if (smp_lapic_addr == 0 || smp_cpu_count <= 1) {
+        write_serial_string("[TLB_SD] self-test skipped (SMP off)\n");
+        return;
+    }
+
+    // Target: the first APIC id that is not the BSP (watchdog convention).
+    uint32_t bsp = apic_get_id() & 15;
+    uint8_t target = 0xFF;
+    uint32_t n = smp_cpu_count;
+    if (n > TLB_MAX_CORES) n = TLB_MAX_CORES;
+    for (uint32_t i = 0; i < n; i++) {
+        if ((smp_lapic_ids[i] & 15) != bsp) { target = smp_lapic_ids[i]; break; }
+    }
+    if (target == 0xFF) {
+        write_serial_string("[TLB_SD] self-test skipped (no AP found)\n");
+        return;
+    }
+    uint32_t apcid = target & 15;
+
+    char buf[160];
+    char* p = buf;
+    const char* s;
+    for (s = "[TLB_SD] SELF TEST on CPU "; *s; s++) *p++ = *s;
+    *p++ = (char)('0' + apcid);
+    for (s = " via vector "; *s; s++) *p++ = *s;
+    *p++ = '0'; *p++ = 'x';
+    for (int i = 28; i >= 0; i -= 4) {
+        int nib = (TLB_TEST_VECTOR >> i) & 0xF;
+        *p++ = (char)(nib < 10 ? '0' + nib : 'A' + (nib - 10));
+    }
+    for (s = "\n"; *s; s++) *p++ = *s;
+    *p = '\0';
+    write_serial_string(buf);
+
+    // Park the AP. From here the AP is inside vmm_tlb_test_handler with IF=1
+    // (its idle CR3 active), so the 0x61 shootdown IPI can nest in.
+    apic_send_fixed_ipi(target, TLB_TEST_VECTOR);
+    tlb_test_wait_volatile(&tlb_test_parked, 1);
+
+    // MATCH: the AP currently runs the boot identity space, so its handler
+    // must both ack AND reload CR3.
+    extern uint32_t tasks_get_boot_cr3(void);
+    vmm_tlb_shootdown(tasks_get_boot_cr3());
+
+    // NO-MATCH: a scratch page_dir nobody runs — handler acks, skips reload.
+    vmm_tlb_shootdown(0x0BADF000u);
+
+    // Release the AP.
+    tlb_test_exit = 1;
+    tlb_test_wait_volatile(&tlb_test_exited, 1);
+
+    tlb_test_mode = 0;   // one shot: stop recording before we read the counters
+    uint32_t recv = (apcid < TLB_MAX_CORES) ? tlb_test_recv[apcid] : 0;
+    uint32_t reload = (apcid < TLB_MAX_CORES) ? tlb_test_reload[apcid] : 0;
+    int ok = (tlb_test_exited == 1) && (recv >= 2) && (reload >= 1) &&
+             (recv - reload <= 1);   // exactly one non-matching shootdown skipped
+
+    p = buf;
+    for (s = ok ? "[TLB_SD] SELF TEST PASS - recv=" : "[TLB_SD] SELF TEST FAIL - recv="; *s; s++) *p++ = *s;
+    {
+        char t[12]; int ti = 0; uint32_t v = recv;
+        if (v == 0) { *p++ = '0'; } else { while (v > 0) { t[ti++] = (char)('0' + v % 10); v /= 10; } while (ti > 0) *p++ = t[--ti]; }
+    }
+    for (s = " reload="; *s; s++) *p++ = *s;
+    {
+        char t[12]; int ti = 0; uint32_t v = reload;
+        if (v == 0) { *p++ = '0'; } else { while (v > 0) { t[ti++] = (char)('0' + v % 10); v /= 10; } while (ti > 0) *p++ = t[--ti]; }
+    }
+    for (s = " (conditional flush verified)\n"; *s; s++) *p++ = *s;
+    *p = '\0';
+    write_serial_string(buf);
+
+    // Exit cleanly for CI (panic=reboot + QEMU -no-reboot).
+    extern void panic_finish(void);
+    panic_finish();
 }

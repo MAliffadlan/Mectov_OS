@@ -256,6 +256,14 @@ jobs:
         if: always()
         run: |
           python3 scripts/watchdog_test.py --timeout 240
+      - name: TLB shootdown IPI self-test (TCG)
+        if: always()
+        run: |
+          # Boots with `tlb_self_test panic=reboot` and -no-reboot: the BSP
+          # parks one AP, fires two shootdowns (matching page_dir → the AP's
+          # handler reloads CR3; non-matching → handler acks but skips the
+          # reload), then resets so QEMU exits cleanly.
+          python3 scripts/tlb_sd_test.py --timeout 240
       - name: Multi-core panic dump + panic=reboot self-test (TCG)
         run: |
           # Boots with `panic_self_test panic=reboot` and -no-reboot: the

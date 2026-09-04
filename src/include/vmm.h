@@ -2,6 +2,7 @@
 #define VMM_H
 
 #include "types.h"
+#include "idt.h"   // registers_t (TLB shootdown handlers)
 
 // Virtual Memory Manager
 // Added on top of existing paging — does NOT break identity mapping.
@@ -73,5 +74,40 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir);
 
 // Switch active page directory (load CR3)
 void vmm_switch_page_dir(uint32_t page_dir);
+
+// ---- TLB shootdown IPI (v38.66) ----
+//
+// When a page-table mutation on one core changes what OTHER cores may still
+// hold in their TLBs (COW-marking during clone, vmm_unmap_page, munmap), the
+// mutating core broadcasts a directed fixed IPI on TLB_SD_VECTOR. Each peer's
+// handler reloads its CR3 — a full TLB flush — but only if it is currently
+// RUNNING the target page directory: under PAE without PCID, every `mov cr3`
+// invalidates all non-global entries, so entries for a non-current CR3 cannot
+// exist. schedule() also reloads CR3 every timer tick, so the exposure this
+// closes is the sub-tick window between the mutation and the peer's next
+// preemption.
+#define TLB_SD_VECTOR   0x61
+#define TLB_TEST_VECTOR 0x62
+
+// Flush `page_dir`'s TLB entries on every other core that currently runs it
+// (page_dir == 0 flushes every core — the shared identity space). Callers
+// may be in any IF state (this disables interrupts while it waits for peer
+// acks) but must NOT hold a lock a peer could be spinning on: a peer that is
+// IF=0 inside such a lock cannot take the IPI until it exits. The ack wait
+// is bounded, so a pathological peer degrades this to the pre-shootdown
+// behavior (flush at the peer's next CR3 reload) instead of deadlocking.
+void vmm_tlb_shootdown(uint32_t page_dir);
+
+// CI self-test (boot arg `tlb_self_test`): parks the first AP and verifies
+// the shootdown handler's receive + conditional-reload + ack protocol with
+// two shootdowns (matching page_dir -> reload happens; non-matching -> the
+// handler runs but skips the reload).
+void vmm_parse_cmdline(const char* cmd);
+void vmm_self_test_tick(void);
+
+// IPI handlers, registered on every core through the shared IDT/handler
+// table (vmm.c implements both).
+void vmm_tlb_sd_handler(registers_t* r);
+void vmm_tlb_test_handler(registers_t* r);
 
 #endif

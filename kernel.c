@@ -112,13 +112,16 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     // Parse the GRUB command line BEFORE paging is enabled: cmdline sits in
     // low physical memory (still identity-mapped at this point). Enables
     // `panic=reboot` (CI: QEMU exits instead of hanging on a kernel panic),
-    // `panic_self_test` (deliberate panic once the desktop is up) and
-    // `wd_self_test` (deliberate AP hard-lockup for the watchdog, v38.64).
+    // `panic_self_test` (deliberate panic once the desktop is up),
+    // `wd_self_test` (deliberate AP hard-lockup for the watchdog, v38.64) and
+    // `tlb_self_test` (TLB-shootdown machinery check, v38.66).
     extern void panic_parse_cmdline(const char* cmd);
     extern void watchdog_parse_cmdline(const char* cmd);
+    extern void vmm_parse_cmdline(const char* cmd);
     if (magic == 0x2BADB002 && mbi != NULL && (mbi->flags & 4) && mbi->cmdline) {
         panic_parse_cmdline((const char*)mbi->cmdline);
         watchdog_parse_cmdline((const char*)mbi->cmdline);
+        vmm_parse_cmdline((const char*)mbi->cmdline);
     }
 
     write_serial_string("1\n");
@@ -294,6 +297,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     // cleanly instead of hanging until the workflow timeout.
     extern void watchdog_self_test_tick(void);
     watchdog_self_test_tick();
+
+    // v38.66 TLB-shootdown self-test: booted with `tlb_self_test`, park the
+    // first AP and verify the shootdown IPI handler's conditional CR3 reload
+    // + ack protocol (matching page_dir reloads, non-matching skips), then
+    // panic_finish() to exit CI cleanly. All APs are up at this point.
+    extern void vmm_self_test_tick(void);
+    vmm_self_test_tick();
 
     write_serial_string("[K] mouse\n");
     init_mouse();

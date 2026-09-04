@@ -5,6 +5,7 @@
 #include "../include/serial.h"
 #include "../include/panic.h"
 #include "../include/watchdog.h"
+#include "../include/vmm.h"  // TLB_SD_VECTOR / TLB_TEST_VECTOR (v38.66)
 
 idt_entry_t idt[256];
 idt_ptr_t   idt_ptr;
@@ -42,6 +43,8 @@ extern void irq12();
 extern void irq14();
 extern void irq15();
 extern void irq_wd_hang();
+extern void irq_tlb_sd();
+extern void irq_tlb_test();
 extern void idt_flush(uint32_t);
 
 // Per-CPU exception stacks (interrupt_entry.asm): one 4KB stack per CPU so
@@ -219,6 +222,15 @@ void idt_init() {
     // watchdog then finds it via the NMI dump.
     idt_set_gate(0x60, (uint32_t)irq_wd_hang, 0x08, 0x8E);
 
+    // TLB shootdown IPI (v38.66): directed fixed IPI on 0x61 — the sender's
+    // vmm_tlb_shootdown() waits on per-core acks, the handler (vmm.c) reloads
+    // CR3 when it runs the target page directory. DPL=0: only the kernel
+    // sends it.
+    idt_set_gate(0x61, (uint32_t)irq_tlb_sd, 0x08, 0x8E);
+    // TLB self-test park IPI (v38.66): parks one AP with IF=1 so the
+    // tlb_self_test can verify the shootdown handler + ack protocol.
+    idt_set_gate(0x62, (uint32_t)irq_tlb_test, 0x08, 0x8E);
+
     idt_flush((uint32_t)&idt_ptr);
 
     // Register Overflow handler (Exception 4) — just ignore and return
@@ -240,6 +252,13 @@ void idt_init() {
     // drops into a cli spin. Registered through the shared handler table, so
     // every core (APs reload the same IDT) can be the target.
     register_interrupt_handler(WD_HANG_VECTOR, wd_hang_ipi_handler);
+
+    // TLB shootdown + self-test park (v38.66): handlers live in vmm.c.
+    // Registered through the shared table so every core answers.
+    extern void vmm_tlb_sd_handler(registers_t* r);
+    extern void vmm_tlb_test_handler(registers_t* r);
+    register_interrupt_handler(TLB_SD_VECTOR, vmm_tlb_sd_handler);
+    register_interrupt_handler(TLB_TEST_VECTOR, vmm_tlb_test_handler);
 }
 
 void register_interrupt_handler(uint8_t n, isr_t handler) {

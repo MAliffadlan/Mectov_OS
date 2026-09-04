@@ -72,6 +72,7 @@ SUITES = [
     ("lseekfile",        "lseekfile_test.py",         240),
     ("panic",            "panic_test.py",             240),
     ("watchdog",         "watchdog_test.py",          240),
+    ("tlb_sd",           "tlb_sd_test.py",            240),
     ("perm",             "perm_test.py",              360),
     ("thread",           "thread_test.py",            360),
     ("cond",             "cond_test.py",              300),
