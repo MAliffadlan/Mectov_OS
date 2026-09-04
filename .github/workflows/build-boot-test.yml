@@ -236,6 +236,14 @@ jobs:
         run: |
           python3 scripts/mmapfile_test.py --timeout 240
 
+      - name: fsync/sync + periodic write-back regression (TCG)
+        run: |
+          # v38.61: syncfiledemo dirties file-backed mmap pages, persists
+          # them via fsync(fd), then dirties again and SLEEPS — the kernel's
+          # ~5 s periodic write-back must flush on its own; both phases are
+          # verified by re-reading through a fresh fd.
+          python3 scripts/syncfile_test.py --timeout 300
+
       - name: Rust Ring 3 app regression (TCG)
         run: |
           python3 scripts/rusthello_test.py --timeout 240

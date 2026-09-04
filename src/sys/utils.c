@@ -36,6 +36,10 @@ uint32_t get_uptime_seconds() {
 
 void shutdown() {
     print("Shutting down...\n", 0x0C);
+    // v38.61: persist dirty file-backed mmap pages before power is cut —
+    // this is the one class of data that would otherwise be lost.
+    extern int task_sync_all(void);
+    task_sync_all();
     __asm__ volatile("cli");
     // v38.45: real ACPI S5 first — PM1a/b control blocks + the \_S5 sleeping
     // type parsed from the firmware's own FADT/DSDT (acpi.c). Returns only
@@ -50,6 +54,10 @@ void shutdown() {
 }
 void reboot() {
     print("Rebooting...\n", 0x0E);
+    // v38.61: same durability guarantee as shutdown() — flush dirty file
+    // mmap pages before the machine restarts.
+    extern int task_sync_all(void);
+    task_sync_all();
     __asm__ volatile("cli");
     // Keyboard controller 8042 reset
     unsigned char g;

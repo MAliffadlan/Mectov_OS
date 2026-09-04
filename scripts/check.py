@@ -67,6 +67,7 @@ SUITES = [
     ("app_smoke",        "app_smoke_test.py",         360),
     ("doom",             "doom_test.py",              480),
     ("mmapfile",         "mmapfile_test.py",          240),
+    ("syncfile",         "syncfile_test.py",           300),
     ("rusthello",        "rusthello_test.py",         240),
     ("lseekfile",        "lseekfile_test.py",         240),
     ("panic",            "panic_test.py",             240),

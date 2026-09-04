@@ -431,6 +431,11 @@ void vfs_init() {
         extern uint8_t _binary_mmapfiledemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/mmapfiledemo.mct", (const char*)_binary_mmapfiledemo_mct_start, _binary_mmapfiledemo_mct_end - _binary_mmapfiledemo_mct_start);
 
+        // fsync()/periodic write-back demo (dirty mmap pages on disk)
+        extern uint8_t _binary_syncfiledemo_mct_start[];
+        extern uint8_t _binary_syncfiledemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/syncfiledemo.mct", (const char*)_binary_syncfiledemo_mct_start, _binary_syncfiledemo_mct_end - _binary_syncfiledemo_mct_start);
+
         // lseek/fstat/O_APPEND demo
         extern uint8_t _binary_lseekfiledemo_mct_start[];
         extern uint8_t _binary_lseekfiledemo_mct_end[];
@@ -718,6 +723,12 @@ void vfs_init() {
     extern uint8_t _binary_mmapfiledemo_mct_end[];
     vfs_create_file("apps/mmapfiledemo.mct");
     vfs_write_file("apps/mmapfiledemo.mct", (const char*)_binary_mmapfiledemo_mct_start, _binary_mmapfiledemo_mct_end - _binary_mmapfiledemo_mct_start);
+
+    // fsync()/periodic write-back demo (dirty mmap pages on disk)
+    extern uint8_t _binary_syncfiledemo_mct_start[];
+    extern uint8_t _binary_syncfiledemo_mct_end[];
+    vfs_create_file("apps/syncfiledemo.mct");
+    vfs_write_file("apps/syncfiledemo.mct", (const char*)_binary_syncfiledemo_mct_start, _binary_syncfiledemo_mct_end - _binary_syncfiledemo_mct_start);
 
     // lseek/fstat/O_APPEND demo
     extern uint8_t _binary_lseekfiledemo_mct_start[];

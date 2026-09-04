@@ -653,6 +653,21 @@ static void syscall_handler(registers_t* regs) {
             regs->eax = task_msync((uint32_t)regs->ebx);
             break;
         }
+        // ----- SYS_FSYNC (120) / SYS_SYNC (121): durability on demand -----
+        // Mectov's regular I/O is synchronous write-through, so dirty
+        // file-backed mmap pages are the only data pending on disk; these
+        // flush it. fsync covers the file behind `fd` (any task's mapping),
+        // sync covers every task.
+        case SYS_FSYNC: {
+            extern int task_fsync_fd(int fd);
+            regs->eax = (uint32_t)task_fsync_fd((int)regs->ebx);
+            break;
+        }
+        case SYS_SYNC: {
+            extern int task_sync_all(void);
+            regs->eax = (uint32_t)task_sync_all();
+            break;
+        }
         // ----- SYS_DUP2 (84): duplicate a file descriptor -----
         case SYS_DUP2: {
             extern int do_sys_dup2(int oldfd, int newfd);

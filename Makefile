@@ -87,6 +87,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/shmdemo_mct.o \
        $(OBJ_DIR)/mmapdemo_mct.o \
        $(OBJ_DIR)/mmapfiledemo_mct.o \
+       $(OBJ_DIR)/syncfiledemo_mct.o \
        $(OBJ_DIR)/lseekfiledemo_mct.o \
        $(OBJ_DIR)/pollselectdemo_mct.o \
        $(OBJ_DIR)/fat32demo_mct.o \
@@ -233,6 +234,9 @@ mmapdemo.mct: apps/mmapdemo.c $(MCT_LIBC_H)
 mmapfiledemo.mct: apps/mmapfiledemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/mmapfiledemo.c mmapfiledemo.mct
 
+syncfiledemo.mct: apps/syncfiledemo.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/syncfiledemo.c syncfiledemo.mct
+
 lseekfiledemo.mct: apps/lseekfiledemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/lseekfiledemo.c lseekfiledemo.mct
 
@@ -375,6 +379,9 @@ $(OBJ_DIR)/mmapdemo_mct.o: mmapdemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/mmapfiledemo_mct.o: mmapfiledemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 mmapfiledemo.mct $(OBJ_DIR)/mmapfiledemo_mct.o
+
+$(OBJ_DIR)/syncfiledemo_mct.o: syncfiledemo.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 syncfiledemo.mct $(OBJ_DIR)/syncfiledemo_mct.o
 
 $(OBJ_DIR)/lseekfiledemo_mct.o: lseekfiledemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 lseekfiledemo.mct $(OBJ_DIR)/lseekfiledemo_mct.o

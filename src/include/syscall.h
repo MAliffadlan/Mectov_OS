@@ -156,10 +156,19 @@ typedef struct {
 
 // File-backed mmap: SYS_MMAP_FILE maps an open VFS FILE fd into the address
 // space (pages fault in lazily FROM THE DISK on first access); dirty pages
-// write back to the file on SYS_MSYNC and SYS_MUNMAP. The mapping keeps its
-// own node reference, so the fd may be closed right after mmap.
+// write back to the file on SYS_MSYNC, SYS_MUNMAP, SYS_FSYNC, SYS_SYNC and
+// the kernel's periodic write-back. The mapping keeps its own node
+// reference, so the fd may be closed right after mmap.
 #define SYS_MMAP_FILE   93  // EBX=fd, ECX=flags(MMAP_FILE_SHARED) -> base VA or 0
 #define SYS_MSYNC       94  // EBX=base VA (from mmap_file) -> 1 written/0 failed
+
+// Durability (v38.61): Mectov's regular I/O is synchronous write-through, so
+// the ONLY data that can be lost on a power cut is dirty file-backed mmap
+// pages (they normally wait for msync/munmap). These two syscalls flush that
+// pending data on demand; the kernel also flushes it periodically (~5 s) and
+// before shutdown()/reboot().
+#define SYS_FSYNC       120 // EBX=fd -> 0 ok / -1 error (flush dirty mmap pages of the file)
+#define SYS_SYNC        121 // (no args) -> 0 ok / -1 error (flush all dirty mmap pages)
 
 // POSIX file positioning & metadata
 #define SYS_LSEEK       95  // EBX=fd, ECX=offset, EDX=whence(SEEK_*) -> new offset or -1
@@ -310,6 +319,25 @@ static inline void* sys_mmap_file(int fd, int flags) {
 static inline int sys_msync(void* addr) {
     int ret;
     __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_MSYNC), "b"(addr) : "memory");
+    return ret;
+}
+// fsync(fd): flush every dirty file-backed mmap page of the file behind `fd`
+// (any task, not just the caller) back to disk. Everything else in Mectov's
+// I/O stack is already write-through, so this is the only pending data. All
+// dirty pages of the file are written even while the mapping stays alive —
+// the durable-write primitive apps use before a checkpoint/rename. Returns 0
+// on success (or nothing to flush), -1 on failure.
+static inline int sys_fsync(int fd) {
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_FSYNC), "b"(fd) : "memory");
+    return ret;
+}
+// sync(): flush EVERY dirty file-backed mmap page of every task back to disk
+// (the kernel also does this automatically every ~5 s and before shutdown).
+// Returns 0 on success, -1 on failure.
+static inline int sys_sync(void) {
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_SYNC) : "memory");
     return ret;
 }
 #define SYS_VMM_ALLOC      30  // EBX=vaddr, ECX=flags → return vaddr or 0

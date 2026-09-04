@@ -3066,20 +3066,80 @@ int task_fb_release(void) {
 }
 
 
-// Write every dirty page of a file-backed mapping back to its VFS file. Runs
-// in syscall context (msync/munmap), so the locked VFS paths are fine. The
+// Copy one dirty page of task tid's region r into dst. Resolves the page's
+// physical frame through the OWNER's page tables and copies it via the kernel
+// identity map, so it works whether or not tid's address space is the active
+// one. Caller guarantees tid cannot run/unmap concurrently (see the flush
+// comment above); a dirty page is always present, so a missing PTE is a
+// defensive no-op that leaves the on-disk bytes in place.
+static void mmap_copy_page_from_owner(int tid, mmap_region_t* r, uint32_t page, char* dst, uint32_t len) {
+    if (tasks[tid].page_dir == 0) return;   // kernel identity space: no user walk
+    uint32_t va = r->base + page * 4096;
+    pte_t* pdpt = (pte_t*)(uintptr_t)tasks[tid].page_dir;
+    if (!(pdpt[pdpt_index(va)] & PAGE_PRESENT)) return;
+    pte_t* pd = (pte_t*)(uintptr_t)(uint32_t)(pdpt[pdpt_index(va)] & PTE_ADDR_MASK);
+    if (!(pd[pd_index(va)] & PAGE_PRESENT)) return;
+    pte_t* pt = (pte_t*)(uintptr_t)(uint32_t)(pd[pd_index(va)] & PTE_ADDR_MASK);
+    if (!(pt[pt_index(va)] & PAGE_PRESENT)) return;
+    uint32_t paddr = (uint32_t)(pt[pt_index(va)] & PTE_ADDR_MASK);
+    memcpy(dst, (void*)(uintptr_t)paddr, len);
+}
+
+// Downgrade one mapped page of task tid's region r back to READ-ONLY. The
+// dirty tracker fires on the RO→RW write fault, so after a write-back clears
+// a page's dirty bit the page MUST be RO again or the next write would slip
+// through without re-arming it (a silent data-loss window until the next
+// flush). In the self context (msync/fsync of the caller's own mapping) the
+// invlpg flushes our own TLB. In a cross-task flush the owner is not running
+// and its next context switch reloads CR3 — this OS has no TLB-shootdown IPI
+// (vmm.c v38.55 note), so the stale RW TLB entry cannot outlive the owner's
+// current run slice either way.
+static void mmap_page_make_ro(int tid, mmap_region_t* r, uint32_t page) {
+    if (tasks[tid].page_dir == 0) return;   // kernel identity space: no user walk
+    uint32_t va = r->base + page * 4096;
+    pte_t* pdpt = (pte_t*)(uintptr_t)tasks[tid].page_dir;
+    if (!(pdpt[pdpt_index(va)] & PAGE_PRESENT)) return;
+    pte_t* pd = (pte_t*)(uintptr_t)(uint32_t)(pdpt[pdpt_index(va)] & PTE_ADDR_MASK);
+    if (!(pd[pd_index(va)] & PAGE_PRESENT)) return;
+    pte_t* pt = (pte_t*)(uintptr_t)(uint32_t)(pd[pd_index(va)] & PTE_ADDR_MASK);
+    if (!(pt[pt_index(va)] & PAGE_PRESENT)) return;
+    pt[pt_index(va)] &= ~PAGE_RW;
+    __asm__ __volatile__("invlpg (%0)" : : "r"(va));
+}
+
+// Write every dirty page of a file-backed mapping back to its VFS file.
+//
+// Since v38.61 this runs in three contexts, all holding the same invariant —
+// the owning task's page tables cannot mutate while we read them:
+//   1. self-context (msync/munmap syscalls): the owner is the caller, so it
+//      cannot concurrently unmap or fault (single-threaded syscall).
+//   2. fsync()/sync() syscalls: the caller holds task_lock and flushes only
+//      regions whose owner is NOT currently running on another core (a task
+//      mutates its mappings only while running) or IS the caller itself.
+//   3. the kernel's periodic write-back (BSP main loop, task 0): same as 2.
+// In contexts 2/3 the caller holds task_lock with IF=0, so the owner cannot
+// be scheduled either; the VFS calls below take vfs_lock (documented order
+// task_lock > vfs_lock), and vfs_lock holders run non-preemptible (irqsave),
+// so no lock cycle exists.
+//
+// Dirty page CONTENT is read through the OWNER's page tables — not the
+// caller's address space, which differs — via the kernel identity map
+// (0..RAM = phys, so a physical frame is directly addressable). That is what
+// lets a flush of some OTHER task's mapping work without switching CR3. The
 // file's CURRENT size is the write-back bound: bytes a task wrote past EOF
 // (pages beyond the original file size) are dropped, matching POSIX — a
-// MAP_SHARED mapping never grows a file by itself; growth comes from write()
-// ftruncate. A concurrent writer that grew the file since mmap is therefore
-// not clobbered either.
-static int mmap_flush_file(mmap_region_t* r) {
+// MAP_SHARED mapping never grows a file by itself; growth comes from
+// write()/ftruncate.
+//
+// Returns 1 when dirty pages were written back (or dropped because the file
+// vanished), 0 when the region was clean, -1 when the flush failed.
+static int mmap_flush_file(int tid, mmap_region_t* r) {
     uint32_t npages = r->size / 4096;
     int any = 0;
     for (uint32_t i = 0; i < npages; i++) {
         if (r->dirty[i / 8] & (1u << (i % 8))) { any = 1; break; }
     }
-    if (!any) return 1;
+    if (!any) return 0;
 
     uint32_t file_size = 0;
     if (r->vfs_node >= 0 && r->vfs_node < MAX_NODES && fs_nodes[r->vfs_node].in_use) {
@@ -3093,9 +3153,9 @@ static int mmap_flush_file(mmap_region_t* r) {
     }
 
     char path[256];
-    if (vfs_get_abs_path(r->vfs_node, path, 256) < 0) return 0;
+    if (vfs_get_abs_path(r->vfs_node, path, 256) < 0) return -1;
     char* buf = kmalloc(file_size);
-    if (!buf) return 0;
+    if (!buf) return -1;
     // Start from the current on-disk content so bytes never written through
     // this mapping (another fd, another process) are preserved.
     int cur = vfs_read_file(path, buf, (int)file_size);
@@ -3106,12 +3166,23 @@ static int mmap_flush_file(mmap_region_t* r) {
             if (off >= file_size) continue;  // past EOF: never persisted
             uint32_t copylen = 4096;
             if (copylen > file_size - off) copylen = file_size - off;
-            memcpy(buf + off, (void*)(uintptr_t)(r->base + off), copylen);
+            mmap_copy_page_from_owner(tid, r, i, buf + off, copylen);
         }
     }
     int w = vfs_write_file(path, buf, (int)file_size);
     kfree(buf);
-    if (w < 0) return 0;
+    if (w < 0) return -1;
+    // Re-arm the dirty tracker: every page just written back goes RO again so
+    // a later write faults and re-sets its bit (the RO→RW fault IS the dirty
+    // mark). Without this, one dirtying per mapping lifetime is all the
+    // tracker ever sees and every write after the first flush is silently
+    // invisible to fsync/periodic write-back. Bytes past EOF stay RW — they
+    // are never persisted anyway (mapping cannot grow the file).
+    for (uint32_t i = 0; i < npages; i++) {
+        if (!(r->dirty[i / 8] & (1u << (i % 8)))) continue;
+        if (i * 4096 >= file_size) continue;
+        mmap_page_make_ro(tid, r, i);
+    }
     memset(r->dirty, 0, (npages + 7) / 8);
     write_serial_string("[MMAP] flushed ");
     write_serial_hex(r->base);
@@ -3135,8 +3206,83 @@ uint32_t task_msync(uint32_t addr) {
         write_serial_string("[MMAP] msync ");
         write_serial_hex(addr);
         write_serial_string("\n");
-        return mmap_flush_file(r);
+        int rc = mmap_flush_file(tid, r);
+        return (rc < 0) ? 0 : 1;
     }
+    return 0;
+}
+
+// ---- v38.61 fsync()/sync(): flush dirty file-backed mmap pages on demand --
+//
+// Everything else in the I/O stack (MECTOVFS, ext2, FAT32, the pcache) is
+// synchronous write-through, so dirty file mmap pages are the ONLY data that
+// can be lost on a power cut before msync/munmap. task_sync_dirty() flushes
+// every flushable dirty region (fsync: restricted to one VFS node).
+//
+// Flushability: a region is flushed only when reading its frames is safe —
+// owner == caller, or owner is not currently running on any core (and, under
+// task_lock with IF=0, cannot be scheduled until the flush completes).
+// Regions owned by a task running elsewhere right now are SKIPPED and left
+// for the next sync/period — the alternative (racing its page faults or
+// munmap) is worse than waiting one interval.
+//
+// Caller must NOT hold task_lock. Returns the number of regions flushed
+// (>0 means something was written back), -1 only on caller error.
+static int task_running_on_any_cpu(int tid) {
+    for (int c = 0; c < 16; c++) {
+        if (current_task[c] == tid) return 1;
+    }
+    return 0;
+}
+
+static int task_sync_dirty(int node_filter) {
+    int cid = get_cid();
+    int self = (cid >= 0 && current_task[cid] >= 0) ? current_task[cid] : -1;
+    int flushed = 0;
+
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&task_lock);
+    for (int tid = 0; tid < MAX_TASKS; tid++) {
+        if (tasks[tid].is_idle || tasks[tid].page_dir == 0) continue;
+        if (tasks[tid].state == TASK_STATE_FREE || tasks[tid].state == TASK_STATE_ZOMBIE) continue;
+        if (tid != self && task_running_on_any_cpu(tid)) continue;  // owner busy: retry later
+        for (int j = 0; j < MMAP_MAX_REGIONS; j++) {
+            mmap_region_t* r = &tasks[tid].mmap_regions[j];
+            if (r->base == 0 || r->map_flags != MMAP_FILE_SHARED || !r->dirty) continue;
+            if (node_filter >= 0 && r->vfs_node != node_filter) continue;
+            int rc = mmap_flush_file(tid, r);
+            if (rc > 0) flushed++;
+        }
+    }
+    spin_unlock(&task_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+    return flushed;
+}
+
+// fsync(fd): flush dirty mmap pages of the file behind the calling task's fd.
+// Returns 0 on success (or nothing pending), -1 when the fd is invalid.
+int task_fsync_fd(int fd) {
+    int cid = get_cid();
+    if (cid < 0 || current_task[cid] < 0) return -1;
+    int tid = current_task[cid];
+
+    extern global_fd_t global_fds[];
+    int gfd = task_get_fd(tid, fd);
+    if (gfd < 0 || gfd >= MAX_GLOBAL_FDS || !global_fds[gfd].in_use) return -1;
+    if (global_fds[gfd].type != FD_TYPE_FILE) return 0;  // pipes/dev: nothing pending
+    int node = global_fds[gfd].vfs_node;
+    if (node < 0 || node >= MAX_NODES || !fs_nodes[node].in_use) return -1;
+    // ext2/FAT32/proc/dev file data is synchronous already — only FS_FILE
+    // (MECTOVFS) nodes can carry dirty mmap pages.
+    if (fs_nodes[node].type != FS_FILE) return 0;
+    task_sync_dirty(node);
+    return 0;
+}
+
+// sync(): flush every flushable dirty region system-wide. Returns 0.
+int task_sync_all(void) {
+    task_sync_dirty(-1);
     return 0;
 }
 
@@ -3251,7 +3397,7 @@ uint32_t task_munmap(uint32_t addr) {
         // File-backed: write dirty pages back to the file before dropping
         // the frames, then free the dirty bitmap.
         if (r->map_flags == MMAP_FILE_SHARED) {
-            mmap_flush_file(r);
+            mmap_flush_file(tid, r);
             if (r->dirty) {
                 kfree(r->dirty);
                 r->dirty = NULL;

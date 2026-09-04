@@ -330,6 +330,23 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         extern void sync_drain_pending(void);
         sync_drain_pending();
 
+        // v38.61: periodic write-back. Dirty file-backed mmap pages are the
+        // only write-behind data in Mectov, so this bounds power-cut loss to
+        // one interval even when no app ever calls msync/fsync/sync. Runs
+        // every ~5 s in this lock-free main-loop context (the flush itself
+        // takes task_lock internally). Task 0's own mapping can never be
+        // dirty, and a region whose owner is running elsewhere is skipped and
+        // retried next interval.
+        {
+            static uint32_t last_writeback_tick = 0;
+            extern int task_sync_all(void);
+            uint32_t now_wb = get_ticks();
+            if (now_wb - last_writeback_tick >= 5000) {
+                last_writeback_tick = now_wb;
+                task_sync_all();
+            }
+        }
+
         // Keep the PIT tick rate calibrated against the RTC wall clock: the
         // desktop's double-click window is scaled by ticks_per_sec, and the
         // TCG virtual clock rate can drift, so re-measure once per second.
