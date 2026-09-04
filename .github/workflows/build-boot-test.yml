@@ -256,6 +256,14 @@ jobs:
         if: always()
         run: |
           python3 scripts/watchdog_test.py --timeout 240
+      - name: Watchdog BSP-hang self-test (per-core mesh, TCG)
+        if: always()
+        run: |
+          # Boots with `wd_self_test_bsp panic=reboot` and -no-reboot: the
+          # BSP cli-spins from its own main loop, so its own detector is
+          # dead. An AP mesh detector must declare CPU 0 HUNG, NMI-dump all
+          # cores (the BSP answers from inside its spin) and reset.
+          python3 scripts/watchdog_bsp_test.py --timeout 240
       - name: TLB shootdown IPI self-test (TCG)
         if: always()
         run: |

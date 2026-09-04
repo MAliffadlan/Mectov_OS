@@ -84,12 +84,19 @@ static void timer_handler(registers_t* regs) {
     (void)regs;
     int cid = get_cid();
 
-    // v38.64 hard-lockup watchdog: every core's vector-32 interrupt (PIT on
-    // the BSP, local APIC timer on the APs) bumps its own heartbeat slot
-    // FIRST, before the BSP-only branch. A core stuck with IF=0 can never
-    // deliver this interrupt, so its heartbeat freezes — that is the signal
-    // the BSP detector watches for (see watchdog.c).
+    // v38.64/67 hard-lockup watchdog: every core's vector-32 interrupt (PIT
+    // on the BSP, local APIC timer on the APs) bumps its own heartbeat AND
+    // tick slots FIRST, before the BSP-only branch. A core stuck with IF=0
+    // can never deliver this interrupt, so its heartbeat freezes — that is
+    // the signal every other core's detector watches for (see watchdog.c).
     watchdog_tick(cid);
+
+    // v38.67: EVERY core runs the hard-lockup detector, not just the BSP.
+    // watchdog_check() self-gates its cadence on this core's own tick count
+    // (only doing real work every WD_CHECK_INTERVAL ticks) and watches every
+    // peer, BSP included. The mesh is what catches a BSP hang: its own
+    // detector dies with it, but the APs keep ticking and declare it HUNG.
+    watchdog_check();
 
     // BSP only: the wall clock, heartbeat and GUI updates must not run four
     // times per tick just because IRQ0 is now broadcast to every core.
@@ -100,14 +107,6 @@ static void timer_handler(registers_t* regs) {
     // in continuously (1000 Hz), reseeding the ChaCha8 DRBG every 8 samples.
     entropy_add(timer_ticks);
 
-    // v38.64: hard-lockup detector — every 100 BSP ticks, check that every
-    // AP's heartbeat is still advancing. On a stall it prints a [WATCHDOG]
-    // marker and panics (multi-core NMI dump + panic=reboot). Lock-free and
-    // IRQ-context safe; no-op until every core has been seen ticking.
-    if ((timer_ticks % WD_CHECK_INTERVAL) == 0) {
-        watchdog_check();
-    }
-    
     // Heartbeat: send '.' every 1000 ticks (1 second). write_serial() takes
     // the serial lock, so the dot can never split a log line from another CPU.
     if ((timer_ticks % 1000) == 0) {

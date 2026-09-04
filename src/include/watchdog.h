@@ -9,12 +9,15 @@
 // Every core's vector-32 timer interrupt (PIT on the BSP, local APIC timer
 // on the APs) bumps a per-core heartbeat counter. A core that dies with
 // IF=0 — a spinlock deadlock, an accidental cli + infinite loop — stops
-// ticking, because its timer interrupt can never be delivered. The BSP's
-// timer IRQ periodically compares every AP's heartbeat against its own
-// clock: a heartbeat frozen for WD_TIMEOUT_TICKS of BSP time is a hard
-// lockup, and the BSP falls into the existing multi-core panic dump
-// (panic.c) — whose NMI-IPI reaches the hung core even with IF=0 and
-// snapshots exactly where it was spinning.
+// ticking, because its timer interrupt can never be delivered. EVERY core
+// runs the detector (v38.67 mesh, not just the BSP): each core's timer IRQ
+// periodically compares every PEER's heartbeat — the BSP included — against
+// its own ~1 kHz tick clock. A heartbeat frozen for WD_TIMEOUT_TICKS is a
+// hard lockup, and the detecting core falls into the existing multi-core
+// panic dump (panic.c) — whose NMI-IPI reaches the hung core even with
+// IF=0 and snapshots exactly where it was spinning. A BSP hang is therefore
+// caught by the APs (its own detector dies with it); a whole-system lockup
+// where every core is IF=0 remains undetectable by any software watchdog.
 
 // Directed fixed IPI vector used by the wd_self_test boot arg to make one
 // AP drop into a cli spin (idt.c wires the gate, interrupt_entry.asm the
@@ -28,23 +31,27 @@
 // every core, before the BSP-only branch.
 void watchdog_tick(int cid);
 
-// Detect stalled cores. Called from the BSP's timer IRQ every 100 ticks;
-// no-op on non-BSP cores, when SMP is off, or before every core has been
-// seen ticking at least once (never fires during bring-up). On a hit it
-// prints a [WATCHDOG] marker and panics (full multi-core dump + reboot
-// under `panic=reboot`). Lock-free: only raw stores and try-writes, safe
-// to call from IRQ context.
+// Detect stalled peers. Called from EVERY core's timer IRQ on every tick;
+// no-op when SMP is off or before every peer has been seen ticking at least
+// once (never fires during bring-up), and only does real work every
+// WD_CHECK_INTERVAL of this core's own ticks. On a hit the winner prints a
+// [WATCHDOG] marker (single-winner: one core drives the dump, the others
+// park) and panics (full multi-core dump + reboot under `panic=reboot`).
+// Lock-free: only raw stores and try-writes, safe to call from IRQ context.
 void watchdog_check(void);
 
-// Parse the GRUB command line for `wd_self_test`. Called once early in
-// kernel_main next to panic_parse_cmdline().
+// Parse the GRUB command line for `wd_self_test` / `wd_self_test_bsp`.
+// Called once early in kernel_main next to panic_parse_cmdline().
 void watchdog_parse_cmdline(const char* cmd);
 
 // CI self-test: when booted with `wd_self_test`, sends a directed fixed IPI
-// that makes the first AP hang with IF=0 (see wd_hang_ipi_handler). The
-// BSP's watchdog must then detect the stall, dump all cores (the hung AP
-// answers the NMI from inside its spin) and reboot. No-op unless the boot
-// arg is present. Called from kernel_main after the timer is live.
+// that makes the first AP hang with IF=0 (see wd_hang_ipi_handler); the
+// remaining cores' detectors must then catch the stall. When booted with
+// `wd_self_test_bsp`, the BSP hangs ITSELF from its own main loop — its own
+// detector dies with it, so an AP mesh detector must be the one to fire,
+// dump all cores (the hung BSP answers the NMI from inside its spin) and
+// reboot. No-op unless one of the args is present. Called from kernel_main
+// after the timer is live.
 void watchdog_self_test_tick(void);
 
 // Runs on the TARGET core of the self-test IPI: cli + spin forever. Never
