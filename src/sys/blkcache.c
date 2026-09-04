@@ -117,3 +117,10 @@ void blkcache_invalidate(int drive, uint32_t lba, int count) {
     }
     spin_unlock_irqrestore(&blkcache_lock, ef);
 }
+
+uint32_t blkcache_gen_now(void) {
+    uint32_t ef = spin_lock_irqsave(&blkcache_lock);
+    uint32_t g = blkcache_gen;
+    spin_unlock_irqrestore(&blkcache_lock, ef);
+    return g;
+}

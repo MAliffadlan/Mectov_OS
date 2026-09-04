@@ -7,6 +7,7 @@
 #include "../include/utils.h"   // memcpy for the DMA bounce path
 #include "../include/ahci.h"    // drives >= AHCI_DRIVE_BASE route to SATA
 #include "../include/xhci.h"    // drives >= USB_DRIVE_BASE route to USB
+#include "../include/blkcache.h" // sector cache + readahead commit/gen APIs
 
 // ata_lock serializes the shared IDE controller: two cores issuing command
 // sequences concurrently would interleave port writes and corrupt the
@@ -86,7 +87,15 @@ int ata_read_sector_drive(int drive, unsigned int lba, unsigned char* b) {
 // batch instead of once per sector. Sector count is clamped to the 128-
 // sector LBA boundary per the ATA spec (a multi-sector transfer may not
 // cross it) — QEMU tolerates crossing, real drives may not.
+// v38.65: how many real multi-sector disk READ commands have been issued
+// (demand misses + readahead). Exposed through /proc/atastats; the bigread
+// benchmark uses deltas around a read pass to prove the block cache and the
+// sequential readahead actually served the pass without touching the disk.
+volatile uint32_t ata_multi_rd_cmds = 0;
+volatile uint32_t ata_ra_fills = 0;   // readahead prefetch batches filled
+
 static int ata_read_sectors_drive_io(int drive, unsigned int lba, int count, unsigned char* b) {
+    ata_multi_rd_cmds++;
     if (drive >= USB_DRIVE_BASE) return usb_read_sectors(drive, lba, count, b);
     if (drive >= AHCI_DRIVE_BASE) return ahci_read_sectors(drive, lba, count, b);
     uint16_t base = ata_base_port(drive);
@@ -121,7 +130,86 @@ static int ata_read_sectors_drive_io(int drive, unsigned int lba, int count, uns
     return 0;
 }
 
-// v38.62 sector cache wrapper — see the single-sector wrapper above.
+// ============================================================================
+// v38.65 sequential readahead
+// ============================================================================
+// The block cache (v38.62) serves REPEATED reads, but a cold sequential
+// stream — ext2's per-4KB-block file reads, FAT32 cluster walks, a Ring 3
+// app streaming a big file in small buffers — still pays one ATA command per
+// small demand. Readahead watches each drive's access stream and, once a
+// small-request sequential pattern is confirmed, pulls the next RA_SECTORS
+// into the cache right after a miss, so the later demands of the stream hit
+// RAM instead of the disk. Correctness is unchanged: a prefetch goes through
+// the same generation-checked commit as a demand read, so a concurrent write
+// can never be shadowed by stale prefetched bytes, and writes still
+// invalidate exactly as before.
+//
+// Policy: only help SMALL demand readers (count <= RA_SMALL_MAX). Wide
+// readers (the VFS layer already batches a big read into up-to-128-sector
+// commands) need no help and must not trigger prefetch storms. The pattern
+// must be confirmed twice (streak >= 2) so an isolated read never prefetches.
+//
+// Locking: ra_lock guards the per-drive stream state AND the single
+// prefetch buffer (two cores prefetching different drives must not share
+// ra_buf). The prefetch I/O runs under ra_lock; _io takes ata_lock inside,
+// giving ra > ata, and blkcache_commit takes blkcache_lock inside, giving
+// ra > blkcache. Nothing ever acquires ra_lock while holding either, so no
+// cycle exists.
+#define RA_SECTORS      64          // prefetch 64 sectors = 32 KB per trigger
+#define RA_SMALL_MAX    16          // only streams of <=16-sector demands
+#define RA_MAX_STREAMS  16
+
+static spinlock_t ra_lock = SPINLOCK_INIT;
+static unsigned char ra_buf[RA_SECTORS * 512];
+static struct {
+    uint32_t prev_end;              // lba+count of the last demand seen
+    uint32_t streak;                // consecutive-demand count (contiguity)
+} ra_stream[RA_MAX_STREAMS];
+
+// Note a demand on the stream (called for every multi-sector demand, hit or
+// miss — cheap: one lock + a few u32s).
+static void ata_ra_note(int drive, uint32_t lba, int count) {
+    if (drive < 0 || drive >= RA_MAX_STREAMS || count < 1) return;
+    uint32_t ef = spin_lock_irqsave(&ra_lock);
+    ra_stream[drive].streak =
+        (lba == ra_stream[drive].prev_end) ? ra_stream[drive].streak + 1 : 1;
+    ra_stream[drive].prev_end = lba + (uint32_t)count;
+    spin_unlock_irqrestore(&ra_lock, ef);
+}
+
+// After a successful disk read of [lba, lba+count) that was committed: when
+// the access pattern is a confirmed small-request sequential stream, read the
+// next RA_SECTORS into the cache (generation-checked, so a concurrent write
+// during the prefetch discards the fill).
+static void ata_ra_maybe_prefetch(int drive, uint32_t lba, int count, uint32_t gen) {
+    if (drive < 0 || drive >= RA_MAX_STREAMS) return;
+    if (count < 1 || count > RA_SMALL_MAX) return;
+
+    uint32_t ef = spin_lock_irqsave(&ra_lock);
+    if (ra_stream[drive].streak < 2) {          // need two contiguous demands
+        spin_unlock_irqrestore(&ra_lock, ef);
+        return;
+    }
+
+    uint32_t start = lba + (uint32_t)count;     // first sector past this read
+    int n = ata_batch_limit(start, RA_SECTORS); // stay on the safe side of
+    if (n < 1) {                                // the 128-sector boundary
+        spin_unlock_irqrestore(&ra_lock, ef);
+        return;
+    }
+
+    // _io takes ata_lock internally (ra > ata); blkcache_commit takes
+    // blkcache_lock internally (ra > blkcache). Both are fine here; nothing
+    // acquires ra_lock while holding either.
+    if (ata_read_sectors_drive_io(drive, start, n, ra_buf) == 0) {
+        ata_ra_fills++;
+        blkcache_commit(drive, start, n, ra_buf, gen);
+    }
+    spin_unlock_irqrestore(&ra_lock, ef);
+}
+
+// v38.62 sector cache wrapper (v38.65 + sequential readahead) — see the
+// single-sector wrapper above.
 int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char* b) {
     extern int blkcache_read(int drive, uint32_t lba, int count,
                              unsigned char* buf, uint32_t* gen_out);
@@ -129,10 +217,16 @@ int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char
                                 const unsigned char* buf, uint32_t gen);
     if (count < 1) return -1;
     count = ata_batch_limit(lba, count);   // same clamp the I/O applies
+
+    ata_ra_note(drive, lba, count);        // track the stream (hit or miss)
+
     uint32_t gen;
     if (blkcache_read(drive, lba, count, b, &gen)) return 0;
     int rc = ata_read_sectors_drive_io(drive, lba, count, b);
-    if (rc == 0) blkcache_commit(drive, lba, count, b, gen);
+    if (rc == 0) {
+        blkcache_commit(drive, lba, count, b, gen);
+        ata_ra_maybe_prefetch(drive, lba, count, gen);
+    }
     return rc;
 }
 

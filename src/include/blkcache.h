@@ -50,4 +50,10 @@ void blkcache_commit(int drive, uint32_t lba, int count,
 // generation. Called by the ATA write paths AFTER the data reached the disk.
 void blkcache_invalidate(int drive, uint32_t lba, int count);
 
+// Current write generation — for a caller that reads sectors itself (the
+// sequential readahead path) and must commit them with the same anti-stale
+// discipline as a demand read: blkcache_commit discards the fill if a write
+// bumped the generation while the read was in flight.
+uint32_t blkcache_gen_now(void);
+
 #endif

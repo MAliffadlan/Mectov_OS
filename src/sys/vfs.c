@@ -275,6 +275,7 @@ void vfs_init() {
                 vfs_create_node("uptime", FS_PROC, proc_node);
                 vfs_create_node("version", FS_PROC, proc_node);
                 vfs_create_node("dmesg", FS_PROC, proc_node);
+                vfs_create_node("atastats", FS_PROC, proc_node);
                 write_serial_string("[VFS] created /proc nodes\n");
             }
         } else {
@@ -286,6 +287,10 @@ void vfs_init() {
             if (vfs_get_node("/proc/dmesg") < 0) {
                 vfs_create_node("dmesg", FS_PROC, proc_node);
                 write_serial_string("[VFS] added /proc/dmesg node\n");
+            }
+            if (vfs_get_node("/proc/atastats") < 0) {
+                vfs_create_node("atastats", FS_PROC, proc_node);
+                write_serial_string("[VFS] added /proc/atastats node\n");
             }
         }
         
@@ -968,6 +973,7 @@ void vfs_init() {
         vfs_create_node("uptime", FS_PROC, proc_node);
         vfs_create_node("version", FS_PROC, proc_node);
         vfs_create_node("dmesg", FS_PROC, proc_node);
+        vfs_create_node("atastats", FS_PROC, proc_node);
         write_serial_string("[VFS] created /proc nodes\n");
     }
     
@@ -1857,6 +1863,23 @@ static int vfs_proc_read(const char* name, char* buf, int max_size) {
         proc_add(buf, &len, max_size, "MectovOS version ");
         proc_add(buf, &len, max_size, OS_VERSION);
         proc_add(buf, &len, max_size, " (i686, SMP)\n");
+    } else if (strcmp(name, "atastats") == 0) {
+        // v38.65: ATA multi-sector disk-read command counter + readahead fill
+        // counter. The bigread benchmark reads deltas around a read pass to
+        // prove the pass was served by the block cache (delta ~0) and that
+        // the sequential readahead coalesced a small-demand cold stream into
+        // a handful of disk commands (delta <= RA budget) instead of one
+        // command per demand.
+        extern volatile uint32_t ata_multi_rd_cmds;
+        extern volatile uint32_t ata_ra_fills;
+        char num[16];
+        proc_add(buf, &len, max_size, "ATA_RD_CMDS=");
+        proc_itoa(num, (int)ata_multi_rd_cmds);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, " RA_FILLS=");
+        proc_itoa(num, (int)ata_ra_fills);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, "\n");
     } else if (strcmp(name, "dmesg") == 0) {
         // Kernel message ring buffer: the same text that goes to the serial
         // port, captured in memory by serial.c (klog_putc). Read back the
