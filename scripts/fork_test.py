@@ -11,8 +11,13 @@ serial log that:
   2. the child exited with status 42    ("SYS_EXIT code=2A")
   3. the OS stayed alive afterwards
 
+The QEMU configuration (CPU model / RAM / SMP count) is parameterizable for
+CI's config matrix — fork + SMP scheduling is prime combo-only-bug territory.
+Defaults match the historical single-config run.
+
 Usage:
-    python3 scripts/fork_test.py [--timeout 240]
+    python3 scripts/fork_test.py [--timeout 240] [--cpu qemu32,+nx]
+                                 [--mem-mb 128] [--smp 4]
 """
 import argparse
 import os
@@ -64,6 +69,12 @@ def main():
     ap.add_argument("--iso", default="mectov.iso")
     ap.add_argument("--disk", default="disk.img")
     ap.add_argument("--ext2", default="ext2.img")
+    ap.add_argument("--cpu", default="qemu32,+nx",
+                    help="QEMU -cpu model (config matrix: qemu32 / Nehalem)")
+    ap.add_argument("--mem-mb", type=int, default=128,
+                    help="guest RAM in MB (config matrix: 64 / 256)")
+    ap.add_argument("--smp", type=int, default=4,
+                    help="guest CPU count (config matrix: 1 / 2 / 4)")
     ap.add_argument("--kvm", action="store_true",
                     help="run with -enable-kvm (real timing, mandatory SMP "
                          "regression: the keyboard single-consumer race only "
@@ -78,11 +89,11 @@ def main():
 
     qemu_cmd = [
         "qemu-system-i386",
-        "-cpu", "qemu32,+nx",
+        "-cpu", args.cpu,
         "-vga", "std",
         "-cdrom", args.iso,
-        "-m", "128",
-        "-smp", "4",
+        "-m", str(args.mem_mb),
+        "-smp", str(args.smp),
         "-display", "none",
         "-serial", f"file:{SERIAL_LOG}",
         "-net", "none",

@@ -345,3 +345,59 @@ jobs:
           # twice; the test asserts the first-run bases differ across the
           # boots AND the two runs within one boot differ.
           python3 scripts/aslr_test.py --timeout 300
+
+      - name: Upload build artifacts (for the config-matrix job)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mectov-artifacts
+          path: |
+            mectov.iso
+            disk.img
+            ext2.img
+          if-no-files-found: error
+          retention-days: 1
+
+  # Config matrix (v38.68): the full suite above runs on ONE configuration
+  # (qemu32,+nx / 128 MB / SMP 4). Mectov's own history proves combo-only
+  # bugs are real — the KVM fork-GPF and the qemu32,+nx boot stall each
+  # appeared only under a specific CPU/RAM/SMP combination. This job smokes
+  # boot + fork/login on every combination of CPU model x RAM x CPU count
+  # (12 jobs, run in parallel by GitHub): NX-less qemu32 vs Nehalem, 64 vs
+  # 256 MB (phys allocator + 48 MB kernel reserve + framebuffer pressure),
+  # and 1 / 2 / 4 cores (SMP bring-up, runqueue, watchdog mesh).
+  config-matrix:
+    needs: build-and-boot
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu: [qemu32, Nehalem]
+        mem: [64, 256]
+        smp: [1, 2, 4]
+    name: "config ${{ matrix.cpu }} / ${{ matrix.mem }}MB / SMP ${{ matrix.smp }}"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mectov-artifacts
+          path: .
+
+      - name: Boot + login + desktop smoke
+        run: |
+          python3 scripts/boot_test.py \
+            --cpu ${{ matrix.cpu }} \
+            --mem-mb ${{ matrix.mem }} \
+            --smp ${{ matrix.smp }} \
+            --timeout 240
+
+      - name: Fork / waitpid / signal smoke
+        run: |
+          python3 scripts/fork_test.py \
+            --cpu ${{ matrix.cpu }} \
+            --mem-mb ${{ matrix.mem }} \
+            --smp ${{ matrix.smp }} \
+            --timeout 240

@@ -8,8 +8,14 @@ logs in through the QEMU monitor, and verifies the kernel reaches
 
 Exit code 0 = boot + login OK, 1 = failure.
 
+The QEMU configuration (CPU model / RAM / SMP count) is parameterizable for
+CI's config matrix — combo-only bugs (NX-less CPUs, low RAM, 1-core vs
+multi-core) are exactly what the matrix hunts. Defaults match the historical
+single-config run.
+
 Usage:
-    python3 scripts/boot_test.py [--timeout 180]
+    python3 scripts/boot_test.py [--timeout 180] [--cpu qemu32,+nx]
+                                 [--mem-mb 128] [--smp 4]
 """
 import argparse
 import os
@@ -59,6 +65,12 @@ def main():
     ap.add_argument("--iso", default="mectov.iso")
     ap.add_argument("--disk", default="disk.img")
     ap.add_argument("--ext2", default="ext2.img")
+    ap.add_argument("--cpu", default="qemu32,+nx",
+                    help="QEMU -cpu model (config matrix: qemu32 / Nehalem)")
+    ap.add_argument("--mem-mb", type=int, default=128,
+                    help="guest RAM in MB (config matrix: 64 / 256)")
+    ap.add_argument("--smp", type=int, default=4,
+                    help="guest CPU count (config matrix: 1 / 2 / 4)")
     args = ap.parse_args()
 
     for p in (SERIAL_LOG, MON_SOCK):
@@ -69,11 +81,11 @@ def main():
 
     qemu = subprocess.Popen([
         "qemu-system-i386",
-        "-cpu", "qemu32,+nx",
+        "-cpu", args.cpu,
         "-vga", "std",
         "-cdrom", args.iso,
-        "-m", "128",
-        "-smp", "4",
+        "-m", str(args.mem_mb),
+        "-smp", str(args.smp),
         "-display", "none",
         "-serial", f"file:{SERIAL_LOG}",
         "-net", "none",
