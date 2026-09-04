@@ -380,6 +380,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Fresh ubuntu runner: QEMU is NOT installed by default and does not
+      # come with the downloaded artifacts. The main job installs it for its
+      # own steps; this job must do the same or every combo dies at step 1
+      # with "qemu-system-i386: command not found".
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
