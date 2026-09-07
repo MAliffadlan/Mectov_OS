@@ -45,6 +45,7 @@ SUITES = [
     ("fbmap",            "fbmap_test.py",             480),
     ("taskbar_hover",    "taskbar_hover_test.py",     300),
     ("startmenu_search", "startmenu_search_test.py",  300),
+    ("explorer",         "explorer_test.py",           300),
     ("fork",             "fork_test.py",              240),
     ("jobcontrol",       "jobcontrol_test.py",        240),
     ("fputest",          "fputest.py",                240),

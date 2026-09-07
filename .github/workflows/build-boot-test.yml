@@ -139,6 +139,14 @@ jobs:
           # (Clock + Lock); Escape clears then closes.
           python3 scripts/startmenu_search_test.py --timeout 300
 
+      - name: File Explorer GUI regression (TCG)
+        run: |
+          # v38.69: the Ring 3 File Explorer (launch from Start menu row 2)
+          # renders the root listing, navigates into /home (one entry:
+          # user/), drills into empty /home/user, and the [<] back button
+          # returns to root. Pixel-count assertions on the screendump.
+          python3 scripts/explorer_test.py --timeout 300
+
       - name: Fork + jobcontrol regressions (TCG)
         run: |
           python3 scripts/fork_test.py --timeout 240
