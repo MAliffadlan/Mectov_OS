@@ -156,6 +156,16 @@ jobs:
           # HTTP server and asserts the guest's GET / Host / User-Agent.
           python3 scripts/browser_test.py --timeout 300
 
+      - name: Browser hostname path — DNS + port-80 gateway redirect (TCG)
+        run: |
+          # v38.71: the Mini Browser's hostname path — kernel DNS client
+          # resolves "localhost" (slirp -> host /etc/hosts, zero internet
+          # dependency), the kernel redirects port 80 to the Web Gateway
+          # Proxy, which answers in deterministic fake mode and echoes the
+          # guest's Host/Path back. Asserts the full chain in serial log,
+          # gateway log and the rendered page.
+          python3 scripts/browser_web_test.py --timeout 300
+
       - name: Fork + jobcontrol regressions (TCG)
         run: |
           python3 scripts/fork_test.py --timeout 240

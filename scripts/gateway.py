@@ -1,8 +1,15 @@
+import os
 import socket
 import urllib.request
 import urllib.parse
 from html.parser import HTMLParser
 import threading
+
+# Test mode: when MECTOV_GATEWAY_FAKE_TEXT is set, every request is answered
+# with a deterministic canned page (no internet fetch) so the guest->DNS->port-80
+# redirect->gateway->render chain can be CI-tested offline. The Host/Path the
+# guest sent are echoed back so tests can assert they survived the trip.
+FAKE_TEXT = os.environ.get("MECTOV_GATEWAY_FAKE_TEXT")
 
 class TextParser(HTMLParser):
     def __init__(self):
@@ -86,10 +93,16 @@ def handle_client(client_socket):
             
         if ':' in host:
             host = host.split(':', 1)[0]
-            
-        # Fetch clean text
-        content = f"--- MECTOV OS GATEWAY ---\nHost: {host}\nPath: {path}\n-------------------------\n\n"
-        content += fetch_url_text(host, path)
+
+        if FAKE_TEXT is not None:
+            # Deterministic test mode: no internet involved.
+            content = (f"--- MECTOV OS GATEWAY (fake) ---\nHost: {host}\nPath: {path}\n"
+                       f"-------------------------\n\n{FAKE_TEXT}")
+            print(f"[FAKE] Host: {host} Path: {path}", flush=True)
+        else:
+            # Fetch clean text from the real internet
+            content = f"--- MECTOV OS GATEWAY ---\nHost: {host}\nPath: {path}\n-------------------------\n\n"
+            content += fetch_url_text(host, path)
         
         # Send raw body back to client
         client_socket.sendall(content.encode('utf-8', errors='ignore'))

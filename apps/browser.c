@@ -242,6 +242,7 @@ static void html_to_text(const char* in, int in_len) {
     int title_on = 0;
     int pending_space = 0;
     int last_nl = 1;        // treat start as after-newline (strip leading blanks)
+    int saw_tag = 0;        // any '<' seen? plain-text input keeps its newlines
 
     for (int i = 0; i < in_len; i++) {
         char c = in[i];
@@ -278,11 +279,11 @@ static void html_to_text(const char* in, int in_len) {
         }
 
         if (in_skip) {
-            if (c == '<') { in_tag = 1; tag_len = 0; }
+            if (c == '<') { in_tag = 1; tag_len = 0; saw_tag = 1; }
             continue;
         }
 
-        if (c == '<') { in_tag = 1; tag_len = 0; pending_space = 0; continue; }
+        if (c == '<') { in_tag = 1; tag_len = 0; pending_space = 0; saw_tag = 1; continue; }
         if (c == '&') {
             i += decode_entity(in, i, in_len, page_text, &page_len, PAGE_MAX) - 1;
             last_nl = 0;
@@ -294,7 +295,19 @@ static void html_to_text(const char* in, int in_len) {
                 if (tl > 0 && page_title[tl - 1] != ' ' && tl < TITLE_MAX - 1)
                     page_title[tl] = ' ';
             }
-            if (!last_nl) pending_space = 1;
+            if (c == '\n' && !saw_tag) {
+                // Plain-text input (no HTML tags seen — e.g. the Web Gateway
+                // Proxy's line-structured replies): preserve real line breaks
+                // instead of collapsing them into one paragraph.
+                if (!last_nl && page_len < PAGE_MAX - 1) {
+                    page_text[page_len++] = '\n';
+                    last_nl = 1;
+                    total_lines++;
+                }
+                pending_space = 0;
+            } else if (!last_nl) {
+                pending_space = 1;
+            }
             continue;
         }
         if (c < 32 || c > 126) continue;
