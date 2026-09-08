@@ -147,6 +147,15 @@ jobs:
           # returns to root. Pixel-count assertions on the screendump.
           python3 scripts/explorer_test.py --timeout 300
 
+      - name: Browser HTTP fetch + render regression (TCG)
+        run: |
+          # v38.70: the Ring 3 Mini Browser fetches a real HTTP page from the
+          # host (slirp 10.0.2.2:<port>, non-80 so it bypasses the Web Gateway
+          # Proxy), renders the parsed HTML into its window, and shows the
+          # status bar (HTTP code / bytes / title). The test runs a local
+          # HTTP server and asserts the guest's GET / Host / User-Agent.
+          python3 scripts/browser_test.py --timeout 300
+
       - name: Fork + jobcontrol regressions (TCG)
         run: |
           python3 scripts/fork_test.py --timeout 240

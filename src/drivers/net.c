@@ -404,7 +404,11 @@ static void tcp_start_conn(tcp_conn_t* c, uint8_t* target_ip, uint16_t port) {
     write_serial_hex(c->local_port);
     write_serial_string("\n");
     net_send_tcp_segment(c, TCP_SYN, 0, 0);
-    c->seq++; // SYN consumes one sequence number
+    // SYN consumes one sequence number. Guard on state: with a synchronous TX
+    // backend (rtl8139 + slirp) the peer's SYN-ACK can arrive via RX IRQ before
+    // this line runs; net_handle_tcp() then already advanced c->seq to ISN+1
+    // (and sent the final ACK), so another increment here would corrupt it.
+    if (c->state == TCP_SYN_SENT) c->seq++; // SYN consumes one sequence number
 }
 
 // Reserve a connection slot and start (or queue) the handshake.
@@ -1057,8 +1061,15 @@ static void net_handle_tcp(ip_header_t* ip, uint8_t* tcp_data, uint32_t tcp_len)
     }
 
     if (c->state == TCP_SYN_SENT) {
+        // SYN consumes one sequence number, so the peer ACKs ISN+1. With a
+        // synchronous TX backend (rtl8139 + slirp) the SYN-ACK can arrive via
+        // RX IRQ *before* the seq++ in tcp_start_conn() runs — in that window
+        // c->seq still holds the bare ISN, so peer_ack == c->seq + 1. In that
+        // case advance c->seq here (the guarded seq++ will skip it) so the
+        // final ACK carries the correct sequence number.
         if ((tcp->flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK) &&
-            ntohl(tcp->ack) == c->seq) {
+            (ntohl(tcp->ack) == c->seq || ntohl(tcp->ack) == (uint32_t)(c->seq + 1))) {
+            if (ntohl(tcp->ack) == (uint32_t)(c->seq + 1)) c->seq = ntohl(tcp->ack);
             // Received SYN-ACK for our ISN
             c->ack = ntohl(tcp->seq) + 1;
             c->state = TCP_ESTABLISHED;
