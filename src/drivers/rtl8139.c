@@ -142,16 +142,13 @@ void rtl8139_send_packet(void* data, uint32_t len) {
     memcpy(buf, data, len);
 
     // Tell RTL8139: buffer address already set, now write status+size
-    // Size is in bits 0-12
+    // Size is in bits 0-12. Fire-and-forget: the previous wait-for-TOK loop
+    // spun up to 10k port-I/O reads per packet inside the caller (often the
+    // IRQ path, IF=0). Under TCG each read is an emulated VM exit — it
+    // measurably inflated host CPU during a multi-packet fetch. The 4-deep
+    // descriptor queue plus the OWN-bit check above already guarantee we
+    // never overwrite a buffer still in flight.
     outl(rtl_io_base + RTL_TX_STATUS0 + (rtl_tx_cur * 4), len & 0x1FFF);
-
-    // Wait for transmission to complete (TOK set by hardware)
-    int timeout = 10000;
-    while (timeout-- > 0) {
-        uint32_t status = inl(rtl_io_base + RTL_TX_STATUS0 + (rtl_tx_cur * 4));
-        if (status & (1 << 15)) break; // TOK - Transmit OK
-        if (status & (1 << 14)) break; // TUN - Transmit underrun (still sent)
-    }
 
     // Advance to next descriptor
     rtl_tx_cur = (rtl_tx_cur + 1) % 4;

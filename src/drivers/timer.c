@@ -54,6 +54,14 @@ void timer_calibrate_ticks_per_sec(void) {
 void timer_update_rate_if_second(void) {
     static uint32_t last_sec = 0xFFFFFFFF;
     static uint32_t last_ticks = 0;
+    static uint32_t last_check_tick = 0;
+    // Gate on tick count BEFORE touching the CMOS: the main loop calls this
+    // ~once per tick (1000 Hz), but rtc_read_time() busy-waits on the UIP
+    // flag — real port I/O that measurably burns host CPU under TCG when
+    // done a thousand times per second. Two reads per second are plenty for
+    // a one-second calibration window.
+    if (last_check_tick != 0 && (timer_ticks - last_check_tick) < 500) return;
+    last_check_tick = timer_ticks;
     rtc_time_t t = rtc_read_time();
     if (last_sec == 0xFFFFFFFF) {
         last_sec = t.second;

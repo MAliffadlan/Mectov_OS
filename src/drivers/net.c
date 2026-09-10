@@ -49,6 +49,17 @@ uint32_t ntohl(uint32_t val) { return htonl(val); }
 // sockets open at once without stomping on each other.
 static tcp_conn_t tcp_conns[TCP_MAX_CONNS];
 static int tcp_latest = -1;          // most recently created conn (SYS_NET_STATUS)
+
+// Per-packet RX serial logging is a debugging aid but costs 4-6 locked serial
+// writes (each with port I/O) per received packet. Under TCG that measurably
+// doubles QEMU's host CPU during a multi-packet fetch (measured 43%->88%),
+// which the user perceives as desktop lag while a page loads. Off by default;
+// set net_rx_debug=1 (gdb/patch) or build with -DNET_RX_DEBUG to re-enable.
+#ifdef NET_RX_DEBUG
+int net_rx_debug = 1;
+#else
+int net_rx_debug = 0;
+#endif
 static uint16_t tcp_port_counter = 49152;
 
 #define TCP_RETRANS_MS   6000
@@ -1170,11 +1181,13 @@ static void net_handle_udp(ip_header_t* ip, uint8_t* udp_data, uint32_t udp_len)
     
     uint16_t src_port = ntohs(udp->src_port);
     uint16_t dst_port = ntohs(udp->dst_port);
-    write_serial_string("[NET] net_handle_udp: src_port=");
-    write_serial_hex(src_port);
-    write_serial_string(" dst_port=");
-    write_serial_hex(dst_port);
-    write_serial_string("\n");
+    if (net_rx_debug) {
+        write_serial_string("[NET] net_handle_udp: src_port=");
+        write_serial_hex(src_port);
+        write_serial_string(" dst_port=");
+        write_serial_hex(dst_port);
+        write_serial_string("\n");
+    }
     
     uint16_t udp_frame_len = ntohs(udp->len);
     if (udp_frame_len < sizeof(udp_header_t) || udp_frame_len > udp_len) return;
@@ -1215,11 +1228,13 @@ static void net_handle_ip(uint8_t* data, uint32_t len) {
     if (len < sizeof(ip_header_t)) return;
     ip_header_t* ip = (ip_header_t*)data;
     
-    write_serial_string("[NET] net_handle_ip: protocol=");
-    write_serial_hex(ip->protocol);
-    write_serial_string(" dst_ip=");
-    write_serial_hex((ip->dst_ip[0] << 24) | (ip->dst_ip[1] << 16) | (ip->dst_ip[2] << 8) | ip->dst_ip[3]);
-    write_serial_string("\n");
+    if (net_rx_debug) {
+        write_serial_string("[NET] net_handle_ip: protocol=");
+        write_serial_hex(ip->protocol);
+        write_serial_string(" dst_ip=");
+        write_serial_hex((ip->dst_ip[0] << 24) | (ip->dst_ip[1] << 16) | (ip->dst_ip[2] << 8) | ip->dst_ip[3]);
+        write_serial_string("\n");
+    }
 
     uint32_t ihl = (ip->ver_ihl & 0x0F) * 4;
     uint32_t total = ntohs(ip->total_len);
@@ -1262,9 +1277,11 @@ static void net_handle_frame(uint8_t* frame, uint32_t len) {
     uint8_t* payload = frame + sizeof(eth_header_t);
     uint32_t payload_len = len - sizeof(eth_header_t);
     
-    write_serial_string("[NET] net_handle_frame: received packet type=");
-    write_serial_hex(type);
-    write_serial_string("\n");
+    if (net_rx_debug) {
+        write_serial_string("[NET] net_handle_frame: received packet type=");
+        write_serial_hex(type);
+        write_serial_string("\n");
+    }
 
 
     if (type == ETH_TYPE_ARP) {
@@ -1300,9 +1317,11 @@ void net_poll(void) {
     for (int i = 0; i < 4; i++) {
         len = rtl8139_poll_rx(buf, sizeof(buf));
         if (len <= 0) break;
-        write_serial_string("[NET] rtl8139_poll_rx: packet received, len=");
-        write_serial_hex(len);
-        write_serial_string("\n");
+        if (net_rx_debug) {
+            write_serial_string("[NET] rtl8139_poll_rx: packet received, len=");
+            write_serial_hex(len);
+            write_serial_string("\n");
+        }
         net_handle_frame(buf, (uint32_t)len);
     }
 
@@ -1351,9 +1370,11 @@ void net_irq_handler(registers_t* r) {
         for (int i = 0; i < 8; i++) { // drain up to 8 frames per IRQ
             len = rtl8139_poll_rx(buf, sizeof(buf));
             if (len <= 0) break;
-            write_serial_string("[NET] IRQ rx, len=");
-            write_serial_hex(len);
-            write_serial_string("\n");
+            if (net_rx_debug) {
+                write_serial_string("[NET] IRQ rx, len=");
+                write_serial_hex(len);
+                write_serial_string("\n");
+            }
             net_handle_frame(buf, (uint32_t)len);
         }
     }

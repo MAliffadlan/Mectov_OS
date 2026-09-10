@@ -651,7 +651,13 @@ void _start() {
                         my_itoa(raw_len, nb);
                         my_strcat(status_msg, nb);
                         my_strcat(status_msg, " bytes");
-                        draw_browser(wid);
+                        // Repaint at most every 10th received chunk: each
+                        // draw costs a full WM re-composite, and repainting
+                        // per chunk doubled QEMU's host CPU during a fetch
+                        // (perceived as desktop lag while a page loads).
+                        // finish_ok() repaints the final page regardless.
+                        static int rx_paint_div = 0;
+                        if (++rx_paint_div >= 10) { rx_paint_div = 0; draw_browser(wid); }
                     } else if (rx_len == -1) {
                         finish_ok(wid);
                     } else if (rx_len == -2) {
