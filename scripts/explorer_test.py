@@ -30,7 +30,7 @@ DUMP3 = "/tmp/mectov_explorer_back.ppm"
 
 LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 
-SM_Y = (768 - 28) - 376  # Start menu panel top (see startmenu_search_test.py)
+SM_Y = (768 - 28) - 404  # Start menu panel top (START_MENU_H = 404 since Pixel Paint)
 
 # Explorer window: requested at (100, 80) 400x340, TITLEBAR_H = 20 (theme.h),
 # so the client area spans x 100..500, y 100..420.

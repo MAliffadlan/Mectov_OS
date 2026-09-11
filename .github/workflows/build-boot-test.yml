@@ -147,6 +147,14 @@ jobs:
           # returns to root. Pixel-count assertions on the screendump.
           python3 scripts/explorer_test.py --timeout 300
 
+      - name: Pixel Paint GUI regression (TCG)
+        run: |
+          # v38.75: the Ring 3 Pixel Paint app launches from Start menu row 4,
+          # stamps palette cells, receives WM drag-forwarded mouse moves (new
+          # content-drag forwarding path), recolors and clears. Pixel-count
+          # assertions on screendumps, permutation-tolerant color matching.
+          python3 scripts/paint_test.py --timeout 300
+
       - name: Browser HTTP fetch + render regression (TCG)
         run: |
           # v38.70: the Ring 3 Mini Browser fetches a real HTTP page from the

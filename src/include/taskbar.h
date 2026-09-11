@@ -5,8 +5,8 @@
 
 // Start menu geometry (shared by taskbar.c draw/hit-test and kernel.c's
 // popup-dismiss bounds): 40 px header + 12 items x 28 px.
-#define START_MENU_H 376
-#define START_MENU_ITEMS 12
+#define START_MENU_H 404
+#define START_MENU_ITEMS 13
 
 void taskbar_draw();
 void taskbar_handle_click(int mx, int my);

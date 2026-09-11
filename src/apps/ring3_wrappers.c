@@ -25,6 +25,10 @@ void open_browser_app() {
     load_mct_app("/apps/browser.mct");
 }
 
+void open_paint_app() {
+    load_mct_app("/apps/paint.mct");
+}
+
 void open_terminal_app() {
     load_mct_app("/apps/terminal.mct");
 }

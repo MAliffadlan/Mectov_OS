@@ -23,6 +23,7 @@ typedef struct {
     WinMouseFn mouse_fn;
     int visible;
     int dragging;
+    int content_drag;      // 1 = mouse button held on this window's content
     int drag_mx, drag_my;  // mouse pos at drag start
     int drag_wx, drag_wy;  // window pos at drag start
     int minimized;         // 1 = hidden in taskbar

@@ -792,6 +792,25 @@ static int wm_handle_mouse_unlocked(int mx, int my, int btn, int pbtn) {
     int click = btn && !pbtn;   // rising edge
     int release = !btn && pbtn; // falling edge
 
+    // v38.75 content-drag forwarding: while the button is held on a window's
+    // content, every move is forwarded to the app as a mouse event so drag
+    // tools (paint, etc.) get continuous input. Cleared on release.
+    if (!click) {
+        for (int i = 0; i < MAX_WINDOWS; i++) {
+            WmWin* w = &wm_wins[i];
+            if (!w->visible || !w->mouse_fn || !w->content_drag) continue;
+            if (release || !(btn & 1)) {
+                w->content_drag = 0;
+                continue;
+            }
+            if (mx >= w->x && mx < w->x + w->w && my >= w->y + TITLEBAR_H && my < w->y + w->h) {
+                w->mouse_fn(w->id, mx - w->x, my - (w->y + TITLEBAR_H), btn);
+            }
+        }
+        if (!release) return 0;   // pure move: nothing else to do
+        // release falls through to the release block below
+    }
+
     // Handle dragging/resizing
     if (btn & 1) {
         for (int i = 0; i < MAX_WINDOWS; i++) {
@@ -1004,6 +1023,7 @@ static int wm_handle_mouse_unlocked(int mx, int my, int btn, int pbtn) {
             // 3. Content area click
             if (w->mouse_fn) {
                 w->mouse_fn(w->id, mx - w->x, my - (w->y + TITLEBAR_H), btn);
+                w->content_drag = 1;
             }
             extern volatile int needs_redraw;
             needs_redraw = 1;

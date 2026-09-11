@@ -46,6 +46,7 @@ SUITES = [
     ("taskbar_hover",    "taskbar_hover_test.py",     300),
     ("startmenu_search", "startmenu_search_test.py",  300),
     ("explorer",         "explorer_test.py",           300),
+    ("paint",            "paint_test.py",             300),
     ("browser",          "browser_test.py",            300),
     ("browser_web",      "browser_web_test.py",        300),
     ("fork",             "fork_test.py",              240),

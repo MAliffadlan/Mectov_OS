@@ -30,6 +30,7 @@ void open_terminal_app();
 void open_clock_app();
 void open_sysinfo_app();
 void open_browser_app();
+void open_paint_app();
 void term_clear();
 int get_use_term_buf();
 

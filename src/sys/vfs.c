@@ -375,6 +375,10 @@ void vfs_init() {
         extern uint8_t _binary_browser_mct_end[];
         changed += vfs_update_file_if_needed("apps/browser.mct", (const char*)_binary_browser_mct_start, _binary_browser_mct_end - _binary_browser_mct_start);
 
+        extern uint8_t _binary_paint_mct_start[];
+        extern uint8_t _binary_paint_mct_end[];
+        changed += vfs_update_file_if_needed("apps/paint.mct", (const char*)_binary_paint_mct_start, _binary_paint_mct_end - _binary_paint_mct_start);
+
         extern uint8_t _binary_terminal_mct_start[];
         extern uint8_t _binary_terminal_mct_end[];
         changed += vfs_update_file_if_needed("apps/terminal.mct", (const char*)_binary_terminal_mct_start, _binary_terminal_mct_end - _binary_terminal_mct_start);
@@ -909,6 +913,12 @@ void vfs_init() {
     extern uint8_t _binary_browser_mct_end[];
     vfs_create_file("apps/browser.mct");
     vfs_write_file("apps/browser.mct", (const char*)_binary_browser_mct_start, _binary_browser_mct_end - _binary_browser_mct_start);
+
+    // Inject paint.mct
+    extern uint8_t _binary_paint_mct_start[];
+    extern uint8_t _binary_paint_mct_end[];
+    vfs_create_file("apps/paint.mct");
+    vfs_write_file("apps/paint.mct", (const char*)_binary_paint_mct_start, _binary_paint_mct_end - _binary_paint_mct_start);
 
     // Inject terminal.mct
     vfs_create_file("apps/terminal.mct");

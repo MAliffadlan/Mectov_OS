@@ -177,8 +177,8 @@ static int volume_popup_open = 0;
 // Labels in menu order; draw, hover and click all key off the ORIGINAL
 // index, while the filtered list maps display rows to those indices.
 static const char* const sm_labels[START_MENU_ITEMS] = {
-    "Terminal", "Notepad", "File Explorer", "Mini Browser", "System Info",
-    "Clock", "PCI Manager", "Snake Game", "Task Manager",
+    "Terminal", "Notepad", "File Explorer", "Mini Browser", "Pixel Paint",
+    "System Info", "Clock", "PCI Manager", "Snake Game", "Task Manager",
     "Lock", "Logout", "Power Off"
 };
 
@@ -533,7 +533,7 @@ void taskbar_draw() {
                 draw_rect(3, item_y, sm_w - 6, item_h - 2, RETRO_SEL);
             }
             
-            if (orig == 11) {
+            if (orig == 12) {
                 // Power off: red accent
                 // Icon: power symbol
                 int ic_x = 10;
@@ -544,13 +544,13 @@ void taskbar_draw() {
                 draw_string_px(ic_x + 18, item_y + 6, sm_labels[orig],
                                hovered ? RETRO_SELTXT : 0x00CC0000,
                                hovered ? RETRO_SEL : TB_BG);
-            } else if (orig == 10) {
+            } else if (orig == 11) {
                 // Logout: muted amber accent (was bright mustard)
                 int ic_x = 10;
                 draw_string_px(ic_x + 18, item_y + 6, sm_labels[orig],
                                hovered ? RETRO_SELTXT : 0x00A0883C,
                                hovered ? RETRO_SEL : TB_BG);
-            } else if (orig == 9) {
+            } else if (orig == 10) {
                 // Lock: padlock glyph (amber), normal highlight text
                 int ic_x = 10, ic_y = item_y + 5;
                 // body
@@ -698,12 +698,13 @@ static void handle_start_menu_click(int item) {
         case 1: { extern int load_mct_app(const char*); load_mct_app("apps/notepad.mct"); } break;
         case 2: open_explorer_app(); break;
         case 3: open_browser_app(); break;
-        case 4: open_sysinfo_app(); break;
-        case 5: open_clock_app(); break;
-        case 6: open_pci_app(); break;
-        case 7: start_ular(); break;
-        case 8: open_taskmgr_app(); break;
-        case 9: // Lock
+        case 4: open_paint_app(); break;
+        case 5: open_sysinfo_app(); break;
+        case 6: open_clock_app(); break;
+        case 7: open_pci_app(); break;
+        case 8: start_ular(); break;
+        case 9: open_taskmgr_app(); break;
+        case 10: // Lock
             {
                 extern volatile int pending_lock;
                 start_menu_open = 0;
@@ -712,7 +713,7 @@ static void handle_start_menu_click(int item) {
                 pending_lock = 1;
             }
             break;
-        case 10: // Logout
+        case 11: // Logout
             {
                 extern volatile int pending_logout;
                 start_menu_open = 0;
@@ -721,7 +722,7 @@ static void handle_start_menu_click(int item) {
                 pending_logout = 1;
             }
             break;
-        case 11: open_power_app(); break;
+        case 12: open_power_app(); break;
     }
 }
 

@@ -29,9 +29,11 @@ MON_SOCK = "/tmp/mectov_smsearch_monitor.sock"
 
 LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 
-# Start menu geometry on the 1024x768 desktop: 200x376 panel at x 2..202,
+# Start menu geometry on the 1024x768 desktop: 200x404 panel at x 2..202,
+# sitting directly on top of the taskbar. Items start 36px into the panel,
+# 28px per row. Panel grew to 404 when Pixel Paint joined the menu (v38.75).
 # above the taskbar (ty = 740). Items start at sm_y+40, 28px per row.
-SM_Y = (768 - 28) - 376
+SM_Y = (768 - 28) - 404
 
 
 def wait_for_in_file(path, needle, timeout):

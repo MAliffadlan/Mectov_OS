@@ -72,6 +72,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/pci_mct.o \
        $(OBJ_DIR)/explorer_mct.o \
        $(OBJ_DIR)/browser_mct.o \
+       $(OBJ_DIR)/paint_mct.o \
        $(OBJ_DIR)/terminal_mct.o \
        $(OBJ_DIR)/taskmgr_mct.o \
        $(OBJ_DIR)/notepad_mct.o \
@@ -179,6 +180,9 @@ pci.mct: apps/pci.c $(MCT_LIBC_H)
 
 browser.mct: apps/browser.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/browser.c browser.mct
+
+paint.mct: apps/paint.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/paint.c paint.mct
 
 terminal.mct: apps/terminal.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/terminal.c terminal.mct
@@ -321,6 +325,9 @@ $(OBJ_DIR)/explorer_mct.o: explorer.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
 $(OBJ_DIR)/browser_mct.o: browser.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+$(OBJ_DIR)/paint_mct.o: paint.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
 $(OBJ_DIR)/terminal_mct.o: terminal.mct | $(OBJ_DIR)
