@@ -38,6 +38,16 @@ int ata_wait_drq_drive(int drive) {
     }
     return timeout > 0 ? 0 : -1;
 }
+
+// v38.74: an absent controller/drive reads back 0x00 (or 0xFF) on the status
+// port — neither BSY, DRQ nor ERR is ever set, so a WRITE SECTORS with no
+// drive behind it made every caller burn the full 100k-iteration DRQ timeout
+// per sector (a 256-sector vfs_save turned into minutes of wasted port I/O
+// that looked like a boot hang under KVM). Detect it up front, fail fast.
+static int ata_no_drive(int drive) {
+    uint8_t st = inb(ata_base_port(drive) + 7);
+    return (st == 0x00 || st == 0xFF);
+}
 int ata_wait_bsy() { return ata_wait_bsy_drive(0); }
 int ata_wait_drq() { return ata_wait_drq_drive(0); }
 
@@ -49,6 +59,7 @@ static int ata_read_sector_drive_io(int drive, unsigned int lba, unsigned char* 
     uint16_t base = ata_base_port(drive);
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10;
+    if (ata_no_drive(drive)) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
     if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; } 
     outb(base + 6, ((drive & 1) ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F)); 
     outb(base + 2, 1); 
@@ -108,6 +119,7 @@ static int ata_read_sectors_drive_io(int drive, unsigned int lba, int count, uns
 
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10;
+    if (ata_no_drive(drive)) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
     if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
     outb(base + 6, ((drive & 1) ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F));
     outb(base + 2, (unsigned char)count);
@@ -243,6 +255,7 @@ static int ata_write_sectors_drive_io(int drive, unsigned int lba, int count, co
 
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10;
+    if (ata_no_drive(drive)) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
     if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
     outb(base + 6, ((drive & 1) ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F));
     outb(base + 2, (unsigned char)count);
@@ -409,6 +422,7 @@ static int ata_dma_transfer(int drive, unsigned int lba, int count,
     // value, so write 0x06, never 0xFF).
     outb(bm + BMIDE_STATUS, 0x06);
     // 1. Issue the DMA command in the command block (sector count = count).
+    if (ata_no_drive(drive)) return -1;
     if (ata_wait_bsy_drive(drive) < 0) return -1;
     outb(base + 6, ((drive & 1) ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F));
     outb(base + 2, (unsigned char)count);
@@ -500,8 +514,8 @@ int ata_dma_write_sectors_drive(int drive, unsigned int lba, int count, const un
     return rc;
 }
 
-void ata_read_sector(unsigned int lba, unsigned char* b) {
-    ata_read_sector_drive(0, lba, b);
+int ata_read_sector(unsigned int lba, unsigned char* b) {
+    return ata_read_sector_drive(0, lba, b);
 }
 static int ata_write_sector_drive_io(int drive, unsigned int lba, unsigned char* b) {
     if (drive >= USB_DRIVE_BASE) return usb_write_sectors(drive, lba, 1, b);
@@ -509,6 +523,7 @@ static int ata_write_sector_drive_io(int drive, unsigned int lba, unsigned char*
     uint16_t base = ata_base_port(drive);
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10; // set activity frames
+    if (ata_no_drive(drive)) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
     if (ata_wait_bsy_drive(drive) < 0) { spin_unlock_irqrestore(&ata_lock, ata_eflags); return -1; }
     outb(base + 6, ((drive & 1) ? 0xF0 : 0xE0) | ((lba >> 24) & 0x0F)); outb(base + 2, 1); outb(base + 3, (unsigned char)lba);
     outb(base + 4, (unsigned char)(lba >> 8)); outb(base + 5, (unsigned char)(lba >> 16)); outb(base + 7, 0x30);
@@ -531,6 +546,6 @@ int ata_write_sector_drive(int drive, unsigned int lba, unsigned char* b) {
     if (rc == 0) blkcache_invalidate(drive, lba, 1);
     return rc;
 }
-void ata_write_sector(unsigned int lba, unsigned char* b) {
-    ata_write_sector_drive(0, lba, b);
+int ata_write_sector(unsigned int lba, unsigned char* b) {
+    return ata_write_sector_drive(0, lba, b);
 }

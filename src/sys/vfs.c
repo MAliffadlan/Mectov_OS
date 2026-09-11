@@ -1047,12 +1047,23 @@ static void vfs_save_unlocked() {
     meta[18] = (unsigned char)(count & 0xFF);
     meta[19] = (unsigned char)((count >> 8) & 0xFF);
     
-    ata_write_sector(VFS_MAGIC_SECTOR, meta);
+    // v38.74: ata_write_sector() now reports failure (e.g. no disk attached —
+    // floating-bus status 0x00/0xFF is detected up front in ata.c). Log once
+    // and bail instead of grinding through every sector of the node table.
+    if (ata_write_sector(VFS_MAGIC_SECTOR, meta) < 0) {
+        write_serial_string("[VFS] save failed: ATA write error (disk attached?)\n");
+        return;
+    }
     
     // Write node table
     unsigned char* p = (unsigned char*)fs_nodes;
     for (int i = 0; i < VFS_NODE_SECTORS; i++) {
-        ata_write_sector(VFS_NODE_START + i, p + (i * 512));
+        if (ata_write_sector(VFS_NODE_START + i, p + (i * 512)) < 0) {
+            write_serial_string("[VFS] save failed at node-table sector ");
+            write_serial_hex((uint32_t)i);
+            write_serial_string("\n");
+            return;
+        }
     }
 }
 void vfs_save() {
@@ -1063,8 +1074,12 @@ void vfs_save() {
 
 static int vfs_load_unlocked() {
     unsigned char meta[512];
-    ata_read_sector(VFS_MAGIC_SECTOR, meta);
-    
+    // v38.74: honor the read status — with no disk this used to "succeed"
+    // reading a 0x00-filled sector and then quietly rebuild over nothing.
+    if (ata_read_sector(VFS_MAGIC_SECTOR, meta) < 0) {
+        write_serial_string("[VFS] load failed: ATA read error (disk attached?)\n");
+        return 0;
+    }
     // Check magic
     if (meta[0] != 'M' || meta[1] != 'E' || meta[2] != 'C' ||
         meta[3] != 'T' || meta[4] != 'O' || meta[5] != 'V' ||
@@ -1086,7 +1101,12 @@ static int vfs_load_unlocked() {
     // Read node table
     unsigned char* p = (unsigned char*)fs_nodes;
     for (int i = 0; i < VFS_NODE_SECTORS; i++) {
-        ata_read_sector(VFS_NODE_START + i, p + (i * 512));
+        if (ata_read_sector(VFS_NODE_START + i, p + (i * 512)) < 0) {
+            write_serial_string("[VFS] load failed at node-table sector ");
+            write_serial_hex((uint32_t)i);
+            write_serial_string("\n");
+            return 0;
+        }
     }
     
     // Sanitize the on-disk node table. Names and parent links are attacker
@@ -2293,7 +2313,7 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
             memset(tmp, 0, 512);
             int chunk = remaining > 512 ? 512 : remaining;
             if (chunk > 0) memcpy(tmp, data + offset, chunk);
-            ata_write_sector((unsigned int)sector++, tmp);
+            if (ata_write_sector((unsigned int)sector++, tmp) < 0) break;
             offset += 512;
             remaining -= 512;
         }
