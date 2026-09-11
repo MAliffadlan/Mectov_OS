@@ -126,6 +126,8 @@ if [ -n "$KVM_FLAGS" ]; then
     sleep 8
     if grep -q "KVM: entry failed" "$KVM_ERR" 2>/dev/null || ! kill -0 $QEMU_PID 2>/dev/null; then
         echo "[!] KVM gagal (entry failed) - fallback ke TCG (tanpa KVM)."
+        echo "    Hint: biasanya karena VirtualBox/VM lain lagi megang VT-x, atau "
+        echo "    nested virtualization mati. Matiin VirtualBox dulu terus jalanin lagi."
         # QEMU yang macet di state KVM-paused kadang mengabaikan SIGTERM dan
         # tetap memegang port chardev 45454 -> restart gagal "Address already
         # in use". Pastikan mati: TERM dulu, 5 detik, kalau bandel kill -9.
