@@ -318,11 +318,35 @@ def main():
             return 1
         print(f"[OK] clear erased everything (paper px={p1}/{p2}/{pmid})")
 
+        # 6. Save/Open cycle: paint a red cell, Save, clear, Open, cell returns
+        click(*SWATCH[3], wait=0.4)
+        rcell = client(GRID_X + 2 * CELL + 12, GRID_Y + 11 * CELL + 12)
+        click(*rcell, wait=0.4)
+        save_btn = client(337, TOOL_Y + 11)
+        open_btn = client(395, TOOL_Y + 11)
+        click(*save_btn, wait=0.8)
+        click(*CLEAR_BTN, wait=0.6)
+        if not screendump(DUMP3):
+            print("FAIL: no screendump after pre-open clear")
+            return 1
+        _, _, px3 = load_ppm(DUMP3)
+        pre = count_color(px3, w, *box(rcell[0], rcell[1], 9), (224, 108, 117))
+        click(*open_btn, wait=0.8)
+        if not screendump(DUMP3):
+            print("FAIL: no screendump after open")
+            return 1
+        _, _, px3 = load_ppm(DUMP3)
+        post = count_color(px3, w, *box(rcell[0], rcell[1], 9), (224, 108, 117))
+        if post < 200 or pre >= 200:
+            print(f"FAIL: save/open roundtrip (red pre-clear={pre} post-open={post})")
+            return 1
+        print(f"[OK] save/open roundtrip (red cell restored px={post})")
+
         serial = open(SERIAL_LOG, "r", errors="replace").read()
         if "PANIC" in serial or "WATCHDOG" in serial:
             print("FAIL: PANIC/WATCHDOG in serial log")
             return 1
-        print("PASS: pixel paint opens, paints, drags, recolors, clears")
+        print("PASS: pixel paint opens, paints, drags, recolors, saves, opens, clears")
         return 0
     finally:
         try:

@@ -48,6 +48,54 @@ static int     win_ch   = PH - 22;
 static int cur_color    = 2;   // start with black
 static int brush        = 0;   // 0 = 1x1, 1 = 2x2, 2 = 3x3 cells
 
+// ---- File I/O (v38.76): save/open the cell grid to the VFS ----
+// Format: magic "MCP1" + GRID_COLS*GRID_ROWS bytes of palette indices.
+#define SAVE_PATH "home/paint.mcp"
+#define IO_BUF_SIZE (4 + GRID_COLS * GRID_ROWS)   // 340 bytes
+static char status_msg[32];   // transient feedback, drawn right of the hint
+static int  status_len = 0;
+
+static void set_status(const char* s) {
+    int n = 0;
+    while (*s && n < (int)sizeof(status_msg) - 1) status_msg[n++] = *s++;
+    status_msg[n] = '\0';
+    status_len = n;
+}
+
+static void do_save(void) {
+    char buf[IO_BUF_SIZE];
+    buf[0] = 'M'; buf[1] = 'C'; buf[2] = 'P'; buf[3] = '1';
+    for (int i = 0; i < GRID_COLS * GRID_ROWS; i++)
+        buf[4 + i] = (char)cells[i];
+    int fd = sys_open(SAVE_PATH);
+    if (fd < 0) {
+        sys_create_file(SAVE_PATH);
+        fd = sys_open(SAVE_PATH);
+    }
+    if (fd < 0) { set_status("Save FAILED"); return; }
+    sys_write(fd, buf, IO_BUF_SIZE);
+    sys_close(fd);
+    set_status("Saved " SAVE_PATH);
+}
+
+static void do_open(void) {
+    char buf[IO_BUF_SIZE];
+    int fd = sys_open(SAVE_PATH);
+    if (fd < 0) { set_status("No file yet"); return; }
+    int n = sys_read(fd, buf, IO_BUF_SIZE);
+    sys_close(fd);
+    if (n < IO_BUF_SIZE || buf[0] != 'M' || buf[1] != 'C' ||
+        buf[2] != 'P' || buf[3] != '1') {
+        set_status("Bad file");
+        return;
+    }
+    for (int i = 0; i < GRID_COLS * GRID_ROWS; i++) {
+        uint8_t v = (uint8_t)buf[4 + i];
+        cells[i] = (v < 8) ? v : 0;
+    }
+    set_status("Opened");
+}
+
 static const uint32_t palette[8] = {
     0xFFF5F0E7,   // 0 paper (white-ish) — doubles as the eraser
     0xFF1E1E2E,   // 1 black
@@ -102,6 +150,11 @@ static void draw_ui(int wid) {
         char lbl[4]; lbl[0] = 'B'; lbl[1] = (char)('1' + i); lbl[2] = '\0';
         sys_draw_text(wid, x + 7, TOOL_Y + 6, lbl, 0xFFCDD6F4);
     }
+    // Save + Open (file I/O)
+    sys_draw_rect(wid, 312, TOOL_Y, 50, 22, 0xFF313244);
+    sys_draw_text(wid, 326, TOOL_Y + 6, "Save", 0xFFA6E3A1);
+    sys_draw_rect(wid, 370, TOOL_Y, 50, 22, 0xFF313244);
+    sys_draw_text(wid, 384, TOOL_Y + 6, "Open", 0xFFF9E2AF);
     // Clear + Quit
     sys_draw_rect(wid, win_cw - 128, TOOL_Y, 58, 22, 0xFF313244);
     sys_draw_text(wid, win_cw - 122, TOOL_Y + 6, "Clear", 0xFFF9E2AF);
@@ -144,6 +197,7 @@ static void draw_ui(int wid) {
     while (*s1) st[n++] = *s1++;
     st[n] = '\0';
     sys_draw_text(wid, 8, STATUS_Y + 5, st, 0xFFA6E3A1);
+    if (status_len > 0) sys_draw_text(wid, 300, STATUS_Y + 5, status_msg, 0xFFF9E2AF);
 }
 
 static void redraw(int wid) {
@@ -151,10 +205,14 @@ static void redraw(int wid) {
     sys_update_window(wid);
 }
 
-int main(void) {
+// Entry point convention: the loader jumps to the MCT header entry offset,
+// which build_mct.py derives from the `_start` symbol — apps define _start
+// directly (see browser.c); a plain main() leaves _start undefined and the
+// app crashes on launch (entry falls back to offset 0).
+void _start(void) {
     if (!inited) grid_init();
     int wid = sys_create_window(60, 40, PW, PH, "Pixel Paint");
-    if (wid < 0) return 1;
+    if (wid < 0) sys_exit();
 
     int painting = 0;
     int last_gx = -1, last_gy = -1;
@@ -170,8 +228,10 @@ int main(void) {
             if (ev.type == 1) {                    // Paint
                 need_redraw = 1;
             } else if (ev.type == 2) {             // Key
-                if (ev.key == 27 || ev.key == 'q') return 0;
-                else if (ev.key == 'c') { grid_init(); need_redraw = 1; }
+                if (ev.key == 27 || ev.key == 'q') sys_exit();
+                else if (ev.key == 'c') { grid_init(); set_status("Cleared"); need_redraw = 1; }
+                else if (ev.key == 's') { do_save(); need_redraw = 1; }
+                else if (ev.key == 'o') { do_open(); need_redraw = 1; }
                 else if (ev.key == 'b') { brush = (brush + 1) % 3; need_redraw = 1; }
                 else if (ev.key >= '1' && ev.key <= '8') {
                     cur_color = ev.key - '1'; need_redraw = 1;
@@ -188,8 +248,10 @@ int main(void) {
                             if (brush < 0) brush = 0; if (brush > 2) brush = 2;
                             need_redraw = 1;
                         }
-                        else if (ev.x >= win_cw - 128 && ev.x < win_cw - 70) { grid_init(); need_redraw = 1; }
-                        else if (ev.x >= win_cw - 64) return 0;
+                        else if (ev.x >= 312 && ev.x < 362) { do_save(); need_redraw = 1; }
+                        else if (ev.x >= 370 && ev.x < 420) { do_open(); need_redraw = 1; }
+                        else if (ev.x >= win_cw - 128 && ev.x < win_cw - 70) { grid_init(); set_status("Cleared"); need_redraw = 1; }
+                        else if (ev.x >= win_cw - 64) sys_exit();
                     }
                 } else if (ev.x >= GRID_X && ev.x < GRID_X + CANVAS_W &&
                            ev.y >= GRID_Y && ev.y < GRID_Y + CANVAS_H) {
@@ -216,5 +278,4 @@ int main(void) {
         (void)painting; (void)have;
         sys_yield();
     }
-    return 0;
 }
