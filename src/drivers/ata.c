@@ -45,7 +45,14 @@ int ata_wait_drq_drive(int drive) {
 // per sector (a 256-sector vfs_save turned into minutes of wasted port I/O
 // that looked like a boot hang under KVM). Detect it up front, fail fast.
 static int ata_no_drive(int drive) {
-    uint8_t st = inb(ata_base_port(drive) + 7);
+    // v38.77 fix: the Status register is only valid for the CURRENTLY
+    // selected unit on the channel. A previous operation can leave the
+    // selection on the other (possibly absent) unit — reading status then
+    // returns 0x00 even though the target drive is healthy. Select the
+    // target drive FIRST, then sample the bus.
+    uint16_t base = ata_base_port(drive);
+    outb(base + 6, (drive & 1) ? 0xF0 : 0xE0);
+    uint8_t st = inb(base + 7);
     return (st == 0x00 || st == 0xFF);
 }
 int ata_wait_bsy() { return ata_wait_bsy_drive(0); }

@@ -795,20 +795,18 @@ static int wm_handle_mouse_unlocked(int mx, int my, int btn, int pbtn) {
     // v38.75 content-drag forwarding: while the button is held on a window's
     // content, every move is forwarded to the app as a mouse event so drag
     // tools (paint, etc.) get continuous input. Cleared on release.
-    if (!click) {
+    // v38.77 fix: pure moves with the button held must STILL fall through to
+    // the titlebar-drag / resize blocks below — the early return here made
+    // every window impossible to move while dragging it.
+    if (!click && !release && (btn & 1)) {
         for (int i = 0; i < MAX_WINDOWS; i++) {
             WmWin* w = &wm_wins[i];
             if (!w->visible || !w->mouse_fn || !w->content_drag) continue;
-            if (release || !(btn & 1)) {
-                w->content_drag = 0;
-                continue;
-            }
             if (mx >= w->x && mx < w->x + w->w && my >= w->y + TITLEBAR_H && my < w->y + w->h) {
                 w->mouse_fn(w->id, mx - w->x, my - (w->y + TITLEBAR_H), btn);
             }
         }
-        if (!release) return 0;   // pure move: nothing else to do
-        // release falls through to the release block below
+        // fall through: drag/resize blocks handle their own state and return
     }
 
     // Handle dragging/resizing
@@ -931,6 +929,7 @@ static int wm_handle_mouse_unlocked(int mx, int my, int btn, int pbtn) {
                 wm_wins[i].dragging = 0;
                 wm_wins[i].resizing = 0;
                 wm_wins[i].resize_edge = 0;
+                wm_wins[i].content_drag = 0; // v38.77: end content drag on release
             }
         }
         extern volatile int needs_redraw;
@@ -948,6 +947,10 @@ static int wm_handle_mouse_unlocked(int mx, int my, int btn, int pbtn) {
         if (w->minimized) continue;
         if (mx >= w->x && mx < w->x + w->w && my >= w->y && my < w->y + w->h) {
             wm_raise(w->id);
+
+            // v38.77: any new click takes the mouse exclusively — end content
+            // drags everywhere (titlebar drag / resize / other window click)
+            for (int j = 0; j < MAX_WINDOWS; j++) wm_wins[j].content_drag = 0;
 
             // 1. Titlebar buttons & dragging (highest priority so corners don't overlap)
             if (my < w->y + TITLEBAR_H) {
