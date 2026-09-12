@@ -45,9 +45,16 @@ menuentry "Mectov OS" {
 }
 EOF
 
-# Gunakan xorriso yang sudah didownload lokal untuk bikin ISO bootable Mectov
-export PATH=/home/mectov/my-os/xbin/usr/bin:$PATH
-export LD_LIBRARY_PATH=/home/mectov/my-os/xbin/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+# Toolchain lokal opsional untuk bikin ISO bootable Mectov. Hanya dipakai kalau
+# direktorinya benar-benar ada; kalau tidak, pakai grub-mkrescue dari PATH sistem.
+# Override: MECTOV_XBIN=/opt/xbin ./run.sh
+MECTOV_XBIN="${MECTOV_XBIN:-/home/mectov/my-os/xbin/usr}"
+if [ -d "$MECTOV_XBIN/bin" ]; then
+    export PATH="$MECTOV_XBIN/bin:$PATH"
+fi
+if [ -d "$MECTOV_XBIN/lib/x86_64-linux-gnu" ]; then
+    export LD_LIBRARY_PATH="$MECTOV_XBIN/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+fi
 grub-mkrescue -o mectov.iso iso >/dev/null 2>&1
 
 echo "[*] Menghentikan instansi lama Web Gateway Proxy (jika ada)..."

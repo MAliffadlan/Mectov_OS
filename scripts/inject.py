@@ -1,7 +1,10 @@
 import struct
 import os
 
-disk_path = '/home/mectov/my-os/disk.img'
+# Repo-root disk.img (bisa di-override via MECTOV_DISK). Dulu hardcoded ke
+# path absolut mesin lama (/home/mectov/my-os/disk.img) sehingga gagal di mesin lain.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+disk_path = os.environ.get("MECTOV_DISK", os.path.join(_REPO_ROOT, "disk.img"))
 
 # Cek apakah disk.img ada, kalau tidak, buat baru
 if not os.path.exists(disk_path) or os.path.getsize(disk_path) == 0:

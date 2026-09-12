@@ -1,4 +1,4 @@
-// --- MECTOV OS v13.5 GUI Edition ---
+// --- MECTOV OS kernel entry (version: see OS_VERSION in src/include/utils.h) ---
 #include "src/include/types.h"
 #include "src/include/vga.h"
 #include "src/include/keyboard.h"
