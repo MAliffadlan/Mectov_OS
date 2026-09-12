@@ -538,7 +538,7 @@ void _start() {
     draw_browser(wid);
 
     gui_event_t ev;
-    int tick = 0;
+    uint32_t last_net_poll = 0;   // ms-gated network polling (see below)
 
     while (1) {
         while (sys_get_event(wid, &ev)) {
@@ -610,12 +610,15 @@ void _start() {
             }
         }
 
-        // Poll network state machine
+        // Poll network state machine. Time-based (not iteration-counted):
+        // loop iterations now track wakeups (~100/s), so a tick%N gate
+        // would poll slower and slower the idler the loop gets (v38.83).
         if (browser_state > 0) {
-            tick++;
-            if (sys_get_ticks() - request_started_at > REQUEST_TIMEOUT_MS) {
+            uint32_t now = sys_get_ticks();
+            if (now - request_started_at > REQUEST_TIMEOUT_MS) {
                 finish_err(wid, "Request timed out.");
-            } else if (tick % 100 == 0) {
+            } else if (now - last_net_poll >= 50) {
+                last_net_poll = now;
                 net_status_t ns;
                 sys_net_status(&ns);
 
@@ -636,9 +639,13 @@ void _start() {
                         draw_browser(wid);
                     }
                 } else if (browser_state == 3) {
+                    // Drain everything available (recv is non-blocking:
+                    // >0 data, 0 empty, -1 closed, -2 lost). Single-shot
+                    // recvs paced the drain to the poll rate and stalled
+                    // bulk pages once iterations slowed (v38.83).
                     char rx_buf[1024];
-                    int rx_len = sys_tcp_recv(conn_id, rx_buf, 1024);
-                    if (rx_len > 0) {
+                    int rx_len;
+                    while ((rx_len = sys_tcp_recv(conn_id, rx_buf, 1024)) > 0) {
                         int copy = rx_len;
                         if (raw_len + copy >= RAW_MAX - 1) copy = RAW_MAX - 1 - raw_len;
                         if (copy > 0) {
@@ -658,7 +665,9 @@ void _start() {
                         // finish_ok() repaints the final page regardless.
                         static int rx_paint_div = 0;
                         if (++rx_paint_div >= 10) { rx_paint_div = 0; draw_browser(wid); }
-                    } else if (rx_len == -1) {
+                        if (raw_len >= RAW_MAX - 1) break;
+                    }
+                    if (rx_len == -1) {
                         finish_ok(wid);
                     } else if (rx_len == -2) {
                         finish_err(wid, "Connection lost.");

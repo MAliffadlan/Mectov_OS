@@ -95,6 +95,10 @@ static int frame_count = 0;
 static int win_cw = WIN_W - 2;
 static int win_ch = WIN_H - 22;
 
+// Physics cadence in wall-clock ms (v38.83): the old frame_count%25 gate
+// assumed fast loop iterations and ran ~5x slow once loops went hlt-idle.
+static uint32_t last_phys_tick = 0;
+
 // Cloud positions for parallax
 static int cloud_x[3] = { 30, 150, 260 };
 static int cloud_y[3] = { 35, 70, 20 };
@@ -349,9 +353,15 @@ void _start() {
         }
         
         if (started && !game_over) {
+            uint32_t now = sys_get_ticks();
+            if (now - last_phys_tick < 25) {
+                sys_yield();
+                continue;
+            }
+            last_phys_tick = now;
             frame_count++;
             
-            if (frame_count % 25 == 0) {
+            {
                 
                 // Gravity
                 bird_vy += GRAVITY;
@@ -369,8 +379,9 @@ void _start() {
                     sys_play_sound(120, 400);
                 }
                 
-                // Cloud parallax (slow scroll)
-                if (frame_count % 75 == 0) {
+                // Cloud parallax (slow scroll, every 3rd physics tick —
+                // same relative rate as the old %75-of-frames gate)
+                if (frame_count % 3 == 0) {
                     for (int i = 0; i < 3; i++) {
                         cloud_x[i] -= 1;
                         if (cloud_x[i] < -40) cloud_x[i] = WIN_W + 10 + (rand() % 40);

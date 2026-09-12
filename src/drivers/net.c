@@ -548,6 +548,14 @@ int net_tcp_recv(int id, uint8_t* out, uint32_t max_len) {
     if (c->state == TCP_CLOSED) return -1;
     if (c->rx_len <= 0) return c->eof ? -1 : 0;
 
+    // Window-update ACK (v38.83): the peer stops sending once our advertised
+    // window hits 0, and it only learns the window reopened from an ACK —
+    // but ACKs previously went out solely on inbound segments, so a drained
+    // buffer with a silent peer wedged the connection until our own FIN
+    // timeout (bulk page loads stalled mid-transfer, then timed out). If we
+    // were advertising less than an MSS and this drain reopens room, tell
+    // the peer immediately (Linux does the same on window opening).
+    int was_tight = (TCP_CONN_BUF - c->rx_len) < 1460;
     int copy = c->rx_len;
     if (copy > (int)max_len) copy = (int)max_len;
     memcpy(out, c->rx, copy);
@@ -556,6 +564,10 @@ int net_tcp_recv(int id, uint8_t* out, uint32_t max_len) {
         c->rx_len -= copy;
     } else {
         c->rx_len = 0;
+    }
+    if (was_tight && (TCP_CONN_BUF - c->rx_len) >= 1460 &&
+        (c->state == TCP_ESTABLISHED || c->state == TCP_CLOSE_WAIT)) {
+        net_send_tcp_segment(c, TCP_ACK, 0, 0);
     }
     return copy;
 }

@@ -71,13 +71,16 @@ void _start() {
     draw_clock(wid); // Gambar pertama kali
     
     gui_event_t ev;
-    int tick = 0;
+    // Time-based redraw (v38.83): the old tick%5000 gate assumed fast loop
+    // iterations and stretched to tens of seconds once loops went hlt-idle.
+    uint32_t last_draw = 0;
     
     while (1) {
         // Process events
         while (sys_get_event(wid, &ev)) {
             if (ev.type == 1) { // Paint event
                 draw_clock(wid);
+                last_draw = sys_get_ticks();
             } else if (ev.type == 2) { // Key event
                 if (ev.key == 27) { // ESC ASCII
                     sys_exit();
@@ -87,14 +90,13 @@ void _start() {
                     win_cw = ev.x;
                     win_ch = ev.y;
                     draw_clock(wid);
+                    last_draw = sys_get_ticks();
                 }
             }
         }
 
-        
-        
-        tick++;
-        if (tick % 5000 == 0) { // Lebih cepat update-nya biar detiknya gak lag
+        if (sys_get_ticks() - last_draw >= 1000) {
+            last_draw = sys_get_ticks();
             draw_clock(wid);
         }
         
