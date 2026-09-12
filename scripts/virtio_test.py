@@ -226,18 +226,27 @@ def main():
         # both through virtio-blk. (cp prints to the GUI terminal, not
         # serial, so there is no in-session marker — the host-side readback
         # below is the proof that the copy actually executed AND landed.)
-        for _ in range(48):
-            mon_cmd("sendkey backspace")
-        type_line(KEYS_CP)
-        time.sleep(4)
+        # Retry blindly: on a slow runner the guest can lag several seconds
+        # behind the keystrokes, so one 4s window may expire with the copy
+        # unstarted (CI once showed this as an empty F32.TXT — created but
+        # never written before shutdown). Re-issuing is idempotent
+        # (overwrite) and every attempt starts with 48 backspaces, which
+        # clears any partial line a delayed previous attempt left behind,
+        # so the byte stream stays self-healing no matter the timing.
+        for _ in range(3):
+            for _ in range(48):
+                mon_cmd("sendkey backspace")
+            type_line(KEYS_CP)
+            time.sleep(8)
 
         # Coexistence: write through the BOOT fat32 volume (drive 3) while
         # /vblk (drive 12) stays mounted — the backend auto-select must
         # switch back. Same deal: host-side readback is the proof.
-        for _ in range(48):
-            mon_cmd("sendkey backspace")
-        type_line(KEYS_CP_FAT32)
-        time.sleep(4)
+        for _ in range(3):
+            for _ in range(48):
+                mon_cmd("sendkey backspace")
+            type_line(KEYS_CP_FAT32)
+            time.sleep(8)
 
         if qemu.poll() is not None:
             print(f"[FAIL] QEMU exited early with code {qemu.returncode}")
