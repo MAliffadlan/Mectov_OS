@@ -31,9 +31,16 @@ LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 # From the locked gate: SPACE opens the panel (consumed), then the password.
 NEW_PW_KEYS = ["spc", "h", "u", "n", "t", "e", "r", "2", "ret"]
 OLD_PW_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
-# From an ALREADY-OPEN panel (wrong-password shake): no leading SPACE, it
-# would type a literal space into the field.
-PANEL_PW_KEYS = ["h", "u", "n", "t", "e", "r", "2", "ret"]
+# Recovering after a rejection: the panel SHOULD still be open (the reject
+# path resets it), but the 4 s idle revert can legitimately fire during the
+# keyless still-locked check above on a slow runner. Lead with SPACE +
+# backspace, which is correct in BOTH worlds: panel open -> literal space
+# typed then erased (field was reset to empty by the rejection); lock
+# screen -> SPACE opens the panel (consumed) and backspace is a harmless
+# no-op on the empty field. Either way the password lands in a live field
+# and every keystroke re-anchors the idle window, so the sequence can no
+# longer straddle the revert boundary.
+PANEL_PW_KEYS = ["spc", "backspace", "h", "u", "n", "t", "e", "r", "2", "ret"]
 
 
 def wait_for_in_file(path, needle, timeout):
@@ -258,7 +265,8 @@ def main():
         print("[OK] old password rejected (no plaintext fallback on hashed file)")
 
         # ---- 4. Recover with the new password, then run the Ring-3 app ----
-        # The panel is already open after the rejection, so no leading SPACE.
+        # PANEL_PW_KEYS leads with SPACE+backspace (see above): correct
+        # whether the panel stayed open or the idle revert fired meanwhile.
         send_keys(PANEL_PW_KEYS)
         desk = wait_screen(lambda w, h, px: is_taskbar(px, w, h),
                            "/tmp/mectov_hardening_unlocked2.ppm", 25)
