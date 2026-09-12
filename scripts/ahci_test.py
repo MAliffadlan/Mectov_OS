@@ -113,7 +113,7 @@ def ensure_boot_images(disk, ext2):
     # slate every run.
     steps = [
         ["dd", "if=/dev/zero", f"of={disk}", "bs=512", "count=2048", "status=none"],
-        ["dd", "if=/dev/zero", f"of={ext2}", "bs=1M", "count=2", "status=none"],
+        ["dd", "if=/dev/zero", f"of={ext2}", "bs=1M", "count=16", "status=none"],
         ["mkfs.ext2", "-F", ext2],
     ]
     for s in steps:
@@ -122,6 +122,14 @@ def ensure_boot_images(disk, ext2):
             print(f"[FAIL] boot image step failed: {' '.join(s)}")
             return 1
     return 0
+
+    # System blobs for the debloated kernel (v38.81): seed /ext2 (warn-only;
+    # the guest falls back gracefully without them).
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _r = subprocess.run(["bash", os.path.join(_root, "scripts", "seed_ext2.sh"), ext2],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if _r.returncode != 0:
+        print("[WARN] ext2 blob seeding failed (guest uses fallbacks)")
 
 
 def main():

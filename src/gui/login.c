@@ -9,6 +9,7 @@
 #include "../include/font8x16.h"
 #include "../include/passwd.h"
 #include "../include/mem.h"
+#include "../include/assets.h"   // on-demand wallpaper (debloat v38.81)
 
 // ---- Instrument-console palette (warm charcoal + phosphor amber) ----
 // Mectov is a hand-built OS, so the gate should read as a machine console:
@@ -138,14 +139,20 @@ static uint32_t* wp_scaled = NULL;
 static uint32_t wp_scaled_w = 0, wp_scaled_h = 0;
 
 static void draw_background(void) {
-    extern uint32_t _binary_obj_wallpaper_bin_start[];
     if (!is_vbe || fb_width == 0 || fb_height == 0) return;
     if (!wp_scaled || wp_scaled_w != fb_width || wp_scaled_h != fb_height) {
         if (wp_scaled) kfree(wp_scaled);
         wp_scaled = (uint32_t*)kmalloc(fb_width * fb_height * 4);
         if (!wp_scaled) return;
         wp_scaled_w = fb_width; wp_scaled_h = fb_height;
-        uint32_t* wp_ptr = _binary_obj_wallpaper_bin_start;
+        // On-demand wallpaper (debloat v38.81): NULL on images without the
+        // blob — flat fill so the gate stays usable.
+        const uint32_t* wp_ptr = assets_wallpaper();
+        if (!wp_ptr) {
+            memset(wp_scaled, 0x22, fb_width * fb_height * 4);
+            memcpy(back_buffer, wp_scaled, fb_width * fb_height * 4);
+            return;
+        }
         uint32_t wp_w = 1024, wp_h = 768;
         for (uint32_t y = 0; y < fb_height; y++) {
             uint32_t sy = (y * wp_h) / fb_height;

@@ -139,8 +139,9 @@ typedef struct {
     uint32_t capacity;
     int      eof_flag;
     int      error_flag;
-    int      mode; // 0=read WAD, 1=read VFS, 2=write VFS
+    int      mode; // 0=read WAD, 1=read VFS, 2=write VFS, 3=disk-backed WAD
     char     path[128];
+    int      wad_node; // mode 3: VFS node of /ext2/doom1.wad (streamed reads)
 } FILE;
 
 extern FILE *doom_stdout;

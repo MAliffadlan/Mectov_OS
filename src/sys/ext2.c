@@ -15,15 +15,17 @@ static uint32_t ext2_max_groups = 0; // capped at MAX below; read_inode bounds-c
 int ext2_current_drive(void) { return ext2_drive; }
 
 static void ext2_read_block(uint32_t block, unsigned char* buf) {
-    // A crafted image can name arbitrary block numbers. Bound the read to the
-    // filesystem's own block count and the 4096-sector (2MB) drive BEFORE the
-    // block * sectors_per_block multiplication can wrap 32 bits; an out-of-
-    // range block reads as zeros instead of hitting the wrong disk area.
+    // A crafted image can name arbitrary block numbers. Bound the read to
+    // the filesystem's own block count BEFORE the block * sectors_per_block
+    // multiplication can wrap 32 bits (v38.81: the old code ALSO clamped to
+    // a hardcoded 4096-sector/2MB drive, which silently zeroed every block
+    // past 2 MB once images grew — on-demand blobs live there now). An
+    // out-of-range block reads as zeros instead of hitting the wrong area.
     if (block >= sb.s_blocks_count) { memset(buf, 0, block_size); return; }
     uint32_t sectors_per_block = block_size / 512;
+    if (sectors_per_block == 0 ||
+        block > 0xFFFFFFFFu / sectors_per_block) { memset(buf, 0, block_size); return; }
     uint32_t start_sector = block * sectors_per_block;
-    if (start_sector >= 4096) { memset(buf, 0, block_size); return; }
-    if (start_sector + sectors_per_block > 4096) sectors_per_block = 4096 - start_sector;
     // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
     uint32_t done = 0;
     while (done < sectors_per_block) {
@@ -297,13 +299,14 @@ int ext2_read_file_data(uint32_t inode_num, char* buf, int max_size) {
 extern void write_serial_string(const char*);
 
 static void ext2_write_block(uint32_t block, unsigned char* buf) {
-    // Same bounds as ext2_read_block: never write past the filesystem's block
-    // count or the 4096-sector drive.
+    // Same bounds as ext2_read_block: never write past the filesystem's
+    // block count (v38.81: the hardcoded 2MB drive clamp is gone — volumes
+    // are bigger now; the count + overflow guards carry the safety).
     if (block >= sb.s_blocks_count) return;
     uint32_t sectors_per_block = block_size / 512;
+    if (sectors_per_block == 0 ||
+        block > 0xFFFFFFFFu / sectors_per_block) return;
     uint32_t start_sector = block * sectors_per_block;
-    if (start_sector >= 4096) return;
-    if (start_sector + sectors_per_block > 4096) sectors_per_block = 4096 - start_sector;
     // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
     uint32_t done = 0;
     while (done < sectors_per_block) {

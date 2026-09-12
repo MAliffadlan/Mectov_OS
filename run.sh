@@ -10,9 +10,18 @@ fi
 
 if [ ! -f "ext2.img" ]; then
     echo "[!] Membuat ext2.img baru..."
-    dd if=/dev/zero of=ext2.img bs=1M count=2 2>/dev/null
+    dd if=/dev/zero of=ext2.img bs=1M count=16 2>/dev/null
     mkfs.ext2 -F ext2.img > /dev/null 2>&1
 fi
+# System blobs (debloat v38.81): the kernel loads doom1.wad /
+# wallpaper.bin / music.wav from /ext2 on demand instead of embedding
+# them. Top up every launch (idempotent, ~1 s) so old/small images gain
+# the blobs without a full recreate.
+if [ -f "ext2.img" ] && [ "$(stat -c%s ext2.img)" -lt 8388608 ]; then
+    echo "[!] ext2.img < 8MB: too small for the system blobs (wallpaper/doom/music)."
+    echo "    Guest falls back gracefully, but for the full desktop: rm ext2.img && ./run.sh"
+fi
+bash scripts/seed_ext2.sh ext2.img
 
 if [ ! -f "fat32.img" ]; then
     echo "[!] Membuat fat32.img baru..."

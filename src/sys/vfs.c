@@ -148,6 +148,27 @@ static int split_path(const char* path, char components[MAX_PATH/2][MAX_FILENAME
 
 // --- Inisialisasi ---
 
+static int vfs_update_file_if_needed(const char* path, const char* data, int size);
+
+// Seed apps/music.wav from /ext2/music.wav (debloat v38.81): the canonical
+// copy lives on ext2 (host-seeded by scripts/seed_ext2.sh); VFS keeps the
+// working copy the media apps open. Missing/corrupt source = skip silently
+// (players report the missing file themselves). Returns 1 when (re)wrote.
+static int vfs_seed_music_from_ext2(void) {
+    int node = vfs_get_node("/ext2/music.wav");
+    if (node < 0) return 0;
+    int sz = fs_nodes[node].size;
+    if (sz <= 44 || sz > 1024 * 1024) return 0;   // plausible WAV bounds
+    char* buf = (char*)kmalloc((uint32_t)sz);
+    if (!buf) return 0;
+    int rd = vfs_read_file("/ext2/music.wav", buf, sz);
+    int changed = 0;
+    if (rd == sz) changed = vfs_update_file_if_needed("apps/music.wav", buf, sz);
+    kfree(buf);
+    if (changed) write_serial_string("[VFS] seeded apps/music.wav from /ext2\n");
+    return changed;
+}
+
 static int vfs_update_file_if_needed(const char* path, const char* data, int size) {
     int node = vfs_get_node(path);
     if (node < 0) {
@@ -343,10 +364,6 @@ void vfs_init() {
         extern uint8_t _binary_mplayer_mct_start[];
         extern uint8_t _binary_mplayer_mct_end[];
         changed += vfs_update_file_if_needed("apps/mplayer.mct", (const char*)_binary_mplayer_mct_start, _binary_mplayer_mct_end - _binary_mplayer_mct_start);
-
-        extern uint8_t _binary_apps_music_wav_start[];
-        extern uint8_t _binary_apps_music_wav_end[];
-        changed += vfs_update_file_if_needed("apps/music.wav", (const char*)_binary_apps_music_wav_start, _binary_apps_music_wav_end - _binary_apps_music_wav_start);
 
         // Large uncached benchmark file (v38.25): 160 KB > PCACHE_MAX_FILE, so
         // every read pays the disk — the multi-sector PIO path (bigread.mct).
@@ -632,6 +649,10 @@ void vfs_init() {
             }
         }
         
+        // Media seed (debloat v38.81): apps/music.wav comes from /ext2 —
+        // this must run AFTER the backend volumes are mounted+populated.
+        vfs_seed_music_from_ext2();
+        
         // We always start at root (dir 0) when booting
         set_current_dir(0);
         
@@ -875,10 +896,6 @@ void vfs_init() {
     extern uint8_t _binary_mplayer_mct_end[];
     vfs_create_file("apps/mplayer.mct");
     vfs_write_file("apps/mplayer.mct", (const char*)_binary_mplayer_mct_start, _binary_mplayer_mct_end - _binary_mplayer_mct_start);
-    extern uint8_t _binary_apps_music_wav_start[];
-    extern uint8_t _binary_apps_music_wav_end[];
-    vfs_create_file("apps/music.wav");
-    vfs_write_file("apps/music.wav", (const char*)_binary_apps_music_wav_start, _binary_apps_music_wav_end - _binary_apps_music_wav_start);
 
     // Large uncached benchmark file (v38.25): 160 KB > PCACHE_MAX_FILE, so
     // every read pays the disk — the multi-sector PIO path (bigread.mct).
@@ -1024,6 +1041,10 @@ void vfs_init() {
             mount_register(fat_node, MOUNT_FAT32, 3, fat32_root_cluster());
         }
     }
+    
+    // Media seed (debloat v38.81): apps/music.wav comes from /ext2 —
+    // this must run AFTER the backend volumes are mounted+populated.
+    vfs_seed_music_from_ext2();
     
     // Flush the seeded tree in one write (per-file saves were suppressed by
     // vfs_seeding); runtime writes save immediately again from here on.

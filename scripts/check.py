@@ -142,9 +142,12 @@ def recreate_images():
     subprocess.run(["dd", "if=/dev/zero", "of=disk.img", "bs=512",
                     "count=2048", "status=none"], check=True)
     subprocess.run(["dd", "if=/dev/zero", "of=ext2.img", "bs=1M",
-                    "count=2", "status=none"], check=True)
+                    "count=16", "status=none"], check=True)
     subprocess.run(["mkfs.ext2", "-F", "ext2.img"], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # System blobs for the debloated kernel (v38.81): doom1.wad /
+    # wallpaper.bin / music.wav live on /ext2, loaded on demand.
+    subprocess.run(["bash", "scripts/seed_ext2.sh", "ext2.img"], check=True)
     subprocess.run(["dd", "if=/dev/zero", "of=fat32.img", "bs=1M",
                     "count=16", "status=none"], check=True)
     subprocess.run(["mkfs.fat", "-F", "32", "-S", "512", "fat32.img"],

@@ -262,7 +262,7 @@ static void draw_icon(int i) {
     }
 }
 
-extern uint32_t _binary_obj_wallpaper_bin_start[];
+#include "../include/assets.h"   // on-demand wallpaper (debloat v38.81)
 
 static int ctx_menu_open = 0;
 static int ctx_menu_x = 0;
@@ -274,13 +274,19 @@ void desktop_draw() {
 
     uint32_t area_h = fb_height - TASKBAR_H_PX;
 
-    // Blit wallpaper clipped to dirty rect
-    uint32_t* wp_ptr = _binary_obj_wallpaper_bin_start;
+    // Blit wallpaper clipped to dirty rect (on-demand, debloat v38.81).
+    // Without the blob the whole area is a flat fill so the desktop stays
+    // usable on images that were never seeded.
+    extern int d_min_x, d_min_y, d_max_x, d_max_y;
+    const uint32_t* wp_ptr = assets_wallpaper();
     uint32_t wp_w = 1024, wp_h = 768;
+    if (!wp_ptr) {
+        if (d_max_x > 0 && d_max_y > 0)
+            draw_rect(0, 0, fb_width, area_h, 0x00111122);
+    } else {
     uint32_t copy_w = (fb_width < wp_w) ? fb_width : wp_w;
     uint32_t copy_h = (area_h < wp_h) ? area_h : wp_h;
     
-    extern int d_min_x, d_min_y, d_max_x, d_max_y;
     int start_y = d_min_y < 0 ? 0 : d_min_y;
     int end_y = d_max_y > (int)copy_h ? (int)copy_h : d_max_y;
     int start_x = d_min_x < 0 ? 0 : d_min_x;
@@ -299,6 +305,7 @@ void desktop_draw() {
     }
     if (area_h > wp_h && d_max_y > (int)wp_h) {
         draw_rect(0, wp_h, fb_width, area_h - wp_h, 0x00111122);
+    }
     }
 
     // Draw desktop icons (grid, modern style)

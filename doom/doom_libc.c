@@ -439,9 +439,10 @@ int sscanf(const char *str, const char *fmt, ...) {
 
 /* ===== FILE operations (WAD file access) ===== */
 
-// The WAD file is embedded in the kernel binary
-extern uint8_t _binary_doom1_wad_start[];
-extern uint8_t _binary_doom1_wad_end[];
+#include "../src/include/assets.h"
+
+// (WAD streaming state lives in FILE.mode=3/wad_node; no preload cache —
+// see fopen below.)
 
 // Stdout/stderr stubs
 static FILE doom_stdout_obj = {NULL, 0, 0, 0, 0, 1};
@@ -465,15 +466,24 @@ FILE *fopen(const char *path, const char *mode) {
     // Check if this is the WAD file
     if (strstr(path, "doom1.wad") || strstr(path, "DOOM1.WAD") ||
         strstr(path, "doom.wad") || strstr(path, "DOOM.WAD")) {
+        // Disk-backed streaming (debloat v38.81): no multi-MB preload —
+        // the heap is typically too fragmented for one at doom-start time.
+        uint32_t wsz = 0;
+        int wnode = assets_open("/ext2/doom1.wad", &wsz);
+        if (wnode < 0 || wsz < 1024 * 1024 || wsz > 16 * 1024 * 1024) {
+            write_serial_string("[DOOM] /ext2/doom1.wad missing/bad (image not seeded?)\n");
+            return NULL;  // doom reports missing IWAD via I_Error
+        }
         FILE *f = (FILE*)malloc(sizeof(FILE));
         if (!f) return NULL;
-        f->data = (uint8_t*)_binary_doom1_wad_start;
-        f->size = (uint32_t)(_binary_doom1_wad_end - _binary_doom1_wad_start);
+        f->data = NULL;
+        f->size = wsz;
         f->pos = 0;
         f->capacity = 0;
         f->eof_flag = 0;
         f->error_flag = 0;
-        f->mode = 0;
+        f->mode = 3;
+        f->wad_node = wnode;
         return f;
     }
     
@@ -538,7 +548,31 @@ int fclose(FILE *f) {
 }
 
 size_t fread(void *buf, size_t elem_size, size_t nmemb, FILE *f) {
-    if (!f || !f->data) return 0;
+    if (!f) return 0;
+    if (f->mode == 3) {
+        // Disk-backed WAD: stream windows from /ext2 (debloat v38.81).
+        // f->data is NULL; reads go through the VFS range helper (which
+        // routes ext2 + backend auto-select), so gameplay never needs a
+        // contiguous multi-MB heap block. Hot lumps stay in blkcache.
+        extern int vfs_read_file_offset(int node, int offset, char* b, int len);
+        if (f->wad_node < 0) return 0;
+        size_t total = elem_size * nmemb;
+        size_t avail = f->size - f->pos;
+        if (total > avail) { total = avail; f->eof_flag = 1; }
+        uint32_t got = 0;
+        while (got < total) {
+            uint32_t want = (uint32_t)(total - got);
+            if (want > 16384) want = 16384;   // bounded stack-free chunks
+            int r = vfs_read_file_offset(f->wad_node, (int)(f->pos + got),
+                                         (char*)buf + got, (int)want);
+            if (r <= 0) { f->error_flag = 1; break; }
+            got += (uint32_t)r;
+            if ((uint32_t)r < want) { f->eof_flag = 1; break; }
+        }
+        f->pos += got;
+        return got / elem_size;
+    }
+    if (!f->data) return 0;
     size_t total = elem_size * nmemb;
     size_t avail = f->size - f->pos;
     if (total > avail) { total = avail; f->eof_flag = 1; }
@@ -576,7 +610,7 @@ size_t fwrite(const void *buf, size_t elem_size, size_t nmemb, FILE *f) {
 }
 
 int fseek(FILE *f, long offset, int whence) {
-    if (!f || !f->data) return -1;
+    if (!f || (!f->data && f->mode != 3)) return -1;
     long new_pos;
     switch (whence) {
     case SEEK_SET: new_pos = offset; break;

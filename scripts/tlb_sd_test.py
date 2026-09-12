@@ -80,6 +80,15 @@ def ensure_images(disk, ext2):
             subprocess.run([mkfs, "-q", path],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    # System blobs for the debloated kernel (v38.81): always (re)seed /ext2
+    # — another suite may have recreated the image since our last run.
+    # Idempotent and warn-only; the guest falls back gracefully without them.
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _r = subprocess.run(["bash", os.path.join(_root, "scripts", "seed_ext2.sh"), ext2],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if _r.returncode != 0:
+        print("[WARN] ext2 blob seeding failed (guest uses fallbacks)")
+
 
 def main():
     ap = argparse.ArgumentParser()

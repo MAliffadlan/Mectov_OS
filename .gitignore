@@ -4,6 +4,7 @@
 *.elf
 *.mct
 myos.bin
+myos.bin.debug
 mectov.iso
 
 # Disk images

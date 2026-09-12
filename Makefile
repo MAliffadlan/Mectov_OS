@@ -62,7 +62,6 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/src/sys/smp_trampoline.o \
        $(SRCS:%.c=$(OBJ_DIR)/%.o) \
        $(OBJ_DIR)/boot.o \
-       $(OBJ_DIR)/wallpaper.o \
        $(OBJ_DIR)/gcalc_mct.o \
        $(OBJ_DIR)/hello_mct.o \
        $(OBJ_DIR)/keyshow_mct.o \
@@ -114,12 +113,10 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/calc_mct.o \
        $(OBJ_DIR)/volume_mct.o \
        $(OBJ_DIR)/mplayer_mct.o \
-       $(OBJ_DIR)/music_wav.o \
        $(OBJ_DIR)/elfdemo_elf.o \
        $(OBJ_DIR)/syncdemo_elf.o \
        $(OBJ_DIR)/udptest_elf.o \
-       $(DOOM_OBJS) \
-       $(OBJ_DIR)/doom1_wad.o
+       $(DOOM_OBJS)
 
 all: $(OBJ_DIR) myos.bin
 
@@ -453,8 +450,10 @@ $(OBJ_DIR)/smpstress_mct.o: smpstress.mct | $(OBJ_DIR)
 $(OBJ_DIR)/bgread_mct.o: bgread.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 bgread.mct $(OBJ_DIR)/bgread_mct.o
 
-$(OBJ_DIR)/music_wav.o: apps/music.wav | $(OBJ_DIR)
-	objcopy -I binary -O elf32-i386 -B i386 apps/music.wav $(OBJ_DIR)/music_wav.o
+# (System-blob objects removed in v38.81: doom1.wad / wallpaper.bin /
+# music.wav now live on /ext2, loaded on demand — see scripts/seed_ext2.sh
+# and src/sys/assets.c. The wallpaper.bin rule below stays: it is the seed
+# source for fresh images.)
 
 # ELF demo app: built as a real ELF32 binary (v38.63: ET_DYN PIE at offset
 # 0 — the kernel loader applies an ASLR bias) and embedded for VFS injection.
@@ -480,15 +479,8 @@ udptest.elf: apps/udptest.c scripts/build_elf.py
 $(OBJ_DIR)/udptest_elf.o: udptest.elf | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 udptest.elf $(OBJ_DIR)/udptest_elf.o
 
-$(OBJ_DIR)/wallpaper.o: $(OBJ_DIR)/wallpaper.bin | $(OBJ_DIR)
-	objcopy -I binary -O elf32-i386 -B i386 $< $@
-
 $(OBJ_DIR)/wallpaper.bin: assets/wallpaper.png
 	python3 scripts/build_wallpaper.py assets/wallpaper.png $@
-
-# DOOM WAD file embedded as object
-$(OBJ_DIR)/doom1_wad.o: doom1.wad | $(OBJ_DIR)
-	objcopy -I binary -O elf32-i386 -B i386 doom1.wad $(OBJ_DIR)/doom1_wad.o
 
 # DOOM source compilation rule
 $(OBJ_DIR)/doom/%.o: doom/%.c | $(OBJ_DIR)
@@ -504,9 +496,14 @@ $(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)
 
 myos.bin: $(OBJS)
 	$(LD) $(LDFLAGS) $(OBJS) -o myos.bin
+	# Debloated shipping binary (v38.81): debug info lives in
+	# myos.bin.debug (for gdb + the COM2 stub symbols); the multiboot
+	# image GRUB loads stays lean. GDB: `gdb myos.bin.debug`.
+	objcopy --only-keep-debug myos.bin myos.bin.debug
+	objcopy --strip-debug myos.bin
 
 clean:
-	rm -rf $(OBJ_DIR) myos.bin
+	rm -rf $(OBJ_DIR) myos.bin myos.bin.debug
 
 clean_all: clean
 	rm -f *.mct *.elf
