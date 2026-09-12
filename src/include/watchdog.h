@@ -24,8 +24,9 @@
 // stub; the handler itself lives here).
 #define WD_HANG_VECTOR 0x60
 
-// Detector cadence: how many BSP ticks between watchdog_check() calls.
-#define WD_CHECK_INTERVAL 100
+// Detector cadence: how many per-core timer ticks between watchdog_check()
+// calls (100 Hz since v38.80: 10 ticks = the old 100 ms cadence).
+#define WD_CHECK_INTERVAL 10
 
 // Bump THIS core's heartbeat. Called at the top of the vector-32 handler on
 // every core, before the BSP-only branch.

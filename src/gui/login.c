@@ -427,6 +427,19 @@ int gui_login() {
 
     uint32_t last_draw = 0;
 
+    // Draw gating (v38.80): this loop used to repaint the whole screen every
+    // 16 ms even when idle — a fullscreen blit + VRAM present at 60 fps that
+    // burned a full host core under TCG just to show a static clock. Now a
+    // frame renders only when something visible could have changed: the
+    // first iteration (fresh buffers), a transition, shake decay, a new RTC
+    // second (clock text), the 500 ms colon-blink phase, fresh input, or
+    // pointer motion. All locals: reset on every gate entry (boot/lock).
+    int lg_need = 1;
+    int lg_last_sec = -1;
+    uint32_t lg_last_phase = 0xFFFFFFFF;
+    int lg_last_mx = -1, lg_last_my = -1, lg_last_btn = -1;
+    int lg_input_dirty = 0;
+
     while (1) {
         // USB HID keyboard/mouse (v38.60): the kernel main loop is parked
         // inside gui_login() while the gate is up (boot, lock, logout), so
@@ -437,7 +450,22 @@ int gui_login() {
         xhci_hid_poll();
 
         uint32_t now = get_ticks();
-        if (now - last_draw >= 16) {
+        // Keep the wall-clock cache fresh on every iteration (self-gated to
+        // ~2 CMOS reads/s inside refresh_clock): the draw gate below keys
+        // off rtc_wall_sec, and the 4 s idle check needs it live even when
+        // no frame renders.
+        refresh_clock();
+        int need = lg_need; lg_need = 0;
+        if (trans_active || shake > 0) need = 1;
+        if (rtc_wall_sec != lg_last_sec) { lg_last_sec = rtc_wall_sec; need = 1; }
+        if ((now / 500) != lg_last_phase) { lg_last_phase = now / 500; need = 1; }
+        if (mouse_x != lg_last_mx || mouse_y != lg_last_my ||
+            (int)mouse_btn != lg_last_btn) {
+            lg_last_mx = mouse_x; lg_last_my = mouse_y;
+            lg_last_btn = (int)mouse_btn; need = 1;
+        }
+        if (lg_input_dirty) { lg_input_dirty = 0; need = 1; }
+        if (need && (now - last_draw >= 16)) {
             last_draw = now;
             extern void mark_dirty(int, int, int, int);
             mark_dirty(0, 0, fb_width, fb_height);
@@ -510,6 +538,10 @@ int gui_login() {
         // ---- State machine ----
         uint8_t kbd_mods = 0;
         uint8_t sc = k_get_scancode_ex(&kbd_mods);
+        // Any key or held button may mutate visible state (typing, caps
+        // light, button hit-testing below): repaint next iteration even if
+        // the mutation ends up a no-op — one extra frame per press is free.
+        if (sc != 0 || (mouse_btn & 1)) lg_input_dirty = 1;
         if (sc != 0 && sc < 0x80) {
             if (trans_active && !trans_open) {
                 // Fading back to the lock screen — the user came back. Cancel

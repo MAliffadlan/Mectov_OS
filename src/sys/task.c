@@ -71,7 +71,7 @@ typedef struct {
     uint8_t  ring;         // 0 = kernel task, 3 = user task
     // === NEW FIELDS (add-on, safe defaults) ===
     int      priority;     // 0=background, 1=interactive, 2=realtime
-    int      sleep_ticks;  // remaining ticks until wake (0 = not sleeping)
+    int      sleep_ticks;  // remaining MILLISECONDS until wake (0 = not sleeping)
     int      wait_ticks;   // consecutive ticks waiting in READY state
     int      rq_cpu;       // per-CPU runqueue this task is queued on (-1 = not queued)
     int      is_idle;      // 1 = pinned per-CPU idle task (never migrated)
@@ -247,7 +247,7 @@ static struct runqueue rq[MAX_CPUS];
 // 32-bit loads, fine for a monitor.
 static int rq_cpu_count(void);   // defined below (phantom-CPU-aware core count)
 
-#define CPU_LOAD_WINDOW 50   // ticks per window (1 kHz -> 50 ms)
+#define CPU_LOAD_WINDOW 50   // IRQ ticks per window (100 Hz -> 500 ms of history)
 static volatile uint32_t cpu_load_pct[MAX_CPUS];
 static uint32_t cpu_win_busy[MAX_CPUS];
 static uint32_t cpu_win_ticks[MAX_CPUS];
@@ -863,13 +863,15 @@ uint32_t schedule(uint32_t esp) {
 
     spin_lock(&task_lock);
 
-    // 1. Sleep upkeep — BSP only. One global decrement per tick keeps sleep
-    //    durations wall-clock correct now that all four CPUs tick at 1kHz.
+    // 1. Sleep upkeep — BSP only. One global pass per tick subtracts the
+    //    tick's wall-clock worth (TIMER_MS_PER_TICK), so sleep durations
+    //    stay correct at any TIMER_HZ; callers (Ring 3 ms, shell seconds)
+    //    all speak milliseconds.
     if (cid == 0) {
         for (int i = 0; i < MAX_TASKS; i++) {
             if (tasks[i].state == TASK_STATE_SLEEP) {
                 if (tasks[i].sleep_ticks > 0) {
-                    tasks[i].sleep_ticks--;
+                    tasks[i].sleep_ticks -= TIMER_MS_PER_TICK;
                 }
                 if (tasks[i].sleep_ticks <= 0) {
                     tasks[i].state = TASK_STATE_READY;
@@ -1296,7 +1298,8 @@ int thread_create(void (*entry)(), int priority, uint32_t page_dir) {
     return thread_create_ex(entry, priority, page_dir, 0, 0);
 }
 
-// Sleep the current task for N timer ticks
+// Sleep the current task for N MILLISECONDS (v38.80: the unit is wall-clock
+// ms at any TIMER_HZ — schedule() subtracts TIMER_MS_PER_TICK per IRQ tick).
 void task_sleep(int ticks) {
     int cid = get_cid();
     if (current_task[cid] < 0 || ticks <= 0) return;

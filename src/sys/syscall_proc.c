@@ -200,6 +200,7 @@ uint32_t handle_syscall_proc(registers_t* regs) {
         }
 
         // ----- SYS_SLEEP (19) -----
+        // Argument is MILLISECONDS (Ring 3 ABI, stable across TIMER_HZ).
         case SYS_SLEEP: {
             int ticks = (int)regs->ebx;
             task_sleep(ticks);

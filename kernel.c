@@ -214,7 +214,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     extern void entropy_init(void);
     entropy_init();
     write_serial_string("[K] timer\n");
-    init_timer(1000); // 1000 Hz PIT for 1ms precision ticks
+    init_timer(TIMER_HZ); // 100 Hz PIT (Linux-HZ style); timer_ticks counts ms
     write_serial_string("[K] kbd\n");
     init_keyboard();
     write_serial_string("[K] cpu\n");
@@ -822,10 +822,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             full_redraw();
         }
 
-        // CPU friendly halt
-        if (get_ticks() == now) {
-            __asm__ __volatile__ ("hlt");
-        }
+        // CPU friendly halt — UNCONDITIONAL. Every IRQ (timer tick included)
+        // wakes the core, so no wakeup is ever lost: flags set by handlers
+        // are re-checked at the top of the next iteration. The old
+        // same-tick guard only served the 1 kHz era and starved hlt
+        // entirely whenever the (TCG) clock ran faster than wall time,
+        // spinning a full core at idle.
+        __asm__ __volatile__ ("hlt");
     }
 }
 

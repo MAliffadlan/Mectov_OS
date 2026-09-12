@@ -13,10 +13,10 @@
 //      the BSP, local APIC timer on the APs). Its first act is
 //      watchdog_tick(cid), a plain store bumping wd_heartbeat[cid] AND this
 //      core's own tick counter wd_tick[cid]. A healthy core bumps its slot
-//      ~1000x/s; a core in cli cannot, because its timer IRQ is masked.
+//      ~100x/s; a core in cli cannot, because its timer IRQ is masked.
 //   2. DETECTION — EVERY core runs the detector (v38.67), not just the BSP:
 //      watchdog_check() is called from every core's vector-32 handler and
-//      self-gates its cadence on that core's OWN tick count (~1 kHz — PIT on
+//      self-gates its cadence on that core's OWN tick count (~100 Hz — PIT on
 //      the BSP, LAPIC timer on the APs, both calibrated). Each detector core
 //      keeps private per-peer state and watches every OTHER core, the BSP
 //      included. A peer heartbeat frozen for >= WD_TIMEOUT_TICKS of the
@@ -60,16 +60,17 @@
 #include "../include/mem.h"    // memset
 
 // ---- Tunables ----
-// Stall threshold in BSP ticks (PIT 1 kHz). Legitimate IF=0 critical
-// sections are sub-millisecond (disk DMA waits, lock hold times); nothing
-// in the kernel legitimately holds IF=0 for even a fraction of a second of
-// BSP time, so 3 s is a hard lockup with enormous margin.
-#define WD_TIMEOUT_TICKS     3000
+// Stall threshold in per-core timer ticks (100 Hz since v38.80; was PIT
+// 1 kHz). Legitimate IF=0 critical sections are sub-millisecond (disk DMA
+// waits, lock hold times); nothing in the kernel legitimately holds IF=0
+// for even a fraction of a second, so 3 s is a hard lockup with enormous
+// margin.
+#define WD_TIMEOUT_TICKS     300
 #define WD_MAX_CORES         16
 
 // ---- Per-core heartbeat + tick (written by every core's timer IRQ) ----
 static volatile uint32_t wd_heartbeat[WD_MAX_CORES];  // peer liveness signal
-static volatile uint32_t wd_tick[WD_MAX_CORES];       // this core's own 1 kHz clock
+static volatile uint32_t wd_tick[WD_MAX_CORES];       // this core's own 100 Hz clock
 
 // ---- Detector state, indexed [detector][peer] (v38.67 mesh) ----
 // Every core runs the detector and keeps its OWN row, so a BSP hang — which
@@ -182,7 +183,7 @@ void watchdog_check(void) {
     int det = apic_get_id() & 15;
     if (det < 0 || det >= WD_MAX_CORES) det = 0;
 
-    // Cadence on THIS core's own 1 kHz clock. The old detector lived only on
+    // Cadence on THIS core's own 100 Hz clock. The old detector lived only on
     // the BSP and gated on timer_ticks; every core now has its own stall
     // clock, which is exactly what lets an AP time a frozen BSP heartbeat.
     if ((wd_tick[det] % WD_CHECK_INTERVAL) != 0) return;

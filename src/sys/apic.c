@@ -3,6 +3,7 @@
 #include "../include/serial.h"
 #include "../include/io.h"
 #include "../include/mem.h"
+#include "../include/timer.h"   // TIMER_MS_PER_TICK (LAPIC tracks the PIT rate)
 
 // Write to LAPIC register
 static void lapic_write(uint32_t reg, uint32_t value) {
@@ -38,8 +39,8 @@ void apic_init(void) {
     write_serial_string("\n");
 }
 
-// Read the PIT channel-0 counter (a 16-bit countdown reloading to 1193 at the
-// BSP's 1 kHz rate). The PIT is a global I/O device, so any CPU may read it.
+// Read the PIT channel-0 counter (a 16-bit countdown reloading to the
+// programmed divisor). The PIT is a global I/O device, so any CPU may read it.
 static uint32_t pit_read(void) {
     outb(0x43, 0x00);            // latch channel 0
     uint8_t lo = inb(0x40);
@@ -66,15 +67,17 @@ uint32_t lapic_timer_calibrate(void) {
     lapic_write(LAPIC_TIMER_DIV, 0xB);            // divide by 1
     lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFF);
 
-    // Busy-wait ~50 ms of PIT time: the 16-bit counter counts 0..1193 then
-    // wraps, so accumulate each (downward) step, adding a full period on wrap.
+    // Busy-wait ~50 ms of PIT time: the 16-bit counter counts down from the
+    // programmed divisor then wraps, so accumulate each (downward) step,
+    // adding a full period on wrap.
     uint32_t c = pit_read();
     int32_t acc = 0;
+    extern uint32_t pit_divisor;
     while (acc < 59659) {
         uint32_t c2 = pit_read();
         if (c2 != c) {
             if (c2 < c) acc += (int32_t)(c - c2);
-            else        acc += (int32_t)(c + (1194 - c2));   // wrapped
+            else        acc += (int32_t)(c + (pit_divisor + 1 - c2));   // wrapped
             c = c2;
         }
         __asm__ __volatile__("pause");
@@ -88,16 +91,18 @@ uint32_t lapic_timer_calibrate(void) {
     return per_ms;
 }
 
-// Program THIS core's local APIC timer at ~1 kHz using the shared calibrated
-// rate. IRQ0 (PIT) is routed to the BSP only, so without this the Application
-// Processors would never receive a timer interrupt — tasks parked on their
-// runqueues would starve forever. Called from ap_main() before interrupts are
-// enabled; the LAPIC timer drives irq_handler -> schedule() on the AP.
+// Program THIS core's local APIC timer at ~TIMER_HZ using the shared
+// calibrated rate. IRQ0 (PIT) is routed to the BSP only, so without this the
+// Application Processors would never receive a timer interrupt — tasks parked
+// on their runqueues would starve forever. Called from ap_main() before
+// interrupts are enabled; the LAPIC timer drives irq_handler -> schedule()
+// on the AP. Keeps BSP/AP tick rates identical so the watchdog mesh and the
+// scheduler compare like with like.
 void lapic_timer_init(void) {
     if (smp_lapic_addr == 0) return;
     if (lapic_timer_per_ms == 0) lapic_timer_calibrate();  // safety net
     lapic_write(LAPIC_LVT_TIMER, 32 | (1u << 17)); // periodic, vector 32
-    lapic_write(LAPIC_TIMER_INIT, lapic_timer_per_ms);
+    lapic_write(LAPIC_TIMER_INIT, lapic_timer_per_ms * TIMER_MS_PER_TICK);
 }
 
 void apic_send_eoi(void) {

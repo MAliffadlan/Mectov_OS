@@ -13,11 +13,14 @@
 volatile uint32_t timer_ticks = 0;
 
 // Measured PIT tick rate in ticks/second, calibrated against the CMOS RTC.
-// The PIT is programmed for 1000 Hz, but under QEMU TCG the emulated timer can
-// run several times faster than wall clock, so an 800-tick "0.8 second" window
-// actually becomes a fraction of a second of real time — double-clicks and
-// similar UI timeouts miss under TCG (and CI, which runs the boot tests with
-// TCG). GUIs should scale their time windows by ticks_per_sec / 1000.
+// Nominally TIMER_HZ (100); under QEMU TCG the emulated timer can run
+// several times faster than wall clock, so a 0.8-second window measured in
+// raw ticks actually becomes a fraction of a second of real time —
+// double-clicks and similar UI timeouts miss under TCG (and CI, which runs
+// the boot tests with TCG). GUIs should scale their time windows by
+// ticks_per_sec / 1000. NOTE: since timer_ticks counts milliseconds,
+// ticks_per_sec reads ~1000 even at TIMER_HZ=100 (100 IRQs x 10 ms) — it
+// measures wall-clock tracking of the ms counter, not the IRQ rate.
 volatile uint32_t ticks_per_sec = 1000;
 
 // Calibrate ticks_per_sec by counting PIT ticks across a full RTC second
@@ -56,10 +59,10 @@ void timer_update_rate_if_second(void) {
     static uint32_t last_ticks = 0;
     static uint32_t last_check_tick = 0;
     // Gate on tick count BEFORE touching the CMOS: the main loop calls this
-    // ~once per tick (1000 Hz), but rtc_read_time() busy-waits on the UIP
-    // flag — real port I/O that measurably burns host CPU under TCG when
-    // done a thousand times per second. Two reads per second are plenty for
-    // a one-second calibration window.
+    // every iteration, but rtc_read_time() busy-waits on the UIP flag —
+    // real port I/O that measurably burns host CPU under TCG when done
+    // hundreds of times per second. Two reads per second are plenty for
+    // a one-second calibration window (the 500 here is milliseconds).
     if (last_check_tick != 0 && (timer_ticks - last_check_tick) < 500) return;
     last_check_tick = timer_ticks;
     rtc_time_t t = rtc_read_time();
@@ -109,13 +112,16 @@ static void timer_handler(registers_t* regs) {
     // BSP only: the wall clock, heartbeat and GUI updates must not run four
     // times per tick just because IRQ0 is now broadcast to every core.
     if (cid != 0) return;
-    timer_ticks++;
+    // The counter is MILLISECONDS, not IRQ ticks (v38.80): every consumer
+    // from Ring 3 timeouts to uptime keeps 1 kHz-era arithmetic unchanged.
+    timer_ticks += TIMER_MS_PER_TICK;
 
     // Feed the kernel entropy pool (v38.52): tick counter + TSC low bits mix
-    // in continuously (1000 Hz), reseeding the ChaCha8 DRBG every 8 samples.
+    // in continuously, reseeding the ChaCha8 DRBG every 8 samples (every
+    // 80 ms at 100 Hz — still far above any attacker-observable rate).
     entropy_add(timer_ticks);
 
-    // Heartbeat: send '.' every 1000 ticks (1 second). write_serial() takes
+    // Heartbeat: send '.' every 1000 ms (1 second). write_serial() takes
     // the serial lock, so the dot can never split a log line from another CPU.
     if ((timer_ticks % 1000) == 0) {
         write_serial('.');
@@ -149,6 +155,7 @@ void init_timer(uint32_t frequency) {
     // 0x43: Command port
     // 0x40: Channel 0 data port
     uint32_t divisor = 1193180 / frequency;
+    pit_divisor = divisor;
 
     outb(0x43, 0x36); // Square wave mode
     uint8_t l = (uint8_t)(divisor & 0xFF);
@@ -159,6 +166,8 @@ void init_timer(uint32_t frequency) {
 }
 
 uint32_t get_ticks() { return timer_ticks; }
+
+uint32_t pit_divisor = 1193;   // programmed divisor; init_timer() sets it.
 
 uint32_t timer_get_us() {
     uint32_t ticks;
@@ -179,11 +188,11 @@ uint32_t timer_get_us() {
     
     __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
     
-    // PIT runs at 1193180 Hz. At 1000 Hz, divisor is 1193.
-    // Counter counts down from 1193 to 0.
-    // Elapsed ticks = 1193 - count.
-    // Microseconds elapsed = (1193 - count) * 1000 / 1193.
-    uint32_t elapsed_us = ((1193 - count) * 1000) / 1193;
+    // PIT input is 1193180 Hz == 1193 * 1000 + 180: dividing by 1193 keeps
+    // every intermediate in 32 bits at the cost of 0.015% (same rounding
+    // the 1 kHz code always had). ticks counts ms, so ticks*1000 is us.
+    if (count > pit_divisor) count = pit_divisor;
+    uint32_t elapsed_us = ((pit_divisor - count) * 1000) / 1193;
     
     return (ticks * 1000) + elapsed_us;
 }
