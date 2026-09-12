@@ -27,7 +27,11 @@ Mectov OS includes a built-in Ethernet network stack (`src/drivers/net.c` & `src
 1. **RTL8139 NIC (`src/drivers/rtl8139.c`)**:
    - Scans PCI bus for Vendor ID `0x10EC` & Device ID `0x8139`.
    - Enables PCI Bus Master & I/O Space bits.
-   - Configures 8KB + 16-byte ring buffer for packet reception.
+   - Configures 8KB + 16-byte ring buffer for packet reception, plus a
+     1500-byte linear overflow area: QEMU's 8139 model does not split a
+     frame across the ring end when WRAP is set — it writes straddling
+     frames linearly past 8K (v38.79; reading the tail from ring offset 0
+     served stale bytes and stalled bulk TCP transfers).
 
 2. **Network Address Defaults (QEMU Slirp)**:
    - **Guest IP**: `10.0.2.15`

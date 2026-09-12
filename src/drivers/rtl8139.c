@@ -194,13 +194,28 @@ int rtl8139_poll_rx(uint8_t* out_buf, uint32_t max_len) {
         uint32_t copy_len = pkt_len;
         if (copy_len > max_len) copy_len = max_len;
 
-        // Copy packet data (skip 4-byte header), handling the WRAP split at the
-        // 8K boundary: tail at [start, 8192), head at ring offset 0.
+        // Copy packet data (skip 4-byte header). STRADDLING FRAMES READ
+        // FROM THE LINEAR OVERFLOW AREA, NOT FROM RING OFFSET 0: QEMU's
+        // 8139 model (hw/net/rtl8139.c, rtl8139_write_buffer) does not
+        // split a frame across the ring end when WRAP is set — it writes
+        // header + packet + CRC linearly past RTL_RING_SIZE into the
+        // +1500 overflow area this buffer was allocated with, and wraps
+        // only its read pointer. The old code copied the tail from ring
+        // offset 0 (stale bytes — typically a boot-time DHCP packet),
+        // which failed the TCP checksum on every straddling full-size
+        // segment; slirp then backed off exponentially, stalling bulk
+        // transfers (e.g. browser page loads) for tens of seconds while
+        // small pages — which almost never straddle — worked fine.
         uint32_t start = rtl_rx_offset + 4;
         uint32_t chunk = copy_len;
-        if (start + chunk > RTL_RING_SIZE) chunk = RTL_RING_SIZE - start;
-        memcpy(out_buf, rtl_rx_buffer + start, chunk);
-        if (copy_len > chunk) memcpy(out_buf + chunk, rtl_rx_buffer, copy_len - chunk);
+        if (start + chunk > RTL_RING_SIZE) {
+            chunk = RTL_RING_SIZE - start;
+            memcpy(out_buf, rtl_rx_buffer + start, chunk);
+            memcpy(out_buf + chunk, rtl_rx_buffer + RTL_RING_SIZE,
+                   copy_len - chunk);
+        } else {
+            memcpy(out_buf, rtl_rx_buffer + start, chunk);
+        }
 
         // Advance RX offset: aligned to 4 bytes, +4 for header, wrapped in ring
         rtl_rx_offset = (uint16_t)((rtl_rx_offset + length + 4 + 3) & ~3);
