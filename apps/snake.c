@@ -39,6 +39,13 @@ static int game_over = 0;
 static int move_interval = 150; 
 static uint32_t last_tick_time = 0;
 
+// Actual client-area size as reported by the WM (event type 5).
+// create_w=WIN_CW, create_h=WIN_CH -> client starts at WIN_CW-2 x WIN_CH-22.
+// Gameplay logic (GRID_W/GRID_H/CELL, collisions, spawns) always uses the
+// WIN_CW/WIN_CH playfield constants; win_cw/win_ch only affects drawing.
+static int win_cw = WIN_CW - 2;
+static int win_ch = WIN_CH - 22;
+
 static void reset_game() {
     slen = 3;
     dir = 1;
@@ -54,34 +61,39 @@ static void reset_game() {
 }
 
 static void draw_game(int wid) {
-    // Bg
-    sys_draw_rect(wid, 0, 0, WIN_CW, WIN_CH, 0x001A1A2E);
-    
-    int gy = 24; // grid Y offset
+    // Fill the whole client area, then center the fixed-size playfield.
+    sys_draw_rect(wid, 0, 0, win_cw, win_ch, 0x001A1A2E);
+
+    int ox = (win_cw - WIN_CW) / 2;
+    int oy = (win_ch - WIN_CH) / 2;
+    if (ox < 0) ox = 0;
+    if (oy < 0) oy = 0;
+
+    int gy = oy + 24; // grid Y offset
     
     // Top bar
-    sys_draw_rect(wid, 0, 0, WIN_CW, 24, 0x0016202A);
-    sys_draw_text(wid, 8, 4, "Score: ", 0x0027C93F);
+    sys_draw_rect(wid, ox, oy, WIN_CW, 24, 0x0016202A);
+    sys_draw_text(wid, ox + 8, oy + 4, "Score: ", 0x0027C93F);
     char sbuf[16]; itoa(score, sbuf);
-    sys_draw_text(wid, 64, 4, sbuf, 0x0027C93F);
+    sys_draw_text(wid, ox + 64, oy + 4, sbuf, 0x0027C93F);
     
-    sys_draw_text(wid, WIN_CW - 80, 4, "Ring 3", 0x00FFBD2E);
+    sys_draw_text(wid, ox + WIN_CW - 80, oy + 4, "Ring 3", 0x00FFBD2E);
     
     if (game_over) {
-        sys_draw_rect(wid, WIN_CW/2 - 60, WIN_CH/2 - 20, 120, 40, 0x00111111);
-        sys_draw_text(wid, WIN_CW/2 - 40, WIN_CH/2 - 12, "GAME OVER", 0x00FF5F56);
-        sys_draw_text(wid, WIN_CW/2 - 45, WIN_CH/2 + 4, "Press ENTER", 0x00FFFFFF);
+        sys_draw_rect(wid, ox + WIN_CW/2 - 60, oy + WIN_CH/2 - 20, 120, 40, 0x00111111);
+        sys_draw_text(wid, ox + WIN_CW/2 - 40, oy + WIN_CH/2 - 12, "GAME OVER", 0x00FF5F56);
+        sys_draw_text(wid, ox + WIN_CW/2 - 45, oy + WIN_CH/2 + 4, "Press ENTER", 0x00FFFFFF);
         sys_update_window(wid);
         return;
     }
 
     // Food
-    sys_draw_rect(wid, fx*CELL+2, gy + fy*CELL+2, CELL-4, CELL-4, 0x00FF5F56);
+    sys_draw_rect(wid, ox + fx*CELL+2, gy + fy*CELL+2, CELL-4, CELL-4, 0x00FF5F56);
     
     // Snake
     for (int i = 0; i < slen; i++) {
         uint32_t col = (i == 0) ? 0x0027C93F : 0x001B9A2F;
-        sys_draw_rect(wid, sx[i]*CELL+1, gy + sy[i]*CELL+1, CELL-2, CELL-2, col);
+        sys_draw_rect(wid, ox + sx[i]*CELL+1, gy + sy[i]*CELL+1, CELL-2, CELL-2, col);
     }
     
     sys_update_window(wid);
@@ -115,6 +127,12 @@ void _start() {
                     else if ((ev.key == 's' || ev.key == 'S') && dir != 0) dir = 2; // DOWN
                     else if ((ev.key == 'a' || ev.key == 'A') && dir != 1) dir = 3; // LEFT
                     else if ((ev.key == 'd' || ev.key == 'D') && dir != 3) dir = 1; // RIGHT
+                }
+            } else if (ev.type == 5) { // Resize (WM reports client w/h)
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    draw_game(wid);
                 }
             }
         }

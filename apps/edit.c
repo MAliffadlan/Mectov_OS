@@ -7,6 +7,8 @@ char ed_b[NANO_BUF_SIZE];
 char ed_fn[128]; 
 int ed_c = 0;
 static int nano_win_id = -1;
+static int win_cw = 420 - 2;
+static int win_ch = 320 - 22;
 
 // safe_strlen to avoid includes
 static int my_strlen(const char* s) {
@@ -39,8 +41,8 @@ static void save_file(void) {
 }
 
 static void nano_draw(int wid) {
-    int cw = 420;
-    int ch = 320;
+    int cw = win_cw;
+    int ch = win_ch;
     sys_draw_rect(wid, 0, 0, cw, ch, 0x001E1E2E); // GUI_BG
     sys_draw_rect(wid, 0, 0, cw, 1, 0x0045475A);  // Border
     sys_draw_rect(wid, 0, ch-1, cw, 1, 0x0045475A);
@@ -149,6 +151,12 @@ void _start() {
         if (got > 0) {
             if (ev.type == 1) {
                 nano_draw(wid);
+            } else if (ev.type == 5) {
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    nano_draw(wid);
+                }
             } else if (ev.type == 2) {
                 char c = ev.key;
                 if (c == 27) { // ESC -> Save and exit

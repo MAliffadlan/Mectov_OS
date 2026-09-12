@@ -19,6 +19,9 @@ typedef struct {
     int key;
 } gui_event_t;
 
+static int win_cw = 240 - 2;
+static int win_ch = 120 - 22;
+
 static void draw_clock(int wid) {
     rtc_time_t tm;
     sys_get_time(&tm);
@@ -41,21 +44,22 @@ static void draw_clock(int wid) {
     itoa_pad(tm.day, dbuf + 8, 2);
     dbuf[10] = '\0';
     
-    sys_draw_rect(wid, 0, 0, 240, 120, 0x001E1E2E); // GUI_BG
+    sys_draw_rect(wid, 0, 0, win_cw, win_ch, 0x001E1E2E); // GUI_BG
     
-    // Draw time
-    sys_draw_text(wid, 85, 30, tbuf, 0x00CDD6F4);
+    // Draw time (centered: defaults 85/80 at win_cw=238)
+    sys_draw_text(wid, win_cw / 2 - 34, 30, tbuf, 0x00CDD6F4);
     
     // Draw date
-    sys_draw_text(wid, 80, 60, dbuf, 0x006C7086);
+    sys_draw_text(wid, win_cw / 2 - 39, 60, dbuf, 0x006C7086);
     
-    // Draw decorative border
-    sys_draw_rect(wid, 10, 10, 220, 1, 0x00313144);
-    sys_draw_rect(wid, 10, 109, 220, 1, 0x00313144);
-    sys_draw_rect(wid, 10, 10, 1, 100, 0x00313144);
-    sys_draw_rect(wid, 229, 10, 1, 100, 0x00313144);
+    // Draw decorative border (defaults: w=220=win_cw-18, btm=109=win_ch+11,
+    // right=229=win_cw-9, h=100=win_ch+2 at win_cw=238, win_ch=98)
+    sys_draw_rect(wid, 10, 10, win_cw - 18, 1, 0x00313144);
+    sys_draw_rect(wid, 10, win_ch + 11, win_cw - 18, 1, 0x00313144);
+    sys_draw_rect(wid, 10, 10, 1, win_ch + 2, 0x00313144);
+    sys_draw_rect(wid, win_cw - 9, 10, 1, win_ch + 2, 0x00313144);
     
-    sys_draw_text(wid, 15, 90, "User Space App", 0x0094E2D5);
+    sys_draw_text(wid, 15, win_ch - 8, "User Space App", 0x0094E2D5);
     
     sys_update_window(wid);
 }
@@ -77,6 +81,12 @@ void _start() {
             } else if (ev.type == 2) { // Key event
                 if (ev.key == 27) { // ESC ASCII
                     sys_exit();
+                }
+            } else if (ev.type == 5) { // Client size (WM reports real cw/ch)
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    draw_clock(wid);
                 }
             }
         }

@@ -88,6 +88,13 @@ static int score = 0;
 static int game_over = 0;
 static int frame_count = 0;
 
+// Actual client-area size as reported by the WM (event type 5).
+// create_w=WIN_W(280), create_h=WIN_H(420) -> client starts at WIN_W-2 x WIN_H-22.
+// Gameplay logic (physics, pipes, collisions, score) always uses the WIN_W/WIN_H
+// playfield constants; win_cw/win_ch only affects drawing (centered playfield).
+static int win_cw = WIN_W - 2;
+static int win_ch = WIN_H - 22;
+
 // Cloud positions for parallax
 static int cloud_x[3] = { 30, 150, 260 };
 static int cloud_y[3] = { 35, 70, 20 };
@@ -116,8 +123,11 @@ static void draw_cloud(int wid, int cx, int cy) {
     sys_draw_rect(wid, cx + 8, cy - 7, 12, 5, COL_CLOUD);
 }
 
-static void draw_pipe(int wid, int px, int gap_y) {
+static void draw_pipe(int wid, int px, int gap_y, int ox, int oy) {
     if (px >= WIN_W || px + PIPE_W <= 0) return;
+
+    px += ox;
+    gap_y += oy;
     
     int lip_w = PIPE_W + 8;
     int lip_x = px - 4;
@@ -125,11 +135,11 @@ static void draw_pipe(int wid, int px, int gap_y) {
     
     // ---- Top pipe ----
     // Body
-    sys_draw_rect(wid, px, 0, PIPE_W, gap_y - lip_h, COL_PIPE_BODY);
+    sys_draw_rect(wid, px, oy, PIPE_W, gap_y - oy - lip_h, COL_PIPE_BODY);
     // Dark left edge
-    sys_draw_rect(wid, px, 0, 3, gap_y - lip_h, COL_PIPE_DARK);
+    sys_draw_rect(wid, px, oy, 3, gap_y - oy - lip_h, COL_PIPE_DARK);
     // Highlight right edge
-    sys_draw_rect(wid, px + PIPE_W - 4, 0, 4, gap_y - lip_h, COL_PIPE_LIP);
+    sys_draw_rect(wid, px + PIPE_W - 4, oy, 4, gap_y - oy - lip_h, COL_PIPE_LIP);
     // Lip (wider cap)
     sys_draw_rect(wid, lip_x, gap_y - lip_h, lip_w, lip_h, COL_PIPE_LIP);
     sys_draw_rect(wid, lip_x, gap_y - lip_h, 3, lip_h, COL_PIPE_DARK);
@@ -142,13 +152,13 @@ static void draw_pipe(int wid, int px, int gap_y) {
     sys_draw_rect(wid, lip_x, bottom_y, 3, lip_h, COL_PIPE_DARK);
     sys_draw_rect(wid, lip_x, bottom_y, lip_w, 3, COL_PIPE_SHADE);
     // Body
-    sys_draw_rect(wid, px, bottom_y + lip_h, PIPE_W, WIN_H - bottom_y - lip_h, COL_PIPE_BODY);
-    sys_draw_rect(wid, px, bottom_y + lip_h, 3, WIN_H - bottom_y - lip_h, COL_PIPE_DARK);
-    sys_draw_rect(wid, px + PIPE_W - 4, bottom_y + lip_h, 4, WIN_H - bottom_y - lip_h, COL_PIPE_LIP);
+    sys_draw_rect(wid, px, bottom_y + lip_h, PIPE_W, oy + WIN_H - bottom_y - lip_h, COL_PIPE_BODY);
+    sys_draw_rect(wid, px, bottom_y + lip_h, 3, oy + WIN_H - bottom_y - lip_h, COL_PIPE_DARK);
+    sys_draw_rect(wid, px + PIPE_W - 4, bottom_y + lip_h, 4, oy + WIN_H - bottom_y - lip_h, COL_PIPE_LIP);
 }
 
-static void draw_bird(int wid, int by, int vy, int dead) {
-    int bx = BIRD_X;
+static void draw_bird(int wid, int by, int vy, int dead, int ox) {
+    int bx = BIRD_X + ox;
     
     if (dead) {
         // Dead bird — red tint, X eyes
@@ -181,61 +191,70 @@ static void draw_bird(int wid, int by, int vy, int dead) {
     sys_draw_rect(wid, bx + BIRD_W + 2, by + 8, 4, 2, 0x00CC4422);
 }
 
-static void draw_ground(int wid) {
-    int gy = WIN_H - GROUND_H;
+static void draw_ground(int wid, int ox, int oy) {
+    int gy = oy + WIN_H - GROUND_H;
     // Grass top strip
-    sys_draw_rect(wid, 0, gy, WIN_W, 5, COL_GRASS1);
-    sys_draw_rect(wid, 0, gy + 5, WIN_W, 3, COL_GRASS2);
+    sys_draw_rect(wid, ox, gy, WIN_W, 5, COL_GRASS1);
+    sys_draw_rect(wid, ox, gy + 5, WIN_W, 3, COL_GRASS2);
     // Dirt body
-    sys_draw_rect(wid, 0, gy + 8, WIN_W, GROUND_H - 8, COL_GROUND);
+    sys_draw_rect(wid, ox, gy + 8, WIN_W, GROUND_H - 8, COL_GROUND);
     // Dirt texture stripes
-    sys_draw_rect(wid, 0, gy + 14, WIN_W, 2, COL_DIRT);
-    sys_draw_rect(wid, 0, gy + 22, WIN_W, 2, COL_DIRT);
+    sys_draw_rect(wid, ox, gy + 14, WIN_W, 2, COL_DIRT);
+    sys_draw_rect(wid, ox, gy + 22, WIN_W, 2, COL_DIRT);
 }
 
-static void draw_score_big(int wid, int sc) {
+static void draw_score_big(int wid, int sc, int ox, int oy) {
     char sbuf[16];
     itoa(sc, sbuf);
     int len = 0;
     while (sbuf[len]) len++;
-    int sx = WIN_W / 2 - (len * 4);
+    int sx = ox + WIN_W / 2 - (len * 4);
     // Shadow
-    sys_draw_text(wid, sx + 1, 31, sbuf, COL_SCORE_BG);
+    sys_draw_text(wid, sx + 1, oy + 31, sbuf, COL_SCORE_BG);
     // Main
-    sys_draw_text(wid, sx, 30, sbuf, COL_SCORE_FG);
+    sys_draw_text(wid, sx, oy + 30, sbuf, COL_SCORE_FG);
 }
 
 static void draw_game(int wid) {
+    // Center the fixed-size playfield; fill the whole client area first so
+    // margins (when the window is larger) show sky instead of garbage.
+    int ox = (win_cw - WIN_W) / 2;
+    int oy = (win_ch - WIN_H) / 2;
+    if (ox < 0) ox = 0;
+    if (oy < 0) oy = 0;
+
+    sys_draw_rect(wid, 0, 0, win_cw, win_ch, COL_SKY_BOT);
+
     // === Sky gradient (simulated with 2 bands) ===
-    sys_draw_rect(wid, 0, 0, WIN_W, WIN_H / 2, COL_SKY_TOP);
-    sys_draw_rect(wid, 0, WIN_H / 2, WIN_W, WIN_H / 2, COL_SKY_BOT);
+    sys_draw_rect(wid, ox, oy, WIN_W, WIN_H / 2, COL_SKY_TOP);
+    sys_draw_rect(wid, ox, oy + WIN_H / 2, WIN_W, WIN_H - WIN_H / 2, COL_SKY_BOT);
     
     // === Clouds (parallax decoration) ===
     for (int i = 0; i < 3; i++) {
-        draw_cloud(wid, cloud_x[i], cloud_y[i]);
+        draw_cloud(wid, ox + cloud_x[i], oy + cloud_y[i]);
     }
     
     // === Pipes ===
     for (int i = 0; i < NUM_PIPES; i++) {
-        draw_pipe(wid, pipes[i].x, pipes[i].gap_y);
+        draw_pipe(wid, pipes[i].x, pipes[i].gap_y, ox, oy);
     }
     
     // === Ground ===
-    draw_ground(wid);
+    draw_ground(wid, ox, oy);
     
     // === Bird ===
-    draw_bird(wid, bird_y, bird_vy, game_over);
+    draw_bird(wid, oy + bird_y, bird_vy, game_over, ox);
     
     // === Score ===
     if (started && !game_over) {
-        draw_score_big(wid, score);
+        draw_score_big(wid, score, ox, oy);
     }
     
     // === Title Screen ===
     if (!started && !game_over) {
         // Title panel
-        int px = WIN_W/2 - 90;
-        int py = WIN_H/2 - 70;
+        int px = ox + WIN_W/2 - 90;
+        int py = oy + WIN_H/2 - 70;
         sys_draw_rect(wid, px, py, 180, 120, COL_PANEL_BG);
         sys_draw_rect(wid, px, py, 180, 2, COL_PANEL_BD);
         sys_draw_rect(wid, px, py + 118, 180, 2, COL_PANEL_BD);
@@ -255,8 +274,8 @@ static void draw_game(int wid) {
     
     // === Game Over panel ===
     if (game_over) {
-        int px = WIN_W/2 - 90;
-        int py = WIN_H/2 - 60;
+        int px = ox + WIN_W/2 - 90;
+        int py = oy + WIN_H/2 - 60;
         // Panel bg
         sys_draw_rect(wid, px, py, 180, 110, COL_PANEL_BG);
         sys_draw_rect(wid, px, py, 180, 2, 0x00FF5F56);
@@ -320,6 +339,12 @@ void _start() {
                 }
             } else if (ev.type == 3) { // Mouse click
                 jump();
+            } else if (ev.type == 5) { // Resize (WM reports client w/h)
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    draw_game(wid);
+                }
             }
         }
         

@@ -99,10 +99,24 @@ typedef struct {
 static pci_device_t pci_devs[32];
 static int pci_count = 0;
 static int scroll_offset = 0;
+static int win_cw = 440 - 2;
+static int win_ch = 360 - 22;
+
+static int visible_rows(void) {
+    int v = (win_ch - 24) / 18;
+    return v > 1 ? v : 1;
+}
+
+static void clamp_scroll(void) {
+    int max = pci_count - visible_rows();
+    if (max < 0) max = 0;
+    if (scroll_offset > max) scroll_offset = max;
+    if (scroll_offset < 0) scroll_offset = 0;
+}
 
 static void draw_pci(int wid) {
-    int cw = 440;
-    int ch = 360;
+    int cw = win_cw;
+    int ch = win_ch;
     sys_draw_rect(wid, 0, 0, cw, ch, 0x001E1E2E);
 
     // Header bar
@@ -185,7 +199,7 @@ void _start() {
     draw_pci(wid);
     
     gui_event_t ev;
-    int max_rows = (360 - 24) / 18;
+    int max_rows = (win_ch - 24) / 18;
     
     while (1) {
         while (sys_get_event(wid, &ev)) {
@@ -195,6 +209,7 @@ void _start() {
                 if (ev.key == 27) sys_exit(); // ESC
                 // Scroll with up/down arrows (need to check if arrow keys generate scancode or mapped char)
                 // We'll use 'w' and 's' as fallbacks too
+                max_rows = visible_rows();
                 if ((ev.key == 'w' || ev.key == 'W') && scroll_offset > 0) {
                     scroll_offset--; draw_pci(wid);
                 }
@@ -203,6 +218,7 @@ void _start() {
                 }
             } else if (ev.type == 3) { // Mouse
                 // Simple click to scroll down
+                max_rows = visible_rows();
                 if (ev.key == 1) { // Left click
                     if (scroll_offset < pci_count - max_rows) {
                         scroll_offset++; draw_pci(wid);
@@ -217,6 +233,7 @@ void _start() {
                     }
                 }
             } else if (ev.type == 4) { // Scroll wheel
+                max_rows = visible_rows();
                 if (ev.key > 0 && scroll_offset > 0) {
                     for (int s = 0; s < 3 && scroll_offset > 0; s++)
                         scroll_offset--;
@@ -224,6 +241,13 @@ void _start() {
                 } else if (ev.key < 0 && scroll_offset < pci_count - max_rows) {
                     for (int s = 0; s < 3 && scroll_offset < pci_count - max_rows; s++)
                         scroll_offset++;
+                    draw_pci(wid);
+                }
+            } else if (ev.type == 5) { // Client size (WM reports real cw/ch)
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    clamp_scroll();
                     draw_pci(wid);
                 }
             }

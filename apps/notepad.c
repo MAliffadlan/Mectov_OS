@@ -28,6 +28,10 @@ static int  has_file = 0;    // 1 if we have a filepath
 static int  wid = -1;
 static int  menu_open = MENU_NONE;
 static int  mode = MODE_EDIT;
+// Actual client-area size as reported by the WM (event type 5).
+// create_w=CW(520), create_h=CH(380) -> client starts at CW-2 x CH-22.
+static int  win_cw = CW - 2;
+static int  win_ch = CH - 22;
 static int  dirty = 0;       // unsaved changes
 static int  save_flash = 0;  // frames to show "Saved!" message
 
@@ -138,8 +142,8 @@ static MItem help_menu[] = {
 #define DROP_ITEM_H 18
 
 static void draw_menubar(void) {
-    sys_draw_rect(wid, 0, 0, CW, MBAR_H, 0x00F5F5F5);
-    sys_draw_rect(wid, 0, MBAR_H, CW, 1, 0x00D0D0D0);
+    sys_draw_rect(wid, 0, 0, win_cw, MBAR_H, 0x00F5F5F5);
+    sys_draw_rect(wid, 0, MBAR_H, win_cw, 1, 0x00D0D0D0);
     for (int i = 0; i < NUM_MENUS; i++) {
         if (menu_open == i)
             sys_draw_rect(wid, menu_x[i]-3, 1, 38, MBAR_H-2, 0x00D0E4FF);
@@ -172,9 +176,9 @@ static void draw_dropdown(int midx) {
 }
 
 static void draw_statusbar(void) {
-    int sy = CH - SBAR_H;
-    sys_draw_rect(wid, 0, sy, CW, SBAR_H, 0x00F0F0F0);
-    sys_draw_rect(wid, 0, sy, CW, 1, 0x00D0D0D0);
+    int sy = win_ch - SBAR_H;
+    sys_draw_rect(wid, 0, sy, win_cw, SBAR_H, 0x00F0F0F0);
+    sys_draw_rect(wid, 0, sy, win_cw, 1, 0x00D0D0D0);
 
     if (mode == MODE_SAVEAS) {
         sys_draw_text(wid, 6, sy+3, "Waiting for filename...", 0x00003399);
@@ -197,15 +201,15 @@ static void draw_statusbar(void) {
         // Char count
         char cstr[16]; int_to_str(buf_len, cstr);
         char stat[24]; str_cpy(stat, "Ln:"); str_cat(stat, cstr);
-        sys_draw_text(wid, CW-70, sy+3, stat, 0x00888888);
+        sys_draw_text(wid, win_cw-70, sy+3, stat, 0x00888888);
     }
 }
 
 static void draw_saveas_dialog(void) {
     int dw = 320;
     int dh = 120;
-    int dx = (CW - dw) / 2;
-    int dy = (CH - dh) / 2;
+    int dx = (win_cw - dw) / 2;
+    int dy = (win_ch - dh) / 2;
 
     // Shadow border
     sys_draw_rect(wid, dx - 1, dy - 1, dw + 2, dh + 2, 0x001E1E2E);
@@ -235,12 +239,13 @@ static void draw_saveas_dialog(void) {
 
 static void draw_all(void) {
     // Clear canvas
-    sys_draw_rect(wid, 0, 0, CW, CH, 0x00FFFFFF);
+    sys_draw_rect(wid, 0, 0, win_cw, win_ch, 0x00FFFFFF);
 
     // Menu bar
     draw_menubar();
 
     // Text area
+    int text_end_y = win_ch - SBAR_H - 4;
     int x = 14, y = TEXT_START_Y;
     char lb[31]; int ll = 0; int sx = x;
 
@@ -250,11 +255,11 @@ static void draw_all(void) {
             x = 14; y += 16; sx = x;
             continue;
         }
-        if (x + 8 > CW - 6) {
+        if (x + 8 > win_cw - 6) {
             if (ll > 0) { lb[ll]=0; sys_draw_text(wid, sx, y, lb, 0x00111111); ll=0; }
             x = 14; y += 16; sx = x;
         }
-        if (y >= TEXT_END_Y) break;
+        if (y >= text_end_y) break;
         if (ll >= 30) {
             lb[ll]=0; sys_draw_text(wid, sx, y, lb, 0x00111111);
             ll=0; sx=x;
@@ -459,6 +464,12 @@ void _start() {
                     } else if (c >= 32 && c < 127 && buf_len < BUF_SIZE-1) {
                         buf[buf_len++] = c; buf[buf_len] = 0; dirty=1; draw_all();
                     }
+                }
+            } else if (ev.type == 5) { // Resize (WM reports client w/h)
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    draw_all();
                 }
             }
         }

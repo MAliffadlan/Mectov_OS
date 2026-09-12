@@ -2,6 +2,9 @@
 
 void** __mct_lib_ptr;
 
+static int win_cw = 360 - 2;
+static int win_ch = 300 - 22;
+
 static void draw_bar(int wid, int x, int y, int w, int h, uint32_t filled, uint32_t total, uint32_t on_col) {
     sys_draw_rect(wid, x, y, w, h, 0x00313244);
     sys_draw_rect(wid, x, y, w, 1, 0x0045475A); // Border
@@ -20,7 +23,7 @@ static void draw_bar(int wid, int x, int y, int w, int h, uint32_t filled, uint3
 }
 
 static void draw_sysinfo(int wid) {
-    sys_draw_rect(wid, 0, 0, 360, 240, 0x001E1E2E);
+    sys_draw_rect(wid, 0, 0, win_cw, win_ch, 0x001E1E2E);
     
     sysinfo_t info;
     sys_get_sysinfo(&info);
@@ -28,8 +31,8 @@ static void draw_sysinfo(int wid) {
     int lx = 12, ly = 10, gap = 28;
 
     sys_draw_text(wid, lx, ly, "System Information", 0x00CDD6F4);
-    sys_draw_text(wid, 300, ly, "Ring 3", 0x00F9E2AF);
-    sys_draw_rect(wid, lx, ly + 18, 360 - 24, 1, 0x00313244);
+    sys_draw_text(wid, win_cw - 58, ly, "Ring 3", 0x00F9E2AF);
+    sys_draw_rect(wid, lx, ly + 18, win_cw - 22, 1, 0x00313244);
     ly += gap;
 
     // CPU
@@ -43,7 +46,7 @@ static void draw_sysinfo(int wid) {
     sprintf(rbuf, "%d MB / %d MB", info.used_ram_kb / 1024, info.total_ram_kb / 1024);
     
     sys_draw_text(wid, lx + 40, ly, rbuf, 0x00CDD6F4);
-    draw_bar(wid, lx + 40, ly + 14, 280, 8, info.used_ram_kb, info.total_ram_kb, 0x0089B4FA);
+    draw_bar(wid, lx + 40, ly + 14, win_cw - 78, 8, info.used_ram_kb, info.total_ram_kb, 0x0089B4FA);
     ly += gap;
 
     // Uptime
@@ -74,7 +77,7 @@ static void draw_sysinfo(int wid) {
 
     // Cores — live per-CPU load bars (Fase 3 SMP: every core ticks and runs
     // its own runqueue, so each bar shows real per-core utilization).
-    sys_draw_rect(wid, lx, ly - 6, 360 - 24, 1, 0x00313244);
+    sys_draw_rect(wid, lx, ly - 6, win_cw - 22, 1, 0x00313244);
     sys_draw_text(wid, lx, ly, "Cores:", 0x006C7086);
     if (info.cpu_count > 4) info.cpu_count = 4;
     static const uint32_t core_colors[4] = { 0x0089B4FA, 0x00A6E3A1, 0x00F9E2AF, 0x00F38BA8 };
@@ -83,10 +86,10 @@ static void draw_sysinfo(int wid) {
         char cbuf[16];
         sprintf(cbuf, "CPU %d", i);
         sys_draw_text(wid, lx, cy, cbuf, 0x00CDD6F4);
-        draw_bar(wid, lx + 52, cy, 230, 12, info.cpu_load[i], 100, core_colors[i]);
+        draw_bar(wid, lx + 52, cy, win_cw - 128, 12, info.cpu_load[i], 100, core_colors[i]);
         char pb[8];
         sprintf(pb, "%d%%", info.cpu_load[i]);
-        sys_draw_text(wid, lx + 288, cy + 1, pb, core_colors[i]);
+        sys_draw_text(wid, win_cw - 58, cy + 1, pb, core_colors[i]);
     }
 
     sys_update_window(wid);
@@ -114,6 +117,12 @@ void _start() {
                 draw_sysinfo(wid);
             } else if (ev.type == 2) {
                 if (ev.key == 27) sys_exit(); // ESC
+            } else if (ev.type == 5) { // Client size (WM reports real cw/ch)
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    draw_sysinfo(wid);
+                }
             }
         }
         

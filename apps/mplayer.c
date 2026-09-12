@@ -24,6 +24,8 @@ void** __mct_lib_ptr;
 #define TONE_RATE  11025
 #define TONE_SIZE  11025
 static uint8_t tone_buf[TONE_SIZE];
+static int win_cw = 320 - 2;
+static int win_ch = 220 - 22;
 
 static void generate_tone(int freq) {
     // Generate 8-bit unsigned PCM sine approximation
@@ -55,10 +57,10 @@ static void draw_visualizer(int wid, int x, int y, int w, int h) {
 
 static void draw_player(int wid, int is_playing) {
     // 1. Background
-    sys_draw_rect(wid, 0, 0, 320, 220, COLOR_BG);
+    sys_draw_rect(wid, 0, 0, win_cw, win_ch, COLOR_BG);
     
     // 2. Header
-    sys_draw_rect(wid, 0, 0, 320, 40, COLOR_SURFACE);
+    sys_draw_rect(wid, 0, 0, win_cw, 40, COLOR_SURFACE);
     sys_draw_text(wid, 20, 12, "Mectov Music", COLOR_TEXT);
     
     // 3. Album Art Placeholder
@@ -71,11 +73,11 @@ static void draw_player(int wid, int is_playing) {
     sys_draw_text(wid, 110, 110, "11025 Hz Tone", 0x006C7086);
 
     // 5. Visualizer Area
-    sys_draw_rect(wid, 20, 160, 280, 40, 0x0011111B);
+    sys_draw_rect(wid, 20, win_ch - 38, win_cw - 38, 40, 0x0011111B);
     if (is_playing) {
-        draw_visualizer(wid, 25, 165, 270, 30);
+        draw_visualizer(wid, 25, win_ch - 33, win_cw - 48, 30);
     } else {
-        sys_draw_rect(wid, 25, 179, 270, 2, COLOR_SUBTEXT);
+        sys_draw_rect(wid, 25, win_ch - 19, win_cw - 48, 2, COLOR_SUBTEXT);
     }
     
     // 6. Controls
@@ -109,6 +111,12 @@ void _start() {
         if (has_event > 0) {
             if (ev.type == 1) { // Paint
                 draw_player(wid, is_playing);
+            } else if (ev.type == 5) { // Resize
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    draw_player(wid, is_playing);
+                }
             } else if (ev.type == 2) { // Key
                 if (ev.key == 'q' || ev.key == 27) break;
             } else if (ev.type == 3) { // Click

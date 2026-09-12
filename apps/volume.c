@@ -24,6 +24,8 @@ static void itoa(int val, char* buf) {
 
 static int volume = 80;
 static int dragging = 0;
+static int win_cw = WIN_W - 2;
+static int win_ch = WIN_H - 22;
 
 // Slider geometry
 #define SL_X    30
@@ -34,10 +36,10 @@ static int dragging = 0;
 
 static void draw_volume(int wid) {
     // Background
-    sys_draw_rect(wid, 0, 0, WIN_W, WIN_H, 0x001A1A2E);
+    sys_draw_rect(wid, 0, 0, win_cw, win_ch, 0x001A1A2E);
     
-    // Title
-    sys_draw_text(wid, WIN_W/2 - 52, 12, "Volume Control", 0x00FFFFFF);
+    // Title (centered: default 78 = 260/2-52 = win_cw/2-51 at win_cw=258)
+    sys_draw_text(wid, win_cw / 2 - 51, 12, "Volume Control", 0x00FFFFFF);
     
     // Volume icon
     if (volume == 0) {
@@ -74,7 +76,7 @@ static void draw_volume(int wid) {
     while (buf[i]) i++;
     buf[i] = '%'; buf[i+1] = '\0';
     
-    sys_draw_text(wid, WIN_W/2 - 16, SL_Y + 28, buf, 0x00FFFFFF);
+    sys_draw_text(wid, win_cw / 2 - 15, SL_Y + 28, buf, 0x00FFFFFF);
     
     // Buttons: [-] and [+]
     sys_draw_rect(wid, SL_X, SL_Y + 52, 40, 28, 0x00333344);
@@ -83,12 +85,12 @@ static void draw_volume(int wid) {
     sys_draw_rect(wid, SL_X + SL_W - 40, SL_Y + 52, 40, 28, 0x00333344);
     sys_draw_text(wid, SL_X + SL_W - 26, SL_Y + 58, "+", 0x0027C93F);
     
-    // Mute button
-    sys_draw_rect(wid, WIN_W/2 - 30, SL_Y + 52, 60, 28, 0x00333344);
+    // Mute button (centered: defaults at win_cw=258)
+    sys_draw_rect(wid, win_cw / 2 - 29, SL_Y + 52, 60, 28, 0x00333344);
     if (volume == 0) {
-        sys_draw_text(wid, WIN_W/2 - 26, SL_Y + 58, "Unmute", 0x00FFBD2E);
+        sys_draw_text(wid, win_cw / 2 - 25, SL_Y + 58, "Unmute", 0x00FFBD2E);
     } else {
-        sys_draw_text(wid, WIN_W/2 - 20, SL_Y + 58, "Mute", 0x00FFBD2E);
+        sys_draw_text(wid, win_cw / 2 - 19, SL_Y + 58, "Mute", 0x00FFBD2E);
     }
     
     sys_update_window(wid);
@@ -152,8 +154,8 @@ void _start() {
                     draw_volume(wid);
                 }
                 // Mute button
-                else if (mx >= WIN_W/2 - 30 && mx <= WIN_W/2 + 30 &&
-                         my >= SL_Y + 52 && my <= SL_Y + 80) {
+                else if (mx >= win_cw / 2 - 29 && mx <= win_cw / 2 + 31 &&
+                          my >= SL_Y + 52 && my <= SL_Y + 80) {
                     if (volume > 0) { prev_volume = volume; set_vol(0); }
                     else set_vol(prev_volume);
                     draw_volume(wid);
@@ -165,6 +167,12 @@ void _start() {
                     set_vol(volume - 5);
                 }
                 draw_volume(wid);
+            } else if (ev.type == 5) { // Client size (WM reports real cw/ch)
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    draw_volume(wid);
+                }
             }
         }
         sys_yield();

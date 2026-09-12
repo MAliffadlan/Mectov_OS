@@ -22,6 +22,8 @@ typedef struct {
 static TmRow rows[128];
 static int num_rows = 0;
 static int tm_selected_row = -1;
+static int win_cw = 380 - 2;
+static int win_ch = 300 - 22;
 
 static void refresh_list() {
     num_rows = 0;
@@ -83,8 +85,8 @@ static void refresh_list() {
 
 
 static void tm_draw(int wid) {
-    int cw = 380;
-    int ch = 300;
+    int cw = win_cw;
+    int ch = win_ch;
     sys_draw_rect(wid, 0, 0, cw, ch, 0x001E1E2E);
 
     sys_draw_rect(wid, 0, LIST_Y, cw, ch - LIST_Y - BTN_H, 0x0011111B);
@@ -169,7 +171,7 @@ void _start() {
                 int my = ev.y;
                 int btn = ev.key;
                 if (btn & 1) {
-                    if (my >= LIST_Y && my < 300 - BTN_H) {
+                    if (my >= LIST_Y && my < win_ch - BTN_H) {
                         int row = (my - LIST_Y - 3) / ROW_HEIGHT;
                         if (row >= 0 && row < num_rows) {
                             tm_selected_row = row;
@@ -178,6 +180,12 @@ void _start() {
                         }
                         tm_draw(wid);
                     }
+                }
+            } else if (ev.type == 5) {
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    tm_draw(wid);
                 }
             }
         }

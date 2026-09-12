@@ -22,6 +22,8 @@ typedef struct {
 
 // --- App Logic ---
 int win_id = -1;
+static int win_cw = 220 - 2;
+static int win_ch = 300 - 22;
 char display_buf[32];
 int buf_len = 0;
 
@@ -39,7 +41,7 @@ char buttons[20] = {
 
 void draw_ui() {
     // Background
-    sys_draw_rect(win_id, 0, 0, 220, 300, 0x404040);
+    sys_draw_rect(win_id, 0, 0, win_cw, win_ch, 0x404040);
     
     // Display
     sys_draw_rect(win_id, 5, 30, 210, 40, 0x202020);
@@ -127,6 +129,12 @@ void _start() {
         } else if (res > 0) {
             if (ev.type == 1) {
                 draw_ui();
+            } else if (ev.type == 5) {
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    draw_ui();
+                }
             } else if (ev.type == 3 && (ev.key & 1)) {
                 handle_click(ev.x, ev.y);
             }

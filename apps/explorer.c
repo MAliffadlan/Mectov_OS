@@ -12,6 +12,11 @@ static int current_parent = 0; // root
 static int scroll_offset = 0;
 static int selected = -1;
 
+// Actual client-area size as reported by the WM (event type 5).
+// create_w=400, create_h=340 -> client starts at 400-2 x 340-22.
+static int win_cw = 400 - 2;
+static int win_ch = 340 - 22;
+
 // --- Back navigation stack (max 8 levels deep) ---
 #define MAX_DEPTH 8
 static int parent_stack[MAX_DEPTH];
@@ -52,6 +57,18 @@ static void refresh_entries() {
     if (entry_count < 0) entry_count = 0;
     scroll_offset = 0;
     selected = -1;
+}
+
+static int visible_rows(void) {
+    int v = (win_ch - 66 - 20) / 22;
+    return v > 1 ? v : 1;
+}
+
+static void clamp_scroll(void) {
+    int max = entry_count - visible_rows();
+    if (max < 0) max = 0;
+    if (scroll_offset > max) scroll_offset = max;
+    if (scroll_offset < 0) scroll_offset = 0;
 }
 
 // --- Navigate into a subdirectory ---
@@ -141,8 +158,10 @@ static void draw_dev_icon(int wid, int x, int y) {
 static void draw_dialog(int wid) {
     int dw = 280;
     int dh = 100;
-    int dx = (400 - dw) / 2;
-    int dy = (340 - dh) / 2;
+    int dx = (win_cw - dw) / 2;
+    int dy = (win_ch - dh) / 2;
+    if (dx < 0) dx = 0;
+    if (dy < 0) dy = 0;
 
     // Shadow
     sys_draw_rect(wid, dx - 1, dy - 1, dw + 2, dh + 2, 0x0011111B);
@@ -176,7 +195,7 @@ static void draw_dialog(int wid) {
 }
 
 static void draw_explorer(int wid) {
-    int cw = 400, ch = 340;
+    int cw = win_cw, ch = win_ch;
     sys_draw_rect(wid, 0, 0, cw, ch, 0x001E1E2E);
 
     // ====== Header bar (24px tall) ======
@@ -404,7 +423,7 @@ void _start() {
                         scroll_offset--;
                         draw_explorer(wid);
                     }
-                    if ((ev.key == 's' || ev.key == 'S') && scroll_offset < entry_count - 10) {
+                    if ((ev.key == 's' || ev.key == 'S') && scroll_offset < entry_count - visible_rows()) {
                         scroll_offset++;
                         draw_explorer(wid);
                     }
@@ -521,7 +540,7 @@ void _start() {
                     // Check file list click
                     int list_top = 66;
                     int row_h = 22;
-                    if (click_y >= list_top && click_y < 340 - 20) {
+                    if (click_y >= list_top && click_y < win_ch - 20) {
                         int row = (click_y - list_top) / row_h + scroll_offset;
                         if (row >= 0 && row < entry_count) {
                             if (selected == row) {
@@ -575,15 +594,15 @@ void _start() {
                     // Check file list right-click
                     int list_top = 66;
                     int row_h = 22;
-                    if (click_y >= list_top && click_y < 340 - 20) {
+                    if (click_y >= list_top && click_y < win_ch - 20) {
                         int row = (click_y - list_top) / row_h + scroll_offset;
                         if (row >= 0 && row < entry_count) {
                             selected = row;
                             explorer_ctx_open = 1;
                             explorer_ctx_x = click_x;
                             explorer_ctx_y = click_y;
-                            if (explorer_ctx_x + 90 > 400) explorer_ctx_x = 400 - 90;
-                            if (explorer_ctx_y + 58 > 320) explorer_ctx_y = 320 - 58;
+                            if (explorer_ctx_x + 90 > win_cw) explorer_ctx_x = win_cw - 90;
+                            if (explorer_ctx_y + 58 > win_ch) explorer_ctx_y = win_ch - 58;
                         }
                     }
                     draw_explorer(wid);
@@ -593,12 +612,19 @@ void _start() {
                     // Scroll up
                     for (int s = 0; s < 3 && scroll_offset > 0; s++)
                         scroll_offset--;
-                } else if (ev.key < 0 && scroll_offset < entry_count - 10) {
+                } else if (ev.key < 0 && scroll_offset < entry_count - visible_rows()) {
                     // Scroll down
-                    for (int s = 0; s < 3 && scroll_offset < entry_count - 10; s++)
+                    for (int s = 0; s < 3 && scroll_offset < entry_count - visible_rows(); s++)
                         scroll_offset++;
                 }
                 draw_explorer(wid);
+            } else if (ev.type == 5) { // Resize (WM reports client w/h)
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x;
+                    win_ch = ev.y;
+                    clamp_scroll();
+                    draw_explorer(wid);
+                }
             }
         }
         sys_yield();

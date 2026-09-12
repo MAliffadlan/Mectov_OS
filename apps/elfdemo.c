@@ -16,6 +16,10 @@ typedef struct {
     int key;
 } gui_event_t;
 
+// Client area follows WM resize notifications (event type 5).
+static int win_cw = 320 - 2;
+static int win_ch = 200 - 22;
+
 void _start() {
     sys_print("[ELF] elfdemo starting from ELF binary in Ring 3...\n", 0x0E);
 
@@ -28,35 +32,49 @@ void _start() {
     int wid = sys_create_window(120, 90, 320, 200, "ELF Demo");
     if (wid < 0) sys_exit();
 
+    // Launch-arg line is constant for the app lifetime: build once, reuse
+    // in every repaint (paint + resize).
+    char aline[40];
+    aline[0] = 'A'; aline[1] = 'r'; aline[2] = 'g'; aline[3] = ':'; aline[4] = ' ';
+    int ai = 5;
+    if (argbuf[0]) {
+        for (int i = 0; argbuf[i] && ai < 38; i++) aline[ai++] = argbuf[i];
+    } else {
+        aline[ai++] = '('; aline[ai++] = 'n'; aline[ai++] = 'o'; aline[ai++] = 'n'; aline[ai++] = 'e'; aline[ai++] = ')';
+    }
+    aline[ai] = '\0';
+
     gui_event_t ev;
     int tick = 0;
 
     while (1) {
         while (sys_get_event(wid, &ev)) {
             if (ev.type == 1) { // Paint
-                sys_draw_rect(wid, 0, 0, 320, 200, 0x1B1B2B);
+                sys_draw_rect(wid, 0, 0, win_cw, win_ch, 0x1B1B2B);
                 sys_draw_text(wid, 40, 40, "This app is a real ELF binary!", 0x00FF88);
                 sys_draw_text(wid, 40, 64, "Loaded by the in-kernel ELF loader", 0x88CCFF);
                 sys_draw_text(wid, 40, 88, "Entry point from e_entry,", 0xA0A0B0);
                 sys_draw_text(wid, 40, 104, "segments from PT_LOAD headers.", 0xA0A0B0);
-                char aline[40];
-                aline[0] = 'A'; aline[1] = 'r'; aline[2] = 'g'; aline[3] = ':'; aline[4] = ' ';
-                int ai = 5;
-                if (argbuf[0]) {
-                    for (int i = 0; argbuf[i] && ai < 38; i++) aline[ai++] = argbuf[i];
-                } else {
-                    aline[ai++] = '('; aline[ai++] = 'n'; aline[ai++] = 'o'; aline[ai++] = 'n'; aline[ai++] = 'e'; aline[ai++] = ')';
-                }
-                aline[ai] = '\0';
                 sys_draw_text(wid, 40, 128, aline, 0xFFFF66);
                 sys_update_window(wid);
             } else if (ev.type == 2) { // Key: ESC exits
                 if (ev.key == 0x01) sys_exit();
+            } else if (ev.type == 5) { // Resize: new client w/h
+                if (ev.x > 40 && ev.y > 40) {
+                    win_cw = ev.x; win_ch = ev.y;
+                    sys_draw_rect(wid, 0, 0, win_cw, win_ch, 0x1B1B2B);
+                    sys_draw_text(wid, 40, 40, "This app is a real ELF binary!", 0x00FF88);
+                    sys_draw_text(wid, 40, 64, "Loaded by the in-kernel ELF loader", 0x88CCFF);
+                    sys_draw_text(wid, 40, 88, "Entry point from e_entry,", 0xA0A0B0);
+                    sys_draw_text(wid, 40, 104, "segments from PT_LOAD headers.", 0xA0A0B0);
+                    sys_draw_text(wid, 40, 128, aline, 0xFFFF66);
+                    sys_update_window(wid);
+                }
             }
         }
         tick++;
         if (tick % 200000 == 0) {
-            sys_draw_rect(wid, 0, 0, 320, 200, (tick & 1) ? 0x1B1B2B : 0x232338);
+            sys_draw_rect(wid, 0, 0, win_cw, win_ch, (tick & 1) ? 0x1B1B2B : 0x232338);
             sys_update_window(wid);
         }
         sys_yield();
