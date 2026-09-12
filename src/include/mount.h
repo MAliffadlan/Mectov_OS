@@ -43,4 +43,18 @@ void mount_dump(void);   // serial-log every active mount (for `mount` with no a
 int  vfs_mount_path(const char* path, const char* fstype, int drive);
 int  vfs_umount_path(const char* path);
 
+// Backend auto-select (v38.78): ext2.c/fat32.c still keep one global
+// superblock each, so before touching a backend node the VFS layer calls
+// mount_select_for_node() to retarget the backend at the volume that owns
+// the node (found by walking up to the enclosing mount point), re-running
+// ext2_init/fat32_init only on a drive mismatch. Every VFS op is atomic
+// under vfs_lock, so the select+use pair cannot interleave across cores.
+// Must be called WITH vfs_lock held. Returns 0 when the backend is ready,
+// -1 when the node has no live mount or the re-init failed (the caller
+// must then fail its op instead of touching the wrong volume).
+// mount_select_drive() pins a backend at an explicit drive (used by `df`,
+// which reports the boot volumes). Returns 0 or -1.
+int  mount_select_for_node(int node);
+int  mount_select_drive(mount_kind_t kind, int drive);
+
 #endif

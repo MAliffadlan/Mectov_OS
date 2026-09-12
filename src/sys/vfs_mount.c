@@ -8,10 +8,12 @@
 // so umount can undo the mapping, and so `mount` (no args) can list them.
 //
 // Limitation (until the backends grow per-volume state): ext2.c and
-// fat32.c keep ONE global superblock each, so a runtime mount must target
-// the drive the backend is currently initialized for — the boot drives
-// (ext2 = 1, fat32 = 3) or a re-mount of the same kind. Mounting a second
-// ext2 volume would silently repoint the first.
+// fat32.c keep ONE global superblock each. That used to mean a second
+// same-kind mount silently repointed the first (its nodes kept working but
+// resolved against the wrong disk). Since v38.78 the VFS layer calls
+// mount_select_for_node() before every backend op, which retargets the
+// backend at the node's own volume — same-kind volumes now coexist as long
+// as ops stay syscall-atomic under vfs_lock (which they all are).
 
 #include "../include/mount.h"
 #include "../include/vfs.h"
@@ -19,6 +21,7 @@
 #include "../include/utils.h"
 #include "../include/ahci.h"   // AHCI_DRIVE_BASE: SATA ports are drives 4+
 #include "../include/xhci.h"   // USB_DRIVE_BASE: USB mass-storage is drives 8+
+#include "../include/virtio_blk.h" // VIRTIO_BLK_BASE: virtio-blk disks are drives 12+
 
 static mount_t mounts[MAX_MOUNTS];
 
@@ -47,6 +50,50 @@ int mount_lookup(int node_idx) {
         if (mounts[i].in_use && mounts[i].node_idx == node_idx) return i;
     }
     return -1;
+}
+
+// Pin a backend at an explicit drive (no-op when already selected).
+int mount_select_drive(mount_kind_t kind, int drive) {
+    extern int ext2_init(int drive);
+    extern int fat32_init(int drive);
+    extern int ext2_current_drive(void);
+    extern int fat32_current_drive(void);
+    if (kind == MOUNT_EXT2) {
+        if (ext2_current_drive() == drive) return 0;
+        return ext2_init(drive);
+    }
+    if (kind == MOUNT_FAT32) {
+        if (fat32_current_drive() == drive) return 0;
+        return fat32_init(drive);
+    }
+    return -1;
+}
+
+// Retarget the backend at the volume owning `node` (vfs_lock must be held).
+int mount_select_for_node(int node) {
+    if (node < 0 || node >= MAX_NODES) return -1;
+    if (!fs_nodes[node].in_use) return -1;
+    fs_type_t t = fs_nodes[node].type;
+    mount_kind_t kind;
+    if (t == FS_EXT2_FILE || t == FS_EXT2_DIR) kind = MOUNT_EXT2;
+    else if (t == FS_FAT32_FILE || t == FS_FAT32_DIR) kind = MOUNT_FAT32;
+    else return 0;   // not a backend node: nothing to select.
+
+    // Walk up to the enclosing mount point (root's parent is -1, so this
+    // always terminates; the step cap is belt-and-braces for corruption).
+    int n = node;
+    for (int guard = 0; guard < MAX_NODES + 1; guard++) {
+        if (n < 0 || n >= MAX_NODES) break;
+        int m = mount_lookup(n);
+        if (m >= 0) {
+            if (mounts[m].kind != kind) return -1;  // stale node: type/mount disagree
+            return mount_select_drive(kind, mounts[m].drive);
+        }
+        int p = fs_nodes[n].parent;
+        if (p < 0 || p >= MAX_NODES || p == n) break;
+        n = p;
+    }
+    return -1;   // backend node with no live mount: refuse, don't guess.
 }
 
 void mount_dump(void) {
@@ -95,9 +142,10 @@ int vfs_mount_path(const char* path, const char* fstype, int drive) {
         return -1;
     }
     // Drives 0-3 are IDE; 4..7 are AHCI ports (v38.50); 8..11 are USB
-    // mass-storage units (v38.56) — all routed through the same sector
-    // API, so ext2/fat32 mount on any of them unchanged.
-    if (drive < 0 || drive >= USB_DRIVE_BASE + USB_MAX_DRIVES) return -1;
+    // mass-storage units (v38.56); 12..15 are virtio-blk disks (v38.78) —
+    // all routed through the same sector API, so ext2/fat32 mount on any
+    // of them unchanged.
+    if (drive < 0 || drive >= VIRTIO_BLK_BASE + VIRTIO_BLK_MAX) return -1;
 
     vfs_lock_acquire();
 

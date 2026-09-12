@@ -23,7 +23,10 @@ void cmd_df(void) {
         p_int(used_sectors * 100 / VFS_DISK_SECTORS, 0x0F); print("%  /", 0x0F);
         print("\n", 0x0F);
         
-        // ext2 (drive 1)
+        // ext2 (boot drive 1): pin the backend first so the row always
+        // describes the boot volume even when another ext2 volume was
+        // touched most recently (per-volume auto-select, v38.78).
+        mount_select_drive(MOUNT_EXT2, 1);
         uint32_t tblocks = 0, fblocks = 0, tinodes = 0, finodes = 0, bsize = 1024;
         if (ext2_get_stats(&tblocks, &fblocks, &tinodes, &finodes, &bsize) == 0 && tblocks > 0) {
             uint32_t total_kb = tblocks * bsize / 1024;
@@ -43,8 +46,9 @@ void cmd_df(void) {
             print("ext2           not mounted\n", 0x07);
         }
         
-        // fat32 (drive 2)
+        // fat32 (boot drive 3): same pinning as the ext2 row above.
         extern int fat32_get_stats(uint32_t*, uint32_t*, uint32_t*);
+        mount_select_drive(MOUNT_FAT32, 3);
         uint32_t tcl = 0, fcl = 0, cbytes = 512;
         if (fat32_get_stats(&tcl, &fcl, &cbytes) == 0 && tcl > 0) {
             uint32_t total_kb = tcl * cbytes / 1024;

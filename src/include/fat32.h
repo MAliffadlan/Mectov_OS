@@ -65,6 +65,9 @@ typedef struct {
 // Detect + parse the BPB of a FAT32 volume on `drive` (secondary channel
 // drives 2-3 are supported by the ATA layer). Returns 0 on success.
 int fat32_init(int drive);
+// Drive the global backend state currently targets (-1 = none yet); see
+// ext2_current_drive() — same mount-layer auto-select contract.
+int fat32_current_drive(void);
 // First cluster of the root directory (valid after fat32_init).
 uint32_t fat32_root_cluster(void);
 

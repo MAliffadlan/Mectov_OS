@@ -107,6 +107,11 @@ typedef struct {
 
 // API — read
 int ext2_init(int drive);
+// Drive the global backend state currently targets (-1 = none yet).
+// The mount layer (vfs_mount.c) compares this against the owning volume
+// before every op and re-inits on mismatch, so several same-kind volumes
+// can stay mounted without silently repointing each other.
+int ext2_current_drive(void);
 int ext2_read_inode(uint32_t inode_num, ext2_inode_t* inode);
 int ext2_write_inode(uint32_t inode_num, ext2_inode_t* inode);
 int ext2_read_file_data(uint32_t inode_num, char* buf, int max_size);

@@ -29,6 +29,16 @@ if [ ! -f "usb.img" ]; then
     mkfs.fat -F 32 -S 512 usb.img > /dev/null 2>&1
 fi
 
+# VirtIO-Blk disk (v38.78, opt-in): FAT32 image behind a transitional
+# virtio-blk-pci controller. The kernel registers it as drive 12; mount it
+# from the shell with `mount /vblk fat32 12`. Attached to QEMU only when
+# MECTOV_VIRTIO=1 (default off — plain boots stay exactly as before).
+if [ ! -f "virtio.img" ]; then
+    echo "[!] Membuat virtio.img baru..."
+    dd if=/dev/zero of=virtio.img bs=1M count=16 2>/dev/null
+    mkfs.fat -F 32 -S 512 virtio.img > /dev/null 2>&1
+fi
+
 # Rebuild kernel (akan mengompilasi semua MCT dinamis secara bersih)
 make
 
@@ -105,6 +115,12 @@ fi
 # bisa 2-3x lebih lambat dari 1-2 core. Fallback TCG otomatis turun ke 2.
 # Override manual:  MECTOV_SMP=1 ./run.sh
 SMP="${MECTOV_SMP:-4}"
+# VirtIO-Blk controller (v38.78, opt-in): MECTOV_VIRTIO=1 attaches the
+# virtio.img disk as drive 12 via the legacy interface the kernel drives.
+VIRTIO_ARGS=""
+if [ "${MECTOV_VIRTIO:-0}" = "1" ]; then
+    VIRTIO_ARGS="-drive file=virtio.img,format=raw,if=none,id=vd0 -device virtio-blk-pci,drive=vd0,disable-modern=on"
+fi
 run_qemu() {
     qemu-system-i386 $KVM_FLAGS \
     -vga std \
@@ -119,7 +135,8 @@ run_qemu() {
     -drive file=fat32.img,format=raw,index=3,media=disk \
     -device qemu-xhci,id=xhci0 \
     -drive file=usb.img,format=raw,if=none,id=usbd0 \
-    -device usb-storage,drive=usbd0,bus=xhci0.0
+    -device usb-storage,drive=usbd0,bus=xhci0.0 \
+    $VIRTIO_ARGS
 }
 
 if [ -n "$KVM_FLAGS" ]; then

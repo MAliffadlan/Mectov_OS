@@ -246,6 +246,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] xhci\n");
     extern void xhci_init(void);
     xhci_init();
+    // VirtIO-Blk (v38.78): transitional/legacy PCI block disks become
+    // drives 12+ on the same sector API (`mount /vblk fat32 12`). Absent
+    // device = log only. Must run after pci_scan (shares nothing with
+    // ahci/xhci — own queue memory, own lock, poll-only so no IRQ wiring).
+    write_serial_string("[K] virtio\n");
+    extern void virtio_blk_init(void);
+    virtio_blk_init();
     write_serial_string("[K] sb16\n");
     extern void sb16_init(void);
     sb16_init();

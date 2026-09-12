@@ -76,7 +76,7 @@ typedef struct {
     int      rq_cpu;       // per-CPU runqueue this task is queued on (-1 = not queued)
     int      is_idle;      // 1 = pinned per-CPU idle task (never migrated)
     uint32_t page_dir;     // per-process page directory (0 = global identity)
-    int      fd_table[16]; // local file descriptors mapped to global FDs
+    int      fd_table[MAX_FDS_PER_TASK]; // local file descriptors mapped to global FDs
     char     launch_arg[128]; // command-line argument passed at launch
     int      trusted_shell; // 1 = verified shell host (terminal/explorer/taskmgr).
                             // Gates SYS_EXEC_CMD/SYS_KILL_TASK. Set ONLY by the
@@ -130,14 +130,14 @@ static volatile int scheduler_ready = 0;
 // Default resource limits for a fresh task slot (set by init_tasking and by
 // every task constructor that reuses a slot). Values are generous for the
 // single-user desktop but real: 64 processes, 256 MB of address space, and
-// the full 16-fd table per task. Root (uid 0) bypasses every limit.
+// the full 32-fd table per task. Root (uid 0) bypasses every limit.
 static void rlimit_set_defaults(int tid) {
     tasks[tid].rlimits[RLIMIT_NPROC].cur  = 64;
     tasks[tid].rlimits[RLIMIT_NPROC].max  = 64;
     tasks[tid].rlimits[RLIMIT_AS].cur     = 256u * 1024u * 1024u;
     tasks[tid].rlimits[RLIMIT_AS].max     = 256u * 1024u * 1024u;
-    tasks[tid].rlimits[RLIMIT_NOFILE].cur = 16;
-    tasks[tid].rlimits[RLIMIT_NOFILE].max = 16;
+    tasks[tid].rlimits[RLIMIT_NOFILE].cur = 32;
+    tasks[tid].rlimits[RLIMIT_NOFILE].max = 32;
 }
 
 // RLIMIT_NPROC enforcement: count live tasks with the same uid as `tid` and
@@ -503,7 +503,7 @@ static int create_idle_task(int cpu) {
     tasks[tid].sig_frame_esp = 0;
     tasks[tid].zombie_since = 0;
     tasks[tid].shm_bits = 0;
-    for (int j = 0; j < 16; j++) tasks[tid].fd_table[j] = -1;
+    for (int j = 0; j < MAX_FDS_PER_TASK; j++) tasks[tid].fd_table[j] = -1;
     for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[tid].mmap_regions[j].base = 0;
     for (int j = 0; j < SIG_MAX; j++) { tasks[tid].signal_handlers[j] = NULL; tasks[tid].sig_masks[j] = 0; tasks[tid].sig_flags[j] = 0; }
     tasks[tid].is_idle = 1;
@@ -560,7 +560,7 @@ void init_tasking() {
         tasks[i].sig_frame_esp = 0;
         tasks[i].zombie_since = 0;
         for (int j = 0; j < SIG_MAX; j++) { tasks[i].signal_handlers[j] = NULL; tasks[i].sig_masks[j] = 0; tasks[i].sig_flags[j] = 0; }
-        for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
+        for (int j = 0; j < MAX_FDS_PER_TASK; j++) tasks[i].fd_table[j] = -1;
         for (int j = 0; j < MMAP_MAX_REGIONS; j++) tasks[i].mmap_regions[j].base = 0;
         rlimit_set_defaults(i);
         fpu_task_init(tasks[i].fxsave);
@@ -682,7 +682,7 @@ int create_task(void (*entry)()) {
             tasks[i].shm_bits = 0;
             for (int j = 0; j < SIG_MAX; j++) { tasks[i].signal_handlers[j] = NULL; tasks[i].sig_masks[j] = 0; tasks[i].sig_flags[j] = 0; }
             task_set_launch_arg(i, "sys_kernel");
-            for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
+            for (int j = 0; j < MAX_FDS_PER_TASK; j++) tasks[i].fd_table[j] = -1;
             fpu_task_init(tasks[i].fxsave);
             uint32_t* stack = (uint32_t*)kstack_top(i);
             
@@ -1239,11 +1239,11 @@ int thread_create_ex(void (*entry)(), int priority, uint32_t page_dir,
             // pipeline spawns a child that dup2()s a pipe/file onto fd 0/1 and
             // then loads an app: without this copy the new task would have an
             // empty fd table and the pipe/file would never be used.
-            for (int j = 0; j < 16; j++) tasks[i].fd_table[j] = -1;
+            for (int j = 0; j < MAX_FDS_PER_TASK; j++) tasks[i].fd_table[j] = -1;
             if (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS &&
                 tasks[current_task[cid]].state != TASK_STATE_FREE) {
                 extern global_fd_t global_fds[];
-                for (int j = 0; j < 16; j++) {
+                for (int j = 0; j < MAX_FDS_PER_TASK; j++) {
                     int gfd = tasks[current_task[cid]].fd_table[j];
                     if (gfd >= 0 && gfd < MAX_GLOBAL_FDS && global_fds[gfd].in_use) {
                         tasks[i].fd_table[j] = gfd;
@@ -1427,13 +1427,13 @@ int task_is_alive(int tid) {
 
 int task_get_fd(int tid, int local_fd) {
     if (tid < 0 || tid >= MAX_TASKS) return -1;
-    if (local_fd < 0 || local_fd >= 16) return -1;
+    if (local_fd < 0 || local_fd >= MAX_FDS_PER_TASK) return -1;
     return tasks[tid].fd_table[local_fd];
 }
 
 void task_set_fd(int tid, int local_fd, int global_fd) {
     if (tid < 0 || tid >= MAX_TASKS) return;
-    if (local_fd < 0 || local_fd >= 16) return;
+    if (local_fd < 0 || local_fd >= MAX_FDS_PER_TASK) return;
     tasks[tid].fd_table[local_fd] = global_fd;
 }
 
@@ -1594,7 +1594,7 @@ int task_rlimit_nofile_ok(void) {
     uint32_t limit = tasks[tid].rlimits[RLIMIT_NOFILE].cur;
     if (limit >= MAX_FDS_PER_TASK) return 1;
     int open = 0;
-    for (int j = 0; j < 16; j++) {
+    for (int j = 0; j < MAX_FDS_PER_TASK; j++) {
         if (tasks[tid].fd_table[j] >= 0) open++;
     }
     return open < (int)limit;
@@ -1866,7 +1866,7 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         // Share the parent's open fds: bump each global refcount so a close in
         // one process does not yank the descriptor from the other.
         extern global_fd_t global_fds[];
-        for (int j = 0; j < 16; j++) {
+        for (int j = 0; j < MAX_FDS_PER_TASK; j++) {
             int gfd = tasks[i].fd_table[j];
             if (gfd >= 0 && gfd < MAX_GLOBAL_FDS && global_fds[gfd].in_use) {
                 global_fds[gfd].ref_count++;
@@ -2164,8 +2164,8 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
     // Inherit the caller's fd table, then rewire fd 0/1 for the pipe/file and
     // drop every other descriptor (POSIX spawn: clean stdin/stdout/stderr).
     extern global_fd_t global_fds[];
-    for (int j = 0; j < 16; j++) tasks[child].fd_table[j] = -1;
-    for (int j = 0; j < 16; j++) {
+    for (int j = 0; j < MAX_FDS_PER_TASK; j++) tasks[child].fd_table[j] = -1;
+    for (int j = 0; j < MAX_FDS_PER_TASK; j++) {
         int gfd = tasks[current_task[cid]].fd_table[j];
         if (gfd >= 0 && gfd < MAX_GLOBAL_FDS && global_fds[gfd].in_use) {
             tasks[child].fd_table[j] = gfd;

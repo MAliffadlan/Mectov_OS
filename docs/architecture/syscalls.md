@@ -164,8 +164,11 @@ which drive + root key backs it so umount can undo the mapping.
   untouched), restores a plain `FS_DIR`, persists the node table. Shell:
   `umount /mnt`; `mount` with no args lists active mounts over serial.
 - Limitation (until the backends grow per-volume state): ext2.c/fat32.c
-  keep one global superblock each, so a runtime mount must target the
-  drive the backend is initialized for (the boot drives or a remount).
+  keep one global superblock each. Since v38.78 the VFS layer calls
+  `mount_select_for_node()` before every backend op, which retargets the
+  backend at the node's own volume (re-init only on drive mismatch, atomic
+  under vfs_lock) — same-kind volumes coexist correctly for all
+  syscall-atomic use. `df` pins the boot drives for stable rows.
 - CI: `scripts/mount_test.py` — umount → refuse-non-mount → remount →
   fat32demo passes on the remounted filesystem.
 

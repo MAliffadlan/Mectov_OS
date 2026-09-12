@@ -32,6 +32,9 @@ static uint32_t fat32_total_sectors = 0;
 static uint32_t fat32_first_data = 0;   // first sector of the data region
 static uint32_t fat32_max_cluster = 0;  // highest valid cluster number
 
+// Drive the global state currently targets (mount-layer auto-select).
+int fat32_current_drive(void) { return fat32_drive; }
+
 // --- low-level disk / FAT access -------------------------------------------
 
 static void fat32_read_sectors(uint32_t lba, unsigned char* buf, int count) {

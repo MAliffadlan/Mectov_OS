@@ -11,6 +11,9 @@ static uint32_t bgd_block = 2; // Usually block 2 for 1024-byte blocks
 static ext2_bg_descriptor_t* bgd_table = NULL;
 static uint32_t ext2_max_groups = 0; // capped at MAX below; read_inode bounds-checks against it
 
+// Drive the global state currently targets (mount-layer auto-select).
+int ext2_current_drive(void) { return ext2_drive; }
+
 static void ext2_read_block(uint32_t block, unsigned char* buf) {
     // A crafted image can name arbitrary block numbers. Bound the read to the
     // filesystem's own block count and the 4096-sector (2MB) drive BEFORE the

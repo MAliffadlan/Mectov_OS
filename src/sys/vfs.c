@@ -1399,6 +1399,11 @@ static int vfs_create_node_unlocked(const char* name, fs_type_t type, int parent
             // already exist on disk, so those bypass this hook.
             if (fs_nodes[parent].type == FS_EXT2_DIR &&
                 (type == FS_DIR || type == FS_FILE)) {
+                if (mount_select_for_node(parent) != 0) {
+                    write_serial_string("VFS: ext2 volume select failed\n");
+                    fs_nodes[i].in_use = 0;
+                    return -1;
+                }
                 uint8_t ft = (type == FS_DIR) ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
                 uint32_t einode = ext2_create_entry(fs_nodes[parent].ext2_inode, name, ft);
                 if (!einode) {
@@ -1413,6 +1418,11 @@ static int vfs_create_node_unlocked(const char* name, fs_type_t type, int parent
             // New object under a FAT32 directory: create the real dirent.
             if (fs_nodes[parent].type == FS_FAT32_DIR &&
                 (type == FS_DIR || type == FS_FILE)) {
+                if (mount_select_for_node(parent) != 0) {
+                    write_serial_string("VFS: fat32 volume select failed\n");
+                    fs_nodes[i].in_use = 0;
+                    return -1;
+                }
                 extern uint32_t fat32_create_entry(uint32_t parent_cluster,
                                                    const char* name, int is_dir);
                 int is_dir = (type == FS_DIR);
@@ -1519,6 +1529,7 @@ static void vfs_remove_ext2_entry(int node) {
     int p = fs_nodes[node].parent;
     if (p < 0 || p >= MAX_NODES) return;
     if (fs_nodes[p].type != FS_EXT2_DIR) return;
+    if (mount_select_for_node(p) != 0) return;
     ext2_remove_entry(fs_nodes[p].ext2_inode, fs_nodes[node].name);
 }
 
@@ -1529,6 +1540,7 @@ static void vfs_remove_fat32_entry(int node) {
     int p = fs_nodes[node].parent;
     if (p < 0 || p >= MAX_NODES) return;
     if (fs_nodes[p].type != FS_FAT32_DIR) return;
+    if (mount_select_for_node(p) != 0) return;
     extern int fat32_remove_entry(uint32_t parent_cluster, const char* name);
     fat32_remove_entry((uint32_t)fs_nodes[p].data_sector, fs_nodes[node].name);
 }
@@ -1707,6 +1719,7 @@ static int vfs_rename_unlocked(const char* old_path, const char* new_path,
         if (old_p != new_parent || fs_nodes[old_p].type != FS_EXT2_DIR) {
             return -5; // cross-directory / cross-filesystem rename not supported
         }
+        if (mount_select_for_node(old_p) != 0) return -5;
         if (ext2_rename_entry(fs_nodes[old_p].ext2_inode, fs_nodes[node].name,
                               new_filename, fs_nodes[node].ext2_inode) != 0) {
             return -5;
@@ -1719,6 +1732,7 @@ static int vfs_rename_unlocked(const char* old_path, const char* new_path,
         if (old_p != new_parent || fs_nodes[old_p].type != FS_FAT32_DIR) {
             return -5;
         }
+        if (mount_select_for_node(old_p) != 0) return -5;
         extern int fat32_rename_entry(uint32_t parent_cluster, const char* old_name,
                                       const char* new_name);
         if (fat32_rename_entry((uint32_t)fs_nodes[old_p].data_sector,
@@ -1969,6 +1983,7 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
     
     if (fs_nodes[node].type == FS_EXT2_FILE) {
         extern int ext2_read_file_data(uint32_t inode_num, char* buf, int max_size);
+        if (mount_select_for_node(node) != 0) return -1;
         int bytes = ext2_read_file_data(fs_nodes[node].ext2_inode, buf, max_size);
         if (bytes >= 0 && bytes < max_size) buf[bytes] = '\0';
         return bytes;
@@ -1976,6 +1991,7 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
     
     if (fs_nodes[node].type == FS_FAT32_FILE) {
         extern int fat32_read_file(uint32_t first_cluster, char* buf, int max_size);
+        if (mount_select_for_node(node) != 0) return -1;
         int sz = fs_nodes[node].size;
         if (sz > max_size) sz = max_size;
         int bytes = fat32_read_file((uint32_t)fs_nodes[node].data_sector, buf, sz);
@@ -2066,6 +2082,7 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
     if (fs_nodes[node].type == FS_EXT2_FILE) {
         if (offset >= size) return 0;
         if (len > size - offset) len = size - offset;
+        if (mount_select_for_node(node) != 0) return -1;
         extern int ext2_read_file_range(uint32_t inode_num, uint32_t offset,
                                         char* buf, int len);
         return ext2_read_file_range(fs_nodes[node].ext2_inode, (uint32_t)offset,
@@ -2074,6 +2091,7 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
     if (fs_nodes[node].type == FS_FAT32_FILE) {
         if (offset >= size) return 0;
         if (len > size - offset) len = size - offset;
+        if (mount_select_for_node(node) != 0) return -1;
         extern int fat32_read_file_range(uint32_t first_cluster, int offset,
                                          char* buf, int len);
         return fat32_read_file_range((uint32_t)fs_nodes[node].data_sector,
@@ -2241,6 +2259,7 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
     }
 
     if (fs_nodes[node].type == FS_EXT2_FILE) {
+        if (mount_select_for_node(node) != 0) return -1;
         int r = ext2_write_file_data(fs_nodes[node].ext2_inode, data, size);
         if (r >= 0) {
             fs_nodes[node].size = r;
@@ -2251,6 +2270,7 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
 
     if (fs_nodes[node].type == FS_FAT32_FILE) {
         extern int fat32_write_file(uint32_t first_cluster, const char* buf, int size);
+        if (mount_select_for_node(node) != 0) return -1;
         extern int fat32_update_dirent(uint32_t parent_cluster, const char* name,
                                        uint32_t first_cluster, uint32_t size);
         int nc = fat32_write_file((uint32_t)fs_nodes[node].data_sector, data, size);
@@ -2560,6 +2580,7 @@ static void vfs_ext2_sync_meta(int node) {
     if (node < 0 || node >= MAX_NODES || !fs_nodes[node].in_use) return;
     if (fs_nodes[node].type != FS_EXT2_FILE && fs_nodes[node].type != FS_EXT2_DIR) return;
     if (!fs_nodes[node].ext2_inode) return;
+    if (mount_select_for_node(node) != 0) return;
     ext2_inode_t inode;
     if (ext2_read_inode(fs_nodes[node].ext2_inode, &inode) != 0) return;
     inode.i_mode = (inode.i_mode & 0xF000) | (fs_nodes[node].mode & 0x1FF);

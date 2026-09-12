@@ -6,7 +6,7 @@ Boots mectov.iso once, logs in, launches the Terminal, runs the Ring 3
 rlimittest app (`run /apps/rlimittest.mct`) and verifies from the serial
 log that every RLIMIT assertion passed:
 
-  * getrlimit defaults are sane (NPROC 64/64, AS 256 MB, NOFILE 16/16)
+  * getrlimit defaults are sane (NPROC 64/64, AS 256 MB, NOFILE 32/32)
   * setrlimit NPROC cur=1 is allowed; fork() is then refused because the
     caller's uid is shared with other live tasks
   * raising cur back to 64 is allowed and fork() succeeds (child reaped)

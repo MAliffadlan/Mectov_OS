@@ -7,6 +7,7 @@
 #include "../include/utils.h"   // memcpy for the DMA bounce path
 #include "../include/ahci.h"    // drives >= AHCI_DRIVE_BASE route to SATA
 #include "../include/xhci.h"    // drives >= USB_DRIVE_BASE route to USB
+#include "../include/virtio_blk.h" // drives >= VIRTIO_BLK_BASE route to virtio-blk
 #include "../include/blkcache.h" // sector cache + readahead commit/gen APIs
 
 // ata_lock serializes the shared IDE controller: two cores issuing command
@@ -61,6 +62,7 @@ int ata_wait_drq() { return ata_wait_drq_drive(0); }
 volatile int hdd_activity = 0;
 
 static int ata_read_sector_drive_io(int drive, unsigned int lba, unsigned char* b) {
+    if (drive >= VIRTIO_BLK_BASE) return virtio_blk_read_sectors(drive, lba, 1, b);
     if (drive >= USB_DRIVE_BASE) return usb_read_sectors(drive, lba, 1, b);
     if (drive >= AHCI_DRIVE_BASE) return ahci_read_sectors(drive, lba, 1, b);
     uint16_t base = ata_base_port(drive);
@@ -114,6 +116,7 @@ volatile uint32_t ata_ra_fills = 0;   // readahead prefetch batches filled
 
 static int ata_read_sectors_drive_io(int drive, unsigned int lba, int count, unsigned char* b) {
     ata_multi_rd_cmds++;
+    if (drive >= VIRTIO_BLK_BASE) return virtio_blk_read_sectors(drive, lba, count, b);
     if (drive >= USB_DRIVE_BASE) return usb_read_sectors(drive, lba, count, b);
     if (drive >= AHCI_DRIVE_BASE) return ahci_read_sectors(drive, lba, count, b);
     uint16_t base = ata_base_port(drive);
@@ -252,6 +255,7 @@ int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char
 // Multi-sector PIO write — the mirror of ata_read_sectors_drive: one
 // command, DRQ pulses per sector, data written in count*512-byte chunks.
 static int ata_write_sectors_drive_io(int drive, unsigned int lba, int count, const unsigned char* b) {
+    if (drive >= VIRTIO_BLK_BASE) return virtio_blk_write_sectors(drive, lba, count, b);
     if (drive >= USB_DRIVE_BASE) return usb_write_sectors(drive, lba, count, b);
     if (drive >= AHCI_DRIVE_BASE) return ahci_write_sectors(drive, lba, count, b);
     uint16_t base = ata_base_port(drive);

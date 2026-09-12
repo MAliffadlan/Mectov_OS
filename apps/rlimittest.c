@@ -4,7 +4,7 @@
 // end to end through real syscalls:
 //
 //   1. getrlimit defaults                -> cur/max sane (NPROC 64, AS 256 MB,
-//                                           NOFILE 16)
+//                                           NOFILE 32)
 //   2. setrlimit NPROC cur=1             -> allowed (lowering cur)
 //   3. fork() with NPROC=1               -> refused (-1): the caller already
 //                                           shares its uid with other live
@@ -48,7 +48,7 @@ void _start(void) {
         fail("nproc-default");
     if (sys_getrlimit(RLIMIT_AS, &rl) != 0 || rl.cur != 256 * MB || rl.max != 256 * MB)
         fail("as-default");
-    if (sys_getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.cur != 16 || rl.max != 16)
+    if (sys_getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.cur != 32 || rl.max != 32)
         fail("nofile-default");
 
     // 2. Lower NPROC cur to 1 (max stays 64 — a non-root caller may only
@@ -81,7 +81,7 @@ void _start(void) {
     // 7-8. RLIMIT_NOFILE: fd allocation stops at the soft limit, and closing
     //      a descriptor frees a slot again. Use 4 so the test is robust no
     //      matter how many fds the launcher wired (0/1/2 may already be open).
-    rl.cur = 4; rl.max = 16;
+    rl.cur = 4; rl.max = 32;
     if (sys_setrlimit(RLIMIT_NOFILE, &rl) != 0) fail("set-nofile");
     int fds[8];
     int nopen = 0;
@@ -107,7 +107,7 @@ void _start(void) {
         sys_close(fd2);
     }
     for (int i = 0; i < nopen; i++) sys_close(fds[i]);
-    rl.cur = 16; rl.max = 16;
+    rl.cur = 32; rl.max = 32;
     if (sys_setrlimit(RLIMIT_NOFILE, &rl) != 0) fail("restore-nofile");
 
     // 9-12. RLIMIT_AS: mmap reservations stop at the soft limit.

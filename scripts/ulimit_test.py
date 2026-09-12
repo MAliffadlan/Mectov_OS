@@ -7,10 +7,10 @@ Boots mectov.iso once, logs in, launches the Terminal and drives the shell
 result as `[ULIMIT] ...`):
 
   * `ulimit -a` lists all three resources with sane soft/hard values
-    (nproc 64/64, as 268435456/268435456, nofile 16/16)
+     (nproc 64/64, as 268435456/268435456, nofile 32/32)
   * `ulimit -n 8` lowers RLIMIT_NOFILE to 8 and `ulimit -n` reads it back
   * `ulimit -n 99` is refused: a non-root caller may not raise a soft limit
-    above its hard limit (16), so it fails with "[ULIMIT] set failed"
+     above its hard limit (32), so it fails with "[ULIMIT] set failed"
   * `ulimit -u 4` lowers RLIMIT_NPROC and `ulimit -u` reads it back
   * the lowered NOFILE limit is actually ENFORCED: a follow-up `run
     /apps/rlimittest.mct` still passes (rlimittest raises its own limits),
@@ -144,8 +144,8 @@ def main():
             print("[FAIL] ulimit -a did not list as 256 MB")
             return 1
         if not wait_for_in_file(SERIAL_LOG,
-                "[ULIMIT] get nofile cur=16 max=16", 30):
-            print("[FAIL] ulimit -a did not list nofile 16/16")
+                "[ULIMIT] get nofile cur=32 max=32", 30):
+            print("[FAIL] ulimit -a did not list nofile 32/32")
             return 1
         print("[OK] ulimit -a lists all resources with sane defaults")
 
@@ -156,15 +156,15 @@ def main():
             return 1
         send_cmd(["spc", "minus", "n"])
         if not wait_for_in_file(SERIAL_LOG,
-                "[ULIMIT] get nofile cur=8 max=16", 30):
-            print("[FAIL] ulimit -n did not read back 8/16")
+                "[ULIMIT] get nofile cur=8 max=32", 30):
+            print("[FAIL] ulimit -n did not read back 8/32")
             return 1
-        print("[OK] ulimit -n 8 lowered NOFILE and ulimit -n reads 8/16")
+        print("[OK] ulimit -n 8 lowered NOFILE and ulimit -n reads 8/32")
 
         # 3. Raising soft above hard is refused for a non-root caller.
         send_cmd(["spc", "minus", "n", "spc", "9", "9"])
         if not wait_for_in_file(SERIAL_LOG, "[ULIMIT] set failed", 30):
-            print("[FAIL] ulimit -n 99 (above hard 16) was not refused")
+            print("[FAIL] ulimit -n 99 (above hard 32) was not refused")
             return 1
         print("[OK] raising soft above the hard limit is refused")
 
@@ -185,9 +185,9 @@ def main():
         #    the terminal's limits — inheritance is exactly what we want to
         #    verify here: a lowered `ulimit -n`/`ulimit -u` must be inherited
         #    by child processes, and the restore must undo it).
-        send_cmd(["spc", "minus", "n", "spc", "1", "6"])
+        send_cmd(["spc", "minus", "n", "spc", "3", "2"])
         if not wait_for_in_file(SERIAL_LOG, "[ULIMIT] set nofile", 30):
-            print("[FAIL] ulimit -n 16 (restore) was refused")
+            print("[FAIL] ulimit -n 32 (restore) was refused")
             return 1
         send_cmd(["spc", "minus", "u", "spc", "6", "4"])
         if not wait_for_in_file(SERIAL_LOG, "[ULIMIT] set nproc", 30):

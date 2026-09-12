@@ -227,6 +227,18 @@ jobs:
           # same path), and byte-compares COPY.TXT on the host with mtools.
           python3 scripts/usb_test.py --timeout 360
 
+      - name: VirtIO-Blk driver regression (virtio-blk-pci + drive 12, TCG)
+        run: |
+          # Boots with a transitional virtio-blk-pci controller
+          # (disable-modern=on, legacy 1AF4:1001) + FAT32 disk (drive 12):
+          # asserts the virtqueue negotiates, then `mount /vblk fat32 12`
+          # (BPB read through the virtqueue), `cp` inside the volume, and
+          # byte-compares COPY.TXT on the host with mtools. Also proves
+          # per-volume coexistence: a second `cp` through the boot FAT32
+          # volume (drive 3) lands on fat32.img, so the backend auto-select
+          # switched back to the right disk.
+          python3 scripts/virtio_test.py --timeout 360
+
       - name: POSIX socket regression (user-net + hostfwd, TCG)
         run: |
           python3 scripts/socktest.py --timeout 300

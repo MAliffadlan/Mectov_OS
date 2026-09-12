@@ -63,6 +63,7 @@ SUITES = [
     ("mount",            "mount_test.py",             240),
     ("ahci",             "ahci_test.py",              360),
     ("usb",              "usb_test.py",               360),
+    ("virtio",           "virtio_test.py",            360),
     ("socktest",         "socktest.py",               300),
     ("poweroff",         "poweroff_test.py",          240),
     ("pollselect",       "pollselect_test.py",        240),

@@ -11,7 +11,7 @@
 // instead of silently truncating existing content.
 #define VFS_FD_MAX_FILE (8 * 1024 * 1024)
 
-#define MAX_FDS_PER_TASK 16
+#define MAX_FDS_PER_TASK 32
 // Global table (v38.44): 256 entries — socket-heavy apps (one fd per
 // accepted connection) plus pipes/files easily exceeded the old 128.
 #define MAX_GLOBAL_FDS   256
