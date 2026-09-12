@@ -296,6 +296,17 @@ uint32_t irq_handler(uint32_t esp) {
     if (r->int_no == 32) {
         return schedule(esp);
     }
+    // Wakeup preemption (v38.82): a key/motion/packet IRQ may have made
+    // interactive work (compositor, focused app) runnable while a spinner
+    // owns this CPU. Run the scheduler now instead of up to 10 ms later —
+    // take_resched() is a no-op when nothing was requested, and schedule()
+    // re-picks the current task when it still wins, so the cost of a
+    // spurious check is one O(64) scan.
+    if (r->int_no == 33 || r->int_no == 43 || r->int_no == 44) {
+        extern int take_resched(void);
+        extern uint32_t schedule(uint32_t esp);
+        if (take_resched()) return schedule(esp);
+    }
     return esp;
 }
 

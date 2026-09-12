@@ -1367,15 +1367,24 @@ void net_irq_handler(registers_t* r) {
     if (isr & 0x01) { // ROK — packets available
         uint8_t buf[1520];
         int len;
+        int drained = 0;
         for (int i = 0; i < 8; i++) { // drain up to 8 frames per IRQ
             len = rtl8139_poll_rx(buf, sizeof(buf));
             if (len <= 0) break;
+            drained++;
             if (net_rx_debug) {
                 write_serial_string("[NET] IRQ rx, len=");
                 write_serial_hex(len);
                 write_serial_string("\n");
             }
             net_handle_frame(buf, (uint32_t)len);
+        }
+        // Drained packets may have completed a recv a task blocks on (or
+        // advanced a connection the compositor's apps read) — preempt
+        // instead of waiting for the next 10 ms tick (see take_resched).
+        if (drained > 0) {
+            extern void request_resched(void);
+            request_resched();
         }
     }
 }

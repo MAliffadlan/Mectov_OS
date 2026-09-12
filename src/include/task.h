@@ -55,6 +55,11 @@ int task_rlimit_nofile_ok(void);
 // RLIMIT_AS check for the current task: 1 = growing the address space by
 // `additional` bytes stays under the soft AS limit (root bypasses).
 int task_rlimit_as_allows(uint32_t additional);
+// Wakeup preemption (v38.82): called from input/packet IRQ handlers when
+// they make interactive work runnable; consumed by irq_handler(), which
+// schedules immediately instead of waiting for the next timer tick.
+void request_resched(void);
+int take_resched(void);
 
 // mmap() regions per task (demand paged): the region is reserved in VA space
 // with no physical frames; a page fault inside it lazily materializes a frame

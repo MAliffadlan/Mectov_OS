@@ -103,6 +103,10 @@ void ps2_drain(void) {
 static void keyboard_handler(registers_t* regs) {
     (void)regs;
     ps2_drain();
+    // A queued key may belong to the compositor or the focused app while a
+    // spinner owns this CPU — let the IRQ path preempt (see take_resched).
+    extern void request_resched(void);
+    request_resched();
 }
 
 void init_keyboard() {

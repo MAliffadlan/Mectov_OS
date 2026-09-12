@@ -239,6 +239,29 @@ struct runqueue {
 
 static struct runqueue rq[MAX_CPUS];
 
+// Wakeup preemption (v38.82): input/packet IRQs set this CPU's flag when
+// they make interactive work runnable (key queued, pointer moved, packets
+// drained); irq_handler() then schedules immediately instead of waiting
+// for the next 10 ms timer tick — the same reason Linux preempts on
+// wakeup. Same safety as the timer path: every lock holder in the
+// scheduler/WM/canvas layers runs cli-first, so an IRQ-time schedule()
+// can never preempt a lock holder (see gui_lock() and task.c:81).
+static volatile uint8_t need_resched[MAX_CPUS];
+
+void request_resched(void) {
+    int cid = get_cid();
+    if (cid < 0 || cid >= MAX_CPUS) cid = 0;
+    need_resched[cid] = 1;
+}
+
+int take_resched(void) {
+    int cid = get_cid();
+    if (cid < 0 || cid >= MAX_CPUS) cid = 0;
+    if (!need_resched[cid]) return 0;
+    need_resched[cid] = 0;
+    return 1;
+}
+
 // Per-CPU load sampling (for the SysInfo app's live core bars). Every
 // schedule() tick counts whether the CPU ran a real task (not task 0 / the
 // pinned idle) and every 50 ticks (50 ms) publishes the percentage into

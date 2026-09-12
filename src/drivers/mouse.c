@@ -102,6 +102,10 @@ void mouse_feed_byte(uint8_t data) {
 static void mouse_handler(registers_t* regs) {
     (void)regs;
     ps2_drain(); // routes by the AUX status bit, not by which IRQ fired
+    // Pointer motion should reach the compositor immediately, not at the
+    // next 10 ms tick (see take_resched).
+    extern void request_resched(void);
+    request_resched();
 }
 
 void init_mouse() {
