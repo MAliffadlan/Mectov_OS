@@ -121,15 +121,18 @@ def ensure_boot_images(disk, ext2):
         if r.returncode != 0:
             print(f"[FAIL] boot image step failed: {' '.join(s)}")
             return 1
-    return 0
 
     # System blobs for the debloated kernel (v38.81): seed /ext2 (warn-only;
-    # the guest falls back gracefully without them).
+    # the guest falls back gracefully without them). This MUST run before the
+    # return — when it sat after it (dead code), every run of this test wiped
+    # ext2.img without re-seeding, and the later DOOM smoke test then failed
+    # in CI with "/ext2/doom1.wad missing/bad".
     _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _r = subprocess.run(["bash", os.path.join(_root, "scripts", "seed_ext2.sh"), ext2],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if _r.returncode != 0:
         print("[WARN] ext2 blob seeding failed (guest uses fallbacks)")
+    return 0
 
 
 def main():
