@@ -1,0 +1,280 @@
+# Mectov OS — GitLab CI
+# Mirrors .github/workflows/build-boot-test.yml step-for-step.
+# Three stages: build → test (+ test:always) → config-matrix.
+
+image: ubuntu:24.04
+
+stages:
+  - build
+  - test
+  - config-matrix
+
+# Run on every push to any branch and on MR pipelines.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+variables:
+  DEBIAN_FRONTEND: noninteractive
+  PIP_BREAK_SYSTEM_PACKAGES: "1"
+
+# ---------------------------------------------------------------------------
+# build
+# ---------------------------------------------------------------------------
+build:
+  stage: build
+  script:
+    # ── Install apt toolchain ──────────────────────────────────────────────
+    - apt-get update -qq
+    - apt-get install -y -qq
+        gcc-multilib
+        nasm
+        grub-pc-bin
+        xorriso
+        mtools
+        dosfstools
+        qemu-system-x86
+        python3-pil
+        e2fsprogs
+        curl
+
+    # ── Install Rust (for apps/rusthello.rs) ──────────────────────────────
+    - curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+    - source "$HOME/.cargo/env"
+    - rustup target add i686-unknown-uefi
+
+    # ── Build kernel ───────────────────────────────────────────────────────
+    - make clean_all
+    - make
+    - test -f myos.bin && echo "myos.bin built OK"
+
+    # ── Build boot ISO ────────────────────────────────────────────────────
+    - make iso
+    - test -f mectov.iso && echo "mectov.iso built OK"
+
+    # ── Create disk images ────────────────────────────────────────────────
+    # Fresh, empty images — the same way run.sh creates them locally.
+    - dd if=/dev/zero of=disk.img bs=512 count=2048 status=none
+    - dd if=/dev/zero of=ext2.img bs=1M count=16 status=none
+    - mkfs.ext2 -F ext2.img > /dev/null 2>&1
+    # System blobs for the debloated kernel (v38.81): doom1.wad /
+    # wallpaper.bin / music.wav live on /ext2, loaded on demand.
+    - bash scripts/seed_ext2.sh ext2.img
+    - dd if=/dev/zero of=fat32.img bs=1M count=16 status=none
+    - mkfs.fat -F 32 -S 512 fat32.img > /dev/null 2>&1
+
+  artifacts:
+    name: mectov-artifacts
+    expire_in: 1 day
+    when: on_success
+    paths:
+      - mectov.iso
+      - myos.bin
+      - disk.img
+      - ext2.img
+      - fat32.img
+
+# ---------------------------------------------------------------------------
+# test  (stage: test)
+# Runs all 40+ suites in the exact order defined in scripts/check.py SUITES.
+# KVM-gated tests (fork_kvm / fputest_kvm) are wrapped in a shell guard so
+# they are skipped gracefully on runners without /dev/kvm.
+# allow_failure: true mirrors GitHub Actions' continue-on-error on the KVM
+# step — the overall pipeline still reports the result.
+# ---------------------------------------------------------------------------
+test:
+  stage: test
+  needs: [build]
+  timeout: 45 minutes
+  allow_failure: true
+  script:
+    # ── Install runtime deps (QEMU + PIL) ─────────────────────────────────
+    - apt-get update -qq
+    - apt-get install -y -qq qemu-system-x86 python3-pil
+
+    # ── Boot test in QEMU (no KVM) ────────────────────────────────────────
+    - python3 scripts/boot_test.py --timeout 240
+
+    # ── Redesigned login screen regression (TCG) ──────────────────────────
+    - python3 scripts/login_redesign_test.py --timeout 300
+
+    # ── Lock screen feature regression (TCG) ──────────────────────────────
+    - python3 scripts/lock_test.py --timeout 480
+
+    # ── Idle auto-lock (locktimeout) regression (TCG) ─────────────────────
+    - python3 scripts/autolock_test.py --timeout 480
+
+    # ── Kernel hardening regression (CSPRNG + salted passwd) (TCG) ────────
+    - python3 scripts/hardening_test.py --timeout 480
+
+    # ── Ring 3 scanout takeover regression (TCG) ──────────────────────────
+    - python3 scripts/fbmap_test.py --timeout 480
+
+    # ── Taskbar window buttons + hover regression (TCG) ───────────────────
+    - python3 scripts/taskbar_hover_test.py --timeout 300
+
+    # ── Start menu search-as-you-type regression (TCG) ────────────────────
+    - python3 scripts/startmenu_search_test.py --timeout 300
+
+    # ── File Explorer GUI regression (TCG) ────────────────────────────────
+    - python3 scripts/explorer_test.py --timeout 300
+
+    # ── Pixel Paint GUI regression (TCG) ──────────────────────────────────
+    - python3 scripts/paint_test.py --timeout 300
+
+    # ── Browser HTTP fetch + render regression (TCG) ──────────────────────
+    - python3 scripts/browser_test.py --timeout 300
+
+    # ── Browser hostname path — DNS + port-80 gateway redirect (TCG) ──────
+    - python3 scripts/browser_web_test.py --timeout 300
+
+    # ── Fork + jobcontrol regressions (TCG) ───────────────────────────────
+    - python3 scripts/fork_test.py --timeout 240
+    - python3 scripts/jobcontrol_test.py --timeout 240
+
+    # ── FPU/SSE context-switch regression (TCG) ───────────────────────────
+    - python3 scripts/fputest.py --timeout 240
+
+    # ── PAE + NX (W^X) regression (TCG) ───────────────────────────────────
+    - python3 scripts/nxtest.py --timeout 240
+
+    # ── Fork KVM 4-core — mandatory SMP keyboard regression ───────────────
+    # Guard: skip gracefully when /dev/kvm is absent or unreadable.
+    - |
+      if [ -e /dev/kvm ] && [ -r /dev/kvm ]; then
+        python3 scripts/fork_test.py --kvm --timeout 240
+        python3 scripts/fputest.py --kvm --timeout 240
+      else
+        echo "WARNING: /dev/kvm not available on this runner — skipping KVM regression"
+      fi
+
+    # ── FAT32 regression (drive 3, TCG) ───────────────────────────────────
+    - python3 scripts/fat32_test.py --timeout 240
+
+    # ── Mount/umount roundtrip regression (TCG) ───────────────────────────
+    - python3 scripts/mount_test.py --timeout 240
+
+    # ── AHCI/SATA driver regression (ich9-ahci + drive 4, TCG) ───────────
+    - python3 scripts/ahci_test.py --timeout 360
+
+    # ── xHCI/USB 3.0 driver regression (qemu-xhci + drive 8, TCG) ────────
+    - python3 scripts/usb_test.py --timeout 360
+
+    # ── VirtIO-Blk driver regression (virtio-blk-pci + drive 12, TCG) ────
+    - python3 scripts/virtio_test.py --timeout 360
+
+    # ── POSIX socket regression (user-net + hostfwd, TCG) ─────────────────
+    - python3 scripts/socktest.py --timeout 300
+
+    # ── ACPI S5 poweroff regression (TCG) ─────────────────────────────────
+    - python3 scripts/poweroff_test.py --timeout 240
+
+    # ── poll/select/getcwd/chdir/clock_gettime regression (TCG) ───────────
+    - python3 scripts/pollselect_test.py --timeout 240
+
+    # ── Ring 3 syscall fuzzer regression (TCG) ────────────────────────────
+    - python3 scripts/fuzz_test.py --timeout 300
+
+    # ── Whole-file page cache regression (TCG) ────────────────────────────
+    - python3 scripts/iocache_test.py --timeout 300
+
+    # ── Demo app smoke tests (smpstress + sigdemo + crashme, TCG) ─────────
+    - python3 scripts/app_smoke_test.py --timeout 360
+
+    # ── Windowed DOOM smoke test (TCG) ────────────────────────────────────
+    - python3 scripts/doom_test.py --timeout 480
+
+    # ── File-backed mmap regression (TCG) ─────────────────────────────────
+    - python3 scripts/mmapfile_test.py --timeout 240
+
+    # ── fsync/sync + periodic write-back regression (TCG) ─────────────────
+    - python3 scripts/syncfile_test.py --timeout 300
+
+    # ── Rust Ring 3 app regression (TCG) ──────────────────────────────────
+    - python3 scripts/rusthello_test.py --timeout 240
+
+    # ── lseek/fstat/O_APPEND regression (TCG) ─────────────────────────────
+    - python3 scripts/lseekfile_test.py --timeout 240
+
+    # ── Multi-core panic dump + panic=reboot self-test (TCG) ──────────────
+    - python3 scripts/panic_test.py --timeout 240
+
+    # ── Ownership/permission enforcement regression (TCG) ─────────────────
+    - python3 scripts/perm_test.py --timeout 360
+
+    # ── TLS + clone() regression (TCG) ────────────────────────────────────
+    - python3 scripts/thread_test.py --timeout 360
+
+    # ── Futex mutex + condvar regression (TCG) ────────────────────────────
+    - python3 scripts/cond_test.py --timeout 300
+
+    # ── Resource limits (RLIMIT_NPROC/AS/NOFILE) regression (TCG) ─────────
+    - python3 scripts/rlimit_test.py --timeout 360
+
+    # ── Shell `ulimit` builtin regression (TCG) ───────────────────────────
+    - python3 scripts/ulimit_test.py --timeout 360
+
+    # ── IDE DMA + multi-sector disk read regression (TCG) ─────────────────
+    - python3 scripts/bigread_test.py --timeout 420
+
+    # ── ASLR regression — PIE ELF base randomized across boots (TCG) ──────
+    - python3 scripts/aslr_test.py --timeout 300
+
+# ---------------------------------------------------------------------------
+# test:always  (stage: test)
+# Watchdog / BSP-hang / TLB-shootdown self-tests MUST run even when the
+# main `test` job fails — GitLab CI's `when: always` is a job-level
+# attribute, so these three suites live in their own job.
+# ---------------------------------------------------------------------------
+test:always:
+  stage: test
+  needs: [build]
+  timeout: 20 minutes
+  when: always
+  script:
+    # ── Install runtime deps (QEMU + PIL) ─────────────────────────────────
+    - apt-get update -qq
+    - apt-get install -y -qq qemu-system-x86 python3-pil
+
+    # ── Watchdog hard-lockup self-test (TCG) ──────────────────────────────
+    - python3 scripts/watchdog_test.py --timeout 240
+
+    # ── Watchdog BSP-hang self-test (per-core mesh, TCG) ──────────────────
+    - python3 scripts/watchdog_bsp_test.py --timeout 240
+
+    # ── TLB shootdown IPI self-test (TCG) ─────────────────────────────────
+    - python3 scripts/tlb_sd_test.py --timeout 240
+
+# ---------------------------------------------------------------------------
+# config-matrix  (stage: config-matrix)
+# Smokes boot + fork on every combination of CPU model × RAM × SMP count.
+# 2 × 2 × 3 = 12 parallel jobs.
+# ---------------------------------------------------------------------------
+config-matrix:
+  stage: config-matrix
+  needs: [build]
+  timeout: 30 minutes
+  parallel:
+    matrix:
+      - CPU: [qemu32, Nehalem]
+        MEM: ["64", "256"]
+        SMP: ["1", "2", "4"]
+  script:
+    # ── Install runtime deps (QEMU + PIL) ─────────────────────────────────
+    - apt-get update -qq
+    - apt-get install -y -qq qemu-system-x86 python3-pil
+
+    # ── Boot + login + desktop smoke ──────────────────────────────────────
+    - python3 scripts/boot_test.py
+        --cpu "$CPU"
+        --mem-mb "$MEM"
+        --smp "$SMP"
+        --timeout 240
+
+    # ── Fork / waitpid / signal smoke ─────────────────────────────────────
+    - python3 scripts/fork_test.py
+        --cpu "$CPU"
+        --mem-mb "$MEM"
+        --smp "$SMP"
+        --timeout 240

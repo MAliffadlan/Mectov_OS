@@ -20,6 +20,7 @@ Usage:
 import argparse
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -38,16 +39,63 @@ DOOM_KEYS = ["d", "o", "o", "m", "ret"]
 
 
 def wait_for_in_file(path, needle, timeout):
+    return wait_for_any(path, [needle], timeout) == 0
+
+
+def wait_for_any(path, needles, timeout):
+    """Wait until ANY of `needles` appears; return the matching index, or -1."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             with open(path, "r", errors="replace") as f:
-                if needle in f.read():
-                    return True
+                txt = f.read()
+            for i, nd in enumerate(needles):
+                if nd in txt:
+                    return i
         except (FileNotFoundError, OSError):
             pass
         time.sleep(1)
-    return False
+    return -1
+
+
+def dump_serial(path, label, lines=40):
+    """Print the tail of the serial log so FAIL branches are diagnosable
+    from CI output (CI job logs are not publicly downloadable)."""
+    try:
+        with open(path, "r", errors="replace") as f:
+            tail = f.read().splitlines()[-lines:]
+        print(f"--- serial tail ({label}) ---")
+        for line in tail:
+            print(line[:130])
+    except OSError:
+        print(f"--- serial tail ({label}): log unavailable ---")
+
+
+def verify_ext2_seed(ext2_img):
+    """Fail fast, with a clear reason, when doom1.wad is missing/truncated in
+    the /ext2 image — historically the #1 confounder for 'never entered game
+    loop'. Best-effort: silently skipped when debugfs is unavailable."""
+    if shutil.which("debugfs") is None:
+        print("[skip] debugfs unavailable — seed check bypassed")
+        return
+    try:
+        r = subprocess.run(
+            ["debugfs", "-R", "stat /doom1.wad", ext2_img],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        print("[skip] debugfs failed to run — seed check bypassed")
+        return
+    out = (r.stdout or "") + (r.stderr or "")
+    m = re.search(r"Size:\s+(\d+)", out)
+    if r.returncode != 0 or not m:
+        print(f"[FAIL] {ext2_img} has no seeded /doom1.wad")
+        print("       run scripts/seed_ext2.sh (or recreate images) before this test")
+        sys.exit(1)
+    size = int(m.group(1))
+    if size < 3_000_000:
+        print(f"[FAIL] doom1.wad in {ext2_img} is truncated ({size} bytes)")
+        sys.exit(1)
+    print(f"[OK] seed check: /doom1.wad present ({size} bytes) in {ext2_img}")
 
 
 def count_in_file(path, pattern, timeout):
@@ -88,6 +136,8 @@ def main():
                     help="run with -enable-kvm (much faster, needs /dev/kvm)")
     args = ap.parse_args()
 
+    verify_ext2_seed(args.ext2)
+
     for p in (SERIAL_LOG, MON_SOCK):
         try:
             os.unlink(p)
@@ -115,13 +165,7 @@ def main():
     try:
         if not wait_for_in_file(SERIAL_LOG, "[K] login", args.timeout):
             print("[FAIL] kernel never reached login screen")
-            try:
-                with open(SERIAL_LOG, "r", errors="replace") as f:
-                    tail = f.read().splitlines()[-25:]
-                for line in tail:
-                    print(line[:130])
-            except OSError:
-                pass
+            dump_serial(SERIAL_LOG, "no login")
             return 1
         print("[OK] booted to login screen")
 
@@ -131,6 +175,7 @@ def main():
 
         if not wait_for_in_file(SERIAL_LOG, "BOOTED KERNEL LOOP", 90):
             print("[FAIL] login did not complete")
+            dump_serial(SERIAL_LOG, "login stuck")
             return 1
         print("[OK] logged in, desktop running")
 
@@ -171,11 +216,28 @@ def main():
 
         if not wait_for_in_file(SERIAL_LOG, "[DOOM] window id=", 30):
             print("[FAIL] DOOM never opened a WM window")
+            dump_serial(SERIAL_LOG, "no doom window")
             return 1
         print("[OK] DOOM opened a WM window")
 
-        if not wait_for_in_file(SERIAL_LOG, "[DOOM] Entering game loop...", 30):
-            print("[FAIL] DOOM never entered its game loop")
+        # Between "window id=" and "Entering game loop..." DOOM still has to
+        # stream the 4.1 MB WAD from /ext2 and initialise textures. On a slow
+        # 2-core TCG CI runner that phase can take minutes of wall time —
+        # the old 30 s window was the cause of the intermittent CI failures.
+        # Abort fast when DOOM itself reports a missing/bad WAD or the kernel
+        # panics — waiting the full timeout there adds noise, not signal.
+        idx = wait_for_any(
+            SERIAL_LOG,
+            ["[DOOM] Entering game loop...",
+             "missing/bad (image not seeded?)",
+             "PANIC"],
+            240)
+        if idx != 0:
+            why = ("WAD missing/bad in /ext2" if idx == 1
+                   else "kernel PANIC" if idx == 2
+                   else "timed out (240 s)")
+            print(f"[FAIL] DOOM never entered its game loop — {why}")
+            dump_serial(SERIAL_LOG, "no game loop")
             return 1
         print("[OK] DOOM entered its game loop")
 
@@ -186,6 +248,7 @@ def main():
         n = count_in_file(SERIAL_LOG, r"\[DOOM\] tick f=([0-9A-Fa-f]+)", 240)
         if n == 0:
             print("[FAIL] no [DOOM] tick lines — game loop not producing frames")
+            dump_serial(SERIAL_LOG, "no ticks")
             return 1
         print(f"[OK] {n} [DOOM] tick line(s) — frames are being produced")
 
