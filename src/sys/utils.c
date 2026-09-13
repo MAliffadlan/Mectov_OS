@@ -2,6 +2,7 @@
 #include "../include/io.h"
 #include "../include/vga.h"
 #include "../include/rtc.h"
+#include "../include/acpi.h"   // acpi_poweroff (v38.84: kills implicit-declaration warning)
 
 char cpu_brand[49];
 unsigned char boot_sec, boot_min, boot_hour;
@@ -123,7 +124,7 @@ void memcpy(void* dest, const void* src, uint32_t len) {
     uint32_t rem = len % 4;
     
     __asm__ __volatile__(
-        "rep movsd\n\t"
+        "rep movsl\n\t"
         "movl %3, %%ecx\n\t"
         "rep movsb"
         : "+D"(dest), "+S"(src)

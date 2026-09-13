@@ -26,7 +26,7 @@ CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g -msoft-float -mno-8
 # safely.
 # -g keeps DWARF debug info in myos.bin so GDB can resolve kernel symbols
 # (break kernel_main, bt, list, etc.) when debugging via the in-kernel stub.
-LDFLAGS = -m elf_i386 -T linker.ld
+LDFLAGS = -m elf_i386 -T linker.ld -z noexecstack
 ASFLAGS = -f elf32
 
 # DOOM compile flags: redirect standard headers to our mini libc

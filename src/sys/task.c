@@ -357,19 +357,23 @@ static void rq_enqueue_wake(int tid) {
 // instead of silently iret'ing into garbage.
 static void esp_bad(const char* tag, uint32_t cid, uint32_t cur, uint32_t esp, uint32_t top) {
     // One atomic line: 4 cores share the serial port and multi-call prints
-    // interleave into garbage. Buffer must exceed the max content.
-    char b[96];
+    // interleave into garbage. Layout is bounded by construction: tag ≤ 90
+    // bytes + 4 hex fields (" 0x" + 8 digits = 11 each) + '\n' = ≤ 135, so a
+    // 160-byte buffer never overflows (v38.84 — the old 96-byte buffer could
+    // be overrun by exactly this dump path, on a corrupted stack no less).
+    char b[160];
     int n = 0;
     const char* s = tag;
     while (*s && n < 90) b[n++] = *s++;
-    b[n++] = ' '; b[n++] = '0'; b[n++] = 'x';
-    for (int i = 7; i >= 0 && n < 94; i--) { int d = (cid >> (i * 4)) & 0xF; b[n++] = d < 10 ? '0' + d : 'A' + d - 10; }
-    b[n++] = ' '; b[n++] = '0'; b[n++] = 'x';
-    for (int i = 7; i >= 0 && n < 94; i--) { int d = (cur >> (i * 4)) & 0xF; b[n++] = d < 10 ? '0' + d : 'A' + d - 10; }
-    b[n++] = ' '; b[n++] = '0'; b[n++] = 'x';
-    for (int i = 7; i >= 0 && n < 94; i--) { int d = (esp >> (i * 4)) & 0xF; b[n++] = d < 10 ? '0' + d : 'A' + d - 10; }
-    b[n++] = ' '; b[n++] = '0'; b[n++] = 'x';
-    for (int i = 7; i >= 0 && n < 94; i--) { int d = (top >> (i * 4)) & 0xF; b[n++] = d < 10 ? '0' + d : 'A' + d - 10; }
+    const uint32_t vals[4] = { cid, cur, esp, top };
+    for (int f = 0; f < 4; f++) {
+        if (n + 11 > (int)sizeof(b) - 1) break;   // " 0x" + 8 digits fits?
+        b[n++] = ' '; b[n++] = '0'; b[n++] = 'x';
+        for (int i = 7; i >= 0; i--) {
+            int d = (vals[f] >> (i * 4)) & 0xF;
+            b[n++] = d < 10 ? '0' + d : 'A' + d - 10;
+        }
+    }
     b[n++] = '\n';
     extern void write_serial_buffer(const char* buf, int size);
     write_serial_buffer(b, n);

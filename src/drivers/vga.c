@@ -65,7 +65,7 @@ void vga_blit_buffer(uint32_t* src, int sw, int sh, int src_pitch, int dx, int d
         uint32_t* s   = src + (y - dy) * src_stride + (x0 - dx);
         uint32_t count = x1 - x0;
         __asm__ __volatile__(
-            "rep movsd"
+            "rep movsl"
             : "+D"(dst), "+S"(s), "+c"(count)
             :: "memory"
         );
