@@ -358,7 +358,11 @@ jobs:
           # consumers move 3,000 items through a bounded buffer over a
           # condvar. Asserts ALL PASS + every item consumed exactly once +
           # zero [PANIC] (exercises the scheduler's self-blocking wake path).
-          python3 scripts/cond_test.py --timeout 300
+          # 480 s (raised from 300): boot+launch on the 2-core TCG runner
+          # can eat over two minutes, and the demo's 20k futex ops + 3k
+          # condvar items take minutes more; the test now splits whatever is
+          # left between its two phases, but the deadline itself needs room.
+          python3 scripts/cond_test.py --timeout 480
 
       - name: Resource limits (RLIMIT_NPROC/AS/NOFILE) regression (TCG)
         run: |

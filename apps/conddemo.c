@@ -41,6 +41,12 @@ static int g_counter = 0;
 static void mutex_worker(void* arg) {
     (void)arg;
     for (int i = 0; i < LOCK_ITERS; i++) {
+        if ((i % 2500) == 1250) {
+            // Progress heartbeat: on the slow TCG CI runner each phase can
+            // take minutes; these markers prove the workers are still making
+            // progress (vs. all blocked on a lost wakeup) at post-mortem.
+            sys_print("[CONDDEMO] mutex-progress\n", 0x08);
+        }
         mct_mutex_lock(&g_mu);
         g_counter++;
         mct_mutex_unlock(&g_mu);

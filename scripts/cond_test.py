@@ -183,6 +183,13 @@ def main():
 
         with open(SERIAL_LOG, "r", errors="replace") as f:
             log_text = f.read()
+        if not reached_all_pass:
+            # Serial tail is the primary post-mortem evidence: the app's
+            # phase heartbeats show exactly where progress stopped.
+            print("=== serial tail (post-mortem) ===")
+            lines = [l for l in log_text.splitlines() if "[LOAD]" not in l]
+            for l in lines[-40:]:
+                print("   ", l[:130])
         if "[CONDDEMO] FAIL" in log_text:
             print("[FAIL] conddemo reported a failed assertion")
             return 1
