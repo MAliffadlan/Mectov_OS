@@ -141,6 +141,15 @@ def main():
         time.sleep(0.5)
 
         # Run the mutex/condvar demo (retry a few times for keystroke safety).
+        # Phase-aware budget: the whole run is deadline-bound (boot + launch
+        # already consumed part of it), and the two app phases get the rest —
+        # split evenly between the 20k-iteration mutex phase and the 3k-item
+        # condvar phase. On the 2-core TCG runner boot+launch can take over
+        # two minutes, so the phase budgets must come from what's LEFT, not
+        # from a fixed constant.
+        import time as _t
+        deadline = _t.time() + args.timeout
+        launched = False
         for _ in range(3):
             for _ in range(24):
                 mon_cmd("sendkey backspace")
@@ -148,14 +157,28 @@ def main():
                 mon_cmd("sendkey " + k)
                 time.sleep(0.12)
             mon_cmd("sendkey ret")
-            if wait_for_in_file(SERIAL_LOG, "[CONDDEMO] ALL PASS", 90):
+            remaining = max(60, int(deadline - _t.time()))
+            if wait_for_in_file(SERIAL_LOG, "[CONDDEMO] start", remaining):
+                launched = True
                 break
             time.sleep(1.0)
+        if not launched:
+            print("[FAIL] conddemo never started")
+            return 1
 
-        if "[CONDDEMO] ALL PASS" not in open(SERIAL_LOG, "r", errors="replace").read():
+        phase_budget = max(60, int((deadline - _t.time()) / 2))
+        reached_all_pass = wait_for_in_file(
+            SERIAL_LOG, "[CONDDEMO] ALL PASS", phase_budget * 2)
+
+        if not reached_all_pass:
             print("=== conddemo did NOT finish — dumping all vCPUs ===")
+            # QEMU 8.2 monitor: `info registers -c N` is unsupported; select
+            # the CPU first, then dump registers.
             for c in range(4):
-                print(mon_cmd(f"info registers -c {c}", read=True).strip())
+                mon_cmd(f"cpu {c}")
+                print(f"--- vCPU {c} ---")
+                print(mon_cmd("info registers", read=True).strip())
+            mon_cmd("cpu 0")
             print(mon_cmd("info cpus", read=True).strip())
 
         with open(SERIAL_LOG, "r", errors="replace") as f:

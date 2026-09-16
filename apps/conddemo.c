@@ -124,8 +124,12 @@ void _start(void) {
     }
 
     // ---- Test 1: mutual exclusion under stress ----
+    // Phase heartbeats: on the 2-core TCG CI runner the 20k-iteration mutex
+    // phase can take minutes; start/join markers keep any future timeout
+    // diagnosable (which phase stalled).
     mct_mutex_init(&g_mu);
     g_counter = 0;
+    sys_print("[CONDDEMO] mutex-phase-start\n", 0x0B);
     int tids[8];
     for (int i = 0; i < MUTEX_THREADS; i++) {
         tids[i] = mct_thread_create(mutex_worker, 0);
@@ -140,6 +144,7 @@ void _start(void) {
             sys_exit_with_code(1);
         }
     }
+    sys_print("[CONDDEMO] mutex-joined\n", 0x0B);
     CHECK(g_counter == MUTEX_THREADS * LOCK_ITERS, "[CONDDEMO] FAIL mutex counter\n");
     sys_print("[CONDDEMO] mutex counter OK\n", 0x0B);
 
@@ -168,6 +173,7 @@ void _start(void) {
             sys_exit_with_code(1);
         }
     }
+    sys_print("[CONDDEMO] pc-threads-joined\n", 0x0B);
 
     // Every item was consumed exactly once (no loss, no dupes, no corruption).
     CHECK(consumed == TOTAL_ITEMS, "[CONDDEMO] FAIL consumed count\n");
