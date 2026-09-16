@@ -14,6 +14,14 @@
 //   [PROCFSDemo] symlink-exists (ok)  (node root-owned from an older disk)
 //   [PROCFSDemo] symlink-open-ok
 //   [PROCFSDemo] readlink-ok
+// v38.86 hard-link / stat section:
+//   [PROCFSDemo] hardlink-created
+//   [PROCFSDemo] hardlink-nlink-ok       (both names report nlink=2)
+//   [PROCFSDemo] hardlink-shared-ds      (same data_sector = same storage)
+//   [PROCFSDemo] hardlink-write-through  (append via one name, read via other)
+//   [PROCFSDemo] symlink-stat-ok         (lstat=link itself, stat=target)
+//   [PROCFSDemo] hardlink-delete-ok      (rm one name, nlink=1, content lives)
+//   [PROCFSDemo] links-done
 //   [PROCFSDemo] done
 //
 // Run it from the terminal:  run /apps/procfsdemo.mct
@@ -196,6 +204,99 @@ void _start(void) {
         } else {
             sys_print("[PROCFSDemo] FAIL readlink call\n", 0x0C);
         }
+    }
+
+    // ---- 4) hard links + stat/lstat (v38.86) ----
+    {
+        // Deterministic start: drop leftovers from earlier runs.
+        sys_delete_file("/home/lk_a");
+        sys_delete_file("/home/lk_b");
+        sys_delete_file("/home/lk_c");
+
+        int crc = sys_create_file("/home/lk_a");
+        if (crc < 0) {
+            // NOTE: sys_create_file returns the new node index (>= 0) on
+            // success, not 0 — only negatives are failures.
+            sys_print("[PROCFSDemo] FAIL create lk_a\n", 0x0C);
+        } else {
+            int fd = sys_open_mode("/home/lk_a", O_APPEND);
+            if (fd < 0) {
+                sys_print("[PROCFSDemo] FAIL open lk_a\n", 0x0C);
+            } else {
+                sys_write(fd, "alpha-beta", 10);
+                sys_close(fd);
+            }
+            int hr = sys_hardlink("/home/lk_a", "/home/lk_b");
+            if (hr != 0) {
+                sys_print("[PROCFSDemo] FAIL hardlink rc\n", 0x0C);
+            } else {
+                sys_print("[PROCFSDemo] hardlink-created\n", 0x0A);
+                stat_k_t sa, sb;
+                if (sys_lstat("/home/lk_a", &sa) == 0 &&
+                    sys_lstat("/home/lk_b", &sb) == 0 &&
+                    sa.nlink == 2 && sb.nlink == 2) {
+                    sys_print("[PROCFSDemo] hardlink-nlink-ok\n", 0x0A);
+                    if (sa.data_sector == sb.data_sector && sa.size == 10 && sb.size == 10) {
+                        sys_print("[PROCFSDemo] hardlink-shared-ds\n", 0x0A);
+                        // Write through lk_b, read back through lk_a.
+                        int fb = sys_open_mode("/home/lk_b", O_APPEND);
+                        if (fb >= 0) {
+                            sys_write(fb, "!", 1);
+                            sys_close(fb);
+                        }
+                        char rb[32];
+                        int fr = sys_open("/home/lk_a");
+                        int nr = (fr >= 0) ? sys_read(fr, rb, sizeof(rb) - 1) : -1;
+                        if (fr >= 0) sys_close(fr);
+                        if (nr == 11 && rb[0] == 'a' && rb[9] == 'a' && rb[10] == '!') {
+                            sys_print("[PROCFSDemo] hardlink-write-through\n", 0x0A);
+                        } else {
+                            sys_print("[PROCFSDemo] FAIL write-through\n", 0x0C);
+                        }
+                    } else {
+                        sys_print("[PROCFSDemo] FAIL shared storage\n", 0x0C);
+                    }
+                } else {
+                    sys_print("[PROCFSDemo] FAIL nlink\n", 0x0C);
+                }
+            }
+        }
+
+        // lstat vs stat on a symlink: lstat sees the link, stat follows it.
+        // (sys_symlink returns the new node index on success — >= 0 is fine.)
+        if (sys_symlink("/home/lk_a", "/home/lk_c") >= 0) {
+            stat_k_t sl, sf;
+            if (sys_lstat("/home/lk_c", &sl) == 0 && sl.type == 8 &&
+                sys_stat("/home/lk_c", &sf) == 0 && sf.type == 0 &&
+                sf.size == 11) {
+                sys_print("[PROCFSDemo] symlink-stat-ok\n", 0x0A);
+            } else {
+                sys_print("[PROCFSDemo] FAIL stat/lstat duality\n", 0x0C);
+            }
+        } else {
+            sys_print("[PROCFSDemo] FAIL symlink lk_c\n", 0x0C);
+        }
+
+        // Unlink one name: nlink drops to 1, content stays reachable via the
+        // other name (the whole point of hard links).
+        sys_delete_file("/home/lk_b");
+        stat_k_t sa2;
+        if (sys_lstat("/home/lk_a", &sa2) == 0 && sa2.nlink == 1 && sa2.size == 11) {
+            char rb[16];
+            int fr = sys_open("/home/lk_a");
+            int nr = (fr >= 0) ? sys_read(fr, rb, 11) : -1;
+            if (fr >= 0) sys_close(fr);
+            if (nr == 11 && rb[10] == '!') {
+                sys_print("[PROCFSDemo] hardlink-delete-ok\n", 0x0A);
+            } else {
+                sys_print("[PROCFSDemo] FAIL post-delete read\n", 0x0C);
+            }
+        } else {
+            sys_print("[PROCFSDemo] FAIL post-delete nlink\n", 0x0C);
+        }
+        sys_delete_file("/home/lk_a");
+        sys_delete_file("/home/lk_c");
+        sys_print("[PROCFSDemo] links-done\n", 0x0A);
     }
 
     sys_print("[PROCFSDemo] done\n", 0x0A);

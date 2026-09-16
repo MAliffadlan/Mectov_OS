@@ -849,6 +849,7 @@ else if (strncmp(cmd_b, "find", 4) == 0 && (cmd_b[4] == '\0' || cmd_b[4] == ' ')
 else if (strncmp(cmd_b, "ln ", 3) == 0) { cmd_ln_arg(); }
 // --- READLINK (v38.85: print a symlink's target) ---
 else if (strncmp(cmd_b, "readlink ", 9) == 0) { cmd_readlink_arg(); }
+else if (strncmp(cmd_b, "stat ", 5) == 0) { cmd_stat_arg(); }
 // --- UNKNOWN ---
 else if (cmd_b[0] != '\0') {
         print("Command not found: ", 0x0C);

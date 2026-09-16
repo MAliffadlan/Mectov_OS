@@ -46,6 +46,14 @@ OK_MARKERS = [
     "symlink-created",
     "symlink-open-ok",
     "readlink-ok",
+    # v38.86 hard-link + stat section (all mandatory)
+    "hardlink-created",
+    "hardlink-nlink-ok",
+    "hardlink-shared-ds",
+    "hardlink-write-through",
+    "symlink-stat-ok",
+    "hardlink-delete-ok",
+    "links-done",
     "done",
 ]
 

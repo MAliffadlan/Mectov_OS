@@ -42,6 +42,35 @@ int vfs_symlink(const char* target, const char* linkpath);
 // symlink / missing). Does NOT follow the link.
 int vfs_readlink(const char* path, char* buf, int size);
 
+// v38.86: hard link — new_path becomes another name for the SAME file node
+// (both names share data_sector, so both see every byte written through
+// either name). Only plain VFS files; symlinks/dirs/proc/dev are refused.
+// The kernel's sector allocator builds its map from in-use nodes, so the
+// shared sectors stay claimed until the LAST name is deleted.
+int vfs_hardlink(const char* existing_path, const char* new_path);
+
+// v38.86: kernel stat struct — mirrors stat_t in syscall.h (kept separate to
+// avoid a header cycle; the syscall layer copies field by field).
+typedef struct vfs_stat {
+    int size;
+    int type;          // fs_type_t value
+    int node_idx;
+    int parent;
+    int data_sector;
+    int nlink;         // how many directory names point at this node
+    char name[32];
+    uint16_t mode;
+    uint16_t uid;
+    uint16_t gid;
+} vfs_stat_t;
+
+// stat() follows a final symlink; lstat() does not (reports the link itself).
+// Returns 0 or -1.
+int vfs_stat_follow(const char* path, vfs_stat_t* st);
+int vfs_stat_nofollow(const char* path, vfs_stat_t* st);
+// Count names pointing at path's node (no-follow counts the link itself).
+int vfs_nlink(const char* path, int follow);
+
 // ---- Unix-style ownership & permission bits (POSIX S_I* values) ----
 #define S_IRUSR 0x100  // owner read
 #define S_IWUSR 0x080  // owner write

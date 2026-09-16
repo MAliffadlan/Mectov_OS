@@ -390,6 +390,38 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_HARDLINK (124), v38.86 -----
+        case SYS_HARDLINK: {
+            const char* existing = (const char*)regs->ebx;
+            const char* newpath = (const char*)regs->ecx;
+            if (safe_strlen(existing, MAX_PATH) < 0 ||
+                safe_strlen(newpath, MAX_PATH) < 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int vfs_hardlink(const char* existing_path, const char* new_path);
+            regs->eax = (uint32_t)vfs_hardlink(existing, newpath);
+            break;
+        }
+
+        // ----- SYS_STAT (125) / SYS_LSTAT (126), v38.86 -----
+        case SYS_STAT:
+        case SYS_LSTAT: {
+            int num = (int)regs->eax;   // captured before eax is overwritten
+            const char* path = (const char*)regs->ebx;
+            vfs_stat_t* st = (vfs_stat_t*)regs->ecx;
+            if (safe_strlen(path, MAX_PATH) < 0 ||
+                !validate_user_ptr(st, sizeof(vfs_stat_t))) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            if (num == SYS_LSTAT)
+                regs->eax = (uint32_t)vfs_stat_nofollow(path, st);
+            else
+                regs->eax = (uint32_t)vfs_stat_follow(path, st);
+            break;
+        }
+
         // ----- SYS_PIPE (32) -----
         case SYS_PIPE: {
             int* pipefd = (int*)regs->ebx;

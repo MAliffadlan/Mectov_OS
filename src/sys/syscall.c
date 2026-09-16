@@ -362,6 +362,9 @@ static void syscall_handler(registers_t* regs) {
         case SYS_UMOUNT:
         case SYS_SYMLINK:
         case SYS_READLINK:
+        case SYS_HARDLINK:
+        case SYS_STAT:
+        case SYS_LSTAT:
             regs->eax = handle_syscall_vfs(regs);
             break;
 

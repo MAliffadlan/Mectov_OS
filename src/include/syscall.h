@@ -173,6 +173,9 @@ typedef struct {
 // Symlinks (v38.85)
 #define SYS_SYMLINK     122 // EBX=target_ptr, ECX=linkpath_ptr -> 0 / node / -1, -2 EEXIST
 #define SYS_READLINK    123 // EBX=path_ptr, ECX=buf, EDX=size -> byte count or -1
+#define SYS_HARDLINK    124 // EBX=existing_ptr, ECX=newpath_ptr -> 0 / -1 / -2 EEXIST / -3 not-file / -4 empty
+#define SYS_STAT        125 // EBX=path_ptr, ECX=stat_k_t* -> 0 / -1 (follows final symlink)
+#define SYS_LSTAT       126 // EBX=path_ptr, ECX=stat_k_t* -> 0 / -1 (does NOT follow)
 
 // POSIX file positioning & metadata
 #define SYS_LSEEK       95  // EBX=fd, ECX=offset, EDX=whence(SEEK_*) -> new offset or -1
@@ -410,6 +413,35 @@ static inline int sys_lseek(int fd, int offset, int whence) {
 // name, mode, uid, gid} for an open file descriptor. Returns 0 or -1.
 static inline int sys_fstat(int fd, stat_t* st) {
     return syscall(SYS_FSTAT, fd, (int)st, 0);
+}
+
+// v38.86: path-based stat/lstat + hard links. stat_k_t mirrors the kernel
+// struct stat_k (vfs.h) field for field; the kernel copies through a
+// validated user pointer.
+typedef struct {
+    int size;
+    int type;
+    int node_idx;
+    int parent;
+    int data_sector;
+    int nlink;
+    char name[32];
+    uint16_t mode;
+    uint16_t uid;
+    uint16_t gid;
+} stat_k_t;
+
+static inline int sys_stat(const char* path, stat_k_t* st) {
+    return syscall(SYS_STAT, (int)path, (int)st, 0);
+}
+static inline int sys_lstat(const char* path, stat_k_t* st) {
+    return syscall(SYS_LSTAT, (int)path, (int)st, 0);
+}
+// link(): new_path becomes another name for existing_path's file content.
+// Returns 0, or -1 (bad args/missing), -2 (EEXIST), -3 (not a plain file),
+// -4 (existing file has no storage yet).
+static inline int sys_hardlink(const char* existing_path, const char* new_path) {
+    return syscall(SYS_HARDLINK, (int)existing_path, (int)new_path, 0);
 }
 
 // chmod: change a file's permission bits. EBX=path, ECX=mode (9 bits).

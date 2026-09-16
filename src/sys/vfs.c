@@ -1800,6 +1800,134 @@ int vfs_readlink(const char* path, char* buf, int size) {
     return tlen;
 }
 
+// ============================================================
+// v38.86: hard links + stat/lstat
+// ============================================================
+
+// How many in-use nodes are aliases of `node` (same data_sector). For
+// non-FS_FILE nodes the answer is always 1 — hard links only exist for
+// plain VFS files.
+static int vfs_count_aliases_unlocked(int node) {
+    if (node < 0 || node >= MAX_NODES || !fs_nodes[node].in_use) return 0;
+    if (fs_nodes[node].type != FS_FILE) return 1;
+    int ds = fs_nodes[node].data_sector;
+    if (ds <= 0) return 1;   // empty file: sector-less, aliases meaningless
+    int count = 0;
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (fs_nodes[i].in_use && fs_nodes[i].type == FS_FILE &&
+            fs_nodes[i].data_sector == ds) count++;
+    }
+    return count;
+}
+
+// After any write that changes size or relocates data_sector, bring every
+// alias in line: same size, same data_sector, cache dropped (the write path
+// re-inserts its own node's copy). Without this, `echo x >> b` through one
+// name of a hard-linked pair would leave the other name with the stale size.
+static void vfs_sync_aliases_unlocked(int node) {
+    if (node < 0 || node >= MAX_NODES) return;
+    if (fs_nodes[node].type != FS_FILE) return;
+    int ds = fs_nodes[node].data_sector;
+    int sz = fs_nodes[node].size;
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (i == node) continue;
+        if (!fs_nodes[i].in_use || fs_nodes[i].type != FS_FILE) continue;
+        if (ds > 0 && fs_nodes[i].data_sector == ds) {
+            if (fs_nodes[i].size != sz) fs_nodes[i].size = sz;
+            pcache_invalidate(i);
+        }
+    }
+}
+
+int vfs_hardlink(const char* existing_path, const char* new_path) {
+    if (!existing_path || !new_path) return -1;
+    vfs_lock_acquire();
+    // POSIX link(): follow the existing path fully; refuse the final
+    // component of new_path (it must not exist — EEXIST).
+    int src = vfs_walk_path(existing_path, 0);
+    if (src < 0) { vfs_lock_release(); return -1; }
+    // Only plain VFS files: symlinks/dirs/proc/dev have their own semantics.
+    if (fs_nodes[src].type != FS_FILE) { vfs_lock_release(); return -3; }
+    if (fs_nodes[src].data_sector <= 0) { vfs_lock_release(); return -4; } // nothing to share yet
+
+    char resolved[MAX_PATH];
+    vfs_resolve_path(new_path, resolved, MAX_PATH);
+    char comps[MAX_PATH/2][MAX_FILENAME];
+    int ncomp = split_path(resolved, comps);
+    if (ncomp <= 0) { vfs_lock_release(); return -1; }
+    int cur = 0;
+    for (int i = 0; i < ncomp - 1; i++) {
+        int nxt = vfs_walk_child(cur, comps[i]);
+        if (nxt < 0) { vfs_lock_release(); return -1; }
+        if (!vfs_is_dir_type(fs_nodes[nxt].type)) { vfs_lock_release(); return -1; }
+        cur = nxt;
+    }
+    const char* lname = comps[ncomp - 1];
+    if (vfs_find_in_dir_unlocked(lname, cur) >= 0 ||
+        vfs_proc_lazy_lookup(cur, lname, 1) == -2) {
+        vfs_lock_release();
+        return -2;   // new name already exists
+    }
+    // Cross-backend link is meaningless: data_sector is per-backend space.
+    // Both ends must be plain VFS (drive-0 ATA) files, so just check types.
+    int n = vfs_create_node(lname, FS_FILE, cur);
+    if (n < 0) { vfs_lock_release(); return -1; }
+    // Alias the storage: share the sector span and the size. uid/mode default
+    // from vfs_create_node (creator-owned 0644); hard links share content,
+    // not metadata, which is close enough for this single-user system.
+    fs_nodes[n].data_sector = fs_nodes[src].data_sector;
+    fs_nodes[n].size = fs_nodes[src].size;
+    vfs_save();
+    vfs_lock_release();
+    return 0;
+}
+
+// Shared body: fill stat_k_t from a node index.
+static void vfs_stat_fill_unlocked(int node, vfs_stat_t* st) {
+    st->size = fs_nodes[node].size;
+    st->type = (int)fs_nodes[node].type;
+    st->node_idx = node;
+    st->parent = fs_nodes[node].parent;
+    st->data_sector = fs_nodes[node].data_sector;
+    st->nlink = vfs_count_aliases_unlocked(node);
+    int i = 0;
+    for (; i < 31 && fs_nodes[node].name[i]; i++) st->name[i] = fs_nodes[node].name[i];
+    st->name[i] = '\0';
+    st->mode = fs_nodes[node].mode;
+    st->uid = fs_nodes[node].uid;
+    st->gid = fs_nodes[node].gid;
+}
+
+int vfs_stat_follow(const char* path, vfs_stat_t* st) {
+    if (!path || !st) return -1;
+    vfs_lock_acquire();
+    int n = vfs_walk_path(path, 0);   // follow final symlink
+    if (n < 0) { vfs_lock_release(); return -1; }
+    vfs_stat_fill_unlocked(n, st);
+    vfs_lock_release();
+    return 0;
+}
+
+int vfs_stat_nofollow(const char* path, vfs_stat_t* st) {
+    if (!path || !st) return -1;
+    vfs_lock_acquire();
+    int n = vfs_walk_path(path, 1);   // report the link itself
+    if (n < 0) { vfs_lock_release(); return -1; }
+    vfs_stat_fill_unlocked(n, st);
+    vfs_lock_release();
+    return 0;
+}
+
+int vfs_nlink(const char* path, int follow) {
+    if (!path) return -1;
+    vfs_lock_acquire();
+    int n = vfs_walk_path(path, follow ? 0 : 1);
+    if (n < 0) { vfs_lock_release(); return -1; }
+    int c = vfs_count_aliases_unlocked(n);
+    vfs_lock_release();
+    return c;
+}
+
 // Remove the on-disk ext2 object behind a VFS node (if any). Must run while
 // the node is still in_use so parent/name lookups stay valid.
 static void vfs_remove_ext2_entry(int node) {
@@ -2750,6 +2878,10 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
     // successful write-through replaces the cached copy (or drops it when the
     // file is now too big / empty to cache).
     pcache_insert(node, data, size);
+    // v38.86: hard-link aliases share this data span — mirror the new size
+    // (and relocated data_sector) onto every alias and drop their caches, so
+    // the other name never serves a stale length/content.
+    vfs_sync_aliases_unlocked(node);
     // The node table's on-disk record changed only when the size or the data
     // sector moved. A same-size in-place rewrite leaves the persisted record
     // identical — the file data itself was already written above — so skip
@@ -3052,6 +3184,7 @@ static char vfs_mode_char(fs_type_t t) {
     if (t == FS_DIR || t == FS_EXT2_DIR || t == FS_FAT32_DIR) return 'd';
     if (t == FS_DEV) return 'c';
     if (t == FS_PROC) return 'p';
+    if (t == FS_SYMLINK) return 'l';
     return '-';
 }
 void vfs_format_mode(uint16_t mode, char* out) {
@@ -3069,7 +3202,7 @@ static void vfs_list_dir_long_unlocked(int dir_node, void (*print_fn)(const char
         if (fs_nodes[i].parent != dir_node) continue;
         count++;
 
-        char line[96];
+        char line[192];
         int p = 0;
         line[p++] = vfs_mode_char(fs_nodes[i].type);
         char mstr[10];
@@ -3093,6 +3226,13 @@ static void vfs_list_dir_long_unlocked(int dir_node, void (*print_fn)(const char
         for (int j = 0; fs_nodes[i].name[j] && p < 100; j++) line[p++] = fs_nodes[i].name[j];
         if (fs_nodes[i].type == FS_DIR || fs_nodes[i].type == FS_EXT2_DIR ||
             fs_nodes[i].type == FS_FAT32_DIR) line[p++] = '/';
+        // v38.86: symlink arrow — show what the link points at.
+        if (fs_nodes[i].type == FS_SYMLINK) {
+            static const char arrow[] = " -> ";
+            for (int j = 0; arrow[j] && p < 186; j++) line[p++] = arrow[j];
+            for (int j = 0; fs_nodes[i].pad[j] && j < VFS_SYMLINK_MAX && p < 190; j++)
+                line[p++] = fs_nodes[i].pad[j];
+        }
         line[p++] = '\n';
         line[p] = '\0';
         print_fn(line, 0x0F);
