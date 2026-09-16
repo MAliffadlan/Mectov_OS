@@ -176,6 +176,7 @@ typedef struct {
 #define SYS_HARDLINK    124 // EBX=existing_ptr, ECX=newpath_ptr -> 0 / -1 / -2 EEXIST / -3 not-file / -4 empty
 #define SYS_STAT        125 // EBX=path_ptr, ECX=stat_k_t* -> 0 / -1 (follows final symlink)
 #define SYS_LSTAT       126 // EBX=path_ptr, ECX=stat_k_t* -> 0 / -1 (does NOT follow)
+#define SYS_FUTEX_WAIT_TIMEOUT 127 // EBX=addr, ECX=expected, EDX=timeout_ms -> 0 released (woken or swept), -1 changed, -2 bad ptr
 
 // POSIX file positioning & metadata
 #define SYS_LSEEK       95  // EBX=fd, ECX=offset, EDX=whence(SEEK_*) -> new offset or -1
@@ -826,6 +827,14 @@ static inline int sys_futex_wait(void* addr, uint32_t expected) {
 }
 static inline int sys_futex_wake(void* addr, int max_waiters) {
     return syscall(SYS_FUTEX_WAKE, (int)addr, max_waiters, 0);
+}
+// v38.87: timed futex wait (FUTEX_WAIT_TIMEOUT semantics). Sleeps while
+// *addr == expected, but wakes after timeout_ms even without a futex_wake.
+// This bounds any lost-wakeup window: the condvar protocol always mutates
+// the word (seq++) before calling wake, so a poller that re-checks the
+// predicate after a timeout can never stay stuck on a satisfied condition.
+static inline int sys_futex_wait_timeout(void* addr, uint32_t expected, uint32_t timeout_ms) {
+    return syscall(SYS_FUTEX_WAIT_TIMEOUT, (int)addr, (int)expected, (int)timeout_ms);
 }
 
 // UDP syscalls

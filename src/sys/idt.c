@@ -294,6 +294,12 @@ uint32_t irq_handler(uint32_t esp) {
     
     // Context switch on timer interrupt (IRQ0 = int 32)
     if (r->int_no == 32) {
+        // v38.87: expired timed-futex parkers wake here, BEFORE schedule() —
+        // futex_sweep takes sync_lock then task_lock (via task_set_state),
+        // which matches the futex_wait ordering; calling it inside schedule()
+        // (already holding task_lock) would ABBA-deadlock.
+        extern void futex_sweep(void);
+        futex_sweep();
         return schedule(esp);
     }
     // Wakeup preemption (v38.82): a key/motion/packet IRQ may have made

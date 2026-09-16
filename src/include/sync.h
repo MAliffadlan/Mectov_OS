@@ -16,6 +16,8 @@ int sem_destroy(int id);
 int futex_wait(uint32_t addr, uint32_t expected);
 // Wakes up to `max_waiters` tasks blocked on addr in this address space.
 int futex_wake(uint32_t addr, int max_waiters);
+int futex_wait_timeout(uint32_t addr, uint32_t expected, uint32_t timeout_ms);
+void futex_sweep(void);
 
 void sync_init(void);
 

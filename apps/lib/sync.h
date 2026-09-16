@@ -49,12 +49,12 @@ static inline void mct_mutex_lock(mct_mutex_t* m) {
     // Fast path: uncontended acquire.
     if (mct_cmpxchg(&m->lock, 0, 1) == 0) return;
     // Slow path: contended. Park on the futex while the lock is held.
-    // futex_wait sleeps only while *addr == expected (the kernel re-checks
-    // under its own lock, so a wake racing between our check and the sleep
-    // is not lost — it returns -1 and we simply retry).
+    // v38.87: the park is BOUNDED (50 ms) — even if a wake is lost to a
+    // kernel race, the timed wait returns and the loop re-checks m->lock,
+    // so the waiter can never sleep past the lock's release.
     for (;;) {
         while (m->lock == 1) {
-            sys_futex_wait((void*)&m->lock, 1);
+            sys_futex_wait_timeout((void*)&m->lock, 1, 50);
         }
         if (mct_cmpxchg(&m->lock, 0, 1) == 0) return;
     }
@@ -86,7 +86,11 @@ static inline void mct_cond_wait(mct_cond_t* c, mct_mutex_t* m) {
     mct_mutex_unlock(m);
     // If a signal raced between the snapshot and here, seq already changed:
     // futex_wait sees it and returns -1 without sleeping — no lost wakeup.
-    sys_futex_wait((void*)&c->seq, s);
+    // v38.87: the sleep itself is bounded (50 ms) as a second line of
+    // defense — a signal always writes seq before waking, so a parker the
+    // sweep releases re-checks a moved word (or a false predicate) and
+    // retries; it can never sleep on a satisfied condition forever.
+    sys_futex_wait_timeout((void*)&c->seq, s, 50);
     mct_mutex_lock(m);
 }
 

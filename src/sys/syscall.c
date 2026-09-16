@@ -469,6 +469,11 @@ static void syscall_handler(registers_t* regs) {
             regs->eax = (uint32_t)futex_wake((uint32_t)regs->ebx, (int)regs->ecx);
             break;
         }
+        case SYS_FUTEX_WAIT_TIMEOUT: {
+            extern int futex_wait_timeout(uint32_t, uint32_t, uint32_t);
+            regs->eax = (uint32_t)futex_wait_timeout((uint32_t)regs->ebx, (uint32_t)regs->ecx, (uint32_t)regs->edx);
+            break;
+        }
 
         // ----- SYS_PRINT (1): Print string to terminal -----
         case SYS_PRINT: {

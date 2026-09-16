@@ -26,6 +26,7 @@
 #define MAX_SEMS   32
 #define MAX_FUTEX  64
 #define MAX_WAITERS 32  // tasks parked on one object
+#define FUTEX_SWEEP_DIV 1  // v38.87: sweep expired timed-futex parkers every N timer ticks
 
 typedef struct {
     int in_use;
@@ -40,11 +41,14 @@ typedef struct {
     uint32_t addr;       // user virtual address being waited on
     int waiters[MAX_WAITERS];
     int waiter_count;
+    int has_timeout;     // v38.87: bounded-park entries carry a deadline
+    uint32_t expire_ms;  // absolute timer_ticks deadline (only if has_timeout)
 } futex_t;
 
 static sem_t   sems[MAX_SEMS];
 static futex_t futexes[MAX_FUTEX];
 static spinlock_t sync_lock = SPINLOCK_INIT;
+extern volatile uint32_t timer_ticks;  // drivers/timer.c (ms since boot)
 
 void sync_init(void) {
     for (int i = 0; i < MAX_SEMS; i++)   { sems[i].in_use = 0; sems[i].count = 0; sems[i].waiter_count = 0; }
@@ -271,6 +275,7 @@ static futex_t* futex_alloc(uint32_t pd, uint32_t addr) {
             futexes[i].page_dir = pd;
             futexes[i].addr = addr;
             futexes[i].waiter_count = 0;
+            futexes[i].has_timeout = 0;
             return &futexes[i];
         }
     }
@@ -329,8 +334,7 @@ int futex_wake(uint32_t addr, int max_waiters) {
     uint32_t pd = task_get_page_dir(get_current_task());
     int woken = 0;
     __asm__ volatile("cli");
-    spin_lock(&sync_lock);
-    futex_t* f = futex_find(pd, addr);
+    spin_lock(&sync_lock);        futex_t* f = futex_find(pd, addr);
     if (f) {
         while (woken < max_waiters && f->waiter_count > 0) {
             if (wake_one(f->waiters, &f->waiter_count)) woken++;
@@ -341,4 +345,92 @@ int futex_wake(uint32_t addr, int max_waiters) {
     spin_unlock(&sync_lock);
     __asm__ volatile("sti");
     return woken;
+}
+
+// ------------------------------------------------------------
+// v38.87 — Timed futex wait: bounded parking (Linux FUTEX_WAIT_TIMEOUT
+// semantics). Blocks while *p == expected, but the sweep below wakes the
+// parker once the deadline passes even if nobody ever called futex_wake.
+// This bounds any lost-wakeup window to the sweep period: the condvar
+// protocol always writes the word (seq++) BEFORE calling wake, so a parker
+// released by the sweep re-checks a word that already moved and retries the
+// predicate — it can never stay stuck on a satisfied condition.
+// Returns 0 (parked, then released — woken OR swept; caller re-checks the
+// predicate either way), -1 (value changed, never slept), -2 (bad ptr /
+// table full).
+// ------------------------------------------------------------
+int futex_wait_timeout(uint32_t addr, uint32_t expected, uint32_t timeout_ms) {
+    extern int validate_user_ptr(const void* ptr, uint32_t size);
+    if (!validate_user_ptr((const void*)(uintptr_t)addr, 4)) return -2;
+    volatile uint32_t* p = (volatile uint32_t*)(uintptr_t)addr;
+    if (*p != expected) return -1;
+
+    int tid = get_current_task();
+    uint32_t pd = task_get_page_dir(tid);
+
+    // Same critical-section discipline as futex_wait: register the waiter and
+    // block it atomically with the re-check, under IF=0 (task_set_state
+    // preserves IF, so interrupts stay off until sync_lock is released).
+    __asm__ volatile("cli");
+    spin_lock(&sync_lock);
+    if (*p != expected) {
+        spin_unlock(&sync_lock);
+        __asm__ volatile("sti");
+        return -1;
+    }
+    futex_t* f = futex_alloc(pd, addr);
+    if (!f || f->waiter_count >= MAX_WAITERS) {
+        spin_unlock(&sync_lock);
+        __asm__ volatile("sti");
+        return -2;
+    }
+    f->waiters[f->waiter_count++] = tid;
+    if (timeout_ms == 0) timeout_ms = 1;      // 0 => expire on the next sweep
+    f->has_timeout = 1;
+    f->expire_ms = timer_ticks + timeout_ms;  // absolute deadline
+    task_set_state(tid, TASK_STATE_BLOCKED);
+    spin_unlock(&sync_lock);
+    __asm__ volatile("sti");
+
+    for (;;) {
+        __asm__ volatile("pause");
+        if (task_get_state(tid) != TASK_STATE_BLOCKED) break;
+    }
+    return 0;
+}
+
+// v38.87 — Timer-tick sweep: wake parkers whose deadline expired. Runs from
+// irq_handler BEFORE schedule(): the sync_lock -> task_set_state(task_lock)
+// ordering matches futex_wait — calling this from inside schedule() (which
+// already holds task_lock) would be an ABBA deadlock. A busy sync_lock just
+// skips this round; the next tick (10 ms later) retries.
+void futex_sweep(void) {
+    static int sweep_div = 0;
+    if (++sweep_div < FUTEX_SWEEP_DIV) return;
+    sweep_div = 0;
+    if (sync_lock.locked) return;
+    uint32_t now = timer_ticks;
+
+    __asm__ volatile("cli");
+    spin_lock(&sync_lock);
+    int woken_any = 0;
+    for (int i = 0; i < MAX_FUTEX; i++) {
+        if (!futexes[i].in_use || !futexes[i].has_timeout) continue;
+        if ((int)(now - futexes[i].expire_ms) < 0) continue;  // not yet due
+        futexes[i].has_timeout = 0;
+        while (futexes[i].waiter_count > 0) {
+            if (!wake_one(futexes[i].waiters, &futexes[i].waiter_count)) break;
+            woken_any = 1;
+        }
+        if (futexes[i].waiter_count == 0) futexes[i].in_use = 0;
+    }
+    spin_unlock(&sync_lock);
+    // NOTE: no `sti` here — the sweep runs inside irq_handler (interrupt
+    // gate, IF=0). Re-enabling interrupts mid-handler nests timer IRQs on
+    // the same kernel stack and double-schedules: corrupts frames, GPF.
+    // (futex_wait's sti is correct only because it runs in syscall context.)
+    if (woken_any) {
+        extern int take_resched(void);
+        take_resched();  // run the scheduler on this CPU right away
+    }
 }
