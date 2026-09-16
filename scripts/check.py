@@ -50,6 +50,7 @@ SUITES = [
     ("browser",          "browser_test.py",            300),
     ("browser_web",      "browser_web_test.py",        300),
     ("fork",             "fork_test.py",              240),
+    ("procfs",           "procfs_test.py",            240),
     ("jobcontrol",       "jobcontrol_test.py",        240),
     ("fputest",          "fputest.py",                240),
     ("nxtest",           "nxtest.py",                 240),
@@ -89,7 +90,7 @@ SUITES = [
 ]
 
 # Fast, high-signal subset for local iteration (~6-8 min TCG).
-QUICK = {"boot", "fork", "jobcontrol", "fputest", "fuzz",
+QUICK = {"boot", "fork", "procfs", "jobcontrol", "fputest", "fuzz",
          "iocache", "app_smoke", "doom", "thread", "cond", "usb"}
 
 TOOLS = ["qemu-system-i386", "mkfs.fat", "mkfs.ext2", "mcopy", "mmd"]

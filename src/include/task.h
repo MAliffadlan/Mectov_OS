@@ -290,11 +290,18 @@ typedef struct {
     int priority;
     int sleep_ticks;
     int stack_watermark;  // peak kernel-stack bytes used (see task.c scheduler)
+    // v38.85: /proc/<pid>/status fields
+    char name[32];        // process name (image name or "fork<parent>")
+    int pgrp;
+    int session;
 } task_info_t;
 
 int get_task_info(int tid, task_info_t* info);
 void task_set_launch_arg(int tid, const char* arg);
 const char* task_get_launch_arg(int tid);
+// v38.85: /proc/<pid>/status name (kernel-derived from image name or "fork<pid>")
+void task_set_name(int tid, const char* name);
+const char* task_get_name(int tid);
 
 // Trusted shell-host flag (v38.53): kernel-computed from the resolved image
 // identity + parent trust; gates SYS_EXEC_CMD / SYS_KILL_TASK. Never derive

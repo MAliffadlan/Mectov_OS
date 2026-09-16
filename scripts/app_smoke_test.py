@@ -38,6 +38,11 @@ LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 # Each entry: (app name, marker that proves it finished, run keys, wait).
 # smpstress needs the longest wait: 8 children × CPU burn on TCG.
 APPS = [
+    ("procfsdemo",
+     "[PROCFSDemo] done",
+     ["r", "u", "n", "spc", "slash", "a", "p", "p", "s", "slash",
+      "p", "r", "o", "c", "f", "s", "d", "e", "m", "o", "dot", "m", "c", "t", "ret"],
+     90),
     ("smpstress",
      "[SMPSTRESS] ALL PASS",
      ["r", "u", "n", "spc", "slash", "a", "p", "p", "s", "slash",

@@ -170,6 +170,10 @@ typedef struct {
 #define SYS_FSYNC       120 // EBX=fd -> 0 ok / -1 error (flush dirty mmap pages of the file)
 #define SYS_SYNC        121 // (no args) -> 0 ok / -1 error (flush all dirty mmap pages)
 
+// Symlinks (v38.85)
+#define SYS_SYMLINK     122 // EBX=target_ptr, ECX=linkpath_ptr -> 0 / node / -1, -2 EEXIST
+#define SYS_READLINK    123 // EBX=path_ptr, ECX=buf, EDX=size -> byte count or -1
+
 // POSIX file positioning & metadata
 #define SYS_LSEEK       95  // EBX=fd, ECX=offset, EDX=whence(SEEK_*) -> new offset or -1
 #define SYS_FSTAT       96  // EBX=fd, ECX=stat_t* -> 0 or -1
@@ -412,6 +416,18 @@ static inline int sys_fstat(int fd, stat_t* st) {
 // Owner or root only; returns 0 or -1.
 static inline int sys_chmod(const char* path, int mode) {
     return syscall(SYS_CHMOD, (int)path, mode, 0);
+}
+
+// symlink (v38.85): create linkpath -> target. Target may not exist (dangling
+// links are legal, POSIX-style). Returns 0/node or -1 (-2 if the name exists).
+static inline int sys_symlink(const char* target, const char* linkpath) {
+    return syscall(SYS_SYMLINK, (int)target, (int)linkpath, 0);
+}
+
+// readlink (v38.85): copy the link target into buf. Returns byte count or -1
+// if path is missing or not a symlink. Does NOT follow the final component.
+static inline int sys_readlink(const char* path, char* buf, int size) {
+    return syscall(SYS_READLINK, (int)path, (int)buf, size);
 }
 
 // chown: transfer a file's ownership. EBX=path, ECX=uid, EDX=gid.

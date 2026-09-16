@@ -182,6 +182,10 @@ jobs:
           python3 scripts/fork_test.py --timeout 240
           python3 scripts/jobcontrol_test.py --timeout 240
 
+      - name: Procfs + symlink regression (TCG)
+        run: |
+          python3 scripts/procfs_test.py --timeout 240
+
       - name: FPU/SSE context-switch regression (TCG)
         run: |
           python3 scripts/fputest.py --timeout 240

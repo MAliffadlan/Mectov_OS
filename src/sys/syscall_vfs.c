@@ -359,6 +359,37 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
         }
 
         // Empty line
+        // ----- SYS_SYMLINK (122): create a symlink (v38.85) -----
+        case SYS_SYMLINK: {
+            const char* target = (const char*)regs->ebx;
+            const char* linkpath = (const char*)regs->ecx;
+            // Targets are stored verbatim in the node, so they need not exist;
+            // only bound the reads. Kernel-created /bin links also come through
+            // here with kernel-space pointers — safe_strlen handles both.
+            if (safe_strlen(target, MAX_PATH) < 0 || safe_strlen(linkpath, MAX_PATH) < 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int vfs_symlink(const char* target, const char* linkpath);
+            regs->eax = (uint32_t)vfs_symlink(target, linkpath);
+            break;
+        }
+
+        // ----- SYS_READLINK (123): read a symlink target (v38.85) -----
+        case SYS_READLINK: {
+            const char* path = (const char*)regs->ebx;
+            char* buf = (char*)regs->ecx;
+            int size = (int)regs->edx;
+            if (safe_strlen(path, MAX_PATH) < 0 ||
+                !validate_user_ptr(buf, (uint32_t)size) || size <= 0) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern int vfs_readlink(const char* path, char* buf, int size);
+            regs->eax = (uint32_t)vfs_readlink(path, buf, size);
+            break;
+        }
+
         // ----- SYS_PIPE (32) -----
         case SYS_PIPE: {
             int* pipefd = (int*)regs->ebx;

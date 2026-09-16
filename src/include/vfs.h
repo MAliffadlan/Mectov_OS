@@ -27,7 +27,20 @@
 // the new fields instead of reading garbage ownership into every node.
 #define VFS_LAYOUT_VERSION 3
 
-typedef enum { FS_FILE, FS_DIR, FS_DEV, FS_EXT2_FILE, FS_EXT2_DIR, FS_FAT32_FILE, FS_FAT32_DIR, FS_PROC } fs_type_t;
+typedef enum { FS_FILE, FS_DIR, FS_DEV, FS_EXT2_FILE, FS_EXT2_DIR, FS_FAT32_FILE, FS_FAT32_DIR, FS_PROC, FS_SYMLINK } fs_type_t;
+
+// v38.85: symlinks. The link target is stored inside the node's 450-byte pad
+// (fs_node_t is a packed 512-byte on-disk struct; adding a field would bump
+// VFS_LAYOUT_VERSION — using pad keeps old images readable untouched).
+#define VFS_SYMLINK_MAX 120
+#define VFS_SYMLINK_HOPS_MAX 8   // POSIX ELOOP budget
+
+// Create linkpath -> target. Target may be absolute (preferred; /bin links
+// are absolute) or relative to the directory containing linkpath.
+int vfs_symlink(const char* target, const char* linkpath);
+// Read the target of a symlink into buf; returns byte count or -1 (not a
+// symlink / missing). Does NOT follow the link.
+int vfs_readlink(const char* path, char* buf, int size);
 
 // ---- Unix-style ownership & permission bits (POSIX S_I* values) ----
 #define S_IRUSR 0x100  // owner read

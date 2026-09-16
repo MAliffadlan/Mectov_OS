@@ -845,6 +845,10 @@ else if (strncmp(cmd_b, "uniq", 4) == 0 && (cmd_b[4] == '\0' || cmd_b[4] == ' ')
 else if (strncmp(cmd_b, "tee ", 4) == 0) { cmd_tee_arg(); }
 // --- FIND (walk a directory tree, print full paths, -name filter) ---
 else if (strncmp(cmd_b, "find", 4) == 0 && (cmd_b[4] == '\0' || cmd_b[4] == ' ')) { cmd_find(); }
+// --- LN (v38.85: create a symlink, GNU-style `ln -s target linkpath`) ---
+else if (strncmp(cmd_b, "ln ", 3) == 0) { cmd_ln_arg(); }
+// --- READLINK (v38.85: print a symlink's target) ---
+else if (strncmp(cmd_b, "readlink ", 9) == 0) { cmd_readlink_arg(); }
 // --- UNKNOWN ---
 else if (cmd_b[0] != '\0') {
         print("Command not found: ", 0x0C);

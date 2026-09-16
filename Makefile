@@ -77,6 +77,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/notepad_mct.o \
        $(OBJ_DIR)/flappy_mct.o \
        $(OBJ_DIR)/forkdemo_mct.o \
+       $(OBJ_DIR)/procfsdemo_mct.o \
        $(OBJ_DIR)/fputest_mct.o \
        $(OBJ_DIR)/hardening_test_mct.o \
        $(OBJ_DIR)/nxtest_mct.o \
@@ -207,6 +208,9 @@ mplayer.mct: apps/mplayer.c $(MCT_LIBC_H)
 
 forkdemo.mct: apps/forkdemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/forkdemo.c forkdemo.mct
+
+procfsdemo.mct: apps/procfsdemo.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/procfsdemo.c procfsdemo.mct
 
 fputest.mct: apps/fputest.c $(MCT_LIBC_H)
 	MCT_CFLAGS_EXTRA="-msse -msse2" python3 scripts/build_mct.py apps/fputest.c fputest.mct
@@ -353,6 +357,9 @@ $(OBJ_DIR)/mplayer_mct.o: mplayer.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/forkdemo_mct.o: forkdemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 forkdemo.mct $(OBJ_DIR)/forkdemo_mct.o
+
+$(OBJ_DIR)/procfsdemo_mct.o: procfsdemo.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 procfsdemo.mct $(OBJ_DIR)/procfsdemo_mct.o
 
 $(OBJ_DIR)/fputest_mct.o: fputest.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 fputest.mct $(OBJ_DIR)/fputest_mct.o

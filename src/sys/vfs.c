@@ -149,6 +149,11 @@ static int split_path(const char* path, char components[MAX_PATH/2][MAX_FILENAME
 // --- Inisialisasi ---
 
 static int vfs_update_file_if_needed(const char* path, const char* data, int size);
+// v38.85 forward decls (defined further below; needed by vfs_init + walker)
+static int vfs_walk_path(const char* path, int nofollow_last);
+static int vfs_get_node_nofollow(const char* path);
+static int vfs_proc_lazy_lookup(int cur, const char* comp, int probe);
+static void vfs_proc_purge_stale(void);
 
 // Seed apps/music.wav from /ext2/music.wav (debloat v38.81): the canonical
 // copy lives on ext2 (host-seeded by scripts/seed_ext2.sh); VFS keeps the
@@ -287,6 +292,12 @@ void vfs_init() {
         // dmesg). The directory itself may already exist on disk, so create
         // only the nodes that are missing — a fresh /proc gets all of them,
         // an upgraded disk gets just the new ones (e.g. dmesg).
+        // v38.85: the node table (including /proc/<pid> entries) persists on
+        // disk, so a load from disk can resurrect PIDs from a previous boot.
+        // They point at processes that no longer exist — purge them before
+        // anything walks /proc. (Node 0 "root" is protected; this only drops
+        // in_use flags, so it runs before the first resolver call below.)
+        vfs_proc_purge_stale();
         if (vfs_get_node("/proc") < 0) {
             int proc_node = vfs_create_node("proc", FS_DIR, 0);
             if (proc_node >= 0) {
@@ -312,6 +323,34 @@ void vfs_init() {
             if (vfs_get_node("/proc/atastats") < 0) {
                 vfs_create_node("atastats", FS_PROC, proc_node);
                 write_serial_string("[VFS] added /proc/atastats node\n");
+            }
+        }
+        
+        // v38.85: /bin with the canonical `term` symlink — `cat /bin/term`
+        // and `run /bin/term` resolve through the walker to apps/terminal.mct.
+        // Idempotent: get_node first to avoid duplicates on repeat boots.
+        if (vfs_get_node("/bin") < 0) {
+            int bin_node = vfs_create_node("bin", FS_DIR, 0);
+            if (bin_node >= 0) {
+                vfs_symlink("/bin/term", "/apps/terminal.mct");
+                write_serial_string("[VFS] created /bin with term symlink\n");
+            }
+        } else if (vfs_get_node_nofollow("/bin/term") < 0) {
+            vfs_symlink("/bin/term", "/apps/terminal.mct");
+            write_serial_string("[VFS] added /bin/term symlink\n");
+        } else {
+            // v38.85.1: repair a stale/partial node — a symlink whose pad is
+            // empty or whose target is relative gets rewritten to the
+            // canonical absolute target so the boot link always resolves.
+            int t = vfs_get_node_nofollow("/bin/term");
+            if (t >= 0 && fs_nodes[t].type == FS_SYMLINK) {
+                const char* want = "/apps/terminal.mct";
+                if (fs_nodes[t].pad[0] != '/' || strncmp(fs_nodes[t].pad, want, VFS_SYMLINK_MAX) != 0) {
+                    int k = 0;
+                    for (; want[k] && k < VFS_SYMLINK_MAX - 1; k++) fs_nodes[t].pad[k] = want[k];
+                    fs_nodes[t].pad[k] = '\0';
+                    write_serial_string("[VFS] repaired /bin/term target\n");
+                }
             }
         }
         
@@ -416,6 +455,11 @@ void vfs_init() {
         extern uint8_t _binary_forkdemo_mct_start[];
         extern uint8_t _binary_forkdemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/forkdemo.mct", (const char*)_binary_forkdemo_mct_start, _binary_forkdemo_mct_end - _binary_forkdemo_mct_start);
+
+        // /proc + symlink demo (v38.85)
+        extern uint8_t _binary_procfsdemo_mct_start[];
+        extern uint8_t _binary_procfsdemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/procfsdemo.mct", (const char*)_binary_procfsdemo_mct_start, _binary_procfsdemo_mct_end - _binary_procfsdemo_mct_start);
 
         // FPU/SSE context-switch regression (v38.41)
         extern uint8_t _binary_fputest_mct_start[];
@@ -667,6 +711,7 @@ void vfs_init() {
     
     // No filesystem on disk — build the tree from scratch (fresh disk).
     vfs_seeding = 1;
+    vfs_proc_purge_stale();   // no-op on a wiped table, kept for symmetry
     
     // Tidak ada filesystem — buat root directory
     memset(fs_nodes, 0, sizeof(fs_nodes));
@@ -707,6 +752,12 @@ void vfs_init() {
     extern uint8_t _binary_forkdemo_mct_end[];
     vfs_create_file("apps/forkdemo.mct");
     vfs_write_file("apps/forkdemo.mct", (const char*)_binary_forkdemo_mct_start, _binary_forkdemo_mct_end - _binary_forkdemo_mct_start);
+
+    // /proc + symlink demo (v38.85)
+    extern uint8_t _binary_procfsdemo_mct_start[];
+    extern uint8_t _binary_procfsdemo_mct_end[];
+    vfs_create_file("apps/procfsdemo.mct");
+    vfs_write_file("apps/procfsdemo.mct", (const char*)_binary_procfsdemo_mct_start, _binary_procfsdemo_mct_end - _binary_procfsdemo_mct_start);
 
     // FPU/SSE context-switch regression (v38.41)
     extern uint8_t _binary_fputest_mct_start[];
@@ -983,8 +1034,10 @@ void vfs_init() {
     
     vfs_save();
 
-    // Phase 1: UNIX-like /dev filesystem
-    int dev_node = vfs_create_node("dev", FS_DIR, 0);
+        // v38.85: same stale-/proc/<pid> purge for the fresh-format path.
+        // Phase 1: UNIX-like /dev filesystem
+        vfs_proc_purge_stale();
+        int dev_node = vfs_create_node("dev", FS_DIR, 0);
     if (dev_node >= 0) {
         vfs_create_node("null", FS_DEV, dev_node);
         vfs_create_node("zero", FS_DEV, dev_node);
@@ -1002,6 +1055,12 @@ void vfs_init() {
         vfs_create_node("dmesg", FS_PROC, proc_node);
         vfs_create_node("atastats", FS_PROC, proc_node);
         write_serial_string("[VFS] created /proc nodes\n");
+    }
+    
+    // v38.85: /bin with the canonical `term` symlink.
+    int bin_node = vfs_create_node("bin", FS_DIR, 0);
+    if (bin_node >= 0) {
+        vfs_symlink("/bin/term", "/apps/terminal.mct");
     }
     
     // Phase 2: Ext2 Filesystem on Drive 1
@@ -1291,46 +1350,195 @@ int vfs_get_abs_path(int node_idx, char* buf, int buf_size) {
 }
 
 // Cari node berdasarkan path. Return node index atau -1.
-static int vfs_get_node_unlocked(const char* path) {
+static int vfs_get_abs_path_unlocked(int node_idx, char* buf, int buf_size);
+static const char* proc_state_str(int s);
+static int vfs_find_in_dir_unlocked(const char* name, int dir_node);
+static void proc_add(char* buf, int* len, int cap, const char* s);
+static void proc_itoa(char* out, int val);
+
+// v38.85: case-insensitive child lookup (existing semantics, extracted so
+// the walker and the dynamic /proc synthesizer share one loop).
+static int vfs_walk_child(int cur, const char* comp) {
+    if (cur < 0 || cur >= MAX_NODES || !fs_nodes[cur].in_use) return -1;
+    char lc_name[MAX_FILENAME];
+    strtolower(lc_name, comp);
+    for (int j = 0; j < MAX_NODES; j++) {
+        if (!fs_nodes[j].in_use) continue;
+        if (fs_nodes[j].parent != cur) continue;
+        char lc_node[MAX_FILENAME];
+        strtolower(lc_node, fs_nodes[j].name);
+        if (strcmp(lc_node, lc_name) == 0) return j;
+    }
+    return -1;
+}
+
+static int vfs_is_dir_type(fs_type_t t) {
+    return t == FS_DIR || t == FS_EXT2_DIR || t == FS_FAT32_DIR;
+}
+
+// v38.85: per-walk dynamic /proc. Two roles:
+//   lookup — translate one component under a /proc dir into a node: either a
+//            real child, or a synthesized /proc/<pid> node (created on the
+//            fly from the live task table, PID stored in data_sector so the
+//            node never serves another process's data).
+//   probe  — used by create/delete/rename: 1 if a live /proc/<pid> node with
+//            this name COULD be synthesized (so creation is refused and
+//            deletion of a live pid node finds its target).
+static int vfs_proc_lazy_lookup(int cur, const char* comp, int probe) {
+    // Only /proc itself synthesizes <pid> children; /proc/self resolves to
+    // the CALLING task's own pid dir (v38.85).
+    int proc_root = vfs_find_in_dir_unlocked("proc", 0);
+    if (proc_root < 0 || cur != proc_root) return -1;
+
+    if (strcmp(comp, "self") == 0) {
+        char pn[8];
+        int me = get_current_task();
+        proc_itoa(pn, me);
+        return vfs_proc_lazy_lookup(cur, pn, probe);
+    }
+
+    // Pure-digit name => a pid.
+    for (const char* c = comp; *c; c++) if (*c < '0' || *c > '9') return -1;
+    if (comp[0] == '\0') return -1;
+    int pid = 0;
+    for (const char* c = comp; *c; c++) {
+        pid = pid * 10 + (*c - '0');
+        if (pid > 0x7FFF) return -1;   // beyond any legal TID (MAX_TASKS 64)
+    }
+    if (pid <= 0) return -1;
+
+    // Already a real node with this name? Verify it still points at a live
+    // task; a node whose PID died is stale and must not be served (the boot
+    // purge removes leftovers, but a kill could race a walk).
+    int existing = vfs_find_in_dir_unlocked(comp, cur);        if (existing >= 0) {
+
+        if (fs_nodes[existing].type == FS_DIR || fs_nodes[existing].type == FS_PROC) {
+            task_info_t ti;
+            int ok = get_task_info(fs_nodes[existing].data_sector, &ti);
+            if (ok) return existing;
+        }
+        // v38.85.1: a pid-named node with no pid (partial write, older disk)
+        // must not shadow synthesis forever — adopt it for this live pid.
+        if (fs_nodes[existing].type == FS_DIR || fs_nodes[existing].type == FS_PROC) {
+            fs_nodes[existing].data_sector = pid;
+            fs_nodes[existing].type = FS_DIR;   // normalize legacy FS_PROC dir
+            if (vfs_find_in_dir_unlocked("status", existing) < 0) vfs_create_node("status", FS_PROC, existing);
+            if (vfs_find_in_dir_unlocked("cmdline", existing) < 0) vfs_create_node("cmdline", FS_PROC, existing);
+            return existing;
+        }
+        return -1;
+    }
+
+    task_info_t ti;
+    if (!get_task_info(pid, &ti)) {
+        return -1;   // no such live process
+    }
+    if (probe) return -2;                      // "would exist": caller decides
+
+    // Synthesize: one node per directory (/proc/<pid>), children created
+    // on demand. Max size keeps the name unique forever within one boot.
+    int dir = vfs_create_node(comp, FS_DIR, cur);
+    if (dir < 0) {
+        return -1;
+    }
+    fs_nodes[dir].data_sector = pid;
+    if (fs_nodes[dir].size < (int)strlen(comp)) fs_nodes[dir].size = (int)strlen(comp);
+    vfs_create_node("status", FS_PROC, dir);
+    vfs_create_node("cmdline", FS_PROC, dir);
+    return dir;
+}
+
+// v38.85: the path walker. Iterative (no per-component recursion → no stack
+// growth), with an 8-hop ELOOP budget for symlinks. nofollow_last controls
+// the FINAL component only (POSIX lstat/unlink/rename semantics):
+//   0 = follow (normal open/stat), 1 = no-follow (readlink/delete/rename).
+static int vfs_walk_path(const char* path, int nofollow_last) {
     if (!path || path[0] == '\0') return get_current_dir();
-    
+
     char resolved[MAX_PATH];
     vfs_resolve_path(path, resolved, MAX_PATH);
-    
-    // Root case
     if (strcmp(resolved, "/") == 0) return 0;
-    
-    // Parse resolved path into components
-    char comps[MAX_PATH/2][MAX_FILENAME];
-    int ncomp = split_path(resolved, comps);
-    if (ncomp < 0) return -1;
-    if (ncomp == 0) return 0;
-    
-    // Walk from root
+
     int cur = 0;
-    for (int i = 0; i < ncomp; i++) {
-        // Normalize component name (lowercase comparison)
-        char lc_name[MAX_FILENAME];
-        strtolower(lc_name, comps[i]);
-        
-        int found = -1;
-        for (int j = 0; j < MAX_NODES; j++) {
-            if (!fs_nodes[j].in_use) continue;
-            if (fs_nodes[j].parent != cur) continue;
-            
-            char lc_node[MAX_FILENAME];
-            strtolower(lc_node, fs_nodes[j].name);
-            if (strcmp(lc_node, lc_name) == 0) {
-                found = j;
-                break;
+    int hops = 0;
+    // Each restart consumes one path from the front; VFS_SYMLINK_HOPS_MAX
+    // restarts bounds total symlink traversals.
+    for (int restart = 0; restart <= VFS_SYMLINK_HOPS_MAX; restart++) {
+        char comps[MAX_PATH/2][MAX_FILENAME];
+        int ncomp = split_path(resolved, comps);
+        if (ncomp < 0) return -1;
+        if (ncomp == 0) return 0;
+
+        for (int i = 0; i < ncomp; i++) {
+            int nxt = vfs_walk_child(cur, comps[i]);
+            if (nxt < 0) {
+                // Dynamic /proc: /proc/<pid>[/status|/cmdline] is synthesized
+                // from the live task table when the name is a live pid.
+                if (vfs_is_dir_type(fs_nodes[cur].type) &&
+                    strcmp(fs_nodes[cur].name, "proc") == 0 && fs_nodes[cur].parent == 0) {
+                    nxt = vfs_proc_lazy_lookup(cur, comps[i], 0);
+                    if (nxt >= 0 && i < ncomp - 1) {
+                        // <pid> resolved; child file must exist as a real node
+                        int c2 = vfs_walk_child(nxt, comps[i + 1]);
+                        if (c2 < 0 || i + 1 != ncomp - 1) return -1;
+                        nxt = c2;
+                        i++;   // consumed the child component too
+                    }
+                } else {
+                    // Existing pid dir: descend to its child file here too.
+                    if (fs_nodes[cur].type == FS_PROC && fs_nodes[cur].data_sector > 0 &&
+                        i < ncomp - 1) {
+                        int c2 = vfs_walk_child(cur, comps[i + 1]);
+                        if (c2 < 0 || i + 1 != ncomp - 1) return -1;
+                        nxt = c2;
+                        i++;
+                    }
+                }
+                if (nxt < 0) return -1;
             }
+            int last = (i == ncomp - 1);
+            if (last && nofollow_last) { cur = nxt; return cur; }
+            if (fs_nodes[nxt].type == FS_SYMLINK) {
+                if (++hops > VFS_SYMLINK_HOPS_MAX) return -2;   // ELOOP
+                const char* tgt = fs_nodes[nxt].pad;
+                if (!tgt[0]) return -1;
+                if (tgt[0] == '/') {
+                    int n = 0;
+                    while (tgt[n] && n < MAX_PATH - 1) { resolved[n] = tgt[n]; n++; }
+                    resolved[n] = '\0';
+                } else {
+                    // Relative: rebuild against the LINK'S directory.
+                    char ap[MAX_PATH];
+                    if (vfs_get_abs_path_unlocked(fs_nodes[nxt].parent, ap, MAX_PATH) != 0) return -1;
+                    int n = 0;
+                    int alen = (int)strlen(ap);
+                    if (alen >= MAX_PATH - 2) return -1;
+                    for (; n < alen; n++) resolved[n] = ap[n];
+                    if (!(alen == 1 && ap[0] == '/')) resolved[n++] = '/';
+                    int m = 0;
+                    while (tgt[m] && n < MAX_PATH - 1) resolved[n++] = tgt[m++];
+                    resolved[n] = '\0';
+                }
+                cur = 0;
+                goto next_restart;   // re-split the rebuilt path
+            }
+            cur = nxt;
         }
-        
-        if (found < 0) return -1;
-        cur = found;
+        return cur;
+    next_restart:;
     }
-    
-    return cur;
+    return -2;
+}
+
+static int vfs_get_node_unlocked(const char* path) {
+    return vfs_walk_path(path, 0);
+}
+// No-follow lookup for the FINAL component (readlink/delete/rename base).
+int vfs_get_node_nofollow(const char* path) {
+    vfs_lock_acquire();
+    int r = vfs_walk_path(path, 1);
+    vfs_lock_release();
+    return r;
 }
 int vfs_get_node(const char* path) {
     vfs_lock_acquire();
@@ -1541,6 +1749,57 @@ int vfs_create_file(const char* path) {
     return r;
 }
 
+// --- Symlinks (v38.85) ---
+
+int vfs_symlink(const char* target, const char* linkpath) {
+    if (!target || !linkpath) return -1;
+    int tlen = (int)strlen(target);
+    if (tlen <= 0 || tlen >= VFS_SYMLINK_MAX) return -1;
+
+    vfs_lock_acquire();
+    // Parent of the link (no-follow on the way: creating "a/b" where a is a
+    // symlink to a dir is ALLOWED — only the final component must not exist).
+    char resolved[MAX_PATH];
+    vfs_resolve_path(linkpath, resolved, MAX_PATH);
+    char comps[MAX_PATH/2][MAX_FILENAME];
+    int ncomp = split_path(resolved, comps);
+    if (ncomp <= 0) { vfs_lock_release(); return -1; }
+    int cur = 0;
+    for (int i = 0; i < ncomp - 1; i++) {
+        int nxt = vfs_walk_child(cur, comps[i]);
+        if (nxt < 0) { vfs_lock_release(); return -1; }
+        if (!vfs_is_dir_type(fs_nodes[nxt].type)) { vfs_lock_release(); return -1; }
+        cur = nxt;
+    }
+    const char* lname = comps[ncomp - 1];
+    if (vfs_find_in_dir_unlocked(lname, cur) >= 0 ||
+        vfs_proc_lazy_lookup(cur, lname, 1) == -2) {
+        vfs_lock_release();
+        return -2;   // link name already exists (real or live /proc/<pid>)
+    }
+    int n = vfs_create_node(lname, FS_SYMLINK, cur);
+    if (n >= 0) {
+        int k = 0;
+        for (; k < tlen; k++) fs_nodes[n].pad[k] = target[k];
+        fs_nodes[n].pad[k] = '\0';
+    }
+    vfs_lock_release();
+    return n;
+}
+
+int vfs_readlink(const char* path, char* buf, int size) {
+    if (!buf || size <= 0) return -1;
+    vfs_lock_acquire();
+    int n = vfs_walk_path(path, 1);   // no-follow the final component
+    if (n < 0 || fs_nodes[n].type != FS_SYMLINK) { vfs_lock_release(); return -1; }
+    int tlen = 0;
+    while (fs_nodes[n].pad[tlen] && tlen < VFS_SYMLINK_MAX) tlen++;
+    if (tlen > size) tlen = size;
+    for (int i = 0; i < tlen; i++) buf[i] = fs_nodes[n].pad[i];
+    vfs_lock_release();
+    return tlen;
+}
+
 // Remove the on-disk ext2 object behind a VFS node (if any). Must run while
 // the node is still in_use so parent/name lookups stay valid.
 static void vfs_remove_ext2_entry(int node) {
@@ -1567,14 +1826,27 @@ static void vfs_remove_fat32_entry(int node) {
 }
 
 static int vfs_delete_node_unlocked(const char* path, int acting_uid) {
-    int node = vfs_get_node(path);
+    // No-follow: deleting a symlink removes the LINK, never its target
+    // (POSIX unlink). vfs_get_node() would traverse the link first.
+    int node = vfs_get_node_nofollow(path);
     if (node < 0) return -1;
     if (node == 0) return -3; // Cannot delete root
     if (fs_nodes[node].type == FS_PROC) return -7; // virtual, cannot delete
-    // The /proc mount point itself is virtual too: deleting it would take the
-    // whole tree down until the next boot recreates it.
     if (fs_nodes[node].type == FS_DIR && fs_nodes[node].parent == 0 &&
         strcmp(fs_nodes[node].name, "proc") == 0) return -7;
+    // v38.85: /proc/<pid> dirs are FS_DIR — block removing them (or anything
+    // named like a pid directly under /proc) even though the type check above
+    // no longer catches them.
+    if (fs_nodes[node].type == FS_DIR) {
+        int pp = fs_nodes[node].parent;
+        if (pp > 0 && fs_nodes[pp].in_use && fs_nodes[pp].parent == 0 &&
+            strcmp(fs_nodes[pp].name, "proc") == 0) {
+            const char* nm = fs_nodes[node].name;
+            int digits = (nm[0] != '\0');
+            for (const char* c = nm; *c; c++) if (*c < '0' || *c > '9') { digits = 0; break; }
+            if (digits) return -7;
+        }
+    }
 
     // Protected system files (v38.53 auth-bypass fix): /etc/passwd must not
     // be removable by non-root. Deleting it re-arms the PASSWD_DEFAULT login
@@ -1685,7 +1957,9 @@ int vfs_delete_node_as(const char* path, int acting_uid) {
 
 static int vfs_rename_unlocked(const char* old_path, const char* new_path,
                                int acting_uid) {
-    int node = vfs_get_node(old_path);
+    // Rename the LINK for symlinks (renaming through to the target would
+    // strand the link path on a dangling name). Rename the node itself.
+    int node = vfs_get_node_nofollow(old_path);
     if (node < 0) return -1;
     if (node == 0) return -3; // Cannot rename root
 
@@ -1786,6 +2060,97 @@ int vfs_rename_as(const char* old_path, const char* new_path, int acting_uid) {
 // ============================================================
 // Virtual /proc filesystem: content generated on the fly at read time.
 // ============================================================
+
+// v38.85: per-process /proc/<pid>/{status,cmdline}. The caller resolved the
+// path; find the pid dir (its data_sector holds the pid) and decide which
+// child file was opened by comparing the node index against the child.
+static int vfs_proc_pid_read(int pid_node, int file_node, char* buf, int max_size) {
+    int len = 0;
+    int pid = fs_nodes[pid_node].data_sector;
+    task_info_t ti;
+    if (!get_task_info(pid, &ti)) {
+        proc_add(buf, &len, max_size, "(no such process)\n");
+        if (len < max_size) buf[len] = '\0';
+        return len;
+    }
+
+    char num[16];
+    int status_child = vfs_find_in_dir_unlocked("status", pid_node);
+    if (file_node == status_child) {
+        proc_add(buf, &len, max_size, "Name:\t");
+        proc_add(buf, &len, max_size, ti.name);
+        proc_add(buf, &len, max_size, "\nState:\t");
+        proc_add(buf, &len, max_size, proc_state_str(ti.state));
+        proc_add(buf, &len, max_size, "\nPid:\t");
+        proc_itoa(num, ti.id);      proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, "\nPPid:\t");
+        proc_itoa(num, task_get_parent(ti.id)); proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, "\nUid:\t");
+        proc_itoa(num, task_get_uid(ti.id));    proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, "\nRing:\t");
+        proc_itoa(num, ti.ring);    proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, "\nPri:\t");
+        proc_itoa(num, ti.priority); proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, "\nPGrp:\t");
+        proc_itoa(num, task_get_pgrp(ti.id));   proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, "\nStk%:\t");
+        proc_itoa(num, (ti.stack_watermark * 100) / TASK_KSTACK_SIZE);
+        proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, "\n");
+    } else {
+        // cmdline: the image path the process was launched with
+        // (launch_arg; fork children inherit the parent's program).
+        proc_add(buf, &len, max_size, task_get_launch_arg(ti.id));
+        proc_add(buf, &len, max_size, "\n");
+    }
+    if (len < max_size) buf[len] = '\0';
+    return len;
+}
+
+// v38.85: drop any /proc/<pid> node left on disk from a previous boot. Only
+// flips in_use off (plus its status/cmdline children); no disk writes —
+// vfs_init's regular vfs_save() persists the clean table.
+static void vfs_proc_purge_stale(void) {
+    int proc_root = -1;
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (fs_nodes[i].in_use && fs_nodes[i].parent == 0 &&
+            fs_nodes[i].type == FS_DIR && strcmp(fs_nodes[i].name, "proc") == 0) {
+            proc_root = i;
+            break;
+        }
+    }
+    if (proc_root < 0) return;
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (!fs_nodes[i].in_use || fs_nodes[i].parent != proc_root) continue;
+        if (fs_nodes[i].type != FS_DIR && fs_nodes[i].type != FS_PROC) continue;
+        // pid dirs are recognizable: digits-only name. A live node carries
+        // its pid in data_sector; ds<=0 is a partial/stale remnant — purge it
+        // too, otherwise it shadows re-synthesis forever (v38.85.1).
+        const char* nm = fs_nodes[i].name;
+        int digits = (nm[0] != '\0');
+        for (const char* c = nm; *c; c++) if (*c < '0' || *c > '9') { digits = 0; break; }
+        if (!digits) continue;
+        if (fs_nodes[i].data_sector <= 0) {
+            for (int j = 0; j < MAX_NODES; j++) {
+                if (fs_nodes[j].in_use && fs_nodes[j].parent == i) fs_nodes[j].in_use = 0;
+            }
+            fs_nodes[i].in_use = 0;
+            write_serial_string("[VFS] purged partial /proc/");
+            write_serial_string(nm);
+            write_serial_string("\n");
+            continue;
+        }
+        task_info_t ti;
+        if (get_task_info(fs_nodes[i].data_sector, &ti)) continue;
+        for (int j = 0; j < MAX_NODES; j++) {
+            if (fs_nodes[j].in_use && fs_nodes[j].parent == i) fs_nodes[j].in_use = 0;
+        }
+        fs_nodes[i].in_use = 0;
+        write_serial_string("[VFS] purged stale /proc/");
+        write_serial_string(nm);
+        write_serial_string("\n");
+    }
+}
 
 static void proc_itoa(char* out, int val) {
     char tmp[16];
@@ -1984,6 +2349,16 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
     if (max_size <= 0) return -1;
 
     if (fs_nodes[node].type == FS_PROC) {
+        // v38.85: /proc/<pid>/{status,cmdline} — per-process dynamic nodes.
+        // pid dirs carry their pid in data_sector (synthesized at walk time).
+        if (fs_nodes[node].data_sector > 0) {
+            return vfs_proc_pid_read(node, node, buf, max_size);
+        }
+        int p = fs_nodes[node].parent;
+        if (p > 0 && fs_nodes[p].in_use && fs_nodes[p].data_sector > 0 &&
+            (fs_nodes[p].type == FS_DIR || fs_nodes[p].type == FS_PROC)) {
+            return vfs_proc_pid_read(p, node, buf, max_size);
+        }
         return vfs_proc_read(fs_nodes[node].name, buf, max_size);
     }
 

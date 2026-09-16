@@ -78,6 +78,7 @@ typedef struct {
     uint32_t page_dir;     // per-process page directory (0 = global identity)
     int      fd_table[MAX_FDS_PER_TASK]; // local file descriptors mapped to global FDs
     char     launch_arg[128]; // command-line argument passed at launch
+    char     name[32];      // process name for /proc/<pid> (v38.85)
     int      trusted_shell; // 1 = verified shell host (terminal/explorer/taskmgr).
                             // Gates SYS_EXEC_CMD/SYS_KILL_TASK. Set ONLY by the
                             // kernel from the resolved image identity + parent
@@ -575,6 +576,7 @@ void init_tasking() {
         tasks[i].page_dir = 0;
         tasks[i].heap_ptr = 0x08000000;
         tasks[i].launch_arg[0] = '\0';
+        tasks[i].name[0] = '\0';
         tasks[i].trusted_shell = 0;
         tasks[i].current_dir = 0;
         tasks[i].parent = 0;
@@ -1083,6 +1085,7 @@ void task_lock_release(void) { spin_unlock(&task_lock); }
 static void terminate_task(int tid, int code) {
     if (tid <= 0 || tid >= MAX_TASKS) return;
     if (tasks[tid].state == TASK_STATE_FREE || tasks[tid].state == TASK_STATE_ZOMBIE) return;
+    tasks[tid].name[0] = '\0';   // v38.85: /proc/<pid> vanishes with the process
 
     rq_remove(tid);
     task_cleanup(tid);
@@ -1861,6 +1864,22 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         memcpy(tasks[i].sig_flags, tasks[parent].sig_flags, sizeof(tasks[i].sig_flags));
         memcpy(tasks[i].fd_table, tasks[parent].fd_table, sizeof(tasks[i].fd_table));
         memcpy(tasks[i].launch_arg, tasks[parent].launch_arg, sizeof(tasks[i].launch_arg));
+        {
+            // v38.85: fork children get "fork<parent>" instead of inheriting
+            // the parent's image name — they are the same program, but a
+            // distinct process, exactly what /proc/<pid> should show.
+            char pname[32];
+            int k = 0;
+            const char* psrc = "fork";
+            for (; k < 4; k++) pname[k] = psrc[k];
+            int pv = parent;
+            char digits[8]; int dn = 0;
+            if (pv == 0) digits[dn++] = '0';
+            while (pv > 0 && dn < 8) { digits[dn++] = '0' + (pv % 10); pv /= 10; }
+            for (int m = 0; m < dn && k < 31; m++) pname[k++] = digits[dn - 1 - m];
+            pname[k] = '\0';
+            memcpy(tasks[i].name, pname, sizeof(tasks[i].name));
+        }
         // Trust inherits with the image (fork of a shell host is another
         // instance of the same host program), matching launch_arg semantics.
         tasks[i].trusted_shell = tasks[parent].trusted_shell;
@@ -2674,6 +2693,10 @@ int get_task_info(int tid, task_info_t* info) {
     info->priority = tasks[tid].priority;
     info->sleep_ticks = tasks[tid].sleep_ticks;
     info->stack_watermark = tasks[tid].stack_watermark;
+    info->pgrp = tasks[tid].pgrp;
+    info->session = tasks[tid].session;
+    for (int i = 0; i < 31 && tasks[tid].name[i]; i++) info->name[i] = tasks[tid].name[i];
+    info->name[31] = '\0';
     return 1;
 }
 
@@ -2686,6 +2709,10 @@ int task_enum(int after, task_info_t* info) {
         info->priority = tasks[i].priority;
         info->sleep_ticks = tasks[i].sleep_ticks;
         info->stack_watermark = tasks[i].stack_watermark;
+        info->pgrp = tasks[i].pgrp;
+        info->session = tasks[i].session;
+        for (int k = 0; k < 31 && tasks[i].name[k]; k++) info->name[k] = tasks[i].name[k];
+        info->name[31] = '\0';
         return i;
     }
     return -1;
@@ -2698,6 +2725,21 @@ void task_set_launch_arg(int tid, const char* arg) {
         for (; i < 127 && arg[i]; i++) tasks[tid].launch_arg[i] = arg[i];
     }
     tasks[tid].launch_arg[i] = '\0';
+}
+
+// v38.85: process name for /proc/<pid>/status. Kernel-side only; derived
+// from the image filename by the loader (or "fork<parent>" in fork), never
+// from user-controlled strings.
+void task_set_name(int tid, const char* name) {
+    if (tid < 0 || tid >= MAX_TASKS || !name) return;
+    int i = 0;
+    for (; i < 31 && name[i]; i++) tasks[tid].name[i] = name[i];
+    tasks[tid].name[i] = '\0';
+}
+
+const char* task_get_name(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return "";
+    return tasks[tid].name;
 }
 
 const char* task_get_launch_arg(int tid) {

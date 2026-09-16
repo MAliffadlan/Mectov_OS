@@ -456,6 +456,14 @@ static int finish_loaded_task(const char* filename, const char* arg,
     } else {
         task_set_launch_arg(task_id, filename);
     }
+    // v38.85: /proc/<pid>/status name — the image's base filename, so
+    // "/apps/doom.mct" shows as "doom.mct". task_set_name truncates safely.
+    {
+        extern void task_set_name(int tid, const char* n);
+        const char* base = filename;
+        for (const char* c = filename; *c; c++) if (*c == '/') base = c + 1;
+        task_set_name(task_id, base);
+    }
     extern void task_set_heap_ptr(int tid, uint32_t ptr);
     task_set_heap_ptr(task_id, img->heap_start);
     // Ring 3 apps run as the logged-in user (uid 1000), not root, so file

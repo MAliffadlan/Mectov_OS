@@ -205,5 +205,7 @@ void cmd_sort(void);
 void cmd_uniq(void);
 void cmd_tee_arg(void);
 void cmd_find(void);
+void cmd_ln_arg(void);        // v38.85 symlink creation
+void cmd_readlink_arg(void);  // v38.85 print symlink target
 
 #endif // SHELL_INTERNAL_H
