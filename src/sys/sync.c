@@ -78,8 +78,21 @@ void sync_task_cleanup_defer(int tid) {
 
 void sync_task_cleanup(int tid) {
     if (tid <= 0 || tid > 63) return;   // MAX_TASKS is 64 (task.c)
+    // Recycle race (v38.89): the pending bit was set by a DEATH, but the
+    // tid slot may have been reused since — a phase-1 worker exits, its tid
+    // is recycled by a phase-2 clone, and the new owner parks, all before
+    // the BSP drain runs. Purging unconditionally would evict the LIVE new
+    // owner's waiter registration; no wake path can reach an unlisted
+    // waiter, so it sleeps forever while every core idles (observed: a
+    // consumer stranded on not_empty, all vCPUs HLT, no panic). Skipping
+    // live tids is exact: waiter registration (sem/futex wait) and this
+    // purge serialize on sync_lock, so a tid observed live here owns
+    // whatever entries it holds. (Same task_is_alive precedent as wake_one
+    // below, which already runs under this lock.)
+    extern int task_is_alive(int);
     __asm__ volatile("cli");
     spin_lock(&sync_lock);
+    if (!task_is_alive(tid)) {
     for (int i = 0; i < MAX_SEMS; i++) {
         if (!sems[i].in_use || sems[i].waiter_count == 0) continue;
         int w = 0;
@@ -96,6 +109,7 @@ void sync_task_cleanup(int tid) {
         }
         futexes[i].waiter_count = w;
     }
+    }  // end if (!task_is_alive): live tids keep their own registrations
     spin_unlock(&sync_lock);
     __asm__ volatile("sti");
 }

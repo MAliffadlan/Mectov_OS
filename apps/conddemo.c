@@ -34,12 +34,16 @@ static int fails = 0;
     if (!(cond)) { sys_print(msg, 0x0C); fails++; } \
 } while (0)
 
+// Minimal decimal printer (defined below; forward-declared for the worker).
+static void print_int(int v);
+
 // ---- shared state (test 1) ----
 static mct_mutex_t g_mu;
 static int g_counter = 0;
 
 static void mutex_worker(void* arg) {
-    (void)arg;
+    int id = (int)(unsigned int)arg;
+    int my = 0;  // stack-local: trustworthy even if shared .bss ever aliases
     for (int i = 0; i < LOCK_ITERS; i++) {
         if ((i % 2500) == 1250) {
             // Progress heartbeat: on the slow TCG CI runner each phase can
@@ -50,7 +54,16 @@ static void mutex_worker(void* arg) {
         mct_mutex_lock(&g_mu);
         g_counter++;
         mct_mutex_unlock(&g_mu);
+        my++;
     }
+    // Per-worker completion count: distinguishes "a worker ran short"
+    // (lifecycle bug) from "all ran full but increments vanished"
+    // (aliasing/atomicity bug) when the final counter mismatches.
+    sys_print("[CONDDEMO] worker-done id=", 0x0B);
+    print_int(id);
+    sys_print(" iters=", 0x0B);
+    print_int(my);
+    sys_print("\n", 0x0B);
 }
 
 // ---- shared state (test 2) ----
@@ -138,7 +151,7 @@ void _start(void) {
     sys_print("[CONDDEMO] mutex-phase-start\n", 0x0B);
     int tids[8];
     for (int i = 0; i < MUTEX_THREADS; i++) {
-        tids[i] = mct_thread_create(mutex_worker, 0);
+        tids[i] = mct_thread_create(mutex_worker, (void*)(unsigned int)i);
         if (tids[i] < 0) {
             sys_print("[CONDDEMO] FAIL create mutex worker\n", 0x0C);
             sys_exit_with_code(1);
@@ -152,6 +165,16 @@ void _start(void) {
     }
     sys_print("[CONDDEMO] mutex-joined\n", 0x0B);
     CHECK(g_counter == MUTEX_THREADS * LOCK_ITERS, "[CONDDEMO] FAIL mutex counter\n");
+    // Print the actual value on mismatch: the SIZE of the shortfall
+    // discriminates a rare single-race loss (off by a handful) from
+    // systematic aliasing (off by whole workers' worth).
+    if (g_counter != MUTEX_THREADS * LOCK_ITERS) {
+        sys_print("[CONDDEMO] counter-was ", 0x0C);
+        print_int(g_counter);
+        sys_print(" want ", 0x0C);
+        print_int(MUTEX_THREADS * LOCK_ITERS);
+        sys_print("\n", 0x0C);
+    }
     sys_print("[CONDDEMO] mutex counter OK\n", 0x0B);
 
     // ---- Test 2: bounded producer/consumer via condvars ----

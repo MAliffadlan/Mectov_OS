@@ -22,7 +22,20 @@
 //                  futex_wait re-checks the value under its lock and
 //                  returns -1 immediately, and the caller re-checks the
 //                  predicate in the standard `while (pred) wait();` loop.
+//
+// Ordering (v38.89): the lock word and the sequence counter are plain
+// `int`, so WITHOUT compiler barriers `-O2` is free to reorder them
+// against the critical section — and did: conddemo.elf once showed
+// unlock's `lock=0` store + wake hoisted ABOVE `g_counter++`, silently
+// dropping mutual exclusion under contention (flaky short counter).
+// Every barrier below is `asm("" ::: "memory")`: zero instructions, but
+// the compiler may not move plain accesses across it. On x86 (TSO)
+// compilation order is visibility order, so this is sufficient — no
+// hardware fence needed.
 // ============================================================
+
+// Compiler barrier: nothing (plain or volatile) moves across it.
+#define MCT_BARRIER() __asm__ __volatile__("" ::: "memory")
 
 // ---- atomic compare-and-swap (i386 userland, SMP-safe) ----
 static inline int mct_cmpxchg(volatile int* p, int old, int new) {
@@ -47,7 +60,7 @@ static inline void mct_mutex_init(mct_mutex_t* m) { m->lock = 0; }
 
 static inline void mct_mutex_lock(mct_mutex_t* m) {
     // Fast path: uncontended acquire.
-    if (mct_cmpxchg(&m->lock, 0, 1) == 0) return;
+    if (mct_cmpxchg(&m->lock, 0, 1) == 0) { MCT_BARRIER(); return; }
     // Slow path: contended. Park on the futex while the lock is held.
     // v38.87: the park is BOUNDED (50 ms) — even if a wake is lost to a
     // kernel race, the timed wait returns and the loop re-checks m->lock,
@@ -56,13 +69,19 @@ static inline void mct_mutex_lock(mct_mutex_t* m) {
         while (m->lock == 1) {
             sys_futex_wait_timeout((void*)&m->lock, 1, 50);
         }
-        if (mct_cmpxchg(&m->lock, 0, 1) == 0) return;
+        // Acquire barrier: the critical section below must not be
+        // compiled above the winning cmpxchg.
+        if (mct_cmpxchg(&m->lock, 0, 1) == 0) { MCT_BARRIER(); return; }
     }
 }
 
 static inline void mct_mutex_unlock(mct_mutex_t* m) {
-    // Release-store then wake one waiter (if any). The syscall acts as a
-    // barrier; on x86 the plain store is already visible before it.
+    // Release barrier FIRST: everything in the critical section above
+    // must be compiled before the release-store. Without this, -O2 once
+    // hoisted the store (+wake) above the caller's increment, silently
+    // unprotecting it under contention (flaky short mutex counter).
+    // On x86 the plain store is already visible before the syscall.
+    MCT_BARRIER();
     m->lock = 0;
     sys_futex_wake((void*)&m->lock, 1);
 }
@@ -96,11 +115,16 @@ static inline void mct_cond_wait(mct_cond_t* c, mct_mutex_t* m) {
 
 static inline void mct_cond_signal(mct_cond_t* c) {
     c->seq++;
+    // The wake must be compiled after the seq bump: a waiter snapshots
+    // seq to detect signals that race its sleep, so a reordered
+    // wake-before-bump is a lost wakeup (healed only by the 50 ms sweep).
+    MCT_BARRIER();
     sys_futex_wake((void*)&c->seq, 1);
 }
 
 static inline void mct_cond_broadcast(mct_cond_t* c) {
     c->seq++;
+    MCT_BARRIER();  // same ordering contract as signal (see above)
     sys_futex_wake((void*)&c->seq, 0x7FFFFFFF);
 }
 
