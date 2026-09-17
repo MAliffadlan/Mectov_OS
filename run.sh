@@ -48,9 +48,9 @@ if [ ! -f "virtio.img" ]; then
     mkfs.fat -F 32 -S 512 virtio.img > /dev/null 2>&1
 fi
 
-# Rebuild kernel (akan mengompilasi semua MCT dinamis secara bersih)
-make
-
+# Rebuild kernel (akan mengompilasi semua MCT dinamis secara bersih).
+# `all32` is explicit on purpose: bare `make` now builds the 64-bit kernel.
+make all32
 # Setup ISO directory
 mkdir -p iso/boot/grub
 cp myos.bin iso/boot/

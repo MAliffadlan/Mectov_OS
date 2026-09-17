@@ -13,6 +13,12 @@ memdisk.tar
 
 # Object directory
 obj/
+# 64-bit bring-up artifacts (x86_64-port branch, M1+)
+obj64/
+iso64/
+myos64.bin
+mectov64.iso
+serial64.log
 
 # Temporary/Scratch files
 offset

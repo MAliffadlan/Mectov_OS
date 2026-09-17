@@ -119,7 +119,18 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/udptest_elf.o \
        $(DOOM_OBJS)
 
-all: $(OBJ_DIR) myos.bin
+# --- Default build: the 64-bit kernel (mainline since 2026-09-18) ---
+# Bare `make` builds the 64-bit kernel + ISO. The previous 32-bit line is kept
+# fully buildable, just explicit:
+#   make all32              myos.bin            (32-bit kernel)
+#   make all32 && make iso  mectov.iso          (32-bit ISO, ./run.sh does this)
+#   make all64 | make       myos64.bin + mectov64.iso (64-bit, the default)
+#   make check64            64-bit gate battery (run64.sh + the scripts/ tests)
+#   make check              32-bit battery (scripts/check.py, ~25 min)
+.DEFAULT_GOAL := all64
+all: all64
+all64: myos64.bin iso64
+all32: $(OBJ_DIR) myos.bin
 
 .PHONY: obj-dirs
 # obj/ itself is not phony (it is a real directory), but its rule must run
@@ -512,7 +523,8 @@ myos.bin: $(OBJS)
 clean:
 	rm -rf $(OBJ_DIR) myos.bin myos.bin.debug
 
-clean_all: clean
+# Full clean: both lines (run.sh calls this before its 32-bit rebuild).
+clean_all: clean clean64
 	rm -f *.mct *.elf
 
 # --- Local test battery (CI parity with .github/workflows/build-boot-test.yml) ---
@@ -537,4 +549,132 @@ check: iso
 check-quick: iso
 	python3 scripts/check.py --quick $(CHECK_ARGS)
 
-.PHONY: all clean clean_all check check-quick iso
+.PHONY: all all32 all64 clean clean_all check check-quick iso myos64 iso64 clean64 check64
+
+# --- 64-bit bring-up (M1, x86_64-port branch) ---
+# Parallel build that does NOT touch the 32-bit kernel: separate sources
+# (boot64.asm + kernel64.c), separate linker script (linker64.ld), separate
+# object dir (obj64/) and output (myos64.bin / mectov64.iso).
+CC64 = gcc
+AS64 = nasm
+LD64 = ld
+CFLAGS64 = -m64 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g -march=x86-64 -mcmodel=kernel -mno-red-zone -fno-pie -fno-pic -MMD -MP
+LDFLAGS64 = -m elf_x86_64 -T linker64.ld -z noexecstack
+ASFLAGS64 = -f elf64
+OBJ64_DIR = obj64
+OBJS64 = $(OBJ64_DIR)/boot64.o $(OBJ64_DIR)/kernel64.o \
+         $(OBJ64_DIR)/k64_gdt64.o $(OBJ64_DIR)/k64_idt64.o \
+         $(OBJ64_DIR)/k64_isr64.o $(OBJ64_DIR)/k64_mem64.o \
+         $(OBJ64_DIR)/k64_task64.o $(OBJ64_DIR)/k64_syscall64.o \
+         $(OBJ64_DIR)/k64_loader64.o         $(OBJ64_DIR)/k64_smp64.o \
+         $(OBJ64_DIR)/k64_kbd64.o $(OBJ64_DIR)/k64_console64.o \
+         $(OBJ64_DIR)/k64_gfx64.o $(OBJ64_DIR)/k64_gui64.o \
+         $(OBJ64_DIR)/k64_mouse64.o \
+         $(OBJ64_DIR)/k64_heap64.o \
+         $(OBJ64_DIR)/font8x16.o \
+         $(OBJ64_DIR)/entry64.o $(OBJ64_DIR)/tramp64_bin.o \
+         $(OBJ64_DIR)/hello64_mct.o $(OBJ64_DIR)/fpu64_mct.o \
+         $(OBJ64_DIR)/clone64_mct.o $(OBJ64_DIR)/forkdemo64_mct.o \
+         $(OBJ64_DIR)/execdemo64_mct.o $(OBJ64_DIR)/execchild64_elf.o \
+         $(OBJ64_DIR)/shell64_mct.o $(OBJ64_DIR)/argdemo64_mct.o \
+         $(OBJ64_DIR)/shelltest64_mct.o $(OBJ64_DIR)/brkdemo64_mct.o \
+         $(OBJ64_DIR)/nxtest64_mct.o $(OBJ64_DIR)/asldemo64_mct.o \
+         $(OBJ64_DIR)/smptest64_mct.o
+
+$(OBJ64_DIR):
+	@mkdir -p $(OBJ64_DIR)
+
+$(OBJ64_DIR)/boot64.o: boot64.asm | $(OBJ64_DIR)
+	$(AS64) $(ASFLAGS64) $< -o $@
+
+$(OBJ64_DIR)/kernel64.o: kernel64.c k64/cpu64.h | $(OBJ64_DIR)
+	$(CC64) $(CFLAGS64) -c $< -o $@
+
+$(OBJ64_DIR)/k64_%.o: k64/%.c k64/cpu64.h | $(OBJ64_DIR)
+	$(CC64) $(CFLAGS64) -c $< -o $@
+
+$(OBJ64_DIR)/entry64.o: k64/entry64.asm | $(OBJ64_DIR)
+	$(AS64) $(ASFLAGS64) $< -o $@
+
+# VGA-1: the 64-bit console draws with the same glyph table as the 32-bit
+# desktop (src/drivers/font8x16.c). Pure data, so the 64-bit flags are fine
+# and there is only ever one font to keep in sync.
+$(OBJ64_DIR)/font8x16.o: src/drivers/font8x16.c src/include/font8x16.h | $(OBJ64_DIR)
+	$(CC64) $(CFLAGS64) -c $< -o $@
+
+# --- M6 AP trampoline: 16-bit blob loaded at 0x8000 via SIPI ---
+k64/tramp64.bin: k64/tramp64.asm
+	nasm -f bin $< -o $@
+
+$(OBJ64_DIR)/tramp64_bin.o: k64/tramp64.bin | $(OBJ64_DIR)
+	objcopy -I binary -O elf64-x86-64 -B i386:x86-64 $< $@
+
+# --- M5 Ring-3 images: MCT2 (flat fixed-base, build_mct64.py) + one ELF64
+# PIE (build_elf64.py, exec target proving the ELF loader). Raw images are
+# embedded into the kernel; the M5 loader parses them at spawn/exec time
+# (no more blind-BASE raw blobs).
+demos/hello64.mct: demos/hello64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/hello64.c demos/hello64.mct 0x40000000
+
+demos/fpu64.mct: demos/fpu64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/fpu64.c demos/fpu64.mct 0x41000000
+
+demos/clone64.mct: demos/clone64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/clone64.c demos/clone64.mct 0x42000000
+
+demos/forkdemo64.mct: demos/forkdemo64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/forkdemo64.c demos/forkdemo64.mct 0x43000000
+
+demos/execdemo64.mct: demos/execdemo64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/execdemo64.c demos/execdemo64.mct 0x44000000
+
+demos/shell64.mct: demos/shell64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/shell64.c demos/shell64.mct 0x45000000
+
+demos/argdemo64.mct: demos/argdemo64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/argdemo64.c demos/argdemo64.mct 0x46000000
+
+demos/shelltest64.mct: demos/shelltest64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/shelltest64.c demos/shelltest64.mct 0x47000000
+
+demos/brkdemo64.mct: demos/brkdemo64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/brkdemo64.c demos/brkdemo64.mct 0x48000000
+
+demos/nxtest64.mct: demos/nxtest64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/nxtest64.c demos/nxtest64.mct 0x49000000
+
+demos/asldemo64.mct: demos/asldemo64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/asldemo64.c demos/asldemo64.mct 0x4A000000
+
+demos/smptest64.mct: demos/smptest64.c demos/sys64.h demos/entry.S scripts/build_mct64.py
+	python3 scripts/build_mct64.py demos/smptest64.c demos/smptest64.mct 0x4B000000
+
+demos/execchild64.elf: demos/execchild64.c demos/sys64.h demos/entry.S scripts/build_elf64.py
+	python3 scripts/build_elf64.py demos/execchild64.c demos/execchild64.elf
+
+$(OBJ64_DIR)/%64_mct.o: demos/%64.mct | $(OBJ64_DIR)
+	objcopy -I binary -O elf64-x86-64 -B i386:x86-64 $< $@
+
+$(OBJ64_DIR)/execchild64_elf.o: demos/execchild64.elf | $(OBJ64_DIR)
+	objcopy -I binary -O elf64-x86-64 -B i386:x86-64 $< $@
+
+-include $(OBJS64:.o=.d)
+
+myos64.bin: $(OBJS64)
+	$(LD64) $(LDFLAGS64) $(OBJS64) -o myos64.bin
+
+iso64: myos64.bin
+	@mkdir -p iso64/boot/grub
+	cp myos64.bin iso64/boot/
+	@printf 'set timeout=0\nset default=0\nmenuentry "Mectov OS 64" {\n    multiboot2 /boot/myos64.bin $(MECTOV64_CMDLINE)\n    boot\n}\n' > iso64/boot/grub/grub.cfg
+	grub-mkrescue -o mectov64.iso iso64
+
+clean64:
+	rm -rf $(OBJ64_DIR) myos64.bin mectov64.iso iso64 serial64.log
+	rm -f demos/*64.o demos/*64.elf demos/*64.bin demos/*64.mct demos/entry64.o
+	rm -f k64/tramp64.bin
+
+check64: iso64
+	./run64.sh --headless && python3 scripts/kbd_test.py && \
+	python3 scripts/heap_test.py && python3 scripts/cons_test.py && \
+	python3 scripts/gui_test.py

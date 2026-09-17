@@ -1,6 +1,11 @@
 # Mectov OS — Documentation Index
 
-Welcome to the official technical documentation for **Mectov OS**, an x86 32-bit monolithic operating system kernel built from scratch in C and Assembly.
+Welcome to the official technical documentation for **Mectov OS**, a monolithic operating system kernel built from scratch in C and Assembly.
+
+Two lines live in this repository:
+
+* **x86_64 (mainline)** — `kernel64.c` + `k64/`, built by bare `make`, run with `./run64.sh`. This is where development happens.
+* **x86 32-bit (original line, reference)** — `src/` + `kernel.c`, still fully buildable as `make all32` and runnable with `./run.sh`. The documents below describe that line; where it solves a problem well, the 64-bit kernel reuses the idea (see [the 64-bit audit and roadmap](architecture/x86_64_port.md)).
 
 ---
 
@@ -12,6 +17,7 @@ Welcome to the official technical documentation for **Mectov OS**, an x86 32-bit
 * **[Memory Management](architecture/memory.md)** — Physical page allocation (PMM), Virtual Memory (VMM/Paging), heap isolation, and process tear-down safety.
 * **[Preemptive Scheduler](architecture/scheduler.md)** — Priority Round-Robin scheduler, context switching, interrupt gates, and deadlock prevention.
 * **[Syscall Subsystem](architecture/syscalls.md)** — `int 0x80` Ring 3 interface, register passing, and modular syscall dispatching (`syscall_gui`, `syscall_vfs`, `syscall_net`, etc.).
+* **[x86_64 Port](architecture/x86_64_port.md)** — 64-bit kernel (`kernel64.c`, `k64/`) milestone status, measured `-m64` reusability of `src/`, the dependency map of the 32-bit desktop, and the M10→M16 porting order.
 
 ### 2. Device Drivers (`docs/drivers/`)
 * **[VGA / VBE Video Driver](drivers/vga_vbe.md)** — 1024x768 VESA VBE linear framebuffer, triple-buffer rendering, dirty region tracking, and hardware mouse cursor.
@@ -32,10 +38,12 @@ Welcome to the official technical documentation for **Mectov OS**, an x86 32-bit
 ## 🛠️ Quick Build & Run Instructions
 
 ```bash
-# Compile the kernel and standalone MCT user apps
-make clean && make
+# 64-bit (default): kernel + ISO, then boot it in QEMU
+make clean64 && make          # -> myos64.bin, mectov64.iso
+./run64.sh                    # windowed QEMU; ./run64.sh --headless for the gate
+make check64                  # 64-bit gate battery + the scripts/ tests
 
-# Run in QEMU (KVM) with VBE display, 128MB RAM, and 4 CPU cores (SMP);
-# the serial console is streamed to serial_debug.log
-./run.sh
+# 32-bit (original line)
+make all32                    # -> myos.bin
+./run.sh                      # builds the ISO itself, boots QEMU (KVM), 4 cores
 ```
