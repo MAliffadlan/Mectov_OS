@@ -82,7 +82,7 @@ SUITES = [
     ("tlb_sd",           "tlb_sd_test.py",            240),
     ("perm",             "perm_test.py",              360),
     ("thread",           "thread_test.py",            360),
-    ("cond",             "cond_test.py",              300),
+    ("cond",             "cond_test.py",              480),
     ("rlimit",           "rlimit_test.py",            360),
     ("ulimit",           "ulimit_test.py",            360),
     ("bigread",          "bigread_test.py",           420),

@@ -35,14 +35,14 @@ SECTIONS {
         subprocess.run(["objcopy", "-O", "binary", elf_file, bin_file], check=True)
     except subprocess.CalledProcessError:
         print("[!] Compilation failed!")
-        return
+        return 1
 
     try:
         with open(bin_file, "rb") as f:
             code_data = f.read()
     except FileNotFoundError:
         print("[!] Binary file not found!")
-        return
+        return 1
 
     code_size = len(code_data)
     entry_point = 0
@@ -59,6 +59,10 @@ SECTIONS {
     os.remove(o_file)
     os.remove(bin_file)
     os.remove(ld_file)
+    return 0
 
 if __name__ == "__main__":
-    build_lib(sys.argv[1], sys.argv[2])
+    if len(sys.argv) < 3:
+        print("Usage: python3 build_lib.py <source.c> <output.mct>")
+        sys.exit(1)
+    sys.exit(build_lib(sys.argv[1], sys.argv[2]))

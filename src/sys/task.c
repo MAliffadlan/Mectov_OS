@@ -1567,8 +1567,11 @@ int task_getrlimit(int res, rlimit_t* out) {
 
 // SYS_SETRLIMIT (POSIX semantics): a non-root caller may lower cur and raise
 // cur only up to max, but may never raise max. Root may set anything. cur
-// must not exceed max. Values are clamped to sane bounds to keep a hostile
-// caller from setting an absurd hard limit that later trips an overflow.
+// must not exceed max. Absurd values are rejected (EINVAL) instead of
+// clamped, so a caller can never observe a limit it did not ask for —
+// silently lowering max would hide bugs and break the cur<=max contract the
+// caller just validated. The 0x7FFFFFFF ceiling keeps hostile values out of
+// the signed enforcement comparisons below.
 int task_setrlimit(int res, const rlimit_t* in) {
     if (res < 0 || res >= RLIM_NLIMITS) return -1;
     if (!in) return -1;
@@ -1576,9 +1579,10 @@ int task_setrlimit(int res, const rlimit_t* in) {
     int tid = (current_task[cid] >= 0 && current_task[cid] < MAX_TASKS) ? current_task[cid] : 0;
 
     rlimit_t want = *in;
-    // Clamp to hard physical ceilings so a corrupt/absurd value can never
-    // cause an arithmetic overflow in the enforcement checks below.
-    if (want.max > 0x7FFFFFFFu) want.max = 0x7FFFFFFFu;
+    // Reject absurd values outright (POSIX EINVAL): the enforcement paths
+    // below compare against signed ints, so anything above INT32_MAX is
+    // not representable as a limit.
+    if (want.max > 0x7FFFFFFFu || want.cur > 0x7FFFFFFFu) return -1;
     // POSIX EINVAL: cur may never exceed max. Refuse instead of clamping, so
     // a caller cannot silently "raise" a limit by asking for an impossible
     // pair (e.g. `ulimit -n 99` with hard=16 must fail, not clamp to 16).

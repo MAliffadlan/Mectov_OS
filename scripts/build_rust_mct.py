@@ -60,7 +60,7 @@ def build_app(rs_file, output_mct):
         )
     except subprocess.CalledProcessError:
         print("[!] rustc failed!")
-        return
+        return 1
 
     # 2. Linker script — same layout as build_mct.py (+ .rdata, which the UEFI
     #    target uses for read-only data, and .data.rel.ro for statics).
@@ -96,14 +96,14 @@ SECTIONS {{
         )
     except subprocess.CalledProcessError:
         print("[!] Linking failed!")
-        return
+        return 1
 
     # 4. Extract raw binary
     try:
         subprocess.run(["objcopy", "-O", "binary", elf_file, bin_file], check=True)
     except subprocess.CalledProcessError:
         print("[!] Binary extraction failed!")
-        return
+        return 1
 
     # 5. Build .mct header (identical layout to build_mct.py)
     with open(bin_file, "rb") as f:
@@ -149,10 +149,11 @@ SECTIONS {{
             os.remove(tmp)
         except OSError:
             pass
+    return 0
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python3 build_rust_mct.py <source.rs> <output.mct>")
         sys.exit(1)
-    build_app(sys.argv[1], sys.argv[2])
+    sys.exit(build_app(sys.argv[1], sys.argv[2]))

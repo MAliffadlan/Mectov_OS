@@ -43,21 +43,21 @@ SECTIONS {
         subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic", "-static", "-O2", "-msoft-float", "-mno-80387", "-mno-sse", "-mno-mmx", "-I.", "-c", c_file, "-o", o_file] + extra_flags, check=True)
     except subprocess.CalledProcessError:
         print("[!] Compilation failed!")
-        return
+        return 1
 
     # 3. Link
     try:
         subprocess.run(["ld", "-m", "elf_i386", "-T", ld_file, o_file, "-o", elf_file], check=True)
     except subprocess.CalledProcessError:
         print("[!] Linking failed!")
-        return
+        return 1
 
     # 4. Extract raw binary
     try:
         subprocess.run(["objcopy", "-O", "binary", elf_file, bin_file], check=True)
     except subprocess.CalledProcessError:
         print("[!] Binary extraction failed!")
-        return
+        return 1
 
     # 5. Build .mct header
     try:
@@ -65,7 +65,7 @@ SECTIONS {
             code_data = f.read()
     except FileNotFoundError:
         print("[!] Binary file not found!")
-        return
+        return 1
 
     code_size = len(code_data)
     entry_point = 0
@@ -112,10 +112,11 @@ SECTIONS {
      
     os.remove(bin_file)
     os.remove(ld_file)
+    return 0
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python3 build_mct.py <source.c> <output.mct>")
         sys.exit(1)
-        
-    build_app(sys.argv[1], sys.argv[2])
+
+    sys.exit(build_app(sys.argv[1], sys.argv[2]))
