@@ -154,6 +154,8 @@ static int vfs_walk_path(const char* path, int nofollow_last);
 static int vfs_get_node_nofollow(const char* path);
 static int vfs_proc_lazy_lookup(int cur, const char* comp, int probe);
 static void vfs_proc_purge_stale(void);
+// v38.91: /proc/sys seeding (called from both vfs_init paths, defined below)
+void vfs_proc_sys_seed(int proc_node);
 
 // Seed apps/music.wav from /ext2/music.wav (debloat v38.81): the canonical
 // copy lives on ext2 (host-seeded by scripts/seed_ext2.sh); VFS keeps the
@@ -324,6 +326,7 @@ void vfs_init() {
                 vfs_create_node("atastats", FS_PROC, proc_node);
                 write_serial_string("[VFS] added /proc/atastats node\n");
             }
+            vfs_proc_sys_seed(proc_node);   // v38.91: /proc/sys tunables
         }
         
         // v38.85: /bin with the canonical `term` symlink — `cat /bin/term`
@@ -460,6 +463,11 @@ void vfs_init() {
         extern uint8_t _binary_procfsdemo_mct_start[];
         extern uint8_t _binary_procfsdemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/procfsdemo.mct", (const char*)_binary_procfsdemo_mct_start, _binary_procfsdemo_mct_end - _binary_procfsdemo_mct_start);
+
+        // /proc/sys + nice demo (v38.91)
+        extern uint8_t _binary_procsysdemo_mct_start[];
+        extern uint8_t _binary_procsysdemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/procsysdemo.mct", (const char*)_binary_procsysdemo_mct_start, _binary_procsysdemo_mct_end - _binary_procsysdemo_mct_start);
 
         // FPU/SSE context-switch regression (v38.41)
         extern uint8_t _binary_fputest_mct_start[];
@@ -759,6 +767,12 @@ void vfs_init() {
     vfs_create_file("apps/procfsdemo.mct");
     vfs_write_file("apps/procfsdemo.mct", (const char*)_binary_procfsdemo_mct_start, _binary_procfsdemo_mct_end - _binary_procfsdemo_mct_start);
 
+    // /proc/sys + nice demo (v38.91)
+    extern uint8_t _binary_procsysdemo_mct_start[];
+    extern uint8_t _binary_procsysdemo_mct_end[];
+    vfs_create_file("apps/procsysdemo.mct");
+    vfs_write_file("apps/procsysdemo.mct", (const char*)_binary_procsysdemo_mct_start, _binary_procsysdemo_mct_end - _binary_procsysdemo_mct_start);
+
     // FPU/SSE context-switch regression (v38.41)
     extern uint8_t _binary_fputest_mct_start[];
     extern uint8_t _binary_fputest_mct_end[];
@@ -1054,6 +1068,7 @@ void vfs_init() {
         vfs_create_node("version", FS_PROC, proc_node);
         vfs_create_node("dmesg", FS_PROC, proc_node);
         vfs_create_node("atastats", FS_PROC, proc_node);
+        vfs_proc_sys_seed(proc_node);   // v38.91: /proc/sys tunables
         write_serial_string("[VFS] created /proc nodes\n");
     }
     
@@ -2224,6 +2239,24 @@ static int vfs_proc_pid_read(int pid_node, int file_node, char* buf, int max_siz
         proc_add(buf, &len, max_size, "\nStk%:\t");
         proc_itoa(num, (ti.stack_watermark * 100) / TASK_KSTACK_SIZE);
         proc_add(buf, &len, max_size, num);
+        // v38.91: nice + CPU% (scheduler ticks actually consumed, as a share
+        // of all ticks since boot — the same definition top(1) approximates).
+        proc_add(buf, &len, max_size, "\nNice:\t");
+        proc_itoa(num, ti.nice); proc_add(buf, &len, max_size, num);
+        proc_add(buf, &len, max_size, "\nCPU%:\t");
+        {
+            extern volatile uint32_t timer_ticks;
+            uint32_t now = timer_ticks;
+            // 32-bit only: __udivdi3 (64-bit divide) is unavailable in the
+            // freestanding link. cpu_ticks <= now always, so clamp first and
+            // the multiply stays far from overflowing uint32.
+            uint32_t pct;
+            if (ti.cpu_ticks == 0 || now == 0)      pct = 0;
+            else if (ti.cpu_ticks >= now)           pct = 100;
+            else if (ti.cpu_ticks > 42949672u)      pct = 99; // overflow guard
+            else                                    pct = (ti.cpu_ticks * 100) / now;
+            proc_itoa(num, (int)pct); proc_add(buf, &len, max_size, num);
+        }
         proc_add(buf, &len, max_size, "\n");
     } else {
         // cmdline: the image path the process was launched with
@@ -2284,8 +2317,10 @@ static void proc_itoa(char* out, int val) {
     char tmp[16];
     int i = 0;
     if (val == 0) { out[0] = '0'; out[1] = '\0'; return; }
-    while (val > 0 && i < 15) { tmp[i++] = '0' + (val % 10); val /= 10; }
+    unsigned int v = (val < 0) ? (unsigned int)(-(long)val) : (unsigned int)val;
+    while (v > 0 && i < 15) { tmp[i++] = '0' + (v % 10); v /= 10; }
     int j = 0;
+    if (val < 0) out[j++] = '-';
     while (i > 0) out[j++] = tmp[--i];
     out[j] = '\0';
 }
@@ -2318,6 +2353,113 @@ static const char* proc_state_str(int s) {
 
 // Generate the content of a /proc file into buf. Returns the byte count, with
 // a NUL appended when there is room (same contract as vfs_read_file).
+// v38.91: tunable getters/setters live with their subsystems.
+extern int proc_sys_zombie_reap_ms(void);
+extern void proc_sys_zombie_reap_ms_set(int);
+extern int proc_sys_load_window(void);
+extern void proc_sys_load_window_set(int);
+extern int proc_sys_futex_sweep_div(void);
+extern void proc_sys_futex_sweep_div_set(int);
+
+// ============================================================
+// v38.91: /proc/sys — runtime-tunable kernel knobs, Linux-sysctl style.
+// Each tunable is a getter/setter pair owned by its subsystem (task.c,
+// sync.c). The registry below is the single wiring point: name -> getters,
+// min/max for the UI, and the setter. Reads render "<value>\n"; writes take
+// an integer. All setters silently reject out-of-range values, so `echo 0 >
+// /proc/sys/load_window` cannot wedge the scheduler.
+// ============================================================
+typedef struct {
+    const char* name;
+    int (*get)(void);
+    void (*set)(int);
+    int min;
+    int max;
+} proc_sys_tun_t;
+
+static const proc_sys_tun_t proc_sys_tunables[] = {
+    // name              getter                        setter                        min   max   owner
+    { "zombie_reap_ms",  proc_sys_zombie_reap_ms,      proc_sys_zombie_reap_ms_set,  1000, 120000 }, // task.c zombie reaper
+    { "load_window",     proc_sys_load_window,         proc_sys_load_window_set,       10, 1000   }, // task.c per-CPU load sample
+    { "futex_sweep_div", proc_sys_futex_sweep_div,     proc_sys_futex_sweep_div_set,    1, 50     }, // sync.c timed-futex sweep
+};
+#define PROC_SYS_N ((int)(sizeof(proc_sys_tunables) / sizeof(proc_sys_tunables[0])))
+
+static const proc_sys_tun_t* proc_sys_find(const char* name) {
+    for (int i = 0; i < PROC_SYS_N; i++)
+        if (strcmp(name, proc_sys_tunables[i].name) == 0) return &proc_sys_tunables[i];
+    return 0;
+}
+
+// Render one tunable: "name = value (min..max)\n".
+static int proc_sys_render(char* buf, int len, int max_size, const proc_sys_tun_t* t) {
+    proc_add(buf, &len, max_size, t->name);
+    proc_add(buf, &len, max_size, " = ");
+    char num[16];
+    proc_itoa(num, t->get());
+    proc_add(buf, &len, max_size, num);
+    proc_add(buf, &len, max_size, " (min ");
+    proc_itoa(num, t->min);
+    proc_add(buf, &len, max_size, num);
+    proc_add(buf, &len, max_size, "..max ");
+    proc_itoa(num, t->max);
+    proc_add(buf, &len, max_size, num);
+    proc_add(buf, &len, max_size, ")\n");
+    return len;
+}
+
+// Read handler for /proc/sys/<name> (name==0 renders the index) and for the
+// /proc/sys directory listing itself.
+static int vfs_proc_sys_read(const char* name, char* buf, int max_size) {
+    int len = 0;
+    if (!name) {
+        proc_add(buf, &len, max_size, "/proc/sys tunables (echo N > file to set):\n");
+        for (int i = 0; i < PROC_SYS_N; i++)
+            len = proc_sys_render(buf, len, max_size, &proc_sys_tunables[i]);
+        return len;
+    }
+    const proc_sys_tun_t* t = proc_sys_find(name);
+    if (!t) { proc_add(buf, &len, max_size, "(unknown tunable)\n"); return len; }
+    return proc_sys_render(buf, len, max_size, t);
+}
+
+// Write handler: returns bytes consumed on success, -1 on bad value, and
+// -100 when `name` is not a /proc/sys node (caller falls through to the
+// regular FS_PROC read/write paths).
+int vfs_proc_sys_write(const char* name, const char* data, int size) {
+    const proc_sys_tun_t* t = proc_sys_find(name);
+    if (!t) return -100;
+    // Parse leading integer (atoi stops at the first non-digit; 'echo 20 >'
+    // arrives without the newline through sys_write, but be lenient anyway).
+    int v = atoi(data);
+    if (v < t->min || v > t->max) return -1;
+    t->set(v);
+    return size;
+}
+
+// Seed /proc/sys with the tunable directory + one FS_PROC node per knob.
+// Idempotent like every other seed: get_node first, create only what's
+// missing — upgraded disks gain new knobs without a rebuild.
+void vfs_proc_sys_seed(int proc_node) {
+    if (proc_node < 0) return;
+    int sys_node = vfs_get_node("/proc/sys");
+    if (sys_node < 0) sys_node = vfs_create_node("sys", FS_DIR, proc_node);
+    if (sys_node < 0) return;
+    if (vfs_get_node("/proc/sys/all") < 0)
+        vfs_create_node("all", FS_PROC, sys_node);
+    for (int i = 0; i < PROC_SYS_N; i++) {
+        char p[64];
+        int k = 0;
+        const char* pre = "/proc/sys/";
+        while (pre[k]) { p[k] = pre[k]; k++; }
+        const char* nm = proc_sys_tunables[i].name;
+        for (int m = 0; nm[m] && k < 63; m++) p[k++] = nm[m];
+        p[k] = '\0';
+        if (vfs_get_node(p) < 0)
+            vfs_create_node(proc_sys_tunables[i].name, FS_PROC, sys_node);
+    }
+}
+
 static int vfs_proc_read(const char* name, char* buf, int max_size) {
     int len = 0;
 
@@ -2486,6 +2628,14 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
         if (p > 0 && fs_nodes[p].in_use && fs_nodes[p].data_sector > 0 &&
             (fs_nodes[p].type == FS_DIR || fs_nodes[p].type == FS_PROC)) {
             return vfs_proc_pid_read(p, node, buf, max_size);
+        }
+        // v38.91: /proc/sys/<tunable> — parent dir is "sys" under /proc.
+        // "all" renders the whole index with ranges.
+        if (p > 0 && fs_nodes[p].in_use && fs_nodes[p].type == FS_DIR &&
+            strcmp(fs_nodes[p].name, "sys") == 0) {
+            return vfs_proc_sys_read(
+                strcmp(fs_nodes[node].name, "all") == 0 ? 0 : fs_nodes[node].name,
+                buf, max_size);
         }
         return vfs_proc_read(fs_nodes[node].name, buf, max_size);
     }
@@ -2790,6 +2940,12 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
             if (!vfs_seeding) vfs_save();
         }
         return r;
+    }
+
+    // v38.91: /proc/sys tunables — echo a value in, a kernel knob changes.
+    if (fs_nodes[node].type == FS_PROC) {
+        int rc = vfs_proc_sys_write(fs_nodes[node].name, data, size);
+        if (rc != -100) return rc;   // -100 = not a sys node, keep falling through
     }
 
     if (fs_nodes[node].type == FS_FAT32_FILE) {

@@ -294,7 +294,16 @@ typedef struct {
     char name[32];        // process name (image name or "fork<parent>")
     int pgrp;
     int session;
+    // v38.91: nice value + consumed CPU ticks (see /proc/<pid>/status)
+    int nice;             // -20 (highest prio) .. 19 (lowest); 0 = default
+    unsigned int cpu_ticks; // scheduler ticks this task actually ran
 } task_info_t;
+
+// v38.91: nice/renice. nice is clamped to [-20,19]; raising another user's
+// priority (lowering its nice) requires root (uid 0). Returns 0 / -1 EINVAL
+// / -2 EPERM / -3 ESRCH (bad tid).
+int task_get_nice(int tid);
+int task_set_nice(int tid, int nice, int caller_uid);
 
 int get_task_info(int tid, task_info_t* info);
 void task_set_launch_arg(int tid, const char* arg);

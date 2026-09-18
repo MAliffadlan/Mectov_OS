@@ -177,6 +177,22 @@ typedef struct {
 #define SYS_STAT        125 // EBX=path_ptr, ECX=stat_k_t* -> 0 / -1 (follows final symlink)
 #define SYS_LSTAT       126 // EBX=path_ptr, ECX=stat_k_t* -> 0 / -1 (does NOT follow)
 #define SYS_FUTEX_WAIT_TIMEOUT 127 // EBX=addr, ECX=expected, EDX=timeout_ms -> 0 released (woken or swept), -1 changed, -2 bad ptr
+#define SYS_NICE        128 // EBX=tid, ECX=nice -> 0 / -1 EINVAL / -2 EPERM / -3 ESRCH
+#define SYS_GETNICE     129 // EBX=tid -> nice value (-20..19) or -3 ESRCH
+#define SYS_FUTEX_REQUEUE 130 // EBX=addr, ECX=expected, EDX=mutex_addr, ESI=max_wake -> n handled / -1 changed / -2 bad
+
+// 4-argument syscall (requeue needs a 4th register; ESI is free here —
+// draw_text-style 5-arg calls never mix with futex calls).
+static inline int syscall4(int num, int arg1, int arg2, int arg3, int arg4) {
+    int ret;
+    __asm__ volatile(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(num), "b"(arg1), "c"(arg2), "d"(arg3), "S"(arg4)
+        : "memory"
+    );
+    return ret;
+}
 
 // POSIX file positioning & metadata
 #define SYS_LSEEK       95  // EBX=fd, ECX=offset, EDX=whence(SEEK_*) -> new offset or -1
@@ -835,6 +851,20 @@ static inline int sys_futex_wake(void* addr, int max_waiters) {
 // predicate after a timeout can never stay stuck on a satisfied condition.
 static inline int sys_futex_wait_timeout(void* addr, uint32_t expected, uint32_t timeout_ms) {
     return syscall(SYS_FUTEX_WAIT_TIMEOUT, (int)addr, (int)expected, (int)timeout_ms);
+}
+
+// v38.91: nice/renice (see task.h). Lower nice = higher scheduling weight.
+static inline int sys_nice(int tid, int nice) {
+    return syscall(SYS_NICE, tid, nice, 0);
+}
+static inline int sys_getnice(int tid) {
+    return syscall(SYS_GETNICE, tid, 0, 0);
+}
+
+// v38.91: FUTEX_WAIT_REQUEUE — wake max_wake waiters of addr, move the rest
+// to mutex_addr's queue (condvar broadcast support, no thundering herd).
+static inline int sys_futex_requeue(void* addr, int expected, void* mutex_addr, int max_wake) {
+    return syscall4(SYS_FUTEX_REQUEUE, (int)addr, expected, (int)mutex_addr, max_wake);
 }
 
 // UDP syscalls

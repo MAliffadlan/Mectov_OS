@@ -22,6 +22,7 @@ typedef struct {
     int ring;      // 0 or 3
     int state;     // 1=Running/Active, 2=Ready/Hidden
     int priority;  // Just for display
+    unsigned int cpu_ticks; // v38.91: scheduler ticks consumed (CPU% column)
 } TmRow;
 
 static TmRow rows[128];
@@ -70,6 +71,7 @@ static void refresh_list() {
             r->ring = info.ring;
             r->state = info.state; // 1=Running, 2=Ready, 3=Sleep
             r->priority = info.priority;
+            r->cpu_ticks = info.cpu_ticks;
         }
     }
     
@@ -106,7 +108,8 @@ static void tm_draw(int id, int cx, int cy, int cw, int ch) {
     draw_string_px(cx + 20, cy + 8, "ID", GUI_DIM, 0);
     draw_string_px(cx + 60, cy + 8, "Aplikasi", GUI_DIM, 0);
     draw_string_px(cx + 200, cy + 8, "Ring", GUI_DIM, 0);
-    draw_string_px(cx + 260, cy + 8, "Status", GUI_DIM, 0);
+    draw_string_px(cx + 260, cy + 8, "CPU%", GUI_DIM, 0);
+    draw_string_px(cx + 310, cy + 8, "Status", GUI_DIM, 0);
 
     // Draw rows
     int y = cy + LIST_Y + 2;
@@ -138,7 +141,21 @@ static void tm_draw(int id, int cx, int cy, int cw, int ch) {
             else if (r->state == 3) state_str = "Sleep";
         }
         
-        draw_string_px(cx + 260, y + 4, state_str, (r->state == 1) ? 0x0055FF55 : GUI_DIM, 0);
+        // v38.91: live CPU% column (scheduler tick accounting per task).
+        {
+            char cpu_str[6];
+            extern volatile uint32_t timer_ticks;  // drivers/timer.c (ms since boot)
+            unsigned int now = timer_ticks;
+            unsigned int pct;
+            if (r->is_window || r->cpu_ticks == 0 || now == 0) pct = 0;
+            else if (r->cpu_ticks >= now)                     pct = 100;
+            else if (r->cpu_ticks > 42949672u)                pct = 99;
+            else                                              pct = (r->cpu_ticks * 100) / now;
+            itoa_pad((int)pct, cpu_str, 3);
+            draw_string_px(cx + 260, y + 4, cpu_str, (pct > 50) ? 0x00FFAA44 : GUI_TEXT, 0);
+        }
+
+        draw_string_px(cx + 310, y + 4, state_str, (r->state == 1) ? 0x0055FF55 : GUI_DIM, 0);
 
         y += ROW_HEIGHT;
         drawn++;

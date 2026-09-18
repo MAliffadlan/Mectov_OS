@@ -208,6 +208,6 @@ void cmd_find(void);
 void cmd_ln_arg(void);        // v38.86 hard link (-s = symlink)
 void cmd_readlink_arg(void);  // v38.85 print symlink target
 void cmd_stat_arg(void);      // v38.86 file metadata
-void cmd_readlink_arg(void);  // v38.85 print symlink target
+void cmd_renice_arg(void);    // v38.91 nice/renice
 
 #endif // SHELL_INTERNAL_H

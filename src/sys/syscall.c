@@ -475,6 +475,38 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        // ----- v38.91: nice/renice (task.c) -----
+        case SYS_NICE: {
+            extern int task_set_nice(int, int, int);
+            extern int get_task_owner_uid(int);
+            int tid = (int)regs->ebx;
+            // Only root may raise another USER's priority; raising your own
+            // or a same-uid peer's is allowed (matches renice(1) semantics).
+            int caller = get_current_task();
+            int caller_uid = (caller > 0) ? get_task_owner_uid(caller) : ROOT_UID;
+            if (tid > 0 && tid != caller && caller_uid != ROOT_UID) {
+                int owner = get_task_owner_uid(tid);
+                if (owner < 0 || owner != caller_uid) {
+                    regs->eax = (uint32_t)-2; break;
+                }
+            }
+            regs->eax = (uint32_t)task_set_nice(tid, (int)regs->ecx, caller_uid);
+            break;
+        }
+        case SYS_GETNICE: {
+            extern int task_get_nice(int);
+            regs->eax = (uint32_t)task_get_nice((int)regs->ebx);
+            break;
+        }
+
+        // ----- v38.91: FUTEX_WAIT_REQUEUE (sync.c) -----
+        case SYS_FUTEX_REQUEUE: {
+            extern int futex_requeue(uint32_t, uint32_t, uint32_t, int);
+            regs->eax = (uint32_t)futex_requeue((uint32_t)regs->ebx, (uint32_t)regs->ecx,
+                                                (uint32_t)regs->edx, (int)regs->esi);
+            break;
+        }
+
         // ----- SYS_PRINT (1): Print string to terminal -----
         case SYS_PRINT: {
             const char* msg = (const char*)regs->ebx;

@@ -5,10 +5,25 @@ on:
     branches: [main]
   pull_request:
 
+# The old single build-and-boot job ran the whole 30+-test suite serially in
+# one QEMU-at-a-time job (~30 minutes per push). The suite is now SPLIT into
+# independent jobs that GitHub runs in parallel; each job boots the same
+# fresh ISO + disk images and owns an unrelated slice of the test space
+# (feature areas / hardware emulations), so jobs cannot interfere through
+# shared ports or persistent disk state (freshly created per job):
+#   build          -> compile + artifact upload (prerequisite)
+#   boot-core      -> boot/login, fuzzer, procfs, fork, job control, fs, sync, limits
+#   gui            -> login/lock/paint/taskbar/startmenu/explorer/fbmap/hardening
+#   browser-net    -> browser HTTP + hostname/gateway + POSIX socket + poll/select
+#   doom-rust      -> windowed DOOM, Rust app, ASLR (2 boots), fsync/mmap/lseek
+#   storage        -> FAT32/mount/AHCI/xHCI/VirtIO/bigread-DMA/iocache
+#   selftest       -> watchdogs, TLB shootdown, multi-core panic (if: always())
+#   kvm            -> KVM 4-core fork/FPU (skips itself when /dev/kvm is absent)
+#   config-matrix  -> unchanged 12-combo boot+fork matrix on the artifacts
 jobs:
-  build-and-boot:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,346 +80,7 @@ jobs:
           dd if=/dev/zero of=fat32.img bs=1M count=16 status=none
           mkfs.fat -F 32 -S 512 fat32.img > /dev/null 2>&1
 
-      - name: Boot test in QEMU (no KVM)
-        run: |
-          python3 scripts/boot_test.py --timeout 240
-
-      - name: Redesigned login screen regression (TCG)
-        run: |
-          # v38.30: full-bleed wallpaper (never cropped), digital clock +
-          # full date (day/date/month/year) pinned bottom-left, SPACE-only
-          # password entry, 4s idle fallback back to the clock view. Boots,
-          # screenshots the lock screen, then drives the whole gate flow.
-          python3 scripts/login_redesign_test.py --timeout 300
-
-      - name: Lock screen feature regression (TCG)
-        run: |
-          # v38.34: `lock` shell builtin, Start menu "Lock" item and the
-          # Ctrl+Alt+L shortcut run the login gate WITHOUT resetting the
-          # session — windows stay alive behind the lock and the desktop is
-          # pixel-restored on unlock. One boot: launch Terminal, `lock`,
-          # unlock, compare the terminal window pre/post (must be intact),
-          # then lock again via Ctrl+Alt+L.
-          python3 scripts/lock_test.py --timeout 480
-
-      - name: Idle auto-lock (locktimeout) regression (TCG)
-        run: |
-          # v38.51: `locktimeout 20` arms the idle timer; with no
-          # keyboard/mouse input the login gate appears on its own, unlock
-          # restores the session without re-locking (countdown re-anchored),
-          # and `locktimeout 0` disables the timer (a longer quiet window
-          # passes with no lock).
-          python3 scripts/autolock_test.py --timeout 480
-
-      - name: Kernel hardening regression (CSPRNG + salted passwd) (TCG)
-        run: |
-          # v38.52: kernel ChaCha8 CSPRNG seeded from timer/kbd/mouse at
-          # boot; /dev/random and TCP ISNs use it; /etc/passwd stores
-          # <salt_hex>:<sha256> instead of plaintext. `passwd mectov123
-          # hunter2` then the NEW password unlocks and the OLD one is
-          # rejected; apps/hardening_test.mct proves from Ring 3 that
-          # SYS_GETRANDOM succeeds with fresh bytes, /dev/random reads
-          # differ, and the passwd file is salted+hashed with no plaintext.
-          python3 scripts/hardening_test.py --timeout 480
-
-      - name: Ring 3 scanout takeover regression (TCG)
-        run: |
-          # v38.53: SYS_FB_MAP maps the VBE framebuffer into a Ring 3 task
-          # (PAGE_DEV device PTEs, active-session authorization) and while it
-          # is held the kernel desktop stops presenting frames. One boot,
-          # two scenarios: (A) grant -> interactive takeover -> typed key
-          # routed through the pump -> clean release -> desktop restored;
-          # (B) relaunch and Ctrl+C the holder mid-takeover -> ownership
-          # drops via task_cleanup -> desktop restored, no panic.
-          python3 scripts/fbmap_test.py --timeout 480
-
-      - name: Taskbar window buttons + hover regression (TCG)
-        run: |
-          # v38.39: clicking a focused window's taskbar button minimizes it
-          # and clicking again restores it (pixel-compared), and the hover
-          # system is wired up — taskbar_track_mouse was dead code (never
-          # called) and hover changes never requested a redraw, so window
-          # buttons/START/Start-menu items never highlighted. Verifies the
-          # non-focused button turns amber on hover, the focused one stays
-          # plain, highlights clear on move-away, and the Start menu item
-          # selection bar appears on hover.
-          python3 scripts/taskbar_hover_test.py --timeout 300
-
-      - name: Start menu search-as-you-type regression (TCG)
-        run: |
-          # v38.40: while the Start menu is open, printable keys filter its
-          # 12 items (case-insensitive substring) instead of reaching the
-          # focused window, Backspace pops the query, Escape clears then
-          # closes, Enter launches the filtered item. The query renders in
-          # amber in the menu header. One boot: type "Snake" -> single row,
-          # Enter launches the game; "zzz" -> "No results", backspace x3
-          # restores all; "lock" -> the two items containing the substring
-          # (Clock + Lock); Escape clears then closes.
-          python3 scripts/startmenu_search_test.py --timeout 300
-
-      - name: File Explorer GUI regression (TCG)
-        run: |
-          # v38.69: the Ring 3 File Explorer (launch from Start menu row 2)
-          # renders the root listing, navigates into /home (one entry:
-          # user/), drills into empty /home/user, and the [<] back button
-          # returns to root. Pixel-count assertions on the screendump.
-          python3 scripts/explorer_test.py --timeout 300
-
-      - name: Pixel Paint GUI regression (TCG)
-        run: |
-          # v38.75: the Ring 3 Pixel Paint app launches from Start menu row 4,
-          # stamps palette cells, receives WM drag-forwarded mouse moves (new
-          # content-drag forwarding path), recolors and clears. Pixel-count
-          # assertions on screendumps, permutation-tolerant color matching.
-          python3 scripts/paint_test.py --timeout 300
-
-      - name: Browser HTTP fetch + render regression (TCG)
-        run: |
-          # v38.70: the Ring 3 Mini Browser fetches a real HTTP page from the
-          # host (slirp 10.0.2.2:<port>, non-80 so it bypasses the Web Gateway
-          # Proxy), renders the parsed HTML into its window, and shows the
-          # status bar (HTTP code / bytes / title). The test runs a local
-          # HTTP server and asserts the guest's GET / Host / User-Agent.
-          python3 scripts/browser_test.py --timeout 300
-
-      - name: Browser hostname path — DNS + port-80 gateway redirect (TCG)
-        run: |
-          # v38.71: the Mini Browser's hostname path — kernel DNS client
-          # resolves "localhost" (slirp -> host /etc/hosts, zero internet
-          # dependency), the kernel redirects port 80 to the Web Gateway
-          # Proxy, which answers in deterministic fake mode and echoes the
-          # guest's Host/Path back. Asserts the full chain in serial log,
-          # gateway log and the rendered page.
-          python3 scripts/browser_web_test.py --timeout 300
-
-      - name: Fork + jobcontrol regressions (TCG)
-        run: |
-          python3 scripts/fork_test.py --timeout 240
-          python3 scripts/jobcontrol_test.py --timeout 240
-
-      - name: Procfs + symlink regression (TCG)
-        run: |
-          python3 scripts/procfs_test.py --timeout 240
-
-      - name: FPU/SSE context-switch regression (TCG)
-        run: |
-          python3 scripts/fputest.py --timeout 240
-
-      - name: PAE + NX (W^X) regression (TCG)
-        run: |
-          python3 scripts/nxtest.py --timeout 240
-
-      - name: Fork KVM 4-core — mandatory SMP keyboard regression
-        run: |
-          # Most GitHub-hosted ubuntu-latest runners expose /dev/kvm; guard
-          # anyway so a KVM-less runner skips with a warning instead of
-          # burning the full boot timeout. On failure fork_test dumps the
-          # serial log tail to distinguish a QEMU startup error from a hang.
-          if [ -e /dev/kvm ] && [ -r /dev/kvm ]; then
-            python3 scripts/fork_test.py --kvm --timeout 240
-            python3 scripts/fputest.py --kvm --timeout 240
-          else
-            echo "::warning::/dev/kvm not available on this runner — skipping the KVM regression"
-          fi
-
-      - name: FAT32 regression (drive 3, TCG)
-        run: |
-          python3 scripts/fat32_test.py --timeout 240
-
-      - name: Mount/umount roundtrip regression (TCG)
-        run: |
-          python3 scripts/mount_test.py --timeout 240
-
-      - name: AHCI/SATA driver regression (ich9-ahci + drive 4, TCG)
-        run: |
-          # Boots with an ich9-ahci controller + FAT32 SATA disk (drive 4),
-          # asserts the controller registers the port, then `mount /sata
-          # fat32 4` (BPB read through AHCI), `cp` a file inside the volume
-          # (read + write through AHCI), and byte-compares COPY.TXT on the
-          # host with mtools — proving the data actually landed on disk.
-          python3 scripts/ahci_test.py --timeout 360
-
-      - name: xHCI/USB 3.0 driver regression (qemu-xhci + drive 8, TCG)
-        run: |
-          # Boots with a qemu-xhci controller + FAT32 stick on the
-          # SuperSpeed bus (drive 8): asserts the controller comes up and
-          # the device enumerates at speed 5000 (PORTSC speed = 4), then
-          # `mount /usb fat32 8` (BPB read through xHCI -> BOT -> SCSI
-          # READ(10)), `cp` inside the volume (read + write through the
-          # same path), and byte-compares COPY.TXT on the host with mtools.
-          python3 scripts/usb_test.py --timeout 360
-
-      - name: VirtIO-Blk driver regression (virtio-blk-pci + drive 12, TCG)
-        run: |
-          # Boots with a transitional virtio-blk-pci controller
-          # (disable-modern=on, legacy 1AF4:1001) + FAT32 disk (drive 12):
-          # asserts the virtqueue negotiates, then `mount /vblk fat32 12`
-          # (BPB read through the virtqueue), `cp` inside the volume, and
-          # byte-compares COPY.TXT on the host with mtools. Also proves
-          # per-volume coexistence: a second `cp` through the boot FAT32
-          # volume (drive 3) lands on fat32.img, so the backend auto-select
-          # switched back to the right disk.
-          python3 scripts/virtio_test.py --timeout 360
-
-      - name: POSIX socket regression (user-net + hostfwd, TCG)
-        run: |
-          python3 scripts/socktest.py --timeout 300
-
-      - name: ACPI S5 poweroff regression (TCG)
-        run: |
-          python3 scripts/poweroff_test.py --timeout 240
-
-      - name: poll/select/getcwd/chdir/clock_gettime regression (TCG)
-        run: |
-          python3 scripts/pollselect_test.py --timeout 240
-
-      - name: Ring 3 syscall fuzzer regression (TCG)
-        run: |
-          # ~2000 random syscalls with garbage pointers/sizes/fds from Ring 3:
-          # the kernel must reject every one without panicking.
-          python3 scripts/fuzz_test.py --timeout 300
-
-      - name: Whole-file page cache regression (TCG)
-        run: |
-          # Cached reads must beat cold disk reads by a wide margin; the
-          # benchmark also exercises the write-through + save-skip path.
-          python3 scripts/iocache_test.py --timeout 300
-
-      - name: Demo app smoke tests (smpstress + sigdemo + crashme, TCG)
-        run: |
-          # One boot, three apps back-to-back: SMP scheduler stress (8
-          # children, CPU burn + sleep + self-signals), the signal-semantics
-          # demo, and a deliberate #UD that the kernel must contain.
-          python3 scripts/app_smoke_test.py --timeout 360
-
-      - name: Windowed DOOM smoke test (TCG)
-        run: |
-          # v38.29: `doom` now renders into a WM window like any desktop app
-          # instead of grabbing the whole framebuffer. One boot: launch the
-          # Terminal, run `doom`, and assert a DOOM window opens, the game
-          # loop enters, and [DOOM] tick lines prove frames are being
-          # produced (composited by the WM) without crashing the OS.
-          python3 scripts/doom_test.py --timeout 480
-
-      - name: File-backed mmap regression (TCG)
-        run: |
-          python3 scripts/mmapfile_test.py --timeout 240
-
-      - name: fsync/sync + periodic write-back regression (TCG)
-        run: |
-          # v38.61: syncfiledemo dirties file-backed mmap pages, persists
-          # them via fsync(fd), then dirties again and SLEEPS — the kernel's
-          # ~5 s periodic write-back must flush on its own; both phases are
-          # verified by re-reading through a fresh fd.
-          python3 scripts/syncfile_test.py --timeout 300
-
-      - name: Rust Ring 3 app regression (TCG)
-        run: |
-          python3 scripts/rusthello_test.py --timeout 240
-
-      - name: lseek/fstat/O_APPEND regression (TCG)
-        run: |
-          python3 scripts/lseekfile_test.py --timeout 240
-
-      - name: Watchdog hard-lockup self-test (TCG)
-        if: always()
-        run: |
-          python3 scripts/watchdog_test.py --timeout 240
-      - name: Watchdog BSP-hang self-test (per-core mesh, TCG)
-        if: always()
-        run: |
-          # Boots with `wd_self_test_bsp panic=reboot` and -no-reboot: the
-          # BSP cli-spins from its own main loop, so its own detector is
-          # dead. An AP mesh detector must declare CPU 0 HUNG, NMI-dump all
-          # cores (the BSP answers from inside its spin) and reset.
-          python3 scripts/watchdog_bsp_test.py --timeout 240
-      - name: TLB shootdown IPI self-test (TCG)
-        if: always()
-        run: |
-          # Boots with `tlb_self_test panic=reboot` and -no-reboot: the BSP
-          # parks one AP, fires two shootdowns (matching page_dir → the AP's
-          # handler reloads CR3; non-matching → handler acks but skips the
-          # reload), then resets so QEMU exits cleanly.
-          python3 scripts/tlb_sd_test.py --timeout 240
-      - name: Multi-core panic dump + panic=reboot self-test (TCG)
-        run: |
-          # Boots with `panic_self_test panic=reboot` and -no-reboot: the
-          # kernel panics deliberately, must dump registers for all 4 cores
-          # (NMI-IPI snapshot), then reset so QEMU exits cleanly instead of
-          # hanging — proving the panic path CI can rely on.
-          python3 scripts/panic_test.py --timeout 240
-
-      - name: Ownership/permission enforcement regression (TCG)
-        run: |
-          # Ring 3 permtest app: create/write own file, chmod 0400/0000
-          # open+read/write denials, chown root-only, root-owned 0644
-          # read-allowed / write+delete-denied. Also sanity-checks the
-          # `ls -l` shell builtin.
-          python3 scripts/perm_test.py --timeout 360
-
-      - name: TLS + clone() regression (TCG)
-        run: |
-          # Ring 3 threaddemo app: main thread installs its own TLS, 4
-          # workers spawned via SYS_CLONE each get a private %gs TCB, each
-          # bumps a per-thread counter ITERS times and every counter must
-          # land on exactly ITERS (a broken/shared TLS would race/corrupt).
-          # Proves FS/GS survive every context switch + signal path.
-          python3 scripts/thread_test.py --timeout 360
-
-      - name: Futex mutex + condvar regression (TCG)
-        run: |
-          # Ring 3 conddemo app on 4 cores: 4 threads bump a shared counter
-          # to exactly 20,000 under a futex mutex, then 2 producers + 2
-          # consumers move 3,000 items through a bounded buffer over a
-          # condvar. Asserts ALL PASS + every item consumed exactly once +
-          # zero [PANIC] (exercises the scheduler's self-blocking wake path).
-          # 480 s (raised from 300): boot+launch on the 2-core TCG runner
-          # can eat over two minutes, and the demo's 20k futex ops + 3k
-          # condvar items take minutes more; the test now splits whatever is
-          # left between its two phases, but the deadline itself needs room.
-          python3 scripts/cond_test.py --timeout 480
-
-      - name: Resource limits (RLIMIT_NPROC/AS/NOFILE) regression (TCG)
-        run: |
-          # Ring 3 rlimittest app: getrlimit defaults sane, fork refused
-          # under NPROC cur=1 (per-uid count), fork OK after raising cur,
-          # non-root may never raise the hard limit, NOFILE stops fd
-          # allocation at the soft limit (close frees a slot), AS stops mmap
-          # at the soft limit (2 MB under 1 MB refused, 256 KB allowed, raise
-          # re-allows). Asserts ALL PASS + zero [PANIC].
-          python3 scripts/rlimit_test.py --timeout 360
-
-      - name: Shell `ulimit` builtin regression (TCG)
-        run: |
-          # Drives the shell `ulimit` builtin from the terminal: -a lists
-          # all resources with sane defaults, -n 8 lowers NOFILE and reads
-          # back 8/16, raising soft above the hard limit is refused for a
-          # non-root caller, -u 4 lowers NPROC, raising cur back to the hard
-          # limit is allowed, and rlimittest still passes afterwards (limits
-          # are inherited by child processes). Asserts zero [PANIC].
-          python3 scripts/ulimit_test.py --timeout 360
-
-      - name: IDE DMA + multi-sector disk read regression (TCG)
-        run: |
-          # Ring 3 bigread app: reads /bench.big (160 KB, > PCACHE_MAX_FILE)
-          # 3 times through the bus-mastering IDE DMA path (PRD table + BMIDE
-          # controller; falls back to multi-sector PIO only if DMA is absent
-          # or fails). The test also asserts the serial log shows the DMA
-          # controller engaged and zero failed DMA transfers, and that the
-          # byte pattern survives every read.
-          python3 scripts/bigread_test.py --timeout 420
-
-      - name: ASLR regression — PIE ELF base randomized across boots (TCG)
-        run: |
-          # v38.63: ET_DYN PIE ELF images load at a random page-aligned base
-          # drawn from the kernel CSPRNG. Two consecutive boots each run the
-          # PIE syncdemo.elf (semaphore + futex workers sharing globals — a
-          # wrong relocation or non-PC-relative reference would crash it)
-          # twice; the test asserts the first-run bases differ across the
-          # boots AND the two runs within one boot differ.
-          python3 scripts/aslr_test.py --timeout 300
-
-      - name: Upload build artifacts (for the config-matrix job)
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mectov-artifacts
@@ -415,7 +91,394 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Config matrix (v38.68): the full suite above runs on ONE configuration
+  # Shared setup for every test job: install QEMU + PIL, pull the artifacts,
+  # recreate the FAT32 scratch image (fat32.img is deliberately NOT shipped —
+  # every job creates its own so persistent state can never leak across jobs).
+  boot-core:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil \
+            dosfstools
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mectov-artifacts
+          path: .
+
+      - name: Boot test in QEMU (no KVM)
+        run: |
+          python3 scripts/boot_test.py --timeout 240
+
+      - name: Ring 3 syscall fuzzer regression (TCG)
+        run: |
+          # ~2000 random syscalls with garbage pointers/sizes/fds from Ring 3:
+          # the kernel must reject every one without panicking.
+          python3 scripts/fuzz_test.py --timeout 300
+
+      - name: Procfs + symlink regression (TCG)
+        run: |
+          python3 scripts/procfs_test.py --timeout 240
+
+      - name: Procfs /proc/sys tunables regression (TCG)
+        run: |
+          # v38.91: drives the /proc/sys tunables from the terminal — cat
+          # /proc/sys/all lists every knob with its range, `echo N >
+          # /proc/sys/zombie_reap_ms` changes the zombie reaper (read back),
+          # out-of-range and garbage writes are rejected without corrupting
+          # the knob, load_window and futex_sweep_div likewise, and the
+          # procsysdemo Ring 3 app proves nice/setnice + CPU% accounting.
+          python3 scripts/procsys_test.py --timeout 240
+
+      - name: Fork + jobcontrol regressions (TCG)
+        run: |
+          python3 scripts/fork_test.py --timeout 240
+          python3 scripts/jobcontrol_test.py --timeout 240
+
+      - name: FPU/SSE context-switch regression (TCG)
+        run: |
+          python3 scripts/fputest.py --timeout 240
+
+      - name: PAE + NX (W^X) regression (TCG)
+        run: |
+          python3 scripts/nxtest.py --timeout 240
+
+      - name: FAT32 regression (drive 3, TCG)
+        run: |
+          python3 scripts/fat32_test.py --timeout 240
+
+      - name: poll/select/getcwd/chdir/clock_gettime regression (TCG)
+        run: |
+          python3 scripts/pollselect_test.py --timeout 240
+
+      - name: Futex mutex + condvar regression (TCG)
+        run: |
+          # Ring 3 conddemo app on 4 cores: 4 threads bump a shared counter
+          # to exactly 20,000 under a futex mutex, then 2 producers + 2
+          # consumers move 3,000 items through a bounded buffer over a
+          # condvar. v38.91: the final broadcast goes through
+          # FUTEX_WAIT_REQUEUE (herd-free handoff to the mutex queue).
+          # Asserts ALL PASS + every item consumed exactly once + zero [PANIC].
+          python3 scripts/cond_test.py --timeout 480
+
+      - name: Resource limits (RLIMIT_NPROC/AS/NOFILE) regression (TCG)
+        run: |
+          python3 scripts/rlimit_test.py --timeout 360
+
+      - name: Shell `ulimit` builtin regression (TCG)
+        run: |
+          python3 scripts/ulimit_test.py --timeout 360
+
+  gui:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil \
+            dosfstools
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mectov-artifacts
+          path: .
+
+      - name: Redesigned login screen regression (TCG)
+        run: |
+          python3 scripts/login_redesign_test.py --timeout 300
+
+      - name: Lock screen feature regression (TCG)
+        run: |
+          python3 scripts/lock_test.py --timeout 480
+
+      - name: Idle auto-lock (locktimeout) regression (TCG)
+        run: |
+          python3 scripts/autolock_test.py --timeout 480
+
+      - name: Kernel hardening regression (CSPRNG + salted passwd) (TCG)
+        run: |
+          python3 scripts/hardening_test.py --timeout 480
+
+      - name: Ring 3 scanout takeover regression (TCG)
+        run: |
+          python3 scripts/fbmap_test.py --timeout 480
+
+      - name: Taskbar window buttons + hover regression (TCG)
+        run: |
+          python3 scripts/taskbar_hover_test.py --timeout 300
+
+      - name: Start menu search-as-you-type regression (TCG)
+        run: |
+          python3 scripts/startmenu_search_test.py --timeout 300
+
+      - name: File Explorer GUI regression (TCG)
+        run: |
+          python3 scripts/explorer_test.py --timeout 300
+
+      - name: Pixel Paint GUI regression (TCG)
+        run: |
+          python3 scripts/paint_test.py --timeout 300
+
+  browser-net:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil \
+            dosfstools
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mectov-artifacts
+          path: .
+
+      - name: Browser HTTP fetch + render regression (TCG)
+        run: |
+          # Picks a free host port itself; never collides with the sibling
+          # net job (which pins its own free port for the gateway).
+          python3 scripts/browser_test.py --timeout 300
+
+      - name: Browser hostname path — DNS + port-80 gateway redirect (TCG)
+        run: |
+          # Gateway port is chosen at runtime; the kernel redirects port 80
+          # to the port the test passes, so two parallel net jobs cannot
+          # collide as long as each picks its own free port.
+          python3 scripts/browser_web_test.py --timeout 300
+
+      - name: POSIX socket regression (user-net + hostfwd, TCG)
+        run: |
+          python3 scripts/socktest.py --timeout 300
+
+  doom-rust:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil \
+            dosfstools
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mectov-artifacts
+          path: .
+
+      - name: Windowed DOOM smoke test (TCG)
+        run: |
+          # v38.29: `doom` renders into a WM window like any desktop app. One
+          # boot: launch the Terminal, run `doom`, assert a DOOM window opens,
+          # the game loop enters, and [DOOM] tick lines prove frames are
+          # produced (composited by the WM) without crashing the OS.
+          python3 scripts/doom_test.py --timeout 480
+
+      - name: Rust Ring 3 app regression (TCG)
+        run: |
+          python3 scripts/rusthello_test.py --timeout 240
+
+      - name: File-backed mmap regression (TCG)
+        run: |
+          python3 scripts/mmapfile_test.py --timeout 240
+
+      - name: fsync/sync + periodic write-back regression (TCG)
+        run: |
+          # v38.61: syncfiledemo dirties file-backed mmap pages, persists
+          # them via fsync(fd), then dirties again and SLEEPS — the kernel's
+          # ~5 s periodic write-back must flush on its own.
+          python3 scripts/syncfile_test.py --timeout 300
+
+      - name: lseek/fstat/O_APPEND regression (TCG)
+        run: |
+          python3 scripts/lseekfile_test.py --timeout 240
+
+      - name: ASLR regression — PIE ELF base randomized across boots (TCG)
+        run: |
+          # v38.63: two consecutive boots each run the PIE syncdemo.elf twice;
+          # the test asserts bases differ across boots AND within one boot.
+          python3 scripts/aslr_test.py --timeout 300
+
+  storage:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil \
+            dosfstools \
+            mtools
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mectov-artifacts
+          path: .
+
+      - name: Create FAT32 scratch image
+        run: |
+          # Per-job fresh image (same as the old shared job did before every
+          # run): mount/AHCI/xHCI/VirtIO tests need an empty FAT32 volume.
+          dd if=/dev/zero of=fat32.img bs=1M count=16 status=none
+          mkfs.fat -F 32 -S 512 fat32.img > /dev/null 2>&1
+
+      - name: Mount/umount roundtrip regression (TCG)
+        run: |
+          python3 scripts/mount_test.py --timeout 240
+
+      - name: AHCI/SATA driver regression (ich9-ahci + drive 4, TCG)
+        run: |
+          # Asserts the ich9-ahci port registers, `mount /sata fat32 4`,
+          # `cp` inside the volume, and byte-compares COPY.TXT with mtools.
+          python3 scripts/ahci_test.py --timeout 360
+
+      - name: xHCI/USB 3.0 driver regression (qemu-xhci + drive 8, TCG)
+        run: |
+          # Asserts SuperSpeed enumeration (PORTSC speed = 4), `mount /usb
+          # fat32 8`, `cp` inside the volume, mtools byte-compare.
+          python3 scripts/usb_test.py --timeout 360
+
+      - name: VirtIO-Blk driver regression (virtio-blk-pci + drive 12, TCG)
+        run: |
+          # Legacy 1AF4:1001 virtqueue, `mount /vblk fat32 12`, `cp`, mtools
+          # byte-compare, and per-volume coexistence (boot FAT32 drive 3).
+          python3 scripts/virtio_test.py --timeout 360
+
+      - name: IDE DMA + multi-sector disk read regression (TCG)
+        run: |
+          # /bench.big (seeded by the kernel on first boot, 160 KB >
+          # PCACHE_MAX_FILE) read 3x through the bus-mastering IDE DMA path;
+          # asserts the DMA controller engaged, zero failed transfers, and
+          # the byte pattern surviving every read.
+          python3 scripts/bigread_test.py --timeout 420
+
+      - name: Whole-file page cache regression (TCG)
+        run: |
+          # Cached reads must beat cold disk reads by >= 4x (iobench's own
+          # verdict); exercises the write-through + save-skip path.
+          python3 scripts/iocache_test.py --timeout 300
+
+  selftest:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil \
+            dosfstools
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mectov-artifacts
+          path: .
+
+      - name: Watchdog hard-lockup self-test (TCG)
+        run: |
+          python3 scripts/watchdog_test.py --timeout 240
+
+      - name: Watchdog BSP-hang self-test (per-core mesh, TCG)
+        run: |
+          # Boots with `wd_self_test_bsp panic=reboot` and -no-reboot: the
+          # BSP cli-spins from its own main loop, so its own detector is
+          # dead. An AP mesh detector must declare CPU 0 HUNG, NMI-dump all
+          # cores (the BSP answers from inside its spin) and reset.
+          python3 scripts/watchdog_bsp_test.py --timeout 240
+
+      - name: TLB shootdown IPI self-test (TCG)
+        run: |
+          # Boots with `tlb_self_test panic=reboot` and -no-reboot: the BSP
+          # parks one AP, fires two shootdowns, then resets so QEMU exits.
+          python3 scripts/tlb_sd_test.py --timeout 240
+
+      - name: Multi-core panic dump + panic=reboot self-test (TCG)
+        run: |
+          # Boots with `panic_self_test panic=reboot` and -no-reboot: the
+          # kernel panics deliberately, must dump registers for all 4 cores
+          # (NMI-IPI snapshot), then reset so QEMU exits cleanly.
+          python3 scripts/panic_test.py --timeout 240
+
+  kvm:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil \
+            dosfstools
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mectov-artifacts
+          path: .
+
+      - name: Fork KVM 4-core — mandatory SMP keyboard regression
+        run: |
+          # Most GitHub-hosted ubuntu-latest runners expose /dev/kvm; guard
+          # anyway so a KVM-less runner skips with a warning instead of
+          # burning the full boot timeout.
+          if [ -e /dev/kvm ] && [ -r /dev/kvm ]; then
+            python3 scripts/fork_test.py --kvm --timeout 240
+            python3 scripts/fputest.py --kvm --timeout 240
+          else
+            echo "::warning::/dev/kvm not available on this runner — skipping the KVM regression"
+          fi
+
+  # Config matrix (v38.68): the full suite used to run on ONE configuration
   # (qemu32,+nx / 128 MB / SMP 4). Mectov's own history proves combo-only
   # bugs are real — the KVM fork-GPF and the qemu32,+nx boot stall each
   # appeared only under a specific CPU/RAM/SMP combination. This job smokes
@@ -424,7 +487,7 @@ jobs:
   # 256 MB (phys allocator + 48 MB kernel reserve + framebuffer pressure),
   # and 1 / 2 / 4 cores (SMP bring-up, runqueue, watchdog mesh).
   config-matrix:
-    needs: build-and-boot
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -439,7 +502,7 @@ jobs:
         uses: actions/checkout@v4
 
       # Fresh ubuntu runner: QEMU is NOT installed by default and does not
-      # come with the downloaded artifacts. The main job installs it for its
+      # come with the downloaded artifacts. The build job installs it for its
       # own steps; this job must do the same or every combo dies at step 1
       # with "qemu-system-i386: command not found".
       - name: Install toolchain

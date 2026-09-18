@@ -17,6 +17,7 @@ int futex_wait(uint32_t addr, uint32_t expected);
 // Wakes up to `max_waiters` tasks blocked on addr in this address space.
 int futex_wake(uint32_t addr, int max_waiters);
 int futex_wait_timeout(uint32_t addr, uint32_t expected, uint32_t timeout_ms);
+int futex_requeue(uint32_t addr, uint32_t expected, uint32_t mutex_addr, int max_wake);
 void futex_sweep(void);
 
 void sync_init(void);

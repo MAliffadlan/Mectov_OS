@@ -128,9 +128,11 @@ static void consumer(void* arg) {
         mct_cond_signal(&not_full);  // a producer may proceed
         // Termination handshake: when the final item is consumed, producers
         // are done and cannot signal not_empty again — a consumer still
-        // parked there would wait forever. Broadcast so it wakes and exits.
-        if (consumed == TOTAL_ITEMS) mct_cond_broadcast(&not_empty);
-        mct_mutex_unlock(&c_mu);
+        // parked there would wait forever. v38.91: broadcast via requeue —
+        // moves parked consumers onto c_mu's queue; the unlock inside the
+        // wrapper hands the mutex to them one at a time (no thundering herd).
+        if (consumed == TOTAL_ITEMS) mct_cond_broadcast_requeue(&not_empty, &c_mu);
+        else                        mct_mutex_unlock(&c_mu);
     }
 }
 

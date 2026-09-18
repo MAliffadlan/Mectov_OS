@@ -26,7 +26,9 @@
 #define MAX_SEMS   32
 #define MAX_FUTEX  64
 #define MAX_WAITERS 32  // tasks parked on one object
-#define FUTEX_SWEEP_DIV 1  // v38.87: sweep expired timed-futex parkers every N timer ticks
+#define FUTEX_SWEEP_DIV_BASE 1  // v38.87: sweep expired timed-futex parkers every N timer ticks
+// v38.91: runtime-tunable via /proc/sys/futex_sweep_div.
+static int futex_sweep_div = FUTEX_SWEEP_DIV_BASE;
 
 typedef struct {
     int in_use;
@@ -362,6 +364,66 @@ int futex_wake(uint32_t addr, int max_waiters) {
 }
 
 // ------------------------------------------------------------
+// v38.91 — Linux FUTEX_WAIT_REQUEUE semantics for condvar broadcast:
+// wake up to `max_wake` waiters on `addr`, then MOVE the remaining waiters
+// to `mutex_addr`'s futex queue so the next mutex_unlock wake releases them
+// one at a time (no thundering herd: N waiters no longer all wake, all
+// fail the mutex cmpxchg, and all re-park). Returns the number of waiters
+// handled (woken + moved), -1 if *addr != expected, -2 on table/bad-arg
+// failure. Caller protocol (condvar broadcast): bump the seq word FIRST,
+// then requeue with the pre-bump value as `expected`.
+// ------------------------------------------------------------
+int futex_requeue(uint32_t addr, uint32_t expected, uint32_t mutex_addr, int max_wake) {
+    if (max_wake < 0) max_wake = 0;
+    extern int validate_user_ptr(const void* ptr, uint32_t size);
+    if (!validate_user_ptr((const void*)(uintptr_t)addr, 4) ||
+        !validate_user_ptr((const void*)(uintptr_t)mutex_addr, 4)) return -2;
+    volatile uint32_t* p = (volatile uint32_t*)(uintptr_t)addr;
+    int tid = get_current_task();
+    uint32_t pd = task_get_page_dir(tid);
+    int woken = 0, moved = 0;
+
+    __asm__ volatile("cli");
+    spin_lock(&sync_lock);
+    if (*p != expected) {
+        spin_unlock(&sync_lock);
+        __asm__ volatile("sti");
+        return -1;
+    }
+    futex_t* src = futex_find(pd, addr);
+    if (!src) {
+        spin_unlock(&sync_lock);
+        __asm__ volatile("sti");
+        return 0;                      // nobody waiting: nothing to do
+    }
+    futex_t* dst = (mutex_addr == addr) ? src : futex_alloc(pd, mutex_addr);
+    if (!dst) {
+        spin_unlock(&sync_lock);
+        __asm__ volatile("sti");
+        return -2;
+    }
+    // Wake the head of the cond queue first (FIFO fairness preserved).
+    while (woken < max_wake && src->waiter_count > 0) {
+        if (!wake_one(src->waiters, &src->waiter_count)) break;
+        woken++;
+    }
+    // Move whoever is left to the mutex queue, preserving FIFO order.
+    while (src->waiter_count > 0 && dst->waiter_count < MAX_WAITERS) {
+        dst->waiters[dst->waiter_count++] = src->waiters[0];
+        for (int i = 1; i < src->waiter_count; i++) src->waiters[i - 1] = src->waiters[i];
+        src->waiter_count--;
+        moved++;
+    }
+    // Waiters that did not fit stay on the cond queue; their 50 ms timed
+    // park still releases them (they re-check the predicate), so overflow
+    // can never wedge — it just falls back to the pre-requeue behavior.
+    if (src->waiter_count == 0 && src != dst) src->in_use = 0;
+    spin_unlock(&sync_lock);
+    __asm__ volatile("sti");
+    return woken + moved;
+}
+
+// ------------------------------------------------------------
 // v38.87 — Timed futex wait: bounded parking (Linux FUTEX_WAIT_TIMEOUT
 // semantics). Blocks while *p == expected, but the sweep below wakes the
 // parker once the deadline passes even if nobody ever called futex_wake.
@@ -413,6 +475,12 @@ int futex_wait_timeout(uint32_t addr, uint32_t expected, uint32_t timeout_ms) {
     return 0;
 }
 
+// v38.91: /proc/sys tunable (see vfs.c registry).
+int proc_sys_futex_sweep_div(void) { return futex_sweep_div; }
+void proc_sys_futex_sweep_div_set(int v) {
+    if (v >= 1 && v <= 50) futex_sweep_div = v;
+}
+
 // v38.87 — Timer-tick sweep: wake parkers whose deadline expired. Runs from
 // irq_handler BEFORE schedule(): the sync_lock -> task_set_state(task_lock)
 // ordering matches futex_wait — calling this from inside schedule() (which
@@ -420,7 +488,8 @@ int futex_wait_timeout(uint32_t addr, uint32_t expected, uint32_t timeout_ms) {
 // skips this round; the next tick (10 ms later) retries.
 void futex_sweep(void) {
     static int sweep_div = 0;
-    if (++sweep_div < FUTEX_SWEEP_DIV) return;
+    if (futex_sweep_div < 1) futex_sweep_div = 1;
+    if (++sweep_div < futex_sweep_div) return;
     sweep_div = 0;
     if (sync_lock.locked) return;
     uint32_t now = timer_ticks;

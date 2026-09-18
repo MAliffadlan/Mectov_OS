@@ -52,7 +52,8 @@ static inline uint32_t kstack_guard(int tid) {
 // Zombie tasks older than this (ms) are reaped even if their parent never
 // calls waitpid() — a safety net for fire-and-forget launchers like the
 // terminal's `run`, which would otherwise leak slots forever.
-#define ZOMBIE_REAP_MS 15000
+// v38.91: runtime-tunable via /proc/sys/zombie_reap_ms.
+static int zombie_reap_ms = 15000;
 
 // Park loop for tasks killed by a default-action signal mid-return. The
 // scheduler switches away on the next tick and the zombie slot is reaped.
@@ -102,6 +103,9 @@ typedef struct {
     uint32_t sig_frame_esp;     // user-stack address of the sigframe awaiting SYS_SIGRETURN
     uint32_t zombie_since;      // tick when the task became a zombie (reap timeout)
     uint32_t shm_bits;          // bitmap of shm segments this task has attached
+    // === v38.91: CPU accounting + nice ===
+    uint32_t cpu_ticks;         // scheduler ticks spent RUNNING (for /proc CPU%)
+    int      nice;              // -20 (highest prio) .. 19 (lowest); 0 = default
     mmap_region_t mmap_regions[MMAP_MAX_REGIONS]; // reserved mmap() ranges (0 = free)
     // === NEW: Unix user id (v38.23) ===
     int uid;                    // 0 = root, 1000 = user (permission checks)
@@ -271,7 +275,9 @@ int take_resched(void) {
 // 32-bit loads, fine for a monitor.
 static int rq_cpu_count(void);   // defined below (phantom-CPU-aware core count)
 
-#define CPU_LOAD_WINDOW 50   // IRQ ticks per window (100 Hz -> 500 ms of history)
+#define CPU_LOAD_WINDOW_BASE 50   // IRQ ticks per window (100 Hz -> 500 ms of history)
+// v38.91: runtime-tunable via /proc/sys/load_window.
+static int cpu_load_window = CPU_LOAD_WINDOW_BASE;
 static volatile uint32_t cpu_load_pct[MAX_CPUS];
 static uint32_t cpu_win_busy[MAX_CPUS];
 static uint32_t cpu_win_ticks[MAX_CPUS];
@@ -452,7 +458,11 @@ static int rq_pick(int cid) {
         if (tasks[tid].is_idle && cid != tid) continue;
         if (task_is_current_elsewhere(cid, tid)) continue;
         tasks[tid].wait_ticks++;
-        int score = tasks[tid].priority * 10 + tasks[tid].wait_ticks;
+        // v38.91: nice-weighted pick. Class (priority) stays dominant; nice
+        // contributes a bounded (10 - nice)/2 bonus [-4..+15] so nice -20
+        // beats nice 19 within the same class but never beats a higher class
+        // outright. Aging (wait_ticks) still eventually promotes starved tasks.
+        int score = tasks[tid].priority * 10 + (10 - tasks[tid].nice) / 2 + tasks[tid].wait_ticks;
         if (score > best_score) { best_score = score; best = tid; }
     }
     if (best >= 0) tasks[best].wait_ticks = 0;
@@ -475,7 +485,8 @@ static int rq_steal(int cid) {
             if (tid == 0 || tasks[tid].is_idle) continue;
             if (tasks[tid].state != TASK_STATE_READY) continue;
             if (task_is_current_elsewhere(cid, tid)) continue;
-            int score = tasks[tid].priority * 10 + tasks[tid].wait_ticks;
+            // v38.91: same nice weighting as rq_pick (class dominates).
+            int score = tasks[tid].priority * 10 + (10 - tasks[tid].nice) / 2 + tasks[tid].wait_ticks;
             if (score > best_score) { best_score = score; best = tid; best_src = c; }
         }
     }
@@ -517,6 +528,8 @@ static int create_idle_task(int cpu) {
     }
     tasks[tid].ring = 0;
     tasks[tid].priority = PRIORITY_BACKGROUND;
+    tasks[tid].nice = 0;
+    tasks[tid].cpu_ticks = 0;
     tasks[tid].sleep_ticks = 0;
     tasks[tid].wait_ticks = 0;
     tasks[tid].page_dir = tasks[0].page_dir;
@@ -569,6 +582,8 @@ void init_tasking() {
         tasks[i].state = TASK_STATE_FREE;
         tasks[i].ring = 0;
         tasks[i].priority = PRIORITY_INTERACTIVE;
+        tasks[i].nice = 0;          // v38.91: default nice
+        tasks[i].cpu_ticks = 0;
         tasks[i].sleep_ticks = 0;
         tasks[i].wait_ticks = 0;
         tasks[i].rq_cpu = -1;
@@ -697,6 +712,8 @@ int create_task(void (*entry)()) {
             
             tasks[i].ring = 0;
             tasks[i].priority = PRIORITY_INTERACTIVE;
+            tasks[i].nice = (current_task[cid] >= 0) ? tasks[current_task[cid]].nice : 0;
+            tasks[i].cpu_ticks = 0;
             tasks[i].wait_ticks = 0;
             tasks[i].current_dir = (current_task[cid] >= 0) ? tasks[current_task[cid]].current_dir : 0;
             tasks[i].parent = 0;
@@ -981,12 +998,15 @@ uint32_t schedule(uint32_t esp) {
         }
     }
 
-    // 3b. Per-CPU load sample: a tick counts as busy only when the picked
+    // 3b. CPU accounting (v38.91): the task that LOST the CPU (cur, now
+    //     READY) just consumed one full tick of wall time — credit it. Plus
+    //     the per-CPU load sample: a tick counts as busy only when the picked
     //     task is real work — never task 0 (kernel main loop / BSP idle) or a
     //     pinned per-CPU idle task.
+    if (cur > 0 && !tasks[cur].is_idle) tasks[cur].cpu_ticks++;
     if (cid < MAX_CPUS) {
         if (next != 0 && !tasks[next].is_idle) cpu_win_busy[cid]++;
-        if (++cpu_win_ticks[cid] >= CPU_LOAD_WINDOW) {
+        if (++cpu_win_ticks[cid] >= (uint32_t)cpu_load_window) {
             cpu_load_pct[cid] = (cpu_win_busy[cid] * 100) / cpu_win_ticks[cid];
             cpu_win_busy[cid] = 0;
             cpu_win_ticks[cid] = 0;
@@ -1237,6 +1257,10 @@ int thread_create_ex(void (*entry)(), int priority, uint32_t page_dir,
             tasks[i].heap_ptr = 0x08000000;
             tasks[i].current_dir = (current_task[cid] >= 0) ? tasks[current_task[cid]].current_dir : 0;
             tasks[i].priority = priority;
+            // v38.91: new threads inherit the creator's nice (POSIX-ish),
+            // start with fresh CPU accounting.
+            tasks[i].nice = (current_task[cid] >= 0) ? tasks[current_task[cid]].nice : 0;
+            tasks[i].cpu_ticks = 0;
             tasks[i].page_dir = page_dir;
             tasks[i].sleep_ticks = 0;
             tasks[i].wait_ticks = 0;
@@ -1862,6 +1886,10 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         tasks[i].sig_frame_esp = 0;
         tasks[i].zombie_since = 0;
         tasks[i].shm_bits = tasks[parent].shm_bits;  // child inherits attachments
+        // v38.91: fresh CPU accounting for the child; nice inherits (POSIX:
+        // a child gets its parent's nice value).
+        tasks[i].cpu_ticks = 0;
+        tasks[i].nice = tasks[parent].nice;
         memcpy(tasks[i].signal_handlers, tasks[parent].signal_handlers,
                sizeof(tasks[i].signal_handlers));
         memcpy(tasks[i].sig_masks, tasks[parent].sig_masks, sizeof(tasks[i].sig_masks));
@@ -2678,7 +2706,7 @@ void task_reap_zombies(void) {
         int parent_gone = (p <= 0 || p >= MAX_TASKS ||
                            tasks[p].state == TASK_STATE_FREE ||
                            tasks[p].state == TASK_STATE_ZOMBIE);
-        if (parent_gone || (now - tasks[i].zombie_since) > ZOMBIE_REAP_MS) {
+        if (parent_gone || (now - tasks[i].zombie_since) > (uint32_t)zombie_reap_ms) {
             tasks[i].state = TASK_STATE_FREE;
             num_tasks--;
         }
@@ -2699,9 +2727,48 @@ int get_task_info(int tid, task_info_t* info) {
     info->stack_watermark = tasks[tid].stack_watermark;
     info->pgrp = tasks[tid].pgrp;
     info->session = tasks[tid].session;
+    info->nice = tasks[tid].nice;
+    info->cpu_ticks = tasks[tid].cpu_ticks;
     for (int i = 0; i < 31 && tasks[tid].name[i]; i++) info->name[i] = tasks[tid].name[i];
     info->name[31] = '\0';
     return 1;
+}
+
+int task_get_nice(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS || tasks[tid].state == TASK_STATE_FREE) return -3;
+    return tasks[tid].nice;
+}
+
+// v38.91: owner uid of a task (-1 if dead) — used by the SYS_NICE permission
+// gate in syscall.c so callers never reach into the static task table.
+int get_task_owner_uid(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS || tasks[tid].state == TASK_STATE_FREE) return -1;
+    return tasks[tid].uid;
+}
+
+// v38.91: /proc/sys tunables owned by the scheduler/reaper (see vfs.c
+// registry). Setters validate and silently clamp/reject out-of-range values.
+int proc_sys_zombie_reap_ms(void) { return zombie_reap_ms; }
+void proc_sys_zombie_reap_ms_set(int v) {
+    if (v >= 1000 && v <= 120000) zombie_reap_ms = v;
+}
+int proc_sys_load_window(void) { return cpu_load_window; }
+void proc_sys_load_window_set(int v) {
+    if (v >= 10 && v <= 1000) cpu_load_window = v;
+}
+
+int task_set_nice(int tid, int nice, int caller_uid) {
+    if (tid < 0 || tid >= MAX_TASKS || tasks[tid].state == TASK_STATE_FREE) return -3;
+    if (nice < -20) nice = -20;
+    if (nice > 19) nice = 19;
+    // Raising priority (lowering nice) requires root — same rule as renice(1).
+    if (nice < tasks[tid].nice && caller_uid != ROOT_UID) return -2;
+    __asm__ volatile("cli");
+    spin_lock(&task_lock);
+    tasks[tid].nice = nice;
+    spin_unlock(&task_lock);
+    __asm__ volatile("sti");
+    return 0;
 }
 
 int task_enum(int after, task_info_t* info) {
@@ -2715,6 +2782,8 @@ int task_enum(int after, task_info_t* info) {
         info->stack_watermark = tasks[i].stack_watermark;
         info->pgrp = tasks[i].pgrp;
         info->session = tasks[i].session;
+        info->nice = tasks[i].nice;
+        info->cpu_ticks = tasks[i].cpu_ticks;
         for (int k = 0; k < 31 && tasks[i].name[k]; k++) info->name[k] = tasks[i].name[k];
         info->name[31] = '\0';
         return i;
