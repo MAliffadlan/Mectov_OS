@@ -156,6 +156,9 @@ static int vfs_proc_lazy_lookup(int cur, const char* comp, int probe);
 static void vfs_proc_purge_stale(void);
 // v38.91: /proc/sys seeding (called from both vfs_init paths, defined below)
 void vfs_proc_sys_seed(int proc_node);
+// v38.96: tmpfs seeding creates /tmp before the walker/users see the tree
+static int vfs_create_node_unlocked(const char* name, fs_type_t type, int parent);
+void write_serial_hex(uint32_t n);
 
 // Seed apps/music.wav from /ext2/music.wav (debloat v38.81): the canonical
 // copy lives on ext2 (host-seeded by scripts/seed_ext2.sh); VFS keeps the
@@ -235,6 +238,185 @@ static int vfs_seed_bench_big(void) {
 // is re-built from its real disk contents every boot instead of trusting
 // stale nodes persisted in the MECTOVFS node table. The mount point itself
 // is kept. Public for the runtime mount layer (vfs_mount.c).
+// ---------------------------------------------------------------------------
+// v38.96: tmpfs — RAM-backed file content ("mount" at /tmp).
+//
+// Design notes:
+//  * FS_RAM_DIR / FS_RAM_FILE nodes live in the SAME fs_nodes table as
+//    everything else (so lookup/walk/list/perm code is shared), but their
+//    CONTENT lives in kmalloc'd buffers tracked by this side table.
+//  * The node table persists to disk (vfs_save), but the side table below
+//    does NOT: fs_nodes[i].data_sector stays 0 for RAM nodes, and vfs_init()
+//    purges any stale FS_RAM_* records left by a previous boot — tmpfs is
+//    volatile by definition. Nothing in the persist path needs changing.
+//  * No pointers are stored in the node table itself (that would risk
+//    persisting heap addresses to disk); the side table is indexed in lockstep
+//    by node index.
+//  * Locking: every helper here must be called with vfs_lock held — callers
+//    are the vfs_*_unlocked paths.
+//  * Budget: VFS_TMPFS_MAX_BYTES global (kmalloc enforces the real ceiling,
+//    this keeps a pathological workload from starving the rest of the heap).
+// ---------------------------------------------------------------------------
+#define TMPFS_MAX_FILE (256 * 1024)   // per-file cap, matches the fd write path
+
+static char*  tmpfs_buf[MAX_NODES];    // buffer per node index (NULL = none)
+static int    tmpfs_cap[MAX_NODES];    // allocated capacity (bytes)
+static uint32_t tmpfs_used = 0;        // global committed bytes
+
+static int vfs_is_ram_type(fs_type_t t) {
+    return t == FS_RAM_DIR || t == FS_RAM_FILE;
+}
+
+// Free one node's buffer (caller holds vfs_lock).
+static void tmpfs_free_node(int i) {
+    if (i < 0 || i >= MAX_NODES) return;
+    if (tmpfs_buf[i]) {
+        tmpfs_used -= (uint32_t)tmpfs_cap[i];
+        kfree(tmpfs_buf[i]);
+        tmpfs_buf[i] = NULL;
+    }
+    tmpfs_cap[i] = 0;
+}
+
+// Release every RAM buffer (boot purge + shutdown). Caller holds vfs_lock.
+static void tmpfs_free_all(void) {
+    for (int i = 0; i < MAX_NODES; i++) tmpfs_free_node(i);
+    tmpfs_used = 0;
+}
+
+// Drop stale FS_RAM_* records left on disk by a previous boot (tmpfs is
+// volatile): clears in_use + frees buffers. Mirrors the /proc purge shape.
+// Caller holds vfs_lock.
+static void vfs_purge_stale_tmpfs(void) {
+    tmpfs_free_all();
+    int n = 0;
+    for (int i = 1; i < MAX_NODES; i++) {
+        if (fs_nodes[i].in_use && vfs_is_ram_type(fs_nodes[i].type)) {
+            pcache_invalidate(i);
+            fs_nodes[i].in_use = 0;
+            fs_nodes[i].size = 0;
+            fs_nodes[i].data_sector = 0;
+            n++;
+        }
+    }
+    if (n) {
+        write_serial_string("[VFS] purged stale tmpfs node(s) from previous boot\n");
+    }
+}
+
+// (Re)create the /tmp RAM directory. Caller holds vfs_lock (init path).
+static void vfs_seed_tmpfs(void) {
+    int tmp = vfs_find_in_dir("tmp", 0);
+    if (tmp < 0 || !vfs_is_ram_type(fs_nodes[tmp].type)) {
+        // Fresh disk: node does not exist (or exists as a plain dir from an
+        // older image — replace it, RAM semantics win).
+        if (tmp >= 0) {
+            vfs_clear_children(tmp);
+            pcache_invalidate(tmp);
+            fs_nodes[tmp].in_use = 0;
+        }
+        tmp = vfs_create_node_unlocked("tmp", FS_RAM_DIR, 0);
+        if (tmp < 0) {
+            write_serial_string("[VFS] tmpfs seed failed (node table full?)\n");
+            return;
+        }
+    }        // idempotent: an existing FS_RAM_DIR /tmp just gets its children dropped
+    vfs_clear_children(tmp);
+    write_serial_string("[VFS] tmpfs mounted at /tmp\n");
+}
+
+// Grow a RAM file's buffer to hold `newsz` bytes. Returns 0 on success.
+// Caller holds vfs_lock.
+static int tmpfs_grow(int node, int newsz) {
+    if (newsz > TMPFS_MAX_FILE) return -1;
+    if (tmpfs_cap[node] >= newsz) return 0;
+    // Round capacity to 512B to bound realloc churn; keep the global budget.
+    int want = (newsz + 511) & ~511;
+    int delta = want - tmpfs_cap[node];
+    if ((uint32_t)delta > VFS_TMPFS_MAX_BYTES - tmpfs_used) return -1; // ENOSPC
+    char* nb = (char*)kmalloc((uint32_t)want);
+    if (!nb) return -1;
+    if (tmpfs_buf[node]) {
+        int keep = fs_nodes[node].size;
+        if (keep > newsz) keep = newsz;
+        if (keep > 0) memcpy(nb, tmpfs_buf[node], keep);
+        // Hole between old EOF and the new capacity reads as zeros (POSIX).
+        for (int i = keep; i < want; i++) nb[i] = 0;
+        tmpfs_used -= (uint32_t)tmpfs_cap[node];
+        kfree(tmpfs_buf[node]);
+    } else {
+        for (int i = 0; i < want; i++) nb[i] = 0;
+    }
+    tmpfs_buf[node] = nb;
+    tmpfs_cap[node] = want;
+    tmpfs_used += (uint32_t)want;
+    return 0;
+}
+
+// Offset read from a RAM file. Len was already clamped by the caller.
+// No ata_lock — nothing touches the disk. Caller holds vfs_lock.
+static int tmpfs_read_range(int node, int offset, char* buf, int len) {
+    if (!tmpfs_buf[node]) return 0;              // empty file: EOF
+    if (offset >= fs_nodes[node].size) return 0; // EOF
+    if (len > fs_nodes[node].size - offset) len = fs_nodes[node].size - offset;
+    memcpy(buf, tmpfs_buf[node] + offset, len);
+    return len;
+}
+
+// Whole-file read used by the legacy (path-based) read path.
+static int tmpfs_read_whole(int node, char* buf, int max_size) {
+    int size = fs_nodes[node].size;
+    if (size > max_size) size = max_size;
+    if (size <= 0) { if (max_size > 0) buf[0] = '\0'; return 0; }
+    int r = tmpfs_read_range(node, 0, buf, size);
+    if (r >= 0 && r < max_size) buf[r] = '\0';
+    return r;
+}
+
+// Overwrite a RAM file with `size` bytes (whole-file write semantics,
+// matching the native FS_FILE path). Caller holds vfs_lock.
+static int tmpfs_write_whole(int node, const char* data, int size) {
+    if (size > TMPFS_MAX_FILE) return -3;        // EFBIG-ish
+    if (tmpfs_grow(node, size) != 0) return -3;
+    if (size > 0) memcpy(tmpfs_buf[node], data, size);
+    fs_nodes[node].size = size;
+    pcache_invalidate(node);
+    return size;
+}
+
+// v38.96: offset-aware write into a tmpfs file. Called from the fd write
+// fast path with fd_lock held — takes only vfs_lock (leaf below fd_lock in
+// the established ordering). append=1 forces the write at EOF (O_APPEND).
+// Grows the buffer on demand; short-writes at the per-file cap (POSIX-ish
+// EFBIG as a partial write). Returns bytes written.
+int vfs_write_file_offset(int node, int offset, const char* buf, int len, int append) {
+    if (node < 0 || node >= MAX_NODES || !fs_nodes[node].in_use) return -1;
+    if (fs_nodes[node].type != FS_RAM_FILE) return -1;
+    if (len < 0) return -1;
+    vfs_lock_acquire();
+    int off = append ? fs_nodes[node].size : offset;
+    if (off < 0 || off > TMPFS_MAX_FILE || len > TMPFS_MAX_FILE) {
+        vfs_lock_release();
+        return -1;
+    }
+    int64_t end = (int64_t)off + (int64_t)len;
+    if (end > TMPFS_MAX_FILE) {
+        len = TMPFS_MAX_FILE - off;   // partial write up to the cap
+        if (len <= 0) { vfs_lock_release(); return -1; }
+        end = off + len;
+    }
+    if (tmpfs_grow(node, (int)end) != 0) { vfs_lock_release(); return -3; }
+    // Hole between the old EOF and the write offset reads as zeros (POSIX).
+    // tmpfs_grow zero-fills new capacity, but a shrink (whole-file write)
+    // leaves stale bytes past the new EOF — re-zero [size, off) explicitly.
+    for (int i = fs_nodes[node].size; i < off; i++) tmpfs_buf[node][i] = 0;
+    if (len > 0) memcpy(tmpfs_buf[node] + off, buf, len);
+    if (end > fs_nodes[node].size) fs_nodes[node].size = (int)end;
+    pcache_invalidate(node);
+    vfs_lock_release();
+    return len;
+}
+
 void vfs_clear_children(int node) {
     if (node < 0 || node >= MAX_NODES) return;
     int changed;
@@ -251,6 +433,7 @@ void vfs_clear_children(int node) {
             }
             if (is_descendant) {
                 pcache_invalidate(i);
+                tmpfs_free_node(i);   // v38.96: RAM content dies with the node
                 fs_nodes[i].in_use = 0;
                 fs_nodes[i].size = 0;
                 fs_nodes[i].data_sector = 0;
@@ -258,6 +441,14 @@ void vfs_clear_children(int node) {
             }
         }
     } while (changed);
+}
+
+// v38.96: current tmpfs committed bytes (procfs meminfo).
+uint32_t tmpfs_used_get(void) {
+    vfs_lock_acquire();
+    uint32_t u = tmpfs_used;
+    vfs_lock_release();
+    return u;
 }
 
 void vfs_init() {
@@ -300,6 +491,11 @@ void vfs_init() {
         // anything walks /proc. (Node 0 "root" is protected; this only drops
         // in_use flags, so it runs before the first resolver call below.)
         vfs_proc_purge_stale();
+        // v38.96: tmpfs is volatile — the loaded node table may carry
+        // FS_RAM_* records from a previous boot whose RAM content is gone.
+        // Free any buffers and drop the stale nodes, then mount /tmp fresh.
+        vfs_purge_stale_tmpfs();
+        vfs_seed_tmpfs();
         if (vfs_get_node("/proc") < 0) {
             int proc_node = vfs_create_node("proc", FS_DIR, 0);
             if (proc_node >= 0) {
@@ -468,6 +664,11 @@ void vfs_init() {
         extern uint8_t _binary_procsysdemo_mct_start[];
         extern uint8_t _binary_procsysdemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/procsysdemo.mct", (const char*)_binary_procsysdemo_mct_start, _binary_procsysdemo_mct_end - _binary_procsysdemo_mct_start);
+
+        // tmpfs /tmp demo (v38.96)
+        extern uint8_t _binary_tmpfsdemo_mct_start[];
+        extern uint8_t _binary_tmpfsdemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/tmpfsdemo.mct", (const char*)_binary_tmpfsdemo_mct_start, _binary_tmpfsdemo_mct_end - _binary_tmpfsdemo_mct_start);
 
         // FPU/SSE context-switch regression (v38.41)
         extern uint8_t _binary_fputest_mct_start[];
@@ -719,7 +920,6 @@ void vfs_init() {
     
     // No filesystem on disk — build the tree from scratch (fresh disk).
     vfs_seeding = 1;
-    vfs_proc_purge_stale();   // no-op on a wiped table, kept for symmetry
     
     // Tidak ada filesystem — buat root directory
     memset(fs_nodes, 0, sizeof(fs_nodes));
@@ -772,6 +972,12 @@ void vfs_init() {
     extern uint8_t _binary_procsysdemo_mct_end[];
     vfs_create_file("apps/procsysdemo.mct");
     vfs_write_file("apps/procsysdemo.mct", (const char*)_binary_procsysdemo_mct_start, _binary_procsysdemo_mct_end - _binary_procsysdemo_mct_start);
+
+    // tmpfs /tmp demo (v38.96)
+    extern uint8_t _binary_tmpfsdemo_mct_start[];
+    extern uint8_t _binary_tmpfsdemo_mct_end[];
+    vfs_create_file("apps/tmpfsdemo.mct");
+    vfs_write_file("apps/tmpfsdemo.mct", (const char*)_binary_tmpfsdemo_mct_start, _binary_tmpfsdemo_mct_end - _binary_tmpfsdemo_mct_start);
 
     // FPU/SSE context-switch regression (v38.41)
     extern uint8_t _binary_fputest_mct_start[];
@@ -1051,6 +1257,9 @@ void vfs_init() {
         // v38.85: same stale-/proc/<pid> purge for the fresh-format path.
         // Phase 1: UNIX-like /dev filesystem
         vfs_proc_purge_stale();
+        // v38.96: fresh table — zero RAM buffers, then mount tmpfs at /tmp.
+        tmpfs_free_all();
+        vfs_seed_tmpfs();
         int dev_node = vfs_create_node("dev", FS_DIR, 0);
     if (dev_node >= 0) {
         vfs_create_node("null", FS_DEV, dev_node);
@@ -1067,8 +1276,7 @@ void vfs_init() {
         vfs_create_node("uptime", FS_PROC, proc_node);
         vfs_create_node("version", FS_PROC, proc_node);
         vfs_create_node("dmesg", FS_PROC, proc_node);
-        vfs_create_node("atastats", FS_PROC, proc_node);
-        vfs_proc_sys_seed(proc_node);   // v38.91: /proc/sys tunables
+        vfs_create_node("atastats", FS_PROC, proc_node);        vfs_proc_sys_seed(proc_node);   // v38.91: /proc/sys tunables
         write_serial_string("[VFS] created /proc nodes\n");
     }
     
@@ -1388,7 +1596,7 @@ static int vfs_walk_child(int cur, const char* comp) {
 }
 
 static int vfs_is_dir_type(fs_type_t t) {
-    return t == FS_DIR || t == FS_EXT2_DIR || t == FS_FAT32_DIR;
+    return t == FS_DIR || t == FS_EXT2_DIR || t == FS_FAT32_DIR || t == FS_RAM_DIR;
 }
 
 // v38.85: per-walk dynamic /proc. Two roles:
@@ -1566,7 +1774,8 @@ int vfs_get_node(const char* path) {
 static int vfs_find_in_dir_unlocked(const char* name, int dir_node) {
     if (dir_node < 0 || dir_node >= MAX_NODES) return -1;
     if (!fs_nodes[dir_node].in_use || (fs_nodes[dir_node].type != FS_DIR &&
-        fs_nodes[dir_node].type != FS_EXT2_DIR && fs_nodes[dir_node].type != FS_FAT32_DIR)) return -1;
+        fs_nodes[dir_node].type != FS_EXT2_DIR && fs_nodes[dir_node].type != FS_FAT32_DIR &&
+        fs_nodes[dir_node].type != FS_RAM_DIR)) return -1;
     
     char lc_name[MAX_FILENAME];
     strtolower(lc_name, name);
@@ -1594,7 +1803,8 @@ static int vfs_create_node_unlocked(const char* name, fs_type_t type, int parent
     // Validate parent
     if (parent < 0 || parent >= MAX_NODES) return -1;
     if (!fs_nodes[parent].in_use || (fs_nodes[parent].type != FS_DIR &&
-        fs_nodes[parent].type != FS_EXT2_DIR && fs_nodes[parent].type != FS_FAT32_DIR)) return -1;
+        fs_nodes[parent].type != FS_EXT2_DIR && fs_nodes[parent].type != FS_FAT32_DIR &&
+        fs_nodes[parent].type != FS_RAM_DIR)) return -1;
     if (!name || name[0] == '\0') return -1;
     
     // Check name exists in parent
@@ -1625,7 +1835,8 @@ static int vfs_create_node_unlocked(const char* name, fs_type_t type, int parent
                 int cuid = (ctask >= 0) ? task_get_uid(ctask) : ROOT_UID;
                 fs_nodes[i].uid = (uint16_t)cuid;
                 fs_nodes[i].gid = 0;
-                if (type == FS_DIR || type == FS_EXT2_DIR || type == FS_FAT32_DIR) {
+                if (type == FS_DIR || type == FS_EXT2_DIR || type == FS_FAT32_DIR ||
+                    type == FS_RAM_DIR) {
                     if (cuid == ROOT_UID) {
                         fs_nodes[i].mode = 0x1FF;  // 0777: kernel dirs are shared
                     } else {
@@ -1679,6 +1890,13 @@ static int vfs_create_node_unlocked(const char* name, fs_type_t type, int parent
                 }
                 fs_nodes[i].type = is_dir ? FS_FAT32_DIR : FS_FAT32_FILE;
                 fs_nodes[i].data_sector = (int)fcluster;
+            }
+            // New object under a tmpfs directory: the request type only
+            // carries intent (FS_DIR/FS_FILE); the RAM backend is what the
+            // parent directory provides. Rename to the RAM types here.
+            if (fs_nodes[parent].type == FS_RAM_DIR &&
+                (type == FS_DIR || type == FS_FILE)) {
+                fs_nodes[i].type = (type == FS_DIR) ? FS_RAM_DIR : FS_RAM_FILE;
             }
             // Runtime creates persist immediately; seeding-time creates are
             // flushed once by vfs_init()'s final vfs_save() (see vfs_seeding).
@@ -1977,6 +2195,10 @@ static int vfs_delete_node_unlocked(const char* path, int acting_uid) {
     if (fs_nodes[node].type == FS_PROC) return -7; // virtual, cannot delete
     if (fs_nodes[node].type == FS_DIR && fs_nodes[node].parent == 0 &&
         strcmp(fs_nodes[node].name, "proc") == 0) return -7;
+    // v38.96: the tmpfs mount point is permanent too (its CONTENT comes and
+    // goes with the boot; the directory itself must survive reboots).
+    if (fs_nodes[node].type == FS_RAM_DIR && fs_nodes[node].parent == 0 &&
+        strcmp(fs_nodes[node].name, "tmp") == 0) return -7;
     // v38.85: /proc/<pid> dirs are FS_DIR — block removing them (or anything
     // named like a pid directly under /proc) even though the type check above
     // no longer catches them.
@@ -2057,6 +2279,7 @@ static int vfs_delete_node_unlocked(const char* path, int acting_uid) {
                         vfs_remove_ext2_entry(i);
                         vfs_remove_fat32_entry(i);
                         pcache_invalidate(i);
+                        tmpfs_free_node(i);   // v38.96: RAM content dies too
                         fs_nodes[i].in_use = 0;
                         fs_nodes[i].size = 0;
                         fs_nodes[i].data_sector = 0;
@@ -2070,6 +2293,7 @@ static int vfs_delete_node_unlocked(const char* path, int acting_uid) {
     vfs_remove_ext2_entry(node);
     vfs_remove_fat32_entry(node);
     pcache_invalidate(node);
+    tmpfs_free_node(node);   // v38.96: RAM content dies with the node
     fs_nodes[node].in_use = 0;
     fs_nodes[node].size = 0;
     fs_nodes[node].data_sector = 0;
@@ -2525,6 +2749,16 @@ static int vfs_proc_read(const char* name, char* buf, int max_size) {
         proc_add(buf, &len, max_size, ", ");
         proc_itoa(num, hs.free_blocks);
         proc_add(buf, &len, max_size, num);
+        // v38.96: tmpfs usage — RAM committed to /tmp file buffers.
+        {
+            extern uint32_t tmpfs_used_get(void);
+            proc_add(buf, &len, max_size, "\nTmpfsUsed: ");
+            proc_itoa(num, (int)tmpfs_used_get());
+            proc_add(buf, &len, max_size, num);
+            proc_add(buf, &len, max_size, " B of ");
+            proc_itoa(num, VFS_TMPFS_MAX_BYTES);
+            proc_add(buf, &len, max_size, " B\n");
+        }
         proc_add(buf, &len, max_size, " free)\nHeapBlocks: ");
         proc_itoa(num, hs.blocks);
         proc_add(buf, &len, max_size, num);
@@ -2654,7 +2888,12 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
         }
         return -2; // Unknown device
     }
-    
+
+    // v38.96: tmpfs — RAM-backed content, no disk, no pcache involved.
+    if (fs_nodes[node].type == FS_RAM_FILE) {
+        return tmpfs_read_whole(node, buf, max_size);
+    }
+
     if (fs_nodes[node].type == FS_EXT2_FILE) {
         extern int ext2_read_file_data(uint32_t inode_num, char* buf, int max_size);
         if (mount_select_for_node(node) != 0) return -1;
@@ -2770,6 +3009,14 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
                                          char* buf, int len);
         return fat32_read_file_range((uint32_t)fs_nodes[node].data_sector,
                                      offset, buf, len);
+    }
+
+    // v38.96: tmpfs — RAM-backed content (offset-aware; no ata_lock needed).
+    if (fs_nodes[node].type == FS_RAM_FILE) {
+        int avail = size - offset;
+        if (avail <= 0) return 0;
+        if (len > avail) len = avail;
+        return tmpfs_read_range(node, offset, buf, len);
     }
 
     if (fs_nodes[node].type != FS_FILE) return -1;
@@ -2965,6 +3212,12 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
             if (!vfs_seeding) vfs_save();
         }
         return (nc >= 0) ? size : nc;
+    }
+
+    // v38.96: tmpfs — write the RAM buffer directly (whole-file semantics,
+    // matching the native path; no sectors, no save, no pcache).
+    if (fs_nodes[node].type == FS_RAM_FILE) {
+        return tmpfs_write_whole(node, data, size);
     }
 
     if (fs_nodes[node].type != FS_FILE) return -2;
@@ -3182,7 +3435,7 @@ static void vfs_list_dir_unlocked(int dir_node, void (*print_fn)(const char*, un
         
         // Print file/dir icon
         if (fs_nodes[i].type == FS_DIR || fs_nodes[i].type == FS_EXT2_DIR ||
-            fs_nodes[i].type == FS_FAT32_DIR) {
+            fs_nodes[i].type == FS_FAT32_DIR || fs_nodes[i].type == FS_RAM_DIR) {
             print_fn("[DIR]  ", 0x0B);
             print_fn(fs_nodes[i].name, 0x0B);
             print_fn("/\n", 0x0B);

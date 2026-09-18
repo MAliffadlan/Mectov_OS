@@ -539,6 +539,7 @@ int d_min_x = 9999, d_min_y = 9999, d_max_x = -1, d_max_y = -1;
 
 void mark_dirty(int x, int y, int w, int h) {
     if (active_rt_buf != back_buffer) return; // Only dirty the screen when drawing to back buffer
+    if (w <= 0 || h <= 0) return;             // v38.96: empty rect = no damage
     
     // Ensure even alignment for 64-bit fast copies in swap_buffers
     int align_x = x & ~1;

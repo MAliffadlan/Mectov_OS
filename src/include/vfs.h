@@ -20,6 +20,10 @@
 #define VFS_MAGIC_SECTOR  0
 #define VFS_NODE_START    1
 #define VFS_NODE_SECTORS  256  // 256 nodes * 512 bytes = 128KB on disk
+
+// v38.96: tmpfs budget. Global cap on RAM committed to FS_RAM_FILE buffers
+// (kernel heap); per-file cap lives in vfs.c and matches the fd write path.
+#define VFS_TMPFS_MAX_BYTES (2 * 1024 * 1024)   // 2MB
 #define VFS_DATA_START    (VFS_NODE_START + VFS_NODE_SECTORS)
 #define VFS_DISK_SECTORS  2048 // total sectors on the 1MB image
 // v3 (v38.23): node table gained uid/gid/mode (ownership + permissions). An
@@ -27,7 +31,12 @@
 // the new fields instead of reading garbage ownership into every node.
 #define VFS_LAYOUT_VERSION 3
 
-typedef enum { FS_FILE, FS_DIR, FS_DEV, FS_EXT2_FILE, FS_EXT2_DIR, FS_FAT32_FILE, FS_FAT32_DIR, FS_PROC, FS_SYMLINK } fs_type_t;
+typedef enum { FS_FILE, FS_DIR, FS_DEV, FS_EXT2_FILE, FS_EXT2_DIR, FS_FAT32_FILE, FS_FAT32_DIR, FS_PROC, FS_SYMLINK,
+               // v38.96: tmpfs — RAM-backed nodes (buffers in the kernel heap,
+               // side table in vfs.c). Appended at the END on purpose: the node
+               // table persists on disk with numeric types, so inserting in the
+               // middle would renumber FS_SYMLINK and misread existing disks.
+               FS_RAM_DIR, FS_RAM_FILE } fs_type_t;
 
 // v38.85: symlinks. The link target is stored inside the node's 450-byte pad
 // (fs_node_t is a packed 512-byte on-disk struct; adding a field would bump
@@ -144,6 +153,10 @@ int vfs_read_file(const char* path, char* buf, int max_size);
 // use this; it takes only ata_lock, the innermost lock). Plain FS_FILE nodes
 // only. Returns bytes read or -1.
 int vfs_read_file_offset(int node, int offset, char* buf, int len);
+// v38.96: offset-aware write into a tmpfs (FS_RAM_FILE) node. append=1
+// writes at EOF (O_APPEND). Grows the RAM buffer on demand, honors the
+// tmpfs budget; returns bytes written or <0.
+int vfs_write_file_offset(int node, int offset, const char* buf, int len, int append);
 
 // Resolusi path
 void vfs_resolve_path(const char* path, char* resolved, int buf_size);

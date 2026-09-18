@@ -79,6 +79,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/forkdemo_mct.o \
        $(OBJ_DIR)/procfsdemo_mct.o \
        $(OBJ_DIR)/procsysdemo_mct.o \
+       $(OBJ_DIR)/tmpfsdemo_mct.o \
        $(OBJ_DIR)/fputest_mct.o \
        $(OBJ_DIR)/hardening_test_mct.o \
        $(OBJ_DIR)/nxtest_mct.o \
@@ -215,6 +216,9 @@ procfsdemo.mct: apps/procfsdemo.c $(MCT_LIBC_H)
 
 procsysdemo.mct: apps/procsysdemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/procsysdemo.c procsysdemo.mct
+
+tmpfsdemo.mct: apps/tmpfsdemo.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/tmpfsdemo.c tmpfsdemo.mct
 
 fputest.mct: apps/fputest.c $(MCT_LIBC_H)
 	MCT_CFLAGS_EXTRA="-msse -msse2" python3 scripts/build_mct.py apps/fputest.c fputest.mct
@@ -367,6 +371,9 @@ $(OBJ_DIR)/procfsdemo_mct.o: procfsdemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/procsysdemo_mct.o: procsysdemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 procsysdemo.mct $(OBJ_DIR)/procsysdemo_mct.o
+
+$(OBJ_DIR)/tmpfsdemo_mct.o: tmpfsdemo.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 tmpfsdemo.mct $(OBJ_DIR)/tmpfsdemo_mct.o
 
 $(OBJ_DIR)/fputest_mct.o: fputest.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 fputest.mct $(OBJ_DIR)/fputest_mct.o

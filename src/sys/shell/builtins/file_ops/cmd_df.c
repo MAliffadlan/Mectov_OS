@@ -64,4 +64,20 @@ void cmd_df(void) {
         } else {
             print("fat32          not mounted\n", 0x07);
         }
+        
+        // v38.96: tmpfs row — RAM-backed, capped by VFS_TMPFS_MAX_BYTES.
+        {
+            extern uint32_t tmpfs_used_get(void);
+            uint32_t used_b = tmpfs_used_get();
+            uint32_t total_kb = VFS_TMPFS_MAX_BYTES / 1024;
+            uint32_t used_kb = used_b / 1024;
+            uint32_t free_kb = total_kb - used_kb;
+            uint32_t pct = used_b * 100 / VFS_TMPFS_MAX_BYTES;
+            print("tmpfs          ", 0x0B);
+            p_int((int)total_kb, 0x0F); print("      ", 0x07);
+            p_int((int)used_kb, 0x0F); print("    ", 0x07);
+            p_int((int)free_kb, 0x0F); print("    ", 0x07);
+            p_int((int)pct, 0x0F); print("%  /tmp", 0x0F);
+            print("\n", 0x0F);
+        }
 }

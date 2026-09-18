@@ -109,7 +109,8 @@ int do_sys_read(int fd, char* buf, int size) {
         }
         int node = global_fds[gfd].vfs_node;
         int t = fs_nodes[node].type;
-        if (t == FS_FILE || t == FS_EXT2_FILE || t == FS_FAT32_FILE) {
+        if (t == FS_FILE || t == FS_EXT2_FILE || t == FS_FAT32_FILE ||
+            t == FS_RAM_FILE) {   // v38.96: tmpfs is a real offset-backed file
             // Offset-aware read at the descriptor's position, then advance it
             // (POSIX sequential read). vfs_read_file_offset dispatches per
             // backend (native / ext2 / FAT32 range reads, v38.53) and takes
@@ -202,6 +203,16 @@ int do_sys_write(int fd, const char* buf, int size) {
         // O_APPEND: every write lands at the end of the file, regardless of
         // the descriptor offset (POSIX).
         if (global_fds[gfd].flags & O_APPEND) off = oldsz;
+        // v38.96: tmpfs fast path — write the RAM buffer in place instead of
+        // the read-modify-write-everything round trip the generic path does
+        // (which would kalloc a whole-file buffer per write).
+        if (fs_nodes[global_fds[gfd].vfs_node].type == FS_RAM_FILE) {
+            int rn = vfs_write_file_offset(global_fds[gfd].vfs_node, off, buf, size,
+                                           (global_fds[gfd].flags & O_APPEND) ? 1 : 0);
+            if (rn >= 0) global_fds[gfd].offset = off + size;
+            fd_lock_release();
+            return rn;
+        }
         // Overflow + cap check (v38.54 HIGH fix): off+size may wrap signed int
         // and make newsz small, leading to heap OOB at whole[off+i].
         if (off < 0 || size < 0 || off > VFS_FD_MAX_FILE || size > VFS_FD_MAX_FILE) {
