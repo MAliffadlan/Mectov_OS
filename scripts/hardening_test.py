@@ -230,9 +230,23 @@ def main():
         time.sleep(1.0)
 
         # ---- 2. Lock, then unlock with the NEW password ----
-        type_line(["l", "o", "c", "k", "ret"])
-        locked = wait_screen(lambda w, h, px: is_locked(px, w, h),
-                             "/tmp/mectov_hardening_locked1.ppm", 25)
+        # Retry the `lock` keystrokes a few times: on a loaded runner the
+        # terminal window can still be settling when the first `lock` is
+        # typed (the keystrokes land nowhere and the gate never shows).
+        locked = None
+        for attempt in range(3):
+            type_line(["l", "o", "c", "k", "ret"])
+            locked = wait_screen(lambda w, h, px: is_locked(px, w, h),
+                                 "/tmp/mectov_hardening_locked1.ppm", 25)
+            if locked is not None:
+                break
+            print(f"[retry] lock attempt {attempt + 1} did not show the gate — re-focusing")
+            # Re-focus the terminal window (same center click as above),
+            # clear any half-typed line, then retry.
+            mon_cmd("mouse_move 300 176")
+            time.sleep(0.1)
+            mon_cmd("mouse_button 1"); time.sleep(0.1); mon_cmd("mouse_button 0")
+            time.sleep(0.5)
         if locked is None:
             print("[FAIL] `lock` did not show the login gate")
             return 1
