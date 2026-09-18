@@ -114,20 +114,20 @@ static void init_icons() {
 // header, so what you see there is exactly what ships.
 #include "../include/icon_glyphs.h"
 
-typedef struct { const char* label; uint32_t tint; uint32_t dark; } icon_tile_t;
+typedef struct { const char* label; uint32_t tint; } icon_tile_t;
 static const icon_tile_t icon_tiles[] = {
-    { "Terminal", 0x0023272F, 0x00101318 },
-    { "Browser",  0x00124A78, 0x000B2F4C },
-    { "Explorer", 0x001C4A66, 0x00122E40 },
-    { "SysInfo",  0x00363E4A, 0x00232932 },
-    { "Clock",    0x00363E4A, 0x00232932 },
-    { "PCI",      0x00225044, 0x00163329 },
-    { "Snake",    0x001C5A40, 0x00123325 },
-    { "Calc",     0x003C3266, 0x00251F42 },
-    { "Task Mgr", 0x00363E4A, 0x00232932 },
-    { "Flappy",   0x00665224, 0x00403418 },
-    { "Notepad",  0x004A525E, 0x00303640 },
-    { "ELF Demo", 0x00592B44, 0x00381C2A },
+    { "Terminal", 0x0023272F },
+    { "Browser",  0x00124A78 },
+    { "Explorer", 0x001C4A66 },
+    { "SysInfo",  0x00363E4A },
+    { "Clock",    0x00363E4A },
+    { "PCI",      0x00225044 },
+    { "Snake",    0x001C5A40 },
+    { "Calc",     0x003C3266 },
+    { "Task Mgr", 0x00363E4A },
+    { "Flappy",   0x00665224 },
+    { "Notepad",  0x004A525E },
+    { "ELF Demo", 0x00592B44 },
 };
 
 static const uint32_t* icon_glyph(const char* label) {
@@ -154,34 +154,34 @@ static void draw_pro_icon(int ix, int iy, const char* label) {
     int bg_y = cy - bg_size / 2;
     int radius = 10;
 
-    // Tile: dark tint by default, tinted hue per app.
-    uint32_t tint = 0x00363E4A, dark = 0x00232932;
+    // Tile: single flat rounded rect in the app's tint. No shadow, no
+    // offset dark edge (v38.94) — cheapest possible tile, zero extra fills.
+    uint32_t tint = 0x00363E4A;
     for (unsigned i = 0; i < sizeof(icon_tiles)/sizeof(icon_tiles[0]); i++) {
-        if (strcmp(label, icon_tiles[i].label) == 0) {
-            tint = icon_tiles[i].tint;
-            dark = icon_tiles[i].dark;
-            break;
-        }
+        if (strcmp(label, icon_tiles[i].label) == 0) { tint = icon_tiles[i].tint; break; }
     }
-
-    // Subtle drop shadow lifts the tile off the wallpaper.
-    draw_soft_shadow(bg_x, bg_y, bg_size, bg_size, radius, 40);
-    // Dark base + tint inset 2px from the right/bottom = inner shade edge.
-    draw_rounded_rect(bg_x, bg_y, bg_size, bg_size, radius, dark);
-    draw_rounded_rect(bg_x, bg_y, bg_size - 2, bg_size - 2, radius, tint);
+    draw_rounded_rect(bg_x, bg_y, bg_size, bg_size, radius, tint);
 
     // Glyph: 16x16 two-tone bitmap at 2x (32px) centered on the tile.
     // 0 = transparent, 1 = foreground (light), 2 = inner (dark recess).
+    // v38.94: run-length blit — consecutive same-color pixels coalesce into
+    // one draw_rect (2x scale means a 16px row is at most 8 rects per color;
+    // typical glyphs issue ~10-16 rects per row instead of up to 16).
     static const uint32_t FG = 0x00E8EDF3, IN = 0x002E3440;
     const uint32_t* g = icon_glyph(label);
     int ox = cx - 16, oy = cy - 16;
     for (int y = 0; y < 16; y++) {
         uint32_t row = g[y];
         if (!row) continue;
-        for (int x = 0; x < 16; x++) {
+        int x = 0;
+        while (x < 16) {
             uint32_t v = (row >> (2 * x)) & 3;
-            if (v == 0) continue;
-            draw_rect(ox + 2*x, oy + 2*y, 2, 2, v == 1 ? FG : IN);
+            if (v == 0) { x++; continue; }
+            uint32_t col = (v == 1) ? FG : IN;
+            int run = 1;
+            while (x + run < 16 && ((row >> (2 * (x + run))) & 3) == v) run++;
+            draw_rect(ox + 2*x, oy + 2*y, 2*run, 2, col);
+            x += run;
         }
     }
 }

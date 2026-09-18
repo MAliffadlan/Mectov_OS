@@ -9,8 +9,8 @@ SERIAL_LOG = "/tmp/iconshot_serial.log"
 MON_SOCK = "/tmp/iconshot_monitor.sock"
 OUT_PPM = "/tmp/mectov_desktop.ppm"
 ISO = os.path.join(ROOT, "mectov.iso")
-DISK = os.path.join(ROOT, "disk.img")
-EXT2 = os.path.join(ROOT, "ext2.img")
+DISK = "/tmp/disk_copy.img"   # copies: run.sh/QEMU may hold locks on the originals
+EXT2 = "/tmp/ext2_copy.img"
 
 # name-to-scancode map for sendkey (subset used to type "root\n")
 SCAN = {}
