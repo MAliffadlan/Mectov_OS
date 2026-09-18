@@ -111,6 +111,22 @@ void apic_send_eoi(void) {
     }
 }
 
+// Broadcast fixed-delivery IPI to all-excluding-self (destination
+// shorthand 11, physical). Same delivery-wait discipline as the directed
+// IPI above: the wait only covers Send acceptance, not receipt, so this
+// stays cheap in IRQ context. With no other cores (or no LAPIC) the
+// shorthand matches nothing and the write is a harmless no-op.
+void apic_broadcast_fixed(uint8_t vector) {
+    if (!smp_lapic_addr) return;
+    volatile uint32_t* icr_high = (volatile uint32_t*)(smp_lapic_addr + LAPIC_ICR_HIGH);
+    volatile uint32_t* icr_low = (volatile uint32_t*)(smp_lapic_addr + LAPIC_ICR_LOW);
+    *icr_high = 0;   // ignored under shorthand, kept deterministic
+    *icr_low = (uint32_t)vector | (3u << 18);
+    while (*icr_low & (1u << 12)) {
+        __asm__ __volatile__("pause");
+    }
+}
+
 // Directed fixed-delivery IPI (physical destination mode, no shorthand):
 // interrupts one specific LAPIC on `vector`. Unlike the NMI delivery used
 // by the panic path this is a normal interrupt — the target must have IF=1

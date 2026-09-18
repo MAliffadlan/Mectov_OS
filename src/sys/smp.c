@@ -15,6 +15,12 @@ extern uint32_t tasks_get_boot_cr3(void);
 
 static volatile int ap_startup_count = 0;
 
+// Set once the BSP finishes waking every AP (end of smp_init, after the
+// last SIPI handshake). The BSP's PIT tick uses it to gate the AP
+// re-tickle broadcast (v38.90): no fixed IPI may land mid-SIPI-handshake,
+// when KVM is still shepherding the target through real mode.
+volatile int smp_aps_ready = 0;
+
 void ap_main(void) {
     // We are now in 32-bit protected mode on an Application Processor
     
@@ -163,4 +169,5 @@ void smp_init(void) {
     write_serial_string("[SMP] AP startup complete. Active APs: ");
     write_serial_hex(ap_startup_count);
     write_serial_string("\n");
+    smp_aps_ready = 1;
 }

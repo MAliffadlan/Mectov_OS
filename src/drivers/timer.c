@@ -116,6 +116,27 @@ static void timer_handler(registers_t* regs) {
     // from Ring 3 timeouts to uptime keeps 1 kHz-era arithmetic unchanged.
     timer_ticks += TIMER_MS_PER_TICK;
 
+    // AP tick insurance (v38.90): KVM's APIC-timer virtualization can lose
+    // an AP's LAPIC arming when the AP programs INIT then HLTs immediately
+    // (exactly ap_main's shape) — the AP then sleeps with no IRQ source
+    // until the watchdog murders the boot (all-HLT NMI dump, no panic).
+    // Re-tickle every AP from the BSP's reliable PIT tick with a fixed
+    // vector-32 broadcast: each AP runs this same handler (heartbeat +
+    // schedule), so a lost LAPIC arming is invisible. Every 2nd tick is
+    // plenty (20 ms << 3 s watchdog window) and halves the ICR traffic.
+    // Gated past SMP bring-up (no IPI mid-SIPI-handshake) and skipped on
+    // single-core/no-LAPIC builds, where the shorthand matches nothing
+    // anyway. A genuinely IF=0-hung AP ignores IPIs, so the watchdog still
+    // fires correctly for real lockups.
+    {
+        extern uint32_t smp_cpu_count;
+        extern volatile int smp_aps_ready;
+        extern void apic_broadcast_fixed(uint8_t vector);
+        uint32_t tick_no = timer_ticks / TIMER_MS_PER_TICK;
+        if (smp_aps_ready && smp_cpu_count > 1 && (tick_no & 1) == 0)
+            apic_broadcast_fixed(32);
+    }
+
     // Feed the kernel entropy pool (v38.52): tick counter + TSC low bits mix
     // in continuously, reseeding the ChaCha8 DRBG every 8 samples (every
     // 80 ms at 100 Hz — still far above any attacker-observable rate).
