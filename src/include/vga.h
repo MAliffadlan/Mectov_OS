@@ -57,6 +57,9 @@ void vga_blit_buffer(uint32_t* src, int sw, int sh, int src_pitch, int dx, int d
 void put_pixel(int x, int y, uint32_t color);
 void draw_rect(int x, int y, int w, int h, uint32_t color);
 void draw_rect_alpha(int x, int y, int w, int h, uint32_t color);
+// Source-over blend of a single pixel: dst = dst*(1-a) + color*a (a = 0..255).
+// The desktop icon renderer uses this for anti-aliased edges and glyph masks.
+void vga_blend_px(int x, int y, uint32_t color, uint8_t a);
 void draw_rect_border(int x, int y, int w, int h, uint32_t col);
 void draw_line(int x0, int y0, int x1, int y1, uint32_t color);
 void draw_circle(int xc, int yc, int r, uint32_t color);

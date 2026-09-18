@@ -47,6 +47,7 @@ SUITES = [
     ("startmenu_search", "startmenu_search_test.py",  300),
     ("explorer",         "explorer_test.py",           300),
     ("paint",            "paint_test.py",             300),
+    ("icons",            "icon_render_test.py",        300),
     ("browser",          "browser_test.py",            300),
     ("browser_web",      "browser_web_test.py",        300),
     ("fork",             "fork_test.py",              240),

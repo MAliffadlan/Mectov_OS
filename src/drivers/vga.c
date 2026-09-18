@@ -231,6 +231,31 @@ void draw_rect_alpha(int x, int y, int w, int h, uint32_t color) {
     }
 }
 
+// Source-over blend of one pixel: dst = dst*(1-a) + color*a, a in 0..255.
+// The 257 trick divides by 255 exactly without an integer divide (t <= 65025,
+// so (t + 128) * 257 fits comfortably in 32 bits). Used by the desktop icon
+// renderer for anti-aliased tile corners and glyph coverage masks.
+void vga_blend_px(int x, int y, uint32_t color, uint8_t a) {
+    if (a == 0) return;
+    if (!clip_test(x, y)) return;
+    if (!active_rt_buf) { put_pixel(x, y, color); return; }
+
+    mark_dirty(x, y, 1, 1);
+    uint32_t* dst = active_rt_buf + y * (active_rt_pitch / 4) + x;
+    uint32_t bg = *dst;
+    uint32_t ia = 255 - a;
+
+    uint32_t r = (((bg >> 16) & 0xFF) * ia + ((color >> 16) & 0xFF) * a);
+    uint32_t g = (((bg >>  8) & 0xFF) * ia + ((color >>  8) & 0xFF) * a);
+    uint32_t b = (( bg        & 0xFF) * ia + ( color        & 0xFF) * a);
+
+    r = ((r + 128) * 257) >> 16;
+    g = ((g + 128) * 257) >> 16;
+    b = ((b + 128) * 257) >> 16;
+
+    *dst = (r << 16) | (g << 8) | b;
+}
+
 void draw_rect_border(int x, int y, int w, int h, uint32_t col) {
     draw_rect(x, y, w, 1, col);          // top
     draw_rect(x, y + h - 1, w, 1, col);  // bottom

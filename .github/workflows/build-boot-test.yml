@@ -244,6 +244,10 @@ jobs:
         run: |
           python3 scripts/paint_test.py --timeout 300
 
+      - name: Desktop icon renderer regression (TCG)
+        run: |
+          python3 scripts/icon_render_test.py --timeout 300
+
   browser-net:
     needs: build
     runs-on: ubuntu-latest
