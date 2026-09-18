@@ -105,119 +105,84 @@ static void init_icons() {
     }
 }
 
-// ---- Desktop Icons (v38.46: clean FLAT squircles — no shadow, no gloss,
-// no gradient; just a nicer, more saturated palette than the old muddy
-// grays and crisp glyphs) ----
+// ---- Desktop Icons (v38.93: pixel-art two-tone glyphs on tinted tiles) ----
+// Each icon is a 16x16 bitmap (src/include/icon_glyphs.h, 2 bits per pixel)
+// blitted at 2x onto a 44px squircle. Tiles are dark, desaturated tints of
+// each app's hue with a 2px bottom-right inner shade for depth — replacing
+// the old saturated-tile + blocky-draw_rect glyphs. Glyphs are hand-designed
+// in scripts/icon_preview.html (live HTML preview) and generated into the
+// header, so what you see there is exactly what ships.
+#include "../include/icon_glyphs.h"
+
+typedef struct { const char* label; uint32_t tint; uint32_t dark; } icon_tile_t;
+static const icon_tile_t icon_tiles[] = {
+    { "Terminal", 0x0023272F, 0x00101318 },
+    { "Browser",  0x00124A78, 0x000B2F4C },
+    { "Explorer", 0x001C4A66, 0x00122E40 },
+    { "SysInfo",  0x00363E4A, 0x00232932 },
+    { "Clock",    0x00363E4A, 0x00232932 },
+    { "PCI",      0x00225044, 0x00163329 },
+    { "Snake",    0x001C5A40, 0x00123325 },
+    { "Calc",     0x003C3266, 0x00251F42 },
+    { "Task Mgr", 0x00363E4A, 0x00232932 },
+    { "Flappy",   0x00665224, 0x00403418 },
+    { "Notepad",  0x004A525E, 0x00303640 },
+    { "ELF Demo", 0x00592B44, 0x00381C2A },
+};
+
+static const uint32_t* icon_glyph(const char* label) {
+    if      (strcmp(label, "Terminal") == 0) return glyph_terminal;
+    else if (strcmp(label, "Browser")  == 0) return glyph_browser;
+    else if (strcmp(label, "Explorer") == 0) return glyph_explorer;
+    else if (strcmp(label, "SysInfo")  == 0) return glyph_sysinfo;
+    else if (strcmp(label, "Clock")    == 0) return glyph_clock;
+    else if (strcmp(label, "PCI")      == 0) return glyph_pci;
+    else if (strcmp(label, "Snake")    == 0) return glyph_snake;
+    else if (strcmp(label, "Calc")     == 0) return glyph_calc;
+    else if (strcmp(label, "Task Mgr") == 0) return glyph_task_mgr;
+    else if (strcmp(label, "Flappy")   == 0) return glyph_flappy;
+    else if (strcmp(label, "Notepad")  == 0) return glyph_notepad;
+    else if (strcmp(label, "ELF Demo") == 0) return glyph_elf_demo;
+    return glyph_generic;
+}
+
 static void draw_pro_icon(int ix, int iy, const char* label) {
     int cx = ix + ICON_W / 2;
-    int cy = iy + ICON_W / 2 - 6; // Center of the icon background
+    int cy = iy + ICON_W / 2 - 6;
     int bg_size = 44;
     int bg_x = cx - bg_size / 2;
     int bg_y = cy - bg_size / 2;
     int radius = 10;
 
-    // Flat tile colors (one solid color per app, saturated + modern)
-    uint32_t bg_col;
-    if      (strcmp(label, "Terminal") == 0) bg_col = 0x001E222B; // near-black slate
-    else if (strcmp(label, "Explorer") == 0) bg_col = 0x003B82F6; // blue
-    else if (strcmp(label, "SysInfo")  == 0) bg_col = 0x0064748B; // slate
-    else if (strcmp(label, "Clock")    == 0) bg_col = 0x00F1F5F9; // off-white
-    else if (strcmp(label, "Browser")  == 0) bg_col = 0x00F59E0B; // amber
-    else if (strcmp(label, "PCI")      == 0) bg_col = 0x000EA5E9; // sky
-    else if (strcmp(label, "Snake")    == 0) bg_col = 0x0022C55E; // green
-    else if (strcmp(label, "Calc")     == 0) bg_col = 0x008B5CF6; // violet
-    else if (strcmp(label, "Task Mgr") == 0) bg_col = 0x00475569; // dark slate
-    else if (strcmp(label, "Flappy")   == 0) bg_col = 0x00EAB308; // yellow
-    else if (strcmp(label, "Notepad")  == 0) bg_col = 0x00E2E8F0; // paper
-    else if (strcmp(label, "ELF Demo") == 0) bg_col = 0x00D946EF; // fuchsia
-    else bg_col = 0x0064748B; // default slate
-
-    // Flat rounded squircle — that's it, nothing on top.
-    draw_rounded_rect(bg_x, bg_y, bg_size, bg_size, radius, bg_col);
-
-    // Draw inner glyphs (Minimalist & Crisp)
-    if (strcmp(label, "Terminal") == 0) {
-        draw_string_px(cx - 8, cy - 4, ">_", 0x004ADE80, 0xFFFFFFFF);
-    } else if (strcmp(label, "Explorer") == 0) {
-        // Folder glyph
-        draw_rect(cx - 12, cy - 10, 24, 18, 0x00FFFFFF);
-        draw_rect(cx - 12, cy - 12, 10, 2, 0x00EBF8FF);
-        draw_rect(cx - 12, cy - 6, 24, 2, 0x0090CDF4); // Inner line detail
-    } else if (strcmp(label, "SysInfo") == 0) {
-        // Monitor glyph
-        draw_rect(cx - 12, cy - 10, 24, 16, 0x002D3748);
-        draw_rect(cx - 10, cy - 8, 20, 12, 0x00A0AEC0); // Screen
-        draw_rect(cx - 4, cy + 6, 8, 4, 0x002D3748); // Stand
-        draw_rect(cx - 8, cy + 10, 16, 2, 0x002D3748); // Base
-    } else if (strcmp(label, "Clock") == 0) {
-        // Clock glyph
-        draw_circle(cx, cy, 14, 0x002D3748);
-        draw_circle(cx, cy, 13, 0x002D3748);
-        draw_line(cx, cy, cx, cy - 8, 0x00E53E3E); // Red minute hand
-        draw_line(cx, cy, cx + 6, cy + 6, 0x002D3748); // Dark hour hand
-        fill_circle(cx, cy, 2, 0x002D3748); // Center pivot
-    } else if (strcmp(label, "PCI") == 0) {
-        // Microchip glyph
-        draw_rect(cx - 10, cy - 10, 20, 20, 0x00FFFFFF);
-        for(int i=0; i<3; i++) {
-            draw_rect(cx - 14, cy - 6 + i*6, 4, 2, 0x00FFFFFF); // Left pins
-            draw_rect(cx + 10, cy - 6 + i*6, 4, 2, 0x00FFFFFF); // Right pins
-            draw_rect(cx - 6 + i*6, cy - 14, 2, 4, 0x00FFFFFF); // Top pins
-            draw_rect(cx - 6 + i*6, cy + 10, 2, 4, 0x00FFFFFF); // Bottom pins
+    // Tile: dark tint by default, tinted hue per app.
+    uint32_t tint = 0x00363E4A, dark = 0x00232932;
+    for (unsigned i = 0; i < sizeof(icon_tiles)/sizeof(icon_tiles[0]); i++) {
+        if (strcmp(label, icon_tiles[i].label) == 0) {
+            tint = icon_tiles[i].tint;
+            dark = icon_tiles[i].dark;
+            break;
         }
-    } else if (strcmp(label, "Browser") == 0) {
-        // Globe glyph
-        draw_circle(cx, cy, 14, 0x00FFFFFF);
-        draw_circle(cx, cy, 13, 0x00FFFFFF);
-        draw_line(cx - 14, cy, cx + 14, cy, 0x00FFFFFF); // Equator
-        draw_line(cx, cy - 14, cx, cy + 14, 0x00FFFFFF); // Prime meridian
-        draw_circle(cx, cy, 7, 0x00FFFFFF); // Inner lat/long illusion
-    } else if (strcmp(label, "Snake") == 0) {
-        // Snake glyph
-        draw_rect(cx - 10, cy - 4, 16, 6, 0x00FFFFFF); // Body horizontal
-        draw_rect(cx + 2, cy - 10, 6, 8, 0x00FFFFFF); // Head
-        draw_rect(cx - 10, cy + 2, 6, 6, 0x00FFFFFF); // Tail drop
-        draw_rect(cx + 4, cy - 8, 2, 2, 0x002E8B57); // Eye (matches the tile base)
-    } else if (strcmp(label, "Calc") == 0) {
-        // Calculator glyph
-        draw_rect(cx - 10, cy - 14, 20, 28, 0x00FFFFFF); // Body
-        draw_rect(cx - 8, cy - 12, 16, 6, 0x00F0E8FF); // Screen
-        for(int r=0; r<3; r++) {
-            for(int c=0; c<3; c++) {
-                draw_rect(cx - 8 + c*6, cy - 3 + r*6, 4, 4, 0x00A0AEC0); // Buttons
-            }
+    }
+
+    // Subtle drop shadow lifts the tile off the wallpaper.
+    draw_soft_shadow(bg_x, bg_y, bg_size, bg_size, radius, 40);
+    // Dark base + tint inset 2px from the right/bottom = inner shade edge.
+    draw_rounded_rect(bg_x, bg_y, bg_size, bg_size, radius, dark);
+    draw_rounded_rect(bg_x, bg_y, bg_size - 2, bg_size - 2, radius, tint);
+
+    // Glyph: 16x16 two-tone bitmap at 2x (32px) centered on the tile.
+    // 0 = transparent, 1 = foreground (light), 2 = inner (dark recess).
+    static const uint32_t FG = 0x00E8EDF3, IN = 0x002E3440;
+    const uint32_t* g = icon_glyph(label);
+    int ox = cx - 16, oy = cy - 16;
+    for (int y = 0; y < 16; y++) {
+        uint32_t row = g[y];
+        if (!row) continue;
+        for (int x = 0; x < 16; x++) {
+            uint32_t v = (row >> (2 * x)) & 3;
+            if (v == 0) continue;
+            draw_rect(ox + 2*x, oy + 2*y, 2, 2, v == 1 ? FG : IN);
         }
-    } else if (strcmp(label, "Task Mgr") == 0) {
-        // Simple list/graph icon
-        draw_rect(cx - 10, cy - 8, 20, 16, 0x00FFFFFF);
-        draw_rect(cx - 8, cy - 6, 16, 3, 0x00CBD5E0);
-        draw_rect(cx - 8, cy - 1, 16, 3, 0x00CBD5E0);
-        draw_rect(cx - 8, cy + 4, 16, 3, 0x00CBD5E0);
-        draw_rect(cx - 8, cy - 6, 4, 3, 0x00E53E3E); // red dot
-    } else if (strcmp(label, "Flappy") == 0) {
-        // Bird glyph
-        draw_rect(cx - 6, cy - 6, 12, 12, 0x00FFFFFF); // Body
-        draw_rect(cx + 2, cy - 4, 2, 2, 0x00000000); // Eye
-        draw_rect(cx + 6, cy, 4, 4, 0x00E53E3E); // Beak (Reddish)
-        draw_rect(cx - 10, cy, 4, 4, 0x00FFFFFF); // Wing
-    } else if (strcmp(label, "Notepad") == 0) {
-        // Page glyph on the light tile: white sheet + blue rule lines
-        draw_rect(cx - 9, cy - 12, 18, 24, 0x00FFFFFF);
-        draw_rect(cx - 9, cy - 12, 18, 1, 0x0090A4B8);
-        draw_rect(cx - 9, cy + 11, 18, 1, 0x0090A4B8);
-        draw_rect(cx - 6, cy - 7, 12, 2, 0x005B8DEF); // Title line
-        draw_rect(cx - 6, cy - 2, 12, 2, 0x00A8B8C8);
-        draw_rect(cx - 6, cy + 3, 12, 2, 0x00A8B8C8);
-    } else if (strcmp(label, "ELF Demo") == 0) {
-        // "ELF" text glyph — proves this app is a real ELF binary
-        draw_string_px(cx - 14, cy - 8, "ELF", 0x00FFFFFF, 0x00B83280);
-        draw_rect(cx - 10, cy + 4, 20, 2, 0x00FFFFFF);
-    } else {
-        // Generic App glyph
-        draw_rect(cx - 8, cy - 10, 16, 20, 0x002D3748);
-        draw_rect(cx - 4, cy - 6, 8, 2, 0x00A0AEC0);
-        draw_rect(cx - 4, cy - 2, 8, 2, 0x00A0AEC0);
-        draw_rect(cx - 4, cy + 2, 8, 2, 0x00A0AEC0);
     }
 }
 
