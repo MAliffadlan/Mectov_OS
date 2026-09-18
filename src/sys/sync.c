@@ -42,9 +42,15 @@ typedef struct {
     uint32_t page_dir;   // futex address space (per-process keying)
     uint32_t addr;       // user virtual address being waited on
     int waiters[MAX_WAITERS];
+    // v38.92: per-WAITER deadline (parallel to waiters[]; 0 = no timeout).
+    // Was per-entry (one deadline for the whole word), which broke requeue:
+    // a moved waiter inherited the cond word's deadline, and a later timed
+    // re-park on the same word could expire the entry out from under the
+    // mutex queue — the sweep purged a waiter that legitimately sat on
+    // another object's queue. Deadlines travel WITH the waiter now: parked
+    // on A with 50 ms, requeued to B with 50 ms still on the clock.
+    uint32_t waiter_expire[MAX_WAITERS];
     int waiter_count;
-    int has_timeout;     // v38.87: bounded-park entries carry a deadline
-    uint32_t expire_ms;  // absolute timer_ticks deadline (only if has_timeout)
 } futex_t;
 
 static sem_t   sems[MAX_SEMS];
@@ -56,6 +62,14 @@ void sync_init(void) {
     for (int i = 0; i < MAX_SEMS; i++)   { sems[i].in_use = 0; sems[i].count = 0; sems[i].waiter_count = 0; }
     for (int i = 0; i < MAX_FUTEX; i++)  { futexes[i].in_use = 0; futexes[i].waiter_count = 0; }
     write_serial_string("[SYNC] init\n");
+}
+
+// v38.92: register `tid` at the tail of f's queue with an optional absolute
+// deadline (0 = untimed). Replaces the old has_timeout/expire_ms word pair.
+static void futex_enqueue(futex_t* f, int tid, uint32_t expire_ms) {
+    int i = f->waiter_count++;
+    f->waiters[i] = tid;
+    f->waiter_expire[i] = expire_ms;
 }
 
 // Drop every waiter entry for `tid`. DEFERRED (v38.55): the obvious hook —
@@ -107,7 +121,11 @@ void sync_task_cleanup(int tid) {
         if (!futexes[i].in_use || futexes[i].waiter_count == 0) continue;
         int w = 0;
         for (int k = 0; k < futexes[i].waiter_count; k++) {
-            if (futexes[i].waiters[k] != tid) futexes[i].waiters[w++] = futexes[i].waiters[k];
+            if (futexes[i].waiters[k] != tid) {
+                futexes[i].waiters[w] = futexes[i].waiters[k];
+                futexes[i].waiter_expire[w] = futexes[i].waiter_expire[k];
+                w++;
+            }
         }
         futexes[i].waiter_count = w;
     }
@@ -138,6 +156,43 @@ void sync_drain_pending(void) {
         hi &= hi - 1;
         sync_task_cleanup(tid);
     }
+}
+
+// v38.92: futex-flavored wake — same policy as wake_one, but shifts the
+// parallel waiter_expire[] array along with the tid queue so deadlines stay
+// attached to the right waiter.
+static int wake_one_f(futex_t* f) {
+    extern int task_is_alive(int);
+    while (f->waiter_count > 0) {
+        int tid = f->waiters[0];
+        if (tid > 0) {
+            extern int task_is_idle(int);
+            if (task_is_idle(tid)) {
+                for (int i = 1; i < f->waiter_count; i++) {
+                    f->waiters[i - 1] = f->waiters[i];
+                    f->waiter_expire[i - 1] = f->waiter_expire[i];
+                }
+                f->waiter_count--;
+                continue;
+            }
+        }
+        if (tid <= 0 || !task_is_alive(tid)) {
+            for (int i = 1; i < f->waiter_count; i++) {
+                f->waiters[i - 1] = f->waiters[i];
+                f->waiter_expire[i - 1] = f->waiter_expire[i];
+            }
+            f->waiter_count--;
+            continue;
+        }
+        for (int i = 1; i < f->waiter_count; i++) {
+            f->waiters[i - 1] = f->waiters[i];
+            f->waiter_expire[i - 1] = f->waiter_expire[i];
+        }
+        f->waiter_count--;
+        task_set_state(tid, TASK_STATE_READY);
+        return 1;
+    }
+    return 0;
 }
 
 // Wake the first LIVE waiter of `list`. Returns 1 if someone was woken.
@@ -291,7 +346,6 @@ static futex_t* futex_alloc(uint32_t pd, uint32_t addr) {
             futexes[i].page_dir = pd;
             futexes[i].addr = addr;
             futexes[i].waiter_count = 0;
-            futexes[i].has_timeout = 0;
             return &futexes[i];
         }
     }
@@ -331,7 +385,7 @@ int futex_wait(uint32_t addr, uint32_t expected) {
         __asm__ volatile("sti");
         return -2; // table full — caller may spin or fail
     }
-    f->waiters[f->waiter_count++] = tid;
+    futex_enqueue(f, tid, 0);   // untimed
     task_set_state(tid, TASK_STATE_BLOCKED);
     spin_unlock(&sync_lock);
     __asm__ volatile("sti");
@@ -353,7 +407,7 @@ int futex_wake(uint32_t addr, int max_waiters) {
     spin_lock(&sync_lock);        futex_t* f = futex_find(pd, addr);
     if (f) {
         while (woken < max_waiters && f->waiter_count > 0) {
-            if (wake_one(f->waiters, &f->waiter_count)) woken++;
+            if (wake_one_f(f)) woken++;
         }
         // If nobody is waiting anymore, reclaim the slot (small table).
         if (f->waiter_count == 0) f->in_use = 0;
@@ -404,13 +458,19 @@ int futex_requeue(uint32_t addr, uint32_t expected, uint32_t mutex_addr, int max
     }
     // Wake the head of the cond queue first (FIFO fairness preserved).
     while (woken < max_wake && src->waiter_count > 0) {
-        if (!wake_one(src->waiters, &src->waiter_count)) break;
+        if (!wake_one_f(src)) break;
         woken++;
     }
-    // Move whoever is left to the mutex queue, preserving FIFO order.
+    // Move whoever is left to the mutex queue, preserving FIFO order —
+    // v38.92: deadlines travel WITH the waiter (per-waiter, not per-entry).
     while (src->waiter_count > 0 && dst->waiter_count < MAX_WAITERS) {
-        dst->waiters[dst->waiter_count++] = src->waiters[0];
-        for (int i = 1; i < src->waiter_count; i++) src->waiters[i - 1] = src->waiters[i];
+        int di = dst->waiter_count++;
+        dst->waiters[di] = src->waiters[0];
+        dst->waiter_expire[di] = src->waiter_expire[0];
+        for (int i = 1; i < src->waiter_count; i++) {
+            src->waiters[i - 1] = src->waiters[i];
+            src->waiter_expire[i - 1] = src->waiter_expire[i];
+        }
         src->waiter_count--;
         moved++;
     }
@@ -460,10 +520,8 @@ int futex_wait_timeout(uint32_t addr, uint32_t expected, uint32_t timeout_ms) {
         __asm__ volatile("sti");
         return -2;
     }
-    f->waiters[f->waiter_count++] = tid;
     if (timeout_ms == 0) timeout_ms = 1;      // 0 => expire on the next sweep
-    f->has_timeout = 1;
-    f->expire_ms = timer_ticks + timeout_ms;  // absolute deadline
+    futex_enqueue(f, tid, timer_ticks + timeout_ms);  // per-waiter deadline
     task_set_state(tid, TASK_STATE_BLOCKED);
     spin_unlock(&sync_lock);
     __asm__ volatile("sti");
@@ -487,6 +545,8 @@ void proc_sys_futex_sweep_div_set(int v) {
 // already holds task_lock) would be an ABBA deadlock. A busy sync_lock just
 // skips this round; the next tick (10 ms later) retries.
 void futex_sweep(void) {
+    extern int task_is_alive(int);
+    extern int task_is_idle(int);
     static int sweep_div = 0;
     if (futex_sweep_div < 1) futex_sweep_div = 1;
     if (++sweep_div < futex_sweep_div) return;
@@ -498,14 +558,30 @@ void futex_sweep(void) {
     spin_lock(&sync_lock);
     int woken_any = 0;
     for (int i = 0; i < MAX_FUTEX; i++) {
-        if (!futexes[i].in_use || !futexes[i].has_timeout) continue;
-        if ((int)(now - futexes[i].expire_ms) < 0) continue;  // not yet due
-        futexes[i].has_timeout = 0;
-        while (futexes[i].waiter_count > 0) {
-            if (!wake_one(futexes[i].waiters, &futexes[i].waiter_count)) break;
-            woken_any = 1;
+        if (!futexes[i].in_use) continue;
+        // v38.92: per-waiter deadlines. Compact the queue, waking any
+        // waiter whose absolute deadline passed. Untimed waiters (expire 0)
+        // are never touched by the sweep — only an explicit wake releases
+        // them, as before.
+        int w = 0;
+        for (int r = 0; r < futexes[i].waiter_count; r++) {
+            uint32_t exp = futexes[i].waiter_expire[r];
+            if (exp != 0 && (int)(now - exp) >= 0) {
+                int tid = futexes[i].waiters[r];
+                if (tid > 0 && task_is_alive(tid) && !task_is_idle(tid)) {
+                    task_set_state(tid, TASK_STATE_READY);
+                    woken_any = 1;
+                }
+                // Dead/idle waiters are dropped either way (same policy as
+                // wake_one) — a dead tid must never linger in a queue.
+                continue;   // compact: skip this slot
+            }
+            futexes[i].waiters[w] = futexes[i].waiters[r];
+            futexes[i].waiter_expire[w] = futexes[i].waiter_expire[r];
+            w++;
         }
-        if (futexes[i].waiter_count == 0) futexes[i].in_use = 0;
+        futexes[i].waiter_count = w;
+        if (w == 0) futexes[i].in_use = 0;
     }
     spin_unlock(&sync_lock);
     // NOTE: no `sti` here — the sweep runs inside irq_handler (interrupt

@@ -128,12 +128,17 @@ static void consumer(void* arg) {
         mct_cond_signal(&not_full);  // a producer may proceed
         // Termination handshake: when the final item is consumed, producers
         // are done and cannot signal not_empty again — a consumer still
-        // parked there would wait forever. Wake-all broadcast: every parked
-        // consumer re-checks the predicate and exits. (The v38.91 kernel
-        // SYS_FUTEX_REQUEUE op exists and is exercised by its own tests;
-        // the per-futex-entry timeout design interacts badly with requeued
-        // waiters, so the hot path stays on the proven wake-all for now.)
+        // parked there would wait forever. Wake-all broadcast (proven):
+        // every parked consumer re-checks the predicate and exits.
+        // v38.92 note: the kernel requeue op is now deadline-correct
+        // (per-waiter), but activating it on this hot path STILL corrupted
+        // the consumed count under 2-core TCG stress (items lost/duped).
+        // Requeued waiters bypass the mutex cmpxchg gauntlet on wake, and
+        // the sweep/re-park interplay opens a window static analysis
+        // didn't catch. Requeue stays kernel-tested only until a dedicated
+        // stress suite proves it — wake-all + timed park remains hot path.
         if (consumed == TOTAL_ITEMS) mct_cond_broadcast(&not_empty);
+        mct_mutex_unlock(&c_mu);
         mct_mutex_unlock(&c_mu);
     }
 }

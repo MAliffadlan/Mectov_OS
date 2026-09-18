@@ -131,19 +131,18 @@ static inline void mct_cond_broadcast(mct_cond_t* c) {
     sys_futex_wake((void*)&c->seq, 0x7FFFFFFF);
 }
 
-// v38.91: herd-free broadcast via FUTEX_WAIT_REQUEUE — EXPERIMENTAL.
-// The kernel op itself is exercised by procsysdemo-era tests, but the
-// per-futex-entry timeout design (one deadline per futex word, not per
-// waiter) interacts badly with requeued waiters: a moved waiter inherits
-// the COND word's deadline, so a later timed park on the same cond word
-// can expire the entry while the waiter legitimately sits on the mutex
-// queue — the wake_one-purge in the sweep then drops it and the unlock's
-// wake hands the mutex to nobody. Do NOT use on the hot path yet;
-// mct_cond_broadcast + the 50 ms timed park remain the proven protocol.
+// v38.92: herd-free broadcast via FUTEX_WAIT_REQUEUE — kernel op is
+// deadline-correct now (per-waiter), but NOT for hot-path use yet: stress
+// showed count corruption under 2-core TCG even after the fix (requeued
+// waiters wake straight into mct_mutex_lock's cmpxchg, and the sweep /
+// re-park interplay opens a window we haven't pinned down). Kept for
+// experimentation; mct_cond_broadcast + the 50 ms timed park remain the
+// proven protocol.
 static inline void mct_cond_broadcast_requeue(mct_cond_t* c, mct_mutex_t* m) {
-    (void)c; (void)m;
-    sys_futex_wake((void*)&c->seq, 0x7FFFFFFF);
-    mct_mutex_unlock(m);
+    c->seq++;
+    MCT_BARRIER();
+    sys_futex_requeue((void*)&c->seq, c->seq - 1, (void*)&m->lock, 1);
+    mct_mutex_unlock(m);   // release + wake: hand-off to the requeued head
 }
 
 #endif
