@@ -86,6 +86,7 @@ jobs:
           name: mectov-artifacts
           path: |
             mectov.iso
+            myos.bin
             disk.img
             ext2.img
           if-no-files-found: error
@@ -108,7 +109,8 @@ jobs:
           sudo apt-get install -y -qq \
             qemu-system-x86 \
             python3-pil \
-            dosfstools
+            dosfstools \
+            mtools
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
