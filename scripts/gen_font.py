@@ -87,7 +87,7 @@ def emit(glyphs):
     lines.append("// (0..15) of glyph ink; blend with vga_blend_px(fg, cov*17).")
     lines.append("// codepoint 32..126 only; anything else renders as a full block")
     lines.append("// (index 95).")
-    lines.append("#define FONT_AA_W     8")
+    lines.append("#define FONT_AA_CELL_W 8")
     lines.append("#define FONT_AA_CELL_H 16")
     lines.append("#define FONT_AA_ADV   8")
     lines.append(f"#define FONT_AA_BASE   {BASELINE}")

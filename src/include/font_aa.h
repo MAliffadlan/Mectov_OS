@@ -9,7 +9,7 @@
 // (0..15) of glyph ink; blend with vga_blend_px(fg, cov*17).
 // codepoint 32..126 only; anything else renders as a full block
 // (index 95).
-#define FONT_AA_W     8
+#define FONT_AA_CELL_W 8
 #define FONT_AA_CELL_H 16
 #define FONT_AA_ADV   8
 #define FONT_AA_BASE   11
