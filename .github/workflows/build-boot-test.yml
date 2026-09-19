@@ -248,6 +248,10 @@ jobs:
         run: |
           python3 scripts/icon_render_test.py --timeout 300
 
+      - name: Antialiased font regression (TCG)
+        run: |
+          python3 scripts/font_render_test.py --timeout 300
+
       - name: Tmpfs /tmp regression (TCG)
         run: |
           python3 scripts/tmpfs_test.py --timeout 300

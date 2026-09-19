@@ -5,6 +5,7 @@
 #include "../include/io.h"
 #include "../include/utils.h"
 #include "../include/font8x16.h"
+#include "../include/font_aa.h"   // v38.97: antialiased text (same 8x16 cell)
 #include "../include/mem.h"
 
 // ---- Framebuffer state ----
@@ -663,26 +664,31 @@ void d_char(int x, int y, char c, unsigned char col) {
         uint32_t fg = vga_to_rgb(col);
         uint32_t bg = vga_to_rgb(col >> 4);
         int px = x * 8, py = y * 16;
-        for (int j = 0; j < 16; j++) {
-            unsigned char row = font8x16_data[(unsigned char)c][j];
-            for (int i = 0; i < 8; i++) {
-                if (row & (0x80 >> i)) put_pixel(px + i, py + j, fg);
-                else put_pixel(px + i, py + j, bg);
-            }
-        }
+        // v38.97: solid cell background, then blend the AA glyph on top.
+        // Same 8x16 cell as before, so the terminal grid layout is untouched.
+        draw_rect(px, py, 8, 16, bg);
+        draw_char_px(px, py, c, fg, 0xFFFFFFFF);
     } else {
         int i = (y * 80 + x) * 2;
         video_m[i] = c; video_m[i + 1] = col;
     }
 }
 
+// v38.97: the one text choke point. bg == 0xFFFFFFFF means transparent
+// (only the glyph is blended, edges included — anti-aliased); any other bg
+// paints a solid 8x16 cell first, preserving the legacy opaque-box contract.
+// Glyphs come from font_aa_data (DejaVu Sans Mono, 4-bit coverage per pixel);
+// alpha = coverage*17 maps the 4-bit ramp onto the full 0..255 blend range.
 void draw_char_px(int px, int py, char c, uint32_t fg, uint32_t bg) {
     if (!is_vbe) return;
-    for (int j = 0; j < 16; j++) {
-        unsigned char row = font8x16_data[(unsigned char)c][j];
-        for (int i = 0; i < 8; i++) {
-            uint32_t col = (row & (0x80 >> i)) ? fg : bg;
-            if (col != 0xFFFFFFFF) put_pixel(px + i, py + j, col);
+    if (bg != 0xFFFFFFFF) draw_rect(px, py, 8, 16, bg);
+    unsigned char uc = (unsigned char)c;
+    int gi = (uc >= FONT_AA_FIRST && uc <= FONT_AA_LAST) ? (uc - FONT_AA_FIRST) : 95;
+    for (int j = 0; j < FONT_AA_CELL_H; j++) {
+        const unsigned char* row = font_aa_data[gi][j];
+        for (int i = 0; i < FONT_AA_CELL_W; i++) {
+            unsigned char cov = row[i];
+            if (cov) vga_blend_px(px + i, py + j, fg, (uint8_t)(cov * 17));
         }
     }
 }
