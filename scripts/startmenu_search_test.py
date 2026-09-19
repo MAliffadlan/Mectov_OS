@@ -104,13 +104,18 @@ def count_amber(px, w, x0, y0, x1, y1):
 
 
 def item_row_text(px, w, row):
-    """Count bright glyph pixels in menu item row `row` (0-based)."""
+    """Count text pixels in menu item row `row` (0-based)."""
+    # Text draws at item_y+6; the AA font's ink spans roughly +1..+14 below
+    # that, so window y0+2..y0+18 catches it fully. Threshold is coverage-
+    # aware: with AA only glyph CORES hit the pure fg colour (237,230,217),
+    # edge pixels blend toward the panel grey — (170,160,140) counts cores
+    # plus solid AA neighbours while staying well above the panel bg.
     y0 = SM_Y + 40 + row * 28
     n = 0
-    for y in range(y0 + 6, y0 + 24):
+    for y in range(y0 + 2, y0 + 18):
         for x in range(6, 200):
             r, g, b = px[y * w + x]
-            if r > 190 and g > 180 and b > 160:
+            if r > 170 and g > 160 and b > 140:
                 n += 1
     return n
 
@@ -215,8 +220,9 @@ def main():
         w1, h1, px1 = load_ppm("/tmp/mectov_sms_snake.ppm")
         # Query shown in amber in the header line (second line of the header).
         # x starts at 36: the amber avatar circle ends at x 34, the query
-        # text starts at x 38.
-        a_hdr = count_amber(px1, w1, 36, SM_Y + 18, 202, SM_Y + 27)
+        # text starts at x 38. Rows: text draws at sm_y+22, and the AA font's
+        # ink spans roughly rows +20..+36 below sm_y (baseline 11, descent).
+        a_hdr = count_amber(px1, w1, 36, SM_Y + 19, 202, SM_Y + 37)
         print(f"[i] amber search text in header: {a_hdr}")
         if a_hdr < 20:
             print("[FAIL] search query not shown in the menu header")
@@ -316,7 +322,7 @@ def main():
         time.sleep(0.5)
         screendump("/tmp/mectov_sms_esc1.ppm")
         w6, h6, px6 = load_ppm("/tmp/mectov_sms_esc1.ppm")
-        a_hdr2 = count_amber(px6, w6, 36, SM_Y + 18, 202, SM_Y + 27)
+        a_hdr2 = count_amber(px6, w6, 36, SM_Y + 19, 202, SM_Y + 37)
         if a_hdr2 > 10:
             print("[FAIL] Escape did not clear the search query")
             return 1

@@ -247,12 +247,15 @@ def main():
             return 1
 
         def has_title(px, w, region):
+            # Coverage-aware: AA text cores hit the pure fg colour, edges
+            # blend toward the button grey — (170,160,140) counts cores plus
+            # solid AA neighbours while staying above the button bg.
             x0, y0, x1, y1 = region
             n = 0
             for y in range(y0 + 6, y1 - 4):
                 for x in range(x0 + 20, x1 - 4):
                     r, g, b = px_at(px, w, x, y)
-                    if r > 190 and g > 180 and b > 160:
+                    if r > 170 and g > 160 and b > 140:
                         n += 1
             return n > 30
         if not has_title(pxb, wb, BTN1) or not has_title(pxb, wb, BTN2):

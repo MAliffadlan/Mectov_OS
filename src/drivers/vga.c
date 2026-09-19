@@ -684,7 +684,7 @@ void draw_char_px(int px, int py, char c, uint32_t fg, uint32_t bg) {
     if (bg != 0xFFFFFFFF) draw_rect(px, py, 8, 16, bg);
     unsigned char uc = (unsigned char)c;
     int gi = (uc >= FONT_AA_FIRST && uc <= FONT_AA_LAST) ? (uc - FONT_AA_FIRST) : 95;
-    for (int j = 0; j < FONT_AA_CELL_H; j++) {
+    for (int j = 0; j < 16; j++) {
         const unsigned char* row = font_aa_data[gi][j];
         for (int i = 0; i < FONT_AA_CELL_W; i++) {
             unsigned char cov = row[i];
