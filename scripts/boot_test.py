@@ -19,6 +19,7 @@ Usage:
 """
 import argparse
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -30,6 +31,36 @@ MON_SOCK = "/tmp/mectov_ci_monitor.sock"
 # The Windows-style lock screen eats the first keypress to dismiss it, so a
 # leading space is sent before the password keys.
 LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
+
+
+def memory_sanity_errors():
+    """Reasons the allocator did NOT come up whole, or [] if it did.
+
+    A boot can reach login and draw a desktop on a guest the kernel cannot
+    actually run on: at 24MB the adaptive reservation consumes every frame,
+    so frame_alloc never finds a shared zero page and the heap ceiling
+    collapses to zero (every kmalloc returns NULL) — yet the login screen
+    still paints, because it needs neither. Without this check a config
+    matrix point could sit green while the system is unusable, which is
+    exactly the class of false confidence the matrix exists to prevent.
+    """
+    try:
+        with open(SERIAL_LOG, "r", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return ["serial log unreadable"]
+
+    errs = []
+    if "[PHYS] FATAL" in text:
+        errs.append("kernel refused this guest (RAM below the supported floor)")
+    if "[PHYS] shared zero page" not in text:
+        errs.append("no free frame for the shared zero page (frame allocator starved)")
+    m = re.search(r"\[MEM\] heap ceiling (0x[0-9a-fA-F]+)", text)
+    if not m:
+        errs.append("no [MEM] heap ceiling line (kernel heap never initialised)")
+    elif int(m.group(1), 16) == 0:
+        errs.append("kernel heap ceiling is zero (kmalloc can never succeed)")
+    return errs
 
 
 def wait_for_in_file(path, needle, timeout):
@@ -109,6 +140,16 @@ def main():
             print(tail)
             return 1
         print("[OK] booted to login screen")
+
+        # Stage 1b: the kernel must have come up with a working allocator,
+        # not just a paintable screen (see memory_sanity_errors).
+        errs = memory_sanity_errors()
+        if errs:
+            print("[FAIL] memory init not healthy:")
+            for e in errs:
+                print("       - " + e)
+            return 1
+        print("[OK] frame allocator + kernel heap healthy")
 
         # Stage 2: log in via monitor keyboard injection.
         for k in LOGIN_KEYS:

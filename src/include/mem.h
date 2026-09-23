@@ -4,7 +4,29 @@
 #include "types.h"
 
 #define PAGE_SIZE 4096
-#define KERNEL_RESERVED_PAGES (80 * 256)  // 80MB reserved for kernel+modules (v38.98: +32MB headroom for the Q3 engine hunk/zone)
+#define KERNEL_RESERVED_PAGES (80 * 256)  // 80MB NOMINAL reservation (v38.98: +32MB headroom for the Q3 engine hunk/zone); phys_init shrinks it on small-RAM guests — see KERNEL_HEAP_MIN_BYTES
+
+// ---- Kernel heap layout (v38.100/v38.101) ----
+// The kmalloc arena is a fixed PHYSICAL span that starts at KERNEL_HEAP_BASE
+// and grows upward, so it must stay strictly inside the frame reservation or
+// the allocator would hand out frames the heap also owns. phys_init owns the
+// single boundary; mem.c derives the heap ceiling from it via
+// phys_reserved_bytes() and never assumes a size of its own.
+#define KERNEL_HEAP_BASE_BYTES (24u * 1024 * 1024)  // 24MB — where the heap starts
+#define KERNEL_HEAP_MIN_BYTES  (4u * 1024 * 1024)   // smallest heap the system boots with
+// Hard floor on guest RAM: below this the reservation cannot even hold the
+// heap base plus the heap minimum, so there would be no free frames at all.
+// phys_init raises the reservation up to this size to keep the heap inside
+// it, and prints `[PHYS] FATAL: guest RAM below the supported floor` when
+// raising it consumes every frame; boot_test.py turns that line into a hard
+// failure rather than letting a starved guest look like a good config.
+//
+// Measured on qemu32,+nx / SMP 4 (boot + login + desktop + fork):
+//   24MB  FATAL, heap ceiling 0, no shared zero page (boot smoke now FAILS)
+//   32MB  boots and logs in, but no app can launch — below the supported set
+//   40MB  same: desktop paints, wallpaper asset falls back, launch starves
+//   48MB  first config where boot AND fork both pass (CI floor)
+#define KERNEL_MIN_RAM_BYTES   (KERNEL_HEAP_BASE_BYTES + KERNEL_HEAP_MIN_BYTES)
 
 // ---- PAE paging (v38.49) ----
 // Three-level paging with 64-bit entries: PDPT (4 × 512MB) -> PD (512 × 2MB)

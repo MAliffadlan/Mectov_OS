@@ -113,12 +113,11 @@ static uint32_t total_pages = 0;
 static uint32_t identity_tables = 8;  // how many 2MB PTs paging_init mapped
 
 // v38.100: the kernel heap ceiling follows the frame reservation instead of
-// being a fixed 56MB. The heap starts at KERNEL_HEAP_BASE (24MB) and must
-// never grow past the region the frame allocator has reserved for the kernel
-// — otherwise request_space hands out a frame the allocator also believes is
-// free. On small-RAM guests phys_init shrinks the reservation, so the heap
-// shrinks with it. Defaults cover the pre-phys_init window.
-#define KERNEL_HEAP_BASE 0x1800000u  // 24MB — must match the literal in request_space
+// being a fixed 56MB. The heap starts at KERNEL_HEAP_BASE_BYTES (24MB) and
+// must never grow past the region the frame allocator has reserved for the
+// kernel — otherwise request_space hands out a frame the allocator also
+// believes is free. On small-RAM guests phys_init shrinks the reservation, so
+// the heap shrinks with it. The default covers the pre-phys_init window.
 static uint32_t heap_max_bytes = 56u * 1024 * 1024;
 static uint32_t heap_used = 0;
 
@@ -133,13 +132,20 @@ void init_mem(uint32_t mem_size) {
     // v38.100: clamp the heap to the reservation phys_init just settled on.
     // 80MB reservation - 24MB base = the nominal 56MB; a capped reservation
     // (small guest) yields a proportionally smaller heap, keeping heap and
-    // free-frame regions disjoint. A 4MB floor keeps the allocator usable
-    // even on a pathologically small guest.
+    // free-frame regions disjoint. There is deliberately NO independent
+    // floor here: phys_init already guarantees the reservation covers
+    // KERNEL_HEAP_MIN_BYTES, and inventing a bigger heap than the reservation
+    // can hold is exactly the overlap bug this layout exists to prevent.
     {
         uint32_t reserved = phys_reserved_bytes();
-        heap_max_bytes = (reserved > KERNEL_HEAP_BASE + (1u * 1024 * 1024))
-                             ? reserved - KERNEL_HEAP_BASE
-                             : (4u * 1024 * 1024);
+        heap_max_bytes = (reserved > KERNEL_HEAP_BASE_BYTES)
+                             ? reserved - KERNEL_HEAP_BASE_BYTES
+                             : 0;
+        write_serial_string("[MEM] heap ceiling ");
+        write_serial_hex(heap_max_bytes);
+        write_serial_string(" bytes above ");
+        write_serial_hex(KERNEL_HEAP_BASE_BYTES);
+        write_serial_string("\n");
     }
 }
 
@@ -289,7 +295,7 @@ static block_meta *find_free_block(block_meta **last, uint32_t size) {
 static block_meta *request_space(block_meta* last, uint32_t size) {
     if (size > heap_max_bytes || size + META_SIZE < size || heap_used + size + META_SIZE > heap_max_bytes) return NULL;
     
-    block_meta *block = (block_meta*)((uint8_t*)KERNEL_HEAP_BASE + heap_used);
+    block_meta *block = (block_meta*)((uint8_t*)KERNEL_HEAP_BASE_BYTES + heap_used);
     heap_used += size + META_SIZE;
     
     if (last) last->next = block;
@@ -470,6 +476,19 @@ void kmalloc_stats(void (*print_fn)(const char*, unsigned char)) {
     while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
     buf[i] = '\0';
     // Reverse
+    for (int j = 0; j < i/2; j++) { char t = buf[j]; buf[j] = buf[i-1-j]; buf[i-1-j] = t; }
+    buf[i] = ' '; buf[i+1] = 'B'; buf[i+2] = '\n'; buf[i+3] = '\0';
+    print_fn(buf, 0x0A);
+
+    // v38.101: show the ceiling too — the whole point of the v38.100 fix is
+    // that it is derived from the frame reservation, so a mismatch between
+    // heap_used and this number is the first thing to look at (Heap Base
+    // above is the KERNEL_HEAP_BASE_BYTES constant).
+    print_fn("  Heap Max       : ", 0x0F);
+    n = heap_max_bytes; i = 0;
+    if (n == 0) { buf[i++] = '0'; }
+    while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
+    buf[i] = '\0';
     for (int j = 0; j < i/2; j++) { char t = buf[j]; buf[j] = buf[i-1-j]; buf[i-1-j] = t; }
     buf[i] = ' '; buf[i+1] = 'B'; buf[i+2] = '\n'; buf[i+3] = '\0';
     print_fn(buf, 0x0A);

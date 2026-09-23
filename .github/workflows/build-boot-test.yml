@@ -565,9 +565,18 @@ jobs:
   # bugs are real — the KVM fork-GPF and the qemu32,+nx boot stall each
   # appeared only under a specific CPU/RAM/SMP combination. This job smokes
   # boot + fork/login on every combination of CPU model x RAM x CPU count
-  # (12 jobs, run in parallel by GitHub): NX-less qemu32 vs Nehalem, 64 vs
-  # 256 MB (phys allocator + 48 MB kernel reserve + framebuffer pressure),
-  # and 1 / 2 / 4 cores (SMP bring-up, runqueue, watchdog mesh).
+  # (12 jobs, run in parallel by GitHub): NX-less qemu32 vs Nehalem, the RAM
+  # floor vs a guest large enough for the nominal reservation (48 vs 256 MB —
+  # the middle of the curve is ram-sweep's job), and 1 / 2 / 4 cores
+  # (SMP bring-up, runqueue, watchdog mesh).
+  #
+  # The RAM axis is 48, not 64: since v38.100 the frame reservation is derived
+  # from detected RAM, so the interesting failures cluster on the RAM axis.
+  # 48MB is the measured floor where boot AND fork both pass; below it the
+  # desktop still paints while the app-launch path runs out of room, which is
+  # exactly the false-green boot_test now refuses to report (see
+  # memory_sanity_errors: it asserts a non-zero heap ceiling and a real shared
+  # zero page, both of which a starved guest loses).
   config-matrix:
     needs: build
     runs-on: ubuntu-latest
@@ -576,7 +585,7 @@ jobs:
       fail-fast: false
       matrix:
         cpu: [qemu32, Nehalem]
-        mem: [64, 256]
+        mem: [48, 256]
         smp: [1, 2, 4]
     name: "config ${{ matrix.cpu }} / ${{ matrix.mem }}MB / SMP ${{ matrix.smp }}"
     steps:
@@ -587,6 +596,67 @@ jobs:
       # come with the downloaded artifacts. The build job installs it for its
       # own steps; this job must do the same or every combo dies at step 1
       # with "qemu-system-i386: command not found".
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mectov-artifacts
+          path: .
+
+      - name: Boot + login + desktop smoke
+        run: |
+          python3 scripts/boot_test.py \
+            --cpu ${{ matrix.cpu }} \
+            --mem-mb ${{ matrix.mem }} \
+            --smp ${{ matrix.smp }} \
+            --timeout 240
+
+      - name: Fork / waitpid / signal smoke
+        run: |
+          python3 scripts/fork_test.py \
+            --cpu ${{ matrix.cpu }} \
+            --mem-mb ${{ matrix.mem }} \
+            --smp ${{ matrix.smp }} \
+            --timeout 240
+
+  # RAM sweep (v38.101). phys_init now derives the kernel reservation from the
+  # detected RAM size (cap the nominal 80MB when it would leave no frames;
+  # raise it back when the heap floor would not fit inside), so the whole
+  # failure surface lives on the RAM axis. config-matrix only samples the two
+  # regimes' anchors (48MB floor / 256MB nominal); this job walks the interior
+  # and the cap boundary, on both CPU models at 4 cores:
+  #
+  #   64 MB  — comfortably capped, heap ~24MB
+  #   96 MB  — still capped, heap ~48MB (approaching the nominal 56MB)
+  #  128 MB  — the cap/nominal boundary: 80MB reserve + 25% floor is now
+  #            satisfiable, so this is the first point that takes the nominal
+  #            reservation (heap back to its full 56MB)
+  #
+  # Each point runs the same boot + fork pair as config-matrix. Values below
+  # 48MB are deliberately absent: 32/40MB boot and log in but cannot launch an
+  # app (the heap is too small for the desktop assets, so the wallpaper falls
+  # back and the launch path starves), so they are not supported configs.
+  ram-sweep:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu: [qemu32, Nehalem]
+        mem: [64, 96, 128]
+        smp: [4]
+    name: "ram ${{ matrix.cpu }} / ${{ matrix.mem }}MB / SMP ${{ matrix.smp }}"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Install toolchain
         run: |
           sudo apt-get update -qq

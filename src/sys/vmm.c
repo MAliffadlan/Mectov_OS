@@ -83,6 +83,29 @@ void phys_init(uint32_t total_pages) {
         reserve_pages = phys_total_pages - min_free;
         write_serial_string("[PHYS] small-RAM guest: reservation capped.\n");
     }
+
+    // The kmalloc heap is a physical span inside this reservation, so the
+    // reservation must be big enough to hold the heap floor (24MB base +
+    // 4MB) no matter how small the guest is — otherwise mem.c would clamp
+    // the heap to something that pokes past the reserved region and the
+    // allocator would hand the same bytes to a process. Raising the
+    // reservation here can eat into the 25% frame floor; a guest too small
+    // for both is refused loudly below instead of booting into corruption.
+    uint32_t reserve_min = (KERNEL_HEAP_BASE_BYTES / 4096) +
+                           (KERNEL_HEAP_MIN_BYTES / 4096);
+    if (reserve_pages < reserve_min) {
+        reserve_pages = reserve_min;
+        write_serial_string("[PHYS] reservation raised to cover kernel heap.\n");
+    }
+    if (reserve_pages > phys_total_pages) reserve_pages = phys_total_pages;
+    if (reserve_pages >= phys_total_pages) {
+        // Zero frames left for user space: no task, stack or framebuffer can
+        // ever be allocated. Say exactly why instead of dying later in an
+        // unrelated-looking place.
+        write_serial_string("[PHYS] FATAL: guest RAM below the supported floor (");
+        write_serial_hex(KERNEL_MIN_RAM_BYTES);
+        write_serial_string(" bytes) - no frames left for user space.\n");
+    }
     phys_reserved_pages = reserve_pages;
     for (uint32_t i = 0; i < reserve_pages && i < phys_total_pages; i++) {
         bitmap_set(i);
