@@ -71,6 +71,9 @@ SUITES = [
     # so it never runs in the default battery — invoke via `make check-q3`
     # (or --only q3 after building that ISO); CI has a dedicated job.
     ("q3",               "q3_test.py",                300, [], "q3"),
+    # TinyGL software-GL gears window (v38.102, Q3 phase 2). Same MECTOV_Q3=1
+    # ISO requirement as q3 — the renderer compiles only in that variant.
+    ("q3gl",             "q3gl_test.py",              420, [], "q3"),
     ("virtio",           "virtio_test.py",            360),
     ("socktest",         "socktest.py",               300),
     ("poweroff",         "poweroff_test.py",          240),

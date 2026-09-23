@@ -410,6 +410,17 @@ jobs:
           # the shell syscall, which executes with interrupts disabled.
           python3 scripts/q3_test.py --iso mectov-q3.iso --timeout 300
 
+      - name: TinyGL gears window (visual, TCG)
+        run: |
+          # v38.102 (Q3 phase 2): the TinyGL software rasterizer renders the
+          # lit gears scene into a WM window. The test types `q3gl` and
+          # asserts via serial that the context + window came up and frames
+          # tick, then pixel-checks a real screendump for the three gear
+          # body colors (blue/red/green from the demo materials) and that
+          # two later frames differ — the scene is genuinely animated on the
+          # composited desktop, not a frozen framebuffer.
+          python3 scripts/q3gl_test.py --iso mectov-q3.iso --timeout 420
+
   storage:
     needs: build
     runs-on: ubuntu-latest

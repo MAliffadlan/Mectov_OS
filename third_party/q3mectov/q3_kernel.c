@@ -321,6 +321,14 @@ double q3_cos(double x) { return q3_fcos(x); }
 double q3_tan(double x) { return q3_fsin(x) / q3_fcos(x); }
 double q3_sqrt(double x) { return q3_fsqrt(x); }
 double q3_fabs(double x) { return x < 0 ? -x : x; }
+/* v38.102: TinyGL's viewport clamp needs an isfinite() check (NaN/Inf -> 0).
+ * Bit-level: NaN/Inf have an all-ones exponent field. int q3_isfinite(double). */
+int q3_isfinite(double x) {
+	union { double d; uint64_t u; } v;
+	v.d = (double)x * 1.0;   /* quiet any signalling payload */
+	v.u = (v.u & 0x7FF0000000000000ULL);
+	return v.u != 0x7FF0000000000000ULL;
+}
 double q3_floor(double x) {
 	long l = (long)x;
 	return (x < 0 && (double)l != x) ? (double)(l - 1) : (double)l;

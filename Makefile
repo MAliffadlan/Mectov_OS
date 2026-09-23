@@ -80,11 +80,28 @@ Q3_SRCS = $(Q3_DIR)/qcommon/q_math.c $(Q3_DIR)/qcommon/q_shared.c \
           $(Q3_DIR)/null/null_client.c $(Q3_DIR)/null/null_input.c $(Q3_DIR)/null/null_snddma.c \
           $(Q3_OUR)/q3_kernel.c $(Q3_OUR)/q3_printf.c \
           $(Q3_OUR)/q3_platform.c
+# TinyGL (v38.102, Q3 phase 2): software OpenGL 1.1 rasterizer rendering the
+# gears scene into a WM window. Vendored from jserv/tinygl (MIT); core only —
+# ztext/glDrawText dropped, allocator shim routes gl_malloc to kmalloc.
+TGL_DIR = third_party/tinygl
+TGL_SRCS = $(TGL_DIR)/src/api.c $(TGL_DIR)/src/arrays.c $(TGL_DIR)/src/clear.c \
+           $(TGL_DIR)/src/clip.c $(TGL_DIR)/src/get.c $(TGL_DIR)/src/image_util.c \
+           $(TGL_DIR)/src/init.c $(TGL_DIR)/src/light.c $(TGL_DIR)/src/list.c \
+           $(TGL_DIR)/src/matrix.c \
+           $(TGL_DIR)/src/misc.c \
+           $(TGL_DIR)/src/msghandling.c $(TGL_DIR)/src/ztext.c \
+           $(TGL_DIR)/src/select.c $(TGL_DIR)/src/specbuf.c $(TGL_DIR)/src/texture.c \
+           $(TGL_DIR)/src/vertex.c $(TGL_DIR)/src/zbuffer.c $(TGL_DIR)/src/zline.c \
+           $(TGL_DIR)/src/zmath.c $(TGL_DIR)/src/zpostprocess.c $(TGL_DIR)/src/zraster.c \
+           $(TGL_DIR)/src/ztriangle.c \
+           $(TGL_DIR)/kernel_shim.c $(TGL_DIR)/q3gl_window.c
 ifeq ($(Q3_ENABLED),1)
 Q3_OBJS = $(patsubst $(Q3_DIR)/%,$(OBJ_DIR)/q3/%,$(Q3_SRCS:.c=.o))
 Q3_OBJS := $(patsubst $(Q3_OUR)/%,$(OBJ_DIR)/q3plat/%,$(Q3_OBJS))
+TGL_OBJS = $(patsubst $(TGL_DIR)/%,$(OBJ_DIR)/tgl/%,$(TGL_SRCS:.c=.o))
 else
 Q3_OBJS =
+TGL_OBJS =
 endif
 # -DSTANDALONE: no CD-key write / no client-only branches (we ship no id
 #   game data); -DDEDICATED would also work but keeps the client light off.
@@ -159,7 +176,8 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/syncdemo_elf.o \
        $(OBJ_DIR)/udptest_elf.o \
        $(DOOM_OBJS) \
-       $(Q3_OBJS)
+       $(Q3_OBJS) \
+       $(TGL_OBJS)
 
 all: $(OBJ_DIR) myos.bin
 
@@ -552,6 +570,28 @@ $(OBJ_DIR)/q3plat/%.o: $(Q3_OUR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(Q3_CFLAGS) -c $< -o $@
 
+# TinyGL (v38.102): compiled like the Q3 tree — libc names resolve through
+# the q3 stub headers (-I$(Q3_OUR)/stubs) to kmalloc-backed shims, plus the
+# TinyGL include dirs. TGL_FEATURE_* stay at their defaults (32-bit render).
+TGL_CFLAGS = -m32 -std=gnu99 -ffreestanding -O1 -MMD -MP \
+              -I$(Q3_OUR)/stubs -I$(TGL_DIR)/include -I$(TGL_DIR)/src \
+              -fno-builtin -fno-pie -fno-pic -march=i686 \
+              -DMECTOV_Q3=1 -DNO_DEBUG_OUTPUT -w
+# memory.c is EXCLUDED from TGL_SRCS: it defines gl_malloc/gl_free over the
+# host malloc, and kernel_shim.c provides those symbols over kmalloc instead.
+
+$(OBJ_DIR)/tgl/src/%.o: $(TGL_DIR)/src/%.c | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(TGL_CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/tgl/kernel_shim.o: $(TGL_DIR)/kernel_shim.c | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(TGL_CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/tgl/q3gl_window.o: $(TGL_DIR)/q3gl_window.c | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(TGL_CFLAGS) -Isrc/include -c $< -o $@
+
 # DOOM source compilation rule
 $(OBJ_DIR)/doom/%.o: doom/%.c | $(OBJ_DIR)
 	$(CC) $(DOOM_CFLAGS) -c $< -o $@
@@ -606,4 +646,10 @@ check-q3:
 	MECTOV_Q3=1 $(MAKE) iso
 	python3 scripts/check.py --keep-images --only q3 $(CHECK_ARGS)
 
-.PHONY: all clean clean_all check check-quick check-q3 iso
+# TinyGL gears window (v38.102, Q3 phase 2): same MECTOV_Q3=1 ISO, visual
+# test only. `make check-q3tgl` runs both Q3-phase suites.
+check-q3tgl:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3gl $(CHECK_ARGS)
+
+.PHONY: all clean clean_all check check-quick check-q3 check-q3tgl iso
