@@ -3588,7 +3588,11 @@ uint32_t task_munmap(uint32_t addr) {
             pte_t* pt = (pte_t*)(uintptr_t)(uint32_t)(pd[pd_index(va)] & PTE_ADDR_MASK);
             if (pt[pt_index(va)] & PAGE_PRESENT) {
                 uint32_t paddr = (uint32_t)(pt[pt_index(va)] & PTE_ADDR_MASK);
-                if (paddr >= (KERNEL_RESERVED_PAGES * 4096)) frame_free(paddr);
+                // v38.100: compare against the RUNTIME reservation, not the
+                // nominal constant — on small-RAM guests the kernel region is
+                // smaller, so frames above it must be freed (a stale 80MB
+                // threshold leaked every user frame in 48..80MB there).
+                if (paddr >= phys_reserved_bytes()) frame_free(paddr);
                 pt[pt_index(va)] = 0;
                 __asm__ __volatile__("invlpg (%0)" : : "r"(va));
             }

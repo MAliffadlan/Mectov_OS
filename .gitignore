@@ -6,6 +6,7 @@
 myos.bin
 myos.bin.debug
 mectov.iso
+mectov-q3.iso
 
 # Disk images
 *.img

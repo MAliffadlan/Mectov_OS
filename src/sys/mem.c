@@ -112,6 +112,16 @@ void paging_enable_smep(void) {
 static uint32_t total_pages = 0;
 static uint32_t identity_tables = 8;  // how many 2MB PTs paging_init mapped
 
+// v38.100: the kernel heap ceiling follows the frame reservation instead of
+// being a fixed 56MB. The heap starts at KERNEL_HEAP_BASE (24MB) and must
+// never grow past the region the frame allocator has reserved for the kernel
+// — otherwise request_space hands out a frame the allocator also believes is
+// free. On small-RAM guests phys_init shrinks the reservation, so the heap
+// shrinks with it. Defaults cover the pre-phys_init window.
+#define KERNEL_HEAP_BASE 0x1800000u  // 24MB — must match the literal in request_space
+static uint32_t heap_max_bytes = 56u * 1024 * 1024;
+static uint32_t heap_used = 0;
+
 void init_mem(uint32_t mem_size) {
     total_pages = mem_size / PAGE_SIZE;
     if (total_pages > PHYS_MAX_PAGES) total_pages = PHYS_MAX_PAGES;
@@ -119,6 +129,18 @@ void init_mem(uint32_t mem_size) {
     // write-only mem_bitmap here was dead code; the real bitmap lives in vmm.c
     // and is initialized right here, so there is exactly one source of truth.
     phys_init(total_pages);
+
+    // v38.100: clamp the heap to the reservation phys_init just settled on.
+    // 80MB reservation - 24MB base = the nominal 56MB; a capped reservation
+    // (small guest) yields a proportionally smaller heap, keeping heap and
+    // free-frame regions disjoint. A 4MB floor keeps the allocator usable
+    // even on a pathologically small guest.
+    {
+        uint32_t reserved = phys_reserved_bytes();
+        heap_max_bytes = (reserved > KERNEL_HEAP_BASE + (1u * 1024 * 1024))
+                             ? reserved - KERNEL_HEAP_BASE
+                             : (4u * 1024 * 1024);
+    }
 }
 
 void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
@@ -254,7 +276,6 @@ typedef struct block_meta {
 } block_meta;
 
 static void *global_base = NULL;
-static uint32_t heap_used = 0;
 
 static block_meta *find_free_block(block_meta **last, uint32_t size) {
     block_meta *current = global_base;
@@ -266,11 +287,9 @@ static block_meta *find_free_block(block_meta **last, uint32_t size) {
 }
 
 static block_meta *request_space(block_meta* last, uint32_t size) {
-    uint32_t max_heap = 56 * 1024 * 1024; // 56MB max heap (heap base=24MB, so grows to 80MB — matching KERNEL_RESERVED_PAGES; v38.98 +32MB for Q3)
+    if (size > heap_max_bytes || size + META_SIZE < size || heap_used + size + META_SIZE > heap_max_bytes) return NULL;
     
-    if (size > max_heap || size + META_SIZE < size || heap_used + size + META_SIZE > max_heap) return NULL;
-    
-    block_meta *block = (block_meta*)((uint8_t*)0x1800000 + heap_used);
+    block_meta *block = (block_meta*)((uint8_t*)KERNEL_HEAP_BASE + heap_used);
     heap_used += size + META_SIZE;
     
     if (last) last->next = block;

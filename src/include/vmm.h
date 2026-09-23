@@ -52,6 +52,7 @@ void vmm_free_address_space(uint32_t page_dir);
 #define PHYS_MAX_PAGES (512 * 256)  // 512MB / 4KB ceiling for static bitmaps
 
 void phys_init(uint32_t total_pages);                    // called from init_mem
+uint32_t phys_reserved_bytes(void);                      // runtime kernel reservation (RAM-adaptive)
 void phys_reserve_region(uint32_t start, uint32_t len);  // mark MMIO (fb, ...) used
 uint32_t phys_get_used_pages(void);                      // reserved + allocated
 uint32_t phys_get_zero_page(void);                       // shared zero frame (pinned)

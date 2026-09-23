@@ -30,6 +30,10 @@ static spinlock_t vmm_lock = SPINLOCK_INIT;
 static uint8_t frame_bitmap[PHYS_MAX_PAGES / 8];
 uint8_t frame_ref_count[PHYS_MAX_PAGES];
 static uint32_t phys_total_pages = 0;   // actual RAM / 4KB, from multiboot
+// v38.100: reservation is adaptive — nominal KERNEL_RESERVED_PAGES capped at
+// 75% of detected RAM (see phys_init), so small-RAM guests keep allocatable
+// frames. All frame paths read this runtime value instead of the constant.
+static uint32_t phys_reserved_pages = KERNEL_RESERVED_PAGES;
 static uint32_t phys_used_count = 0;    // maintained used-frame total (O(1) meminfo)
 static int vmm_initialized = 0;
 
@@ -66,23 +70,35 @@ void phys_init(uint32_t total_pages) {
     memset(frame_bitmap, 0, sizeof(frame_bitmap));
     memset(frame_ref_count, 0, sizeof(frame_ref_count));
 
-    // Reserve the kernel + heap region (first 48MB)
-    for (uint32_t i = 0; i < KERNEL_RESERVED_PAGES && i < phys_total_pages; i++) {
+    // Reserve the kernel + heap region. The nominal reservation is
+    // KERNEL_RESERVED_PAGES (80MB, sized for the Q3 hunk/zone heap on big
+    // guests), but it must adapt to small RAM: on a 64MB guest reserving
+    // every frame left zero frames for user space and boot died. Keep a
+    // 25% frame floor so small guests stay bootable. mem.c reads the result
+    // back via phys_reserved_bytes() to bound the kernel heap to the same
+    // boundary.
+    uint32_t reserve_pages = KERNEL_RESERVED_PAGES;
+    uint32_t min_free = phys_total_pages / 4;
+    if (reserve_pages + min_free > phys_total_pages) {
+        reserve_pages = phys_total_pages - min_free;
+        write_serial_string("[PHYS] small-RAM guest: reservation capped.\n");
+    }
+    phys_reserved_pages = reserve_pages;
+    for (uint32_t i = 0; i < reserve_pages && i < phys_total_pages; i++) {
         bitmap_set(i);
         frame_ref_count[i] = 1;
     }
-    phys_used_count = (KERNEL_RESERVED_PAGES < phys_total_pages)
-                          ? KERNEL_RESERVED_PAGES : phys_total_pages;
+    phys_used_count = reserve_pages;
 
     write_serial_string("[PHYS] allocator: ");
     write_serial_hex(phys_total_pages * 4096);
     write_serial_string(" bytes RAM, ");
-    write_serial_hex(KERNEL_RESERVED_PAGES * 4096);
+    write_serial_hex(reserve_pages * 4096);
     write_serial_string(" reserved for kernel.\n");
 
     // Grab one frame for the shared zero page and pin it. Runs before paging
     // is enabled (paging_init is later), so direct physical access is fine.
-    for (uint32_t i = KERNEL_RESERVED_PAGES; i < phys_total_pages; i++) {
+    for (uint32_t i = reserve_pages; i < phys_total_pages; i++) {
         if (!bitmap_test(i)) {
             phys_zero_page = i * 4096;
             bitmap_set(i);
@@ -99,6 +115,13 @@ void phys_init(uint32_t total_pages) {
 
 // The shared zero page (0 if the allocator could not reserve one).
 uint32_t phys_get_zero_page(void) { return phys_zero_page; }
+
+// v38.100: the runtime kernel reservation, in bytes. mem.c derives the kernel
+// heap ceiling from this so the heap can never grow into frames that the
+// allocator believes are free — on small-RAM guests the reservation shrinks
+// (see phys_init) and the heap must shrink with it. Reads a single aligned
+// uint32 set once by phys_init; no lock needed.
+uint32_t phys_reserved_bytes(void) { return phys_reserved_pages * 4096u; }
 
 // Mark a physical region (e.g. the framebuffer, MMIO) as in use so the
 // allocator never hands it out. Called from paging_init() with the framebuffer
@@ -158,7 +181,7 @@ uint32_t frame_alloc(void) {
     uint32_t eflags;
     __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
     spin_lock(&vmm_lock);
-    for (uint32_t i = KERNEL_RESERVED_PAGES; i < phys_total_pages; i++) {
+    for (uint32_t i = phys_reserved_pages; i < phys_total_pages; i++) {
         if (!bitmap_test(i)) {
             bitmap_set(i);
             frame_ref_count[i] = 1;
@@ -181,7 +204,7 @@ void frame_free(uint32_t paddr) {
     __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
     spin_lock(&vmm_lock);
     uint32_t idx = paddr / 4096;
-    if (idx >= KERNEL_RESERVED_PAGES && idx < phys_total_pages) {
+    if (idx >= phys_reserved_pages && idx < phys_total_pages) {
         if (frame_ref_count[idx] > 0) {
             frame_ref_count[idx]--;
             if (frame_ref_count[idx] == 0) {
@@ -350,7 +373,7 @@ void vmm_free_address_space(uint32_t page_dir) {
                         !(pt[e] & PAGE_DEV) &&
                         (pt[e] & 0x000FFFFFFFFFF007ULL) != (boot_pt[e] & 0x000FFFFFFFFFF007ULL)) {
                         uint32_t page_paddr = (uint32_t)(pt[e] & PTE_ADDR_MASK);
-                        if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
+                        if (page_paddr >= (phys_reserved_pages * 4096)) {
                             frame_free(page_paddr);
                         }
                     }
@@ -360,7 +383,7 @@ void vmm_free_address_space(uint32_t page_dir) {
                 for (uint32_t e = 0; e < PT_ENTRIES; e++) {
                     if ((pt[e] & PAGE_PRESENT) && !(pt[e] & PAGE_DEV)) {
                         uint32_t page_paddr = (uint32_t)(pt[e] & PTE_ADDR_MASK);
-                        if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
+                        if (page_paddr >= (phys_reserved_pages * 4096)) {
                             frame_free(page_paddr);
                         }
                     }
@@ -509,7 +532,7 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
                     }
                     dst_pt[e] = spe;
                     uint32_t page_paddr = (uint32_t)(spe & PTE_ADDR_MASK);
-                    if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
+                    if (page_paddr >= (phys_reserved_pages * 4096)) {
                         if (frame_ref_count[page_paddr / 4096] < 255)
                             frame_ref_count[page_paddr / 4096]++;
                         // At 255 the frame is pinned — never freed. Acceptable.
@@ -545,7 +568,7 @@ uint32_t vmm_clone_address_space(uint32_t src_page_dir) {
                     }
                     dst_pt[e] = spe;
                     uint32_t page_paddr = (uint32_t)(spe & PTE_ADDR_MASK);
-                    if (page_paddr >= (KERNEL_RESERVED_PAGES * 4096)) {
+                    if (page_paddr >= (phys_reserved_pages * 4096)) {
                         if (frame_ref_count[page_paddr / 4096] < 255)
                             frame_ref_count[page_paddr / 4096]++;
                         // At 255 the frame is pinned — never freed. Acceptable.
