@@ -770,6 +770,7 @@ else if (strcmp(cmd_b, "snake") == 0 || strcmp(cmd_b, "ular") == 0) cmd_snake();
 else if (strcmp(cmd_b, "flappy") == 0) cmd_flappy();
 // --- DOOM ---
 else if (strcmp(cmd_b, "doom") == 0 || strncmp(cmd_b, "doom ", 5) == 0) { cmd_doom(); }
+else if (strcmp(cmd_b, "q3") == 0 || strncmp(cmd_b, "q3 ", 3) == 0) { cmd_q3(); }
 // --- TASKMGR ---
 else if (strcmp(cmd_b, "taskmgr") == 0) cmd_taskmgr();
 // --- LOCK (kunci) ---

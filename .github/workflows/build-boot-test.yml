@@ -16,6 +16,7 @@ on:
 #   gui            -> login/lock/paint/taskbar/startmenu/explorer/fbmap/hardening
 #   browser-net    -> browser HTTP + hostname/gateway + POSIX socket + poll/select
 #   doom-rust      -> windowed DOOM, Rust app, ASLR (2 boots), fsync/mmap/lseek
+#   quake3         -> ioquake3 engine core on the MECTOV_Q3=1 ISO variant
 #   storage        -> FAT32/mount/AHCI/xHCI/VirtIO/bigread-DMA/iocache
 #   selftest       -> watchdogs, TLB shootdown, multi-core panic (if: always())
 #   kvm            -> KVM 4-core fork/FPU (skips itself when /dev/kvm is absent)
@@ -89,6 +90,29 @@ jobs:
             myos.bin
             disk.img
             ext2.img
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Build ioquake3 kernel variant (MECTOV_Q3=1)
+        run: |
+          # v38.99: second ISO with the Q3 engine core compiled in. The
+          # default ISO must stay engine-free; only the quake3 job boots
+          # this variant. disk/ext2 copies ship alongside so the test job
+          # gets the same fresh-image state as every other job.
+          MECTOV_Q3=1 make iso
+          mv mectov.iso mectov-q3.iso
+          cp disk.img disk-q3.img
+          cp ext2.img ext2-q3.img
+          test -f mectov-q3.iso && echo "mectov-q3.iso built OK"
+
+      - name: Upload Q3 build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mectov-q3-artifacts
+          path: |
+            mectov-q3.iso
+            disk-q3.img
+            ext2-q3.img
           if-no-files-found: error
           retention-days: 1
 
@@ -349,6 +373,42 @@ jobs:
           # v38.63: two consecutive boots each run the PIE syncdemo.elf twice;
           # the test asserts bases differ across boots AND within one boot.
           python3 scripts/aslr_test.py --timeout 300
+
+  quake3:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil \
+            dosfstools
+
+      - name: Download Q3 build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mectov-q3-artifacts
+          path: .
+
+      - name: Restore disk image names
+        run: |
+          cp disk-q3.img disk.img
+          cp ext2-q3.img ext2.img
+
+      - name: ioquake3 engine core regression (TCG)
+        run: |
+          # v38.99: boots the MECTOV_Q3=1 ISO, types `q3` in the Terminal,
+          # and asserts Com_Init + 10 Com_Frame ticks complete with the OS
+          # alive. The engine runs on a dedicated kernel task forked by
+          # cmd_q3 (IF=1) with its config I/O on tmpfs — never inline in
+          # the shell syscall, which executes with interrupts disabled.
+          python3 scripts/q3_test.py --iso mectov-q3.iso --timeout 300
 
   storage:
     needs: build

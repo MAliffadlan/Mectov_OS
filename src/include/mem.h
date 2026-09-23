@@ -4,7 +4,7 @@
 #include "types.h"
 
 #define PAGE_SIZE 4096
-#define KERNEL_RESERVED_PAGES (48 * 256)  // 48MB reserved for kernel+modules
+#define KERNEL_RESERVED_PAGES (80 * 256)  // 80MB reserved for kernel+modules (v38.98: +32MB headroom for the Q3 engine hunk/zone)
 
 // ---- PAE paging (v38.49) ----
 // Three-level paging with 64-bit entries: PDPT (4 × 512MB) -> PD (512 × 2MB)

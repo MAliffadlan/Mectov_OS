@@ -3163,10 +3163,6 @@ static int vfs_alloc_sectors(int sectors_needed, int exclude_node) {
 }
 
 static int vfs_write_file_unlocked(const char* path, const char* data, int size) {
-    extern void write_serial_string(const char*);
-    write_serial_string("[VFS] write: ");
-    write_serial_string(path);
-    write_serial_string("\n");
     int node = vfs_get_node(path);
     if (node < 0) return -1;
 

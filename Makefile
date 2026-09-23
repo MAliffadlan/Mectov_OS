@@ -54,6 +54,45 @@ SRCS = $(wildcard $(SRC_DIR)/drivers/*.c) \
        $(wildcard $(SRC_DIR)/gui/*.c) \
        kernel.c
 
+# Quake III (v38.98): ioquake3 subset (qcommon core + null client) built
+# into the kernel behind MECTOV_Q3=1 (default off). Stub headers under
+# third_party/q3mectov/stubs alias every libc name to q3_* implementations
+# (q3_kernel.c), so ioq3 objects reference nothing from utils.c/doom_libc.
+Q3_ENABLED := $(shell [ "$(MECTOV_Q3)" = "1" ] && echo 1 || echo 0)
+ifeq ($(Q3_ENABLED),1)
+CFLAGS += -DMECTOV_Q3=1
+endif
+# v38.99: flipping MECTOV_Q3 changes CFLAGS, which make's dependency check
+# cannot see — cmd_q3.o built in one mode was reused as-is in the other and
+# the Q3 ISO once shipped the "engine not compiled in" stub. Stamp the mode;
+# on mismatch wipe the object tree so every variant starts clean.
+Q3_STAMP := $(OBJ_DIR)/.q3mode
+ifneq ($(shell cat $(Q3_STAMP) 2>/dev/null),$(Q3_ENABLED))
+$(shell mkdir -p $(OBJ_DIR); rm -rf $(OBJ_DIR)/*; echo "$(Q3_ENABLED)" > "$(Q3_STAMP)")
+endif
+Q3_DIR = third_party/q3/code
+Q3_OUR = third_party/q3mectov
+Q3_SRCS = $(Q3_DIR)/qcommon/q_math.c $(Q3_DIR)/qcommon/q_shared.c \
+          $(Q3_DIR)/qcommon/common.c $(Q3_DIR)/qcommon/cvar.c $(Q3_DIR)/qcommon/cmd.c \
+          $(Q3_DIR)/qcommon/files.c $(Q3_DIR)/qcommon/msg.c \
+          $(Q3_DIR)/qcommon/huffman.c $(Q3_DIR)/qcommon/md4.c \
+          $(Q3_DIR)/qcommon/md5.c $(Q3_DIR)/qcommon/ioapi.c $(Q3_DIR)/qcommon/unzip.c \
+          $(Q3_DIR)/null/null_client.c $(Q3_DIR)/null/null_input.c $(Q3_DIR)/null/null_snddma.c \
+          $(Q3_OUR)/q3_kernel.c $(Q3_OUR)/q3_printf.c \
+          $(Q3_OUR)/q3_platform.c
+ifeq ($(Q3_ENABLED),1)
+Q3_OBJS = $(patsubst $(Q3_DIR)/%,$(OBJ_DIR)/q3/%,$(Q3_SRCS:.c=.o))
+Q3_OBJS := $(patsubst $(Q3_OUR)/%,$(OBJ_DIR)/q3plat/%,$(Q3_OBJS))
+else
+Q3_OBJS =
+endif
+# -DSTANDALONE: no CD-key write / no client-only branches (we ship no id
+#   game data); -DDEDICATED would also work but keeps the client light off.
+Q3_CFLAGS = -m32 -std=gnu99 -ffreestanding -O1 -MMD -MP \
+              -I$(Q3_OUR)/stubs -I$(Q3_DIR)/qcommon -I$(Q3_DIR)/null \
+              -fno-builtin -fno-pie -fno-pic -march=i686 \
+              -DMECTOV_Q3=1 -DSTANDALONE -w
+
 # DOOM source files (all .c in doom/ directory)
 DOOM_SRCS = $(wildcard doom/*.c)
 DOOM_OBJS = $(DOOM_SRCS:doom/%.c=$(OBJ_DIR)/doom/%.o)
@@ -119,7 +158,8 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/elfdemo_elf.o \
        $(OBJ_DIR)/syncdemo_elf.o \
        $(OBJ_DIR)/udptest_elf.o \
-       $(DOOM_OBJS)
+       $(DOOM_OBJS) \
+       $(Q3_OBJS)
 
 all: $(OBJ_DIR) myos.bin
 
@@ -503,6 +543,15 @@ $(OBJ_DIR)/udptest_elf.o: udptest.elf | $(OBJ_DIR)
 $(OBJ_DIR)/wallpaper.bin: assets/wallpaper.png
 	python3 scripts/build_wallpaper.py assets/wallpaper.png $@
 
+# Q3 source compilation rule (objects only enter the link when MECTOV_Q3=1)
+$(OBJ_DIR)/q3/%.o: $(Q3_DIR)/%.c | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(Q3_CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/q3plat/%.o: $(Q3_OUR)/%.c | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(Q3_CFLAGS) -c $< -o $@
+
 # DOOM source compilation rule
 $(OBJ_DIR)/doom/%.o: doom/%.c | $(OBJ_DIR)
 	$(CC) $(DOOM_CFLAGS) -c $< -o $@
@@ -551,4 +600,10 @@ check: iso
 check-quick: iso
 	python3 scripts/check.py --quick $(CHECK_ARGS)
 
-.PHONY: all clean clean_all check check-quick iso
+# ioquake3 engine-core suite (v38.99): builds the MECTOV_Q3=1 kernel/ISO
+# variant and runs only the q3 regression against it.
+check-q3:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3 $(CHECK_ARGS)
+
+.PHONY: all clean clean_all check check-quick check-q3 iso

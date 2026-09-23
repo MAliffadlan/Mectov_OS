@@ -134,7 +134,7 @@ run_qemu() {
     qemu-system-i386 $KVM_FLAGS \
     -vga std \
     -cdrom mectov.iso \
-    -m 128 \
+    -m 512 \
     -smp "$SMP" \
     $AUDIO_ARGS \
     -net nic,model=rtl8139 -net user \

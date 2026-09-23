@@ -266,7 +266,7 @@ static block_meta *find_free_block(block_meta **last, uint32_t size) {
 }
 
 static block_meta *request_space(block_meta* last, uint32_t size) {
-    uint32_t max_heap = 24 * 1024 * 1024; // 24MB max heap (heap base=24MB, so grows to 48MB — matching KERNEL_RESERVED_PAGES)
+    uint32_t max_heap = 56 * 1024 * 1024; // 56MB max heap (heap base=24MB, so grows to 80MB — matching KERNEL_RESERVED_PAGES; v38.98 +32MB for Q3)
     
     if (size > max_heap || size + META_SIZE < size || heap_used + size + META_SIZE > max_heap) return NULL;
     

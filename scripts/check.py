@@ -67,6 +67,10 @@ SUITES = [
     ("mount",            "mount_test.py",             240),
     ("ahci",             "ahci_test.py",              360),
     ("usb",              "usb_test.py",               360),
+    # ioquake3 engine-core port (v38.99). Needs the MECTOV_Q3=1 ISO variant,
+    # so it never runs in the default battery — invoke via `make check-q3`
+    # (or --only q3 after building that ISO); CI has a dedicated job.
+    ("q3",               "q3_test.py",                300, [], "q3"),
     ("virtio",           "virtio_test.py",            360),
     ("socktest",         "socktest.py",               300),
     ("poweroff",         "poweroff_test.py",          240),
@@ -116,6 +120,8 @@ def suite_entries(args):
             print("[check] --kvm requested but /dev/kvm is unavailable "
                   "— skipping %s" % name)
             continue
+        if need == "q3" and not (args.only and name in args.only):
+            continue  # Q3 suite needs the MECTOV_Q3=1 ISO (make check-q3)
         out.append((name, script, timeout, extra, need))
     return out
 

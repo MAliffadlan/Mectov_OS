@@ -105,7 +105,11 @@ typedef struct {
 // unmapped guard page; a stack overflow faults on it and the #PF handler
 // panics with a clear message (see task.c). TASK_KSTACK_SIZE is the usable
 // stack size (shared with /proc/tasks, which shows peak usage as a % of it).
-#define TASK_KSTACK_SIZE 16384
+// v38.99: 16KB was too small for deep third-party engine call chains — the
+// ioquake3 core (Com_Frame -> Com_EventLoop -> FS stack) overflowed into the
+// guard page and double-faulted. 32KB keeps those frames comfortably inside
+// (peak observed ~16.5KB with headroom for IRQ nesting on the same stack).
+#define TASK_KSTACK_SIZE 32768
 int task_is_stack_guard(uint32_t addr);       // 1 if addr is in any guard page
 uint32_t task_stack_top(int tid);             // top of task tid's kernel stack
 void task_install_stack_guards(uint32_t page_dir); // unmap guards in a page dir

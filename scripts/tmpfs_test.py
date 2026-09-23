@@ -206,14 +206,25 @@ def main():
         print("[OK] no app-internal failures")
 
         # Shell integration: echo redirection into /tmp, then cat it back.
-        if not type_line(ECHO_KEYS, retries=2, ready_marker="mectov-tmpfs-ok", timeout=30):
+        # Markers must be phase-DISTINCT: the payload string appears in the
+        # echo phase's own debug line, so waiting for it in the cat phase
+        # matches instantly and the count check below races the real output.
+        if not type_line(ECHO_KEYS, retries=2, ready_marker="[SH] redirected", timeout=30):
             print("[FAIL] echo > /tmp/sh.txt did not echo back")
             return 1
-        if not type_line(CAT_KEYS, retries=2, ready_marker="mectov-tmpfs-ok", timeout=30):
+        if not type_line(CAT_KEYS, retries=2, ready_marker="[SH] cat", timeout=30):
             print("[FAIL] cat /tmp/sh.txt did not print the payload")
             return 1
-        serial = read_file(SERIAL_LOG)
-        if serial.count("mectov-tmpfs-ok") < 2:
+        # The cat mirror writes the payload on the same line microseconds
+        # after '[SH] cat', but poll briefly so a slow reader never races it.
+        ok = False
+        for _ in range(10):
+            serial = read_file(SERIAL_LOG)
+            if serial.count("mectov-tmpfs-ok") >= 2:
+                ok = True
+                break
+            time.sleep(1)
+        if not ok:
             print("[FAIL] shell round-trip through /tmp incomplete")
             return 1
         print("[OK] shell echo>/tmp + cat round-trip")

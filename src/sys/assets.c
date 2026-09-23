@@ -48,3 +48,11 @@ int assets_open(const char* path, uint32_t* size_out) {
     *size_out = (uint32_t)sz;
     return node;
 }
+
+/* v38.98: size accessor untuk Q3 libc shim (q3_kernel.c) — node index dari
+ * vfs_get_node, balikin ukuran file dalam byte (0 kalau node invalid). */
+unsigned int vfs_get_file_size(int node) {
+    if (node < 0 || node >= MAX_NODES) return 0;
+    int sz = fs_nodes[node].size;
+    return sz > 0 ? (unsigned int)sz : 0;
+}
