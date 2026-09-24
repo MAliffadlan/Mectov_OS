@@ -151,7 +151,7 @@ def main():
 
         # ---- Phase C: open terminal ----
         if not terminal_launch.launch_terminal(mon_cmd, SERIAL_LOG, DUMP):
-            print("[FAIL] terminal did not launch")
+            print("[FAIL] the Terminal never became ready — see the [launch] report above")
             return 1
         time.sleep(2)
 

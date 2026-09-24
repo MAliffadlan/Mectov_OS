@@ -212,7 +212,7 @@ def main():
         time.sleep(1.5)
         if not terminal_launch.launch_terminal(
                 mon_cmd, SERIAL_LOG, "/tmp/mectov_hardening_cursor.ppm"):
-            print("[FAIL] terminal did not launch")
+            print("[FAIL] the Terminal never became ready — see the [launch] report above")
             return 1
         wait_for_in_file(SERIAL_LOG, "ipc_create key=0x0000DEAD", 30)
         time.sleep(1.0)

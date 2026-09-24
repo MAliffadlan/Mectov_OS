@@ -112,7 +112,7 @@ def main():
         time.sleep(1.5)
         if not terminal_launch.launch_terminal(
                 mon_cmd, SERIAL_LOG, "/tmp/mectov_jobs_cursor.ppm"):
-            print("[FAIL] terminal did not launch")
+            print("[FAIL] the Terminal never became ready — see the [launch] report above")
             return 1
         print("[OK] terminal launched")
         # Wait until the terminal has finished init (its IPC queue is up) so

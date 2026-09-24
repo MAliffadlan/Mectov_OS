@@ -204,7 +204,7 @@ def main():
         time.sleep(1.5)
         if not terminal_launch.launch_terminal(
                 mon_cmd, SERIAL_LOG, "/tmp/mectov_ahci_cursor.ppm"):
-            print("[FAIL] terminal did not launch (icon double-click missed?)")
+            print("[FAIL] the Terminal never became ready — see the [launch] report above")
             return 1
         if not wait_for_in_file(SERIAL_LOG, "ipc_create key=0x0000DEAD", 30):
             print("[FAIL] terminal never became ready")

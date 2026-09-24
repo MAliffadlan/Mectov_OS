@@ -305,7 +305,7 @@ def main():
 
         time.sleep(1.5)
         if not terminal_launch.launch_terminal(mon_cmd, SERIAL_LOG, CURSOR_PPM):
-            print("[FAIL] terminal did not launch")
+            print("[FAIL] the Terminal never became ready — see the [launch] report above")
             return 1
         if not wait_for_in_file(SERIAL_LOG, "ipc_create key=0x0000DEAD", 30):
             print("[FAIL] terminal never became ready")

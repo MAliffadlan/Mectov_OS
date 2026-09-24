@@ -137,7 +137,7 @@ def main():
         time.sleep(1.5)
         if not terminal_launch.launch_terminal(
                 mon_cmd, SERIAL_LOG, "/tmp/mectov_fork_cursor.ppm"):
-            print("[FAIL] terminal did not launch (icon double-click missed?)")
+            print("[FAIL] the Terminal never became ready — see the [launch] report above")
             return 1
         print("[OK] terminal launched")
         # Wait for the terminal's IPC queue (keyboard routing is live only then),

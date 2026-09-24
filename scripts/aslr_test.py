@@ -98,9 +98,9 @@ def boot_once(tag, args, serial_log, mon_sock):
         time.sleep(1.5)
         if not terminal_launch.launch_terminal(
                 mon, serial_log, f"/tmp/mectov_aslr_{tag}_cursor.ppm"):
-            return [], False, "terminal did not launch"
+            return [], False, "the Terminal never became ready (see the [launch] report above)"
         if not wait_for_in_file(serial_log, "ipc_create key=0x0000DEAD", 30):
-            return [], False, "terminal never became ready"
+            return [], False, "the Terminal launched but its IPC queue never appeared"
         time.sleep(1.0)
 
         mon("mouse_move 300 176")
