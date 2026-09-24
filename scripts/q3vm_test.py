@@ -33,7 +33,16 @@ What it proves, in order:
      `trap_LocateGameData`, filesystem probing) and returns through
      vmMain. Trap counts, G_ERROR count and `locate_game_data` payload are all
      asserted, so "it ran 0 instructions" cannot pass.
-  6. the kernel survives it: the task parks in hlt, QEMU stays up, and a shell
+  6. the game loop really runs (v38.106): the driver replays the retail
+     server's connect sequence (CLIENT_CONNECT / USERINFO_CHANGED / BEGIN —
+     "Mectov entered the game" comes back through trap_SendServerCommand)
+     and then 200 GAME_RUN_FRAME + GAME_CLIENT_THINK pairs with level time
+     advancing FRAMETIME per frame. id's own Pmove accelerates the player
+     across the floor plane: the sampled playerState origin moves forward by
+     hundreds of units and the player lands on the floor (ground =
+     ENTITYNUM_WORLD, z at the 24-unit standing offset) — official gameplay
+     physics executing inside the bytecode.
+  7. the kernel survives it: the task parks in hlt, QEMU stays up, and a shell
      command issued afterwards still produces its serial marker (the desktop
      was not wedged by running the game VM).
 
@@ -69,8 +78,21 @@ SYS_ERROR_MARKER = "[Q3] Sys_Error"
 MINFO_MARKER = "Registered virtual machines:"
 CALL_MARKER = "[Q3VM] calling vmMain(GAME_INIT)"
 RETURNED_MARKER = "[Q3VM] GAME_INIT returned "
+ENTERED_MARKER = "entered the game"
+CONNECT_MARKER = "[Q3VM] client 0: GAME_CLIENT_CONNECT"
+BEGIN_MARKER = "[Q3VM] client 0: GAME_CLIENT_BEGIN"
+FRAME_LOOP_MARKER = "[Q3VM] frame loop: 200 frames x 50 msec"
+FRAME_DONE_MARKER = "[Q3VM] frame loop done"
+MOVEMENT_MARKER = "[Q3VM] movement x0="
 DONE_MARKER = "[Q3VM] done"
 FAILED_MARKER = "[Q3VM] FAILED"
+
+# per-frame playerState samples straight out of the VM's data segment
+FRAME_RE = re.compile(
+    r"\[Q3VM\] frame (\d+) t=(\d+) origin=\((-?\d+),(-?\d+),(-?\d+)\) "
+    r"ground=(-?\d+) velocity=\((-?\d+),(-?\d+),(-?\d+)\)")
+ENTITYNUM_WORLD = 1022        # MAX_GENTITIES-2, q_shared.h
+STAND_Z = 33                  # spawn 24 + the +9 the game adds on top
 
 LOCATE_RE = re.compile(
     r"\[Q3VM\] locate_game_data entities=(-?\d+) sizeof_gentity=(-?\d+) "
@@ -372,7 +394,61 @@ def main():
         print("[OK] official G_InitGame completed: worldspawn spawned, "
               "items registered, no unhandled traps")
 
-        # ---- 6. the kernel survived it --------------------------------------
+        # ---- 5c. the retail connect sequence ran ----------------------------
+        if CONNECT_MARKER not in log or BEGIN_MARKER not in log:
+            print("[FAIL] the server connect sequence never ran")
+            dump_tail(40)
+            return 1
+        if ENTERED_MARKER not in log:
+            print("[FAIL] the module never announced the client (no 'entered "
+                  "the game' through trap_SendServerCommand)")
+            dump_tail(40)
+            return 1
+        print("[OK] retail connect sequence: ClientConnect -> userinfo -> "
+              "ClientBegin, 'Mectov entered the game' and all")
+
+        # ---- 5d. the game loop moved the player -----------------------------
+        if FRAME_LOOP_MARKER not in log:
+            print("[FAIL] the game loop never started")
+            dump_tail(40)
+            return 1
+        if FRAME_DONE_MARKER not in log:
+            print("[FAIL] the game loop never finished (module died mid-run?)")
+            for line in log.splitlines():
+                if "G_ERROR" in line or "unhandled trap" in line:
+                    print("       " + line[:140])
+            dump_tail(40)
+            return 1
+        frames = FRAME_RE.findall(log)
+        if len(frames) < 2:
+            print(f"[FAIL] only {len(frames)} playerState samples in the log")
+            return 1
+        first = frames[0]
+        last = frames[-1]
+        dx = int(last[2]) - int(first[2])
+        if dx <= 500:
+            print(f"[FAIL] the player barely moved: x {first[2]} -> {last[2]} "
+                  f"(delta {dx}) — Pmove is not really running")
+            return 1
+        ground = int(last[5])
+        z = int(last[4])
+        if ground != ENTITYNUM_WORLD:
+            print(f"[FAIL] the player never landed (ground={ground})")
+            return 1
+        if not (20 <= z <= 60):
+            print(f"[FAIL] implausible standing height z={z} (want ~{STAND_Z})")
+            return 1
+        print(f"[OK] official gameplay code moved the player: frame "
+              f"{first[0]} x={first[2]} -> frame {last[0]} x={last[2]} "
+              f"(delta {dx} units in {int(last[1]) - int(first[1])} msec of "
+              f"game time), landed on the floor (z={z}, ground=WORLD)")
+        mm2 = re.search(r"\[Q3VM\] movement x0=(-?\d+) x1=(-?\d+) delta=(-?\d+)", log)
+        if mm2 and int(mm2.group(3)) <= 0:
+            print("[FAIL] the driver's own accounting says the player did not "
+                  "advance")
+            return 1
+
+        # ---- 7. the kernel survived it --------------------------------------
         if qemu.poll() is not None:
             print(f"[FAIL] QEMU exited with code {qemu.returncode}")
             return 1
