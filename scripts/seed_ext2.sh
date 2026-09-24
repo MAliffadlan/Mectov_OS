@@ -42,4 +42,7 @@ seed_one() { # $1 = host path, $2 = ext2 name
 seed_one "$ROOT/doom1.wad" doom1.wad
 seed_one "$WP" wallpaper.bin
 seed_one "$ROOT/apps/music.wav" music.wav
+# Q3 phase 4 (v38.104): the Mectov map file — /ext2/mectov1.map, staged by
+# q3play_start() into the engine FS as baseq3/maps/mectov1.map.
+seed_one "$ROOT/assets/maps/mectov1.map" mectov1.map
 echo "[seed] done: $(debugfs -R 'ls' "$IMG" 2>/dev/null | tr '\n' ' ')"

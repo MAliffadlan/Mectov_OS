@@ -24,7 +24,18 @@ What it proves, in order:
   5. INPUT, mouse: while the window holds the capture, injected relative
      motion must produce "[Q3CL] mouse dx=… yaw=…" with yaw changing, and the
      rendered frame must differ from the pre-input one (the view turned).
-  6. ESC quits: "[Q3CL] ESC -> quit" then "loop done"/"done", and the desktop
+  6. MAP DATA (phase 4): "[Q3CL] map loaded name=mectov1 brushes=… bots=…"
+     proves the world came from the MCTBSP1 file through the engine FS (no
+     pak0 — the map is our own data, staged from /ext2 or the embedded
+     fallback), the player's first frame position matches the map's
+     "[Q3CL] spawn" state, and the screendump contains the map's magenta
+     platform — geometry that never existed in the hardcoded phase-3 arena.
+  7. MAP COLLISION (phase 4): a longer held `w` walks the player into the
+     platform brush and must produce "[Q3CL] move blocked brush" with the
+     player stopping just short of it (not passing through). After a mouse
+     turn, walking again must move the player — collision blocks, it does
+     not wedge.
+  8. ESC quits: "[Q3CL] ESC -> quit" then "loop done"/"done", and the desktop
      comes back (the Q3 window's pixels are gone).
 
 Usage:
@@ -58,7 +69,13 @@ READY_MARKER = "[Q3CL] world ready"
 FRAME_MARKER = "[Q3CL] frame="
 MOUSE_MARKER = "[Q3CL] mouse dx="
 KEY_MARKER = "[Q3CL] key down w bind=+forward"
+BLOCKED_MARKER = "[Q3CL] move blocked brush"
 QUIT_MARKER = "[Q3CL] ESC -> quit"
+
+MAP_LOADED_RE = (r"\[Q3CL\] map loaded name=(\S+) brushes=(\d+) bots=(\d+) "
+                 r"spawn=(-?\d+),(-?\d+),(-?\d+)")
+SPAWN_RE = (r"\[Q3CL\] spawn x=(-?\d+),(-?\d+) z=(-?\d+) "
+            r"yaw=(-?\d+) pitch=(-?\d+)")
 
 # Window geometry as CL_StartHunkUsers() computes it: 322x262 centred in the
 # framebuffer, above the taskbar; content = 320x240 inside border+titlebar.
@@ -156,7 +173,7 @@ def window_rect(w, h):
 
 def count_colors(px, w, x0, y0, x1, y1, step=2):
     """Classify sampled pixels of a region into the Q3 scene's colour axes."""
-    sky = warm = orange = green = bright = sample = 0
+    sky = warm = orange = green = bright = magenta = sample = 0
     for y in range(y0, y1, step):
         base = y * w * 3
         for x in range(x0, x1, step):
@@ -171,10 +188,12 @@ def count_colors(px, w, x0, y0, x1, y1, step=2):
                 orange += 1
             if g > r + 60 and g > b + 60:
                 green += 1
+            if r > g + 70 and b > g + 70:
+                magenta += 1
             if r + g + b > 600:
                 bright += 1
     return {"sky": sky, "warm": warm, "orange": orange, "green": green,
-            "bright": bright, "sample": sample}
+            "bright": bright, "magenta": magenta, "sample": sample}
 
 
 def assert_scene_pixels(path):
@@ -182,14 +201,16 @@ def assert_scene_pixels(path):
     w, h, px = load_ppm_pixels(path)
     x0, y0, cw, ch = window_rect(w, h)
     c = count_colors(px, w, x0, y0, x0 + cw, y0 + ch)
-    detail = (f"{c['detail'] if 'detail' in c else ''}"
-              f"sky={c['sky']} warm={c['warm']} orange={c['orange']} "
-              f"green={c['green']} bright={c['bright']} (of {c['sample']})")
+    detail = (f"sky={c['sky']} warm={c['warm']} orange={c['orange']} "
+              f"green={c['green']} magenta={c['magenta']} "
+              f"bright={c['bright']} (of {c['sample']})")
     # Thresholds are deliberately low (the sampled count is ~9600 at step 2)
-    # but the four axes must all be present: sky above the walls, warm
-    # wall/floor geometry, both bot colours, and lit/crosshair pixels.
+    # but the axes must all be present: sky above the walls, warm wall/floor
+    # geometry, both bot colours, lit/crosshair pixels — and (phase 4) the
+    # map's magenta platform, geometry the hardcoded arena never had.
     ok = (c["sky"] >= 400 and c["warm"] >= 1500 and
-          c["orange"] >= 8 and c["green"] >= 4 and c["bright"] >= 4)
+          c["orange"] >= 8 and c["green"] >= 4 and c["bright"] >= 4 and
+          c["magenta"] >= 30)
     return ok, detail
 
 
@@ -308,19 +329,27 @@ def main():
             return 1
         print("[OK] CL_Frame ticking inside the engine's frame loop")
 
-        time.sleep(6)
-        if not screendump(SHOT_SCENE):
-            print("[FAIL] screendump failed")
-            return 1
-        ok, detail = assert_scene_pixels(SHOT_SCENE)
-        print(f"     scene: {detail}")
+        # Pixel assertion with retries (same rationale as q3gl_test): under a
+        # loaded host one screendump can catch a phase where the camera's
+        # view is mostly sky. Up to 5 dumps, 2 s apart.
+        ok = False
+        detail = ""
+        for attempt in range(5):
+            time.sleep(6 if attempt == 0 else 2)
+            if not screendump(SHOT_SCENE):
+                print("[FAIL] screendump failed")
+                return 1
+            ok, detail = assert_scene_pixels(SHOT_SCENE)
+            print(f"     scene (try {attempt + 1}): {detail}")
+            if ok:
+                break
         if not ok:
-            print("[FAIL] the Q3 window does not show the rendered arena")
+            print("[FAIL] the Q3 window does not show the rendered world (5 tries)")
             return 1
         w, h, px = load_ppm_pixels(SHOT_SCENE)
         sx0, sy0, scw, sch = window_rect(w, h)
         scene_sky = count_colors(px, w, sx0, sy0, sx0 + scw, sy0 + sch)["sky"]
-        print("[OK] window shows the rendered arena (sky/wall/bots)")
+        print("[OK] window shows the rendered world (sky/wall/bots/platform)")
 
         hits, centre = centre_is_bright(SHOT_SCENE)
         if hits < 4:
@@ -329,9 +358,52 @@ def main():
             return 1
         print(f"[OK] crosshair rendered at {centre} (bright pixels={hits})")
 
-        # ---- keyboard input: hold W, the camera must move forward ----------
-        before = last_frame_state(read_file(SERIAL_LOG))
-        sendkey("w", 600)
+        # ---- phase 4: the world must come from the MAP FILE, not hardcoded --
+        log = read_file(SERIAL_LOG)
+        ml = re.search(MAP_LOADED_RE, log)
+        if not ml:
+            print("[FAIL] no [Q3CL] map loaded marker (world not loaded from "
+                  "the MCTBSP1 map through the engine FS)")
+            for line in log.splitlines()[-20:]:
+                print(line[:130])
+            return 1
+        map_name, n_brushes, n_bots = ml.group(1), int(ml.group(2)), int(ml.group(3))
+        if map_name != "mectov1" or n_brushes < 10 or n_bots < 2:
+            print(f"[FAIL] map loaded looks wrong: name={map_name} "
+                  f"brushes={n_brushes} bots={n_bots}")
+            return 1
+        if "[Q3CL] map staged from embedded fallback" in log:
+            print("[OK] map data staged from the embedded fallback "
+                  "(/ext2 carries no map in this run)")
+        elif "[Q3CL] map staged from /ext2/mectov1.map" in log:
+            print("[OK] map data staged from /ext2/mectov1.map")
+        print(f"[OK] world loaded from map data: {map_name} "
+              f"(brushes={n_brushes}, bots={n_bots}, no pak0)")
+        ms = re.search(SPAWN_RE, log)
+        if not ms:
+            print("[FAIL] no [Q3CL] spawn marker (player state not taken "
+                  "from the map)")
+            return 1
+        spawn = (int(ms.group(1)), int(ms.group(2)), int(ms.group(3)))
+        first = None
+        for fm in re.finditer(r"\[Q3CL\] frame=(\d+) t=(\d+) pos=(-?\d+),(-?\d+)", log):
+            first = (int(fm.group(3)), int(fm.group(4)))
+            break
+        if not first or abs(first[0] - spawn[0]) > 2 or abs(first[1] - spawn[1]) > 2:
+            print(f"[FAIL] first frame pos {first} != map spawn {spawn}")
+            return 1
+        print(f"[OK] player state initialized from the map "
+              f"(spawn {spawn}, first frame {first})")
+
+        # ---- MAP COLLISION: walk into the platform brush -------------------
+        # Phase 4 replaces the phase-3 flat clamp with real brush collision:
+        # a long held `w` (spawn faces the platform, yaw 180 = -Y) walks the
+        # player into it and must BOTH reach the brush marker AND stop.
+        # The hold must be long: the engine frames at ~com_maxfps and under
+        # TCG that is only a few frames per second — 6 s ≈ 15-20 frames of
+        # 40 units, more than the 374 units of open lane to the platform.
+        before = last_frame_state(log)
+        sendkey("w", 6000)
         if not wait_for_in_file(SERIAL_LOG, KEY_MARKER, 20):
             print("[FAIL] 'sendkey w' never reached CL_KeyEvent as +forward")
             for line in read_file(SERIAL_LOG).splitlines()[-20:]:
@@ -342,55 +414,102 @@ def main():
             print("[FAIL] key release never reached the client (stuck keys)")
             return 1
         print("[OK] key release also delivered (movement keys can be released)")
-
-        deadline = time.time() + 25
-        moved = None
-        while time.time() < deadline:
-            moved = last_frame_state(read_file(SERIAL_LOG))
-            if moved and before and moved["frame"] > before["frame"]:
+        if not wait_for_in_file(SERIAL_LOG, BLOCKED_MARKER, 20):
+            print("[FAIL] walking the whole lane never produced "
+                  f"'{BLOCKED_MARKER}' (map collision did not stop the player)")
+            for line in read_file(SERIAL_LOG).splitlines()[-25:]:
+                print(line[:130])
+            return 1
+        # The blocked marker fires mid-stream, but frame markers only print
+        # every 30 frames — the last one can predate the impact. Top up with
+        # short `w` holds until one more marker prints while standing at the
+        # wall (y <= 30 = 24 stand-off + marker rounding).
+        base = last_frame_state(read_file(SERIAL_LOG))
+        for _ in range(12):
+            sendkey("w", 2000)
+            cand = last_frame_state(read_file(SERIAL_LOG))
+            if (cand and base and cand["frame"] > base["frame"]
+                    and cand["pos"][1] <= 30):
                 break
-            time.sleep(1)
-        if not (before and moved and moved["frame"] > before["frame"]):
-            print("[FAIL] frame markers stopped after the key press")
+            time.sleep(1.5)
+        stopped = last_frame_state(read_file(SERIAL_LOG))
+        if not (before and stopped):
+            print("[FAIL] frame markers missing around the walk")
             return 1
-        dy = moved["pos"][1] - before["pos"][1]
-        if abs(dy) < 4:
-            print(f"[FAIL] camera did not move on +forward "
-                  f"(pos {before['pos']} -> {moved['pos']})")
+        dy = abs(stopped["pos"][1] - before["pos"][1])
+        if dy < 200:
+            print(f"[FAIL] player barely moved before the brush "
+                  f"(dy={dy}: {before['pos']} -> {stopped['pos']})")
             return 1
-        print(f"[OK] +forward moved the camera {dy} units "
-              f"(pos {before['pos']} -> {moved['pos']})")
+        if stopped["pos"][1] > 60:
+            print(f"[FAIL] no frame marker at the wall after the blocked "
+                  f"walk (pos y={stopped['pos'][1]})")
+            return 1
+        if stopped["pos"][1] < -60:
+            print(f"[FAIL] player passed through the platform brush "
+                  f"(pos y={stopped['pos'][1]}, brush face at -16)")
+            return 1
+        print(f"[OK] map collision stopped the player at the brush "
+              f"(walked {dy} units, pos {before['pos']} -> {stopped['pos']})")
 
-        # ---- mouse input: relative motion must turn the view --------------
-        sendkey("s", 600)     # walk back, keeps the run symmetric
-        time.sleep(1.5)
-        if not screendump(SHOT_AIM):
-            print("[FAIL] screendump A failed")
-            return 1
-        yaw_before = last_frame_state(read_file(SERIAL_LOG))["yaw"]
-        for _ in range(8):
+        # ---- the client must NOT be wedged: turn, then walk the free lane --
+        # Collision blocks movement; it must not stop the client. Mouse ticks
+        # prove routing + yaw, then a held `s` walks BACK — with the yaw no
+        # longer 180 that lane is open all the way north, proving the blocked
+        # client still moves. Holds must span >=2 engine frames (one frame can
+        # be seconds under TCG), and every step waits for its serial evidence
+        # instead of a fixed sleep.
+        for _ in range(3):
             mon_cmd("mouse_move 120 0")
-            time.sleep(0.15)
+            time.sleep(0.2)
         if not wait_for_in_file(SERIAL_LOG, MOUSE_MARKER, 20):
             print("[FAIL] mouse capture never delivered a CL_MouseEvent")
             for line in read_file(SERIAL_LOG).splitlines()[-20:]:
                 print(line[:130])
             return 1
-        m = re.search(r"\[Q3CL\] mouse dx=(\d+) dy=(\d+) yaw=(-?\d+)", 
+        m = re.search(r"\[Q3CL\] mouse dx=(\d+) dy=(\d+) yaw=(-?\d+)",
                       read_file(SERIAL_LOG))
         print(f"[OK] mouse routed into the engine "
               f"(dx={m.group(1)} dy={m.group(2)} yaw={m.group(3)})")
-        time.sleep(2)
+        time.sleep(1.0)
+        # The mouse marker IS the authoritative yaw read-out: frame markers
+        # only fire every 30 frames, so the latest one can predate the mouse
+        # event entirely under TCG's few-fps engine loop.
+        myaws = re.findall(r"\[Q3CL\] mouse dx=\d+ dy=\d+ yaw=(-?\d+)",
+                           read_file(SERIAL_LOG))
+        turned = last_frame_state(read_file(SERIAL_LOG))
+        last_myaw = int(myaws[-1]) if myaws else None
+        if last_myaw is None or abs(last_myaw - stopped["yaw"]) < 3:
+            print(f"[FAIL] yaw did not change from mouse motion "
+                  f"({stopped['yaw']} -> {last_myaw})")
+            return 1
+        print(f"[OK] mouse look changed yaw {stopped['yaw']} -> {last_myaw}")
+        s_before = read_file(SERIAL_LOG).count("[Q3CL] key down s bind=+back")
+        sendkey("s", 4000)
+        moved = None
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            log2 = read_file(SERIAL_LOG)
+            if log2.count("[Q3CL] key down s bind=+back") > s_before:
+                cand = last_frame_state(log2)
+                if (cand and cand["frame"] > turned["frame"] and
+                        cand["pos"][1] - turned["pos"][1] >= 4):
+                    moved = cand
+                    break
+            time.sleep(1)
+        if not moved:
+            print("[FAIL] the client did not move after the blocked walk "
+                  "(wedged, or +back never reached CL_Frame)")
+            for line in read_file(SERIAL_LOG).splitlines()[-20:]:
+                print(line[:130])
+            return 1
+        print(f"[OK] collision blocked but did not wedge the client "
+              f"(walked back {moved['pos'][1] - turned['pos'][1]} units, "
+              f"pos {turned['pos']} -> {moved['pos']})")
         if not screendump(SHOT_MOVED):
             print("[FAIL] screendump B failed")
             return 1
-        now = last_frame_state(read_file(SERIAL_LOG))
-        if now is None or abs(now["yaw"] - yaw_before) < 3:
-            print(f"[FAIL] yaw did not change from mouse motion "
-                  f"({yaw_before} -> {now['yaw'] if now else None})")
-            return 1
-        print(f"[OK] mouse look changed yaw {yaw_before} -> {now['yaw']}")
-        diff = sampled_diff(SHOT_AIM, SHOT_MOVED)
+        diff = sampled_diff(SHOT_SCENE, SHOT_MOVED)
         if diff < 80:
             print(f"[FAIL] the frame did not change after turning (diff={diff})")
             return 1

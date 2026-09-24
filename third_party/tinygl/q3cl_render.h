@@ -39,6 +39,12 @@ int  q3ref_height(void);
 void q3ref_begin_frame(void);
 /* Camera pose for the following q3ref_draw_world() (degrees for yaw/pitch). */
 void q3ref_set_camera(float x, float y, float z, float yaw_deg, float pitch_deg);
+/* Phase 4: draw the world from a loaded MCTBSP1 map (see
+ * third_party/q3mectov/q3_map.h). NULL restores the phase-3 hardcoded
+ * arena. Forward-declared here so this header stays dependency-free —
+ * only q3cl_render.c pulls the real struct in. */
+struct q3map_s;
+void q3ref_set_map(const struct q3map_s *m);
 /* Draw the arena. time_sec drives the animated props. */
 void q3ref_draw_world(double time_sec);
 void q3ref_end_frame(void);

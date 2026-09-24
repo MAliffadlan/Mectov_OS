@@ -239,15 +239,25 @@ def main():
         print("[OK] render loop ticking")
 
         # Frame 1 for the pixel assertion — give the scene a few seconds of
-        # rotation so the gears sweep through a representative pose.
-        time.sleep(8)
-        if not screendump(SHOT1):
-            print("[FAIL] screendump 1 failed")
-            return 1
-        ok, detail = assert_gears_pixels(SHOT1)
-        print(f"     shot1: {detail}")
+        # rotation so the gears sweep through a representative pose. RETRY the
+        # sample up to 5 times: under a loaded host TCG's effective frame rate
+        # drops and a single screendump can catch the gears at a rotation
+        # phase where a gear hides behind another (this cost a bisect round
+        # during v38.104 bring-up — the identical binary passed and failed
+        # with only host load as the difference).
+        ok = False
+        detail = ""
+        for attempt in range(5):
+            time.sleep(8 if attempt == 0 else 2)
+            if not screendump(SHOT1):
+                print("[FAIL] screendump 1 failed")
+                return 1
+            ok, detail = assert_gears_pixels(SHOT1)
+            print(f"     shot1 (try {attempt + 1}): {detail}")
+            if ok:
+                break
         if not ok:
-            print("[FAIL] shot1 does not show rendered gears")
+            print("[FAIL] shot1 does not show rendered gears (5 tries)")
             return 1
         print("[OK] gears window shows rendered geometry (blue/red/green bodies)")
 

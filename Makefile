@@ -79,7 +79,8 @@ Q3_SRCS = $(Q3_DIR)/qcommon/q_math.c $(Q3_DIR)/qcommon/q_shared.c \
           $(Q3_DIR)/qcommon/md5.c $(Q3_DIR)/qcommon/ioapi.c $(Q3_DIR)/qcommon/unzip.c \
           $(Q3_DIR)/null/null_input.c $(Q3_DIR)/null/null_snddma.c \
           $(Q3_OUR)/q3_kernel.c $(Q3_OUR)/q3_printf.c \
-          $(Q3_OUR)/q3_platform.c $(Q3_OUR)/q3_client.c
+          $(Q3_OUR)/q3_platform.c $(Q3_OUR)/q3_client.c \
+          $(Q3_OUR)/q3_map.c
 # null/null_client.c is deliberately NOT built any more (v38.103): q3_client.c
 # replaces the upstream null client with the Mectov client layer — CL_Init,
 # CL_Frame, CL_KeyEvent/CL_CharEvent/CL_MouseEvent, the bind commands and the

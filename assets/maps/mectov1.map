@@ -1,0 +1,32 @@
+# Mectov OS map — MCTBSP1 format 1 (text, brush-based; no pak0 assets).
+# Source of truth for Q3 phase 4: the identical text is embedded as
+# Q3MAP_EMBEDDED_MECTOV1 in third_party/q3mectov/q3_map.c as the fallback
+# when /ext2 carries no mectov1.map — keep the two in sync.
+#
+# Directives (whitespace-separated tokens; '#' starts a comment):
+#   map   <name>                       map name (serial marker + sanity)
+#   bounds <half-extent>               horizontal backstop clamp for movement
+#   spawn <x> <y> <z> <yaw> <pitch>    player start (yaw 180 faces -Y)
+#   brush <minx miny minz maxx maxy maxz r g b>   solid AABB, per-face shading
+#   bot   <x y z w d h r g b>          spinning/bobbing box, z = base elevation
+#
+# Layout (Quake units, z up): 960x960 play field inside 192-high perimeter
+# walls, four 320-high pillars at +-320, a 320x240 magenta platform south of
+# centre (the collision + colour proof for the phase-4 test), three bots.
+MCTBSP1 1
+map mectov1
+bounds 480
+spawn 0 390 26 180 0
+brush -480 -480 -40 480 480 0 0.230 0.223 0.208
+brush -496 -496 -16 496 -480 192 0.420 0.360 0.280
+brush -496 480 -16 496 496 192 0.420 0.360 0.280
+brush -496 -480 -16 -480 480 192 0.420 0.360 0.280
+brush 480 -480 -16 496 480 192 0.420 0.360 0.280
+brush -352 -352 -16 -288 -288 320 0.620 0.550 0.400
+brush 288 -352 -16 352 -288 320 0.620 0.550 0.400
+brush -352 288 -16 -288 352 320 0.620 0.550 0.400
+brush 288 288 -16 352 352 320 0.620 0.550 0.400
+brush -160 -256 -16 160 -16 48 0.780 0.180 0.780
+bot 60 140 0 48 48 72 0.950 0.450 0.100
+bot -140 60 0 48 48 72 0.200 0.850 0.250
+bot 80 -136 48 48 48 72 0.900 0.250 0.200

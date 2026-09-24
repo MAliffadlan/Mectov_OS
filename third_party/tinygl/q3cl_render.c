@@ -119,7 +119,22 @@ static void wall_strip(float x0, float y0, float x1, float y1,
 
 /* --- world ------------------------------------------------------------ */
 
+/* Phase 4 (v38.104): when the client loaded an MCTBSP1 map, the world —
+ * geometry, bots included — comes from that data and nothing here is
+ * hardcoded; the phase-3 arena below is only the fallback for a failed or
+ * missing map load. The client calls q3ref_set_map() once after
+ * q3map_load(). */
+#include "../q3mectov/q3_map.h"
+
+static const q3map_t *r_map;   /* NULL = phase-3 hardcoded arena fallback */
+
+void q3ref_set_map(const struct q3map_s *m) {
+    r_map = (const q3map_t *)m;
+}
+
 #define TILE 128.0f
+
+/* ---- phase-3 hardcoded arena (fallback when no map is loaded) -------- */
 
 static void floor_grid(void) {
     for (int iy = 0; iy < 8; iy++) {
@@ -140,23 +155,17 @@ static void floor_grid(void) {
 static void walls(void) {
     const float A = Q3REF_ARENA_HALF;
     /* The four arena walls, as (x0,y0)->(x1,y1) floor segments: -X, +X, +Y, -Y.
-     * Each gets a base band, a body and a top rim. (Writing these as two
-     * coordinate arrays is how this first shipped with two of the four walls
-     * drawn as diagonals across the arena — the +Y entry read (-A,A)->(A,-A).
-     * Explicit segments keep the geometry readable.) */
+     * Explicit segments, not shared coordinate arrays (v38.103 lesson). */
     const float xs[4] = { -A,  A, -A, -A };
     const float ys[4] = { -A, -A,  A, -A };
     const float xe[4] = { -A,  A,  A,  A };
     const float ye[4] = {  A,  A,  A, -A };
 
     for (int i = 0; i < 4; i++) {
-        /* body */
         wall_strip(xs[i], ys[i], xe[i], ye[i], 32.0f, Q3REF_WALL_H - 24.0f,
                    0.42f, 0.36f, 0.28f);
-        /* floor-level base band (also hides any z-fighting at z=0) */
         wall_strip(xs[i], ys[i], xe[i], ye[i], 0.0f, 32.0f,
                    0.26f, 0.22f, 0.18f);
-        /* top rim */
         wall_strip(xs[i], ys[i], xe[i], ye[i],
                    Q3REF_WALL_H - 24.0f, Q3REF_WALL_H, 0.55f, 0.48f, 0.36f);
     }
@@ -170,8 +179,8 @@ static void pillars(void) {
     shaded_box( p,  p, 0.0f, 64.0f, 64.0f, Q3REF_PILLAR_H, 0.62f, 0.55f, 0.40f);
 }
 
-/* Three "bots": coloured boxes that spin and bob, so the scene is provably
- * alive frame to frame before any input is injected. */
+/* Three "bots": coloured boxes that spin and bob, so the fallback scene is
+ * provably alive frame to frame before any input is injected. */
 static void bots(double t) {
     static const float bx[3] = {    0.0f, -140.0f,  150.0f };
     static const float by[3] = { -200.0f, -320.0f, -330.0f };
@@ -189,6 +198,56 @@ static void bots(double t) {
         glRotatef(spin, 0.0f, 0.0f, 1.0f);
         shaded_box(0.0f, 0.0f, 0.0f, 48.0f, 48.0f, 72.0f,
                    col[i][0], col[i][1], col[i][2]);
+        glPopMatrix();
+    }
+}
+
+/* ---- phase-4 map world ----------------------------------------------- */
+
+static void map_world(void) {
+    const q3map_t *m = r_map;
+
+    /* Floor checkers: one quad per 128-unit tile inside the map's bounds.
+     * Kept from the phase-3 look deliberately — the floor is the cheapest
+     * orientation cue and the walls/bruchs carry the map's own colours. */
+    {
+        float H = m->bounds_half;
+        int   n = 8;
+        float tile = (2.0f * H) / (float)n;
+        for (int iy = 0; iy < n; iy++) {
+            for (int ix = 0; ix < n; ix++) {
+                float x0 = -H + ix * tile;
+                float y0 = -H + iy * tile;
+                int dark = (ix + iy) & 1;
+                float b = dark ? 0.15f : 0.23f;
+                glColor3f(b, b * 0.97f, b * 0.88f);
+                glBegin(GL_QUADS);
+                quad(x0, y0, 0.0f, x0 + tile, y0, 0.0f,
+                     x0 + tile, y0 + tile, 0.0f, x0, y0 + tile, 0.0f);
+                glEnd();
+            }
+        }
+    }
+
+    /* The map itself: every brush is a shaded box, bots included (their
+     * boxes come straight from the map data — the phase-3 duplicate bot
+     * tables in this file and in the client are gone). */
+    for (int i = 0; i < m->n_brushes; i++) {
+        const float *mn = m->brushes[i].mins;
+        const float *mx = m->brushes[i].maxs;
+        float cx = (mn[0] + mx[0]) * 0.5f;
+        float cy = (mn[1] + mx[1]) * 0.5f;
+        float w  = mx[0] - mn[0];
+        float d  = mx[1] - mn[1];
+        float h  = mx[2] - mn[2];
+        shaded_box(cx, cy, mn[2], w, d, h,
+                   m->brushes[i].rgb[0], m->brushes[i].rgb[1], m->brushes[i].rgb[2]);
+    }
+    for (int i = 0; i < m->n_bots; i++) {
+        glPushMatrix();
+        glTranslatef(m->bots[i].x, m->bots[i].y, m->bots[i].z);
+        shaded_box(0.0f, 0.0f, 0.0f, m->bots[i].w, m->bots[i].d, m->bots[i].h,
+                   m->bots[i].rgb[0], m->bots[i].rgb[1], m->bots[i].rgb[2]);
         glPopMatrix();
     }
 }
@@ -228,10 +287,20 @@ static void arena(void) {
     glRotatef(90.0f, 1.0f, 0.0f, 0.0f);
     glTranslatef(-cam_x, -cam_y, -cam_z);
 
+    if (r_map) {
+        /* Phase 4: the loaded map is the whole world (its brushes include
+         * floor, walls and pillars; bots come from the same data). */
+        map_world();
+        return;
+    }
+
+    /* Fallback: the phase-3 hardcoded arena (a map load that failed must
+     * still leave a live, assertable world behind). */
     floor_grid();
     walls();
     pillars();
     bots(t);
+    (void)t;
 }
 
 /* --- API -------------------------------------------------------------- */

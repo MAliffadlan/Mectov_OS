@@ -66,6 +66,7 @@
 #include "../../src/include/theme.h"
 #include "../../src/include/spinlock.h"
 #include "../tinygl/q3cl_render.h"
+#include "q3_map.h"   /* phase 4: the world + player start come from data */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -246,6 +247,9 @@ static float cl_yaw = 180.0f, cl_pitch = 0.0f;
 static uint32_t cl_frames;
 static double   cl_time_base;
 static uint32_t cl_log_console_budget = 64;
+/* phase 4: consecutive blocked-frame counter while the player tries to walk
+ * into a map brush — drives the one-shot "move blocked brush" marker. */
+static unsigned cl_blocked_frames;
 
 static char     bindings[256][64];
 
@@ -574,6 +578,114 @@ void CL_Disconnect(qboolean showMainMenu) {
     write_serial_string("[Q3CL] disconnect\n");
 }
 
+/* --- phase 4: map-driven world ----------------------------------------- */
+
+/* The engine FS only sees paths under fs_game (baseq3) inside fs_homepath
+ * (/tmp/q3home — tmpfs, v38.99), so whatever the source — the seeded
+ * /ext2/mectov1.map or, when ext2 has none, the embedded fallback text —
+ * it is staged ONCE at startup as baseq3/maps/mectov1.map. One loader path
+ * downstream: the engine's own FS (the same entry cm_load.c uses for real
+ * .bsp files). Whole-file tmpfs writes, zero ATA (v38.98 lesson). */
+#define Q3MAP_QPATH "maps/mectov1.map"
+
+static void q3_stage_map(void) {
+    extern int  vfs_mkdir(const char *path);
+    extern int  vfs_create_file(const char *path);
+    extern int  vfs_write_file(const char *path, const char *data, int size);
+    extern int  vfs_read_file(const char *path, char *buf, int max_size);
+    extern int  vfs_get_node(const char *path);
+    extern unsigned int vfs_get_file_size(int node);
+
+    static char buf[8192];
+    const char *dst = "/tmp/q3home/baseq3/" Q3MAP_QPATH;
+    int n = 0;
+
+    vfs_mkdir("/tmp/q3home/baseq3/maps");
+
+    if (vfs_get_node("/ext2/mectov1.map") >= 0) {
+        int sz = (int)vfs_get_file_size(vfs_get_node("/ext2/mectov1.map"));
+        if (sz > 0 && sz < (int)sizeof(buf) - 1) {
+            n = vfs_read_file("/ext2/mectov1.map", buf, sizeof(buf) - 1);
+        }
+    }
+    if (n > 0) {
+        write_serial_string("[Q3CL] map staged from /ext2/mectov1.map\n");
+    } else {
+        const char *s = Q3MAP_EMBEDDED_MECTOV1;
+        while (s[n]) { buf[n] = s[n]; n++; }
+        write_serial_string("[Q3CL] map staged from embedded fallback\n");
+    }
+    buf[n] = '\0';
+    if (vfs_create_file(dst) >= 0)
+        vfs_write_file(dst, buf, n);
+}
+
+/* Spawn the player from the map's own start state (phase 4 — the pose was
+ * hardcoded before). The marker carries the exact start pose for the test. */
+static void q3map_spawn_player(const q3map_t *m) {
+    cl_x = m->spawn[0];
+    cl_y = m->spawn[1];
+    cl_z = m->spawn[2];
+    cl_yaw = m->spawn[3];
+    cl_pitch = m->spawn[4];
+    while (cl_yaw > 180.0f)  cl_yaw -= 360.0f;
+    while (cl_yaw < -180.0f) cl_yaw += 360.0f;
+    if (cl_pitch > 85.0f)  cl_pitch = 85.0f;
+    if (cl_pitch < -85.0f) cl_pitch = -85.0f;
+    write_serial_string("[Q3CL] spawn x=");
+    ser_int((int)cl_x); write_serial_string(","); ser_int((int)cl_y);
+    write_serial_string(" z="); ser_int((int)cl_z);
+    write_serial_string(" yaw="); ser_int((int)cl_yaw);
+    write_serial_string(" pitch="); ser_int((int)cl_pitch);
+    write_serial_string("\n");
+}
+
+/* --- phase-4 map collision ---------------------------------------------- */
+
+/* Eye stand-off, same hygiene as the phase-3 arena clamp's 64 units: a wall
+ * face reaching the eye's own depth is the one case TinyGL's clipper sees.
+ * 32 keeps the eye clear of every wall inner face while still letting the
+ * player walk right up to geometry. */
+#define CL_STANDOFF 32.0f
+
+/* Is map position (x,y) solid for the eye at cl_z? An AABB test over the
+ * loaded brushes whose z-range overlaps the eye band (±16). */
+static int cl_point_blocked(const q3map_t *m, float x, float y) {
+    for (int i = 0; i < m->n_brushes; i++) {
+        const float *mn = m->brushes[i].mins;
+        const float *mx = m->brushes[i].maxs;
+        if (mn[2] > cl_z + 16.0f || mx[2] < cl_z - 16.0f) continue;
+        if (x > mn[0] - CL_STANDOFF && x < mx[0] + CL_STANDOFF &&
+            y > mn[1] - CL_STANDOFF && y < mx[1] + CL_STANDOFF)
+            return 1;
+    }
+    return 0;
+}
+
+/* Axis-separated slide move (Q3-style: an X pass then a Y pass, the other
+ * axis keeping its position), against the loaded map. Returns 1 when the
+ * move was blocked. */
+static int cl_slide_move(float *org, const float *dir, float dist) {
+    const q3map_t *m = q3map_current();
+    float lim = m->bounds_half;   /* backstop; the perimeter brushes bind first */
+    int blocked = 0;
+
+    for (int a = 0; a < 2; a++) {
+        float d = dir[a] * dist;
+        float *o = (a == 0) ? &org[0] : &org[1];
+        if (d == 0.0f) continue;
+        if (*o + d >  lim) { *o =  lim; blocked = 1; continue; }
+        if (*o + d < -lim) { *o = -lim; blocked = 1; continue; }
+        if (cl_point_blocked(m, (a == 0) ? *o + d : org[0],
+                                (a == 0) ? org[1] : *o + d)) {
+            blocked = 1;              /* this axis is solid: no move on it */
+            continue;
+        }
+        *o += d;
+    }
+    return blocked;
+}
+
 /* --- life cycle ------------------------------------------------------- */
 
 void CL_Init(void) {
@@ -669,9 +781,18 @@ void CL_StartHunkUsers(qboolean rendererOnly) {
         write_serial_string("[Q3CL] WARNING: mouse capture refused\n");
     }
 
-    /* Start looking down the arena's -Y wall from the middle of the floor. */
-    cl_x = 0.0f; cl_y = 180.0f; cl_z = Q3REF_EYE_H;
-    cl_yaw = 180.0f; cl_pitch = 0.0f;
+    /* Phase 4: the world comes from a map file. Load it through the engine
+     * FS, hand it to the renderer, and spawn the player from the map's own
+     * start state. A failed load keeps the phase-3 hardcoded arena. */
+    if (q3map_load(Q3MAP_QPATH) == 0) {
+        q3ref_set_map(q3map_current());
+        q3map_spawn_player(q3map_current());
+        write_serial_string("[Q3CL] map world active\n");
+    } else {
+        cl_x = 0.0f; cl_y = 180.0f; cl_z = Q3REF_EYE_H;
+        cl_yaw = 180.0f; cl_pitch = 0.0f;
+        write_serial_string("[Q3CL] map world FAILED - phase-3 arena fallback\n");
+    }
     cl_time_base = get_ticks() / 1000.0;
 
     needs_redraw = 1;
@@ -736,42 +857,73 @@ void CL_Frame(int msec) {
         float len = sqrtf(vx * vx + vy * vy);
         vx /= len; vy /= len;
     }
+    int blocked = 0;
     float speed = (cl_move & MF_SPEED) ? 320.0f : 200.0f;
-    cl_x += vx * speed * dt;
-    cl_y += vy * speed * dt;
     if (cl_move & MF_MOVEUP)   cl_z += 60.0f * dt;
     if (cl_move & MF_MOVEDOWN) cl_z -= 60.0f * dt;
-
-    /* Stay inside the arena (the renderer's walls are the same constants).
-     * 64 units of standoff, not 48: a polygon that straddles the near plane
-     * is the one case TinyGL's clipper sees, and this client has no collision
-     * system to keep the eye out of anything. */
-    float lim = Q3REF_ARENA_HALF - 64.0f;
-    if (cl_x >  lim) cl_x =  lim;
-    if (cl_x < -lim) cl_x = -lim;
-    if (cl_y >  lim) cl_y =  lim;
-    if (cl_y < -lim) cl_y = -lim;
     if (cl_z < 12.0f) cl_z = 12.0f;
     if (cl_z > 90.0f) cl_z = 90.0f;
 
-    /* And out of the bots. They are solid 48x48x72 boxes standing on the
-     * floor; walking the eye *inside* one leaves six faces crossing the near
-     * plane every frame, and the one thing a port with no collision system
-     * should not do is feed the clipper the hardest case it has. Push the
-     * player back out along the axis of least penetration. */
-    {
-        static const float bx[3] = {    0.0f, -140.0f,  150.0f };
-        static const float by[3] = { -200.0f, -320.0f, -330.0f };
-        const float keep = 36.0f;   /* 24 (half box) + 12 clearance */
-        for (int i = 0; i < 3; i++) {
-            float dx = cl_x - bx[i], dy = cl_y - by[i];
-            if (dx > -keep && dx < keep && dy > -keep && dy < keep) {
-                float px = keep - (dx < 0 ? -dx : dx);
-                float py = keep - (dy < 0 ? -dy : dy);
-                if (px < py) cl_x = bx[i] + (dx < 0 ? -keep : keep);
-                else         cl_y = by[i] + (dy < 0 ? -keep : keep);
+    if (q3map_current()) {
+        /* Phase 4: collide against the loaded map — axis-separated movement
+         * with a 32-unit eye stand-off, then push out of any map bot the
+         * eye would end up inside (same near-plane hygiene as below). */
+        float org[2] = { cl_x, cl_y };
+        float dir[2] = { vx, vy };
+        const q3map_t *mp = q3map_current();
+        blocked = cl_slide_move(org, dir, speed * dt);
+        cl_x = org[0];
+        cl_y = org[1];
+        for (int i = 0; i < mp->n_bots; i++) {
+            float hx = mp->bots[i].w * 0.5f + 12.0f;
+            float hy = mp->bots[i].d * 0.5f + 12.0f;
+            float bz0 = mp->bots[i].z, bz1 = bz0 + mp->bots[i].h;
+            if (bz0 > cl_z + 16.0f || bz1 < cl_z - 16.0f) continue;
+            float dx = cl_x - mp->bots[i].x, dy = cl_y - mp->bots[i].y;
+            if (dx > -hx && dx < hx && dy > -hy && dy < hy) {
+                float px = hx - (dx < 0 ? -dx : dx);
+                float py = hy - (dy < 0 ? -dy : dy);
+                if (px < py) cl_x = mp->bots[i].x + (dx < 0 ? -hx : hx);
+                else         cl_y = mp->bots[i].y + (dy < 0 ? -hy : hy);
             }
         }
+    } else {
+        /* No map: exactly the v38.103 behaviour — flat arena clamp plus the
+         * hardcoded-bot pushout. 64 units of standoff, not 48: a polygon
+         * that straddles the near plane is the one case TinyGL's clipper
+         * sees, and this client has no collision system to keep the eye out
+         * of anything. */
+        float lim = Q3REF_ARENA_HALF - 64.0f;
+        if (cl_x >  lim) cl_x =  lim;
+        if (cl_x < -lim) cl_x = -lim;
+        if (cl_y >  lim) cl_y =  lim;
+        if (cl_y < -lim) cl_y = -lim;
+        {
+            static const float bx[3] = {    0.0f, -140.0f,  150.0f };
+            static const float by[3] = { -200.0f, -320.0f, -330.0f };
+            const float keep = 36.0f;   /* 24 (half box) + 12 clearance */
+            for (int i = 0; i < 3; i++) {
+                float dx = cl_x - bx[i], dy = cl_y - by[i];
+                if (dx > -keep && dx < keep && dy > -keep && dy < keep) {
+                    float px = keep - (dx < 0 ? -dx : dx);
+                    float py = keep - (dy < 0 ? -dy : dy);
+                    if (px < py) cl_x = bx[i] + (dx < 0 ? -keep : keep);
+                    else         cl_y = by[i] + (dy < 0 ? -keep : keep);
+                }
+            }
+        }
+    }
+
+    /* One-shot serial marker: the test's proof that map collision actually
+     * stops the player. Fires on the 5th consecutive blocked frame while a
+     * move input is held; re-arms the moment movement is free again. */
+    if (blocked && (cl_move & (MF_FORWARD | MF_BACK | MF_MOVELEFT |
+                               MF_MOVERIGHT))) {
+        if (cl_blocked_frames < 1000) cl_blocked_frames++;
+        if (cl_blocked_frames == 5)
+            write_serial_string("[Q3CL] move blocked brush\n");
+    } else if (!blocked) {
+        cl_blocked_frames = 0;
     }
 
     /* render + present through the compositor */
@@ -834,6 +986,10 @@ void q3play_start(void) {
             vfs_write_file("/tmp/q3home/baseq3/default.cfg",
                            "// mectov client cfg\n", 22);
     }
+
+    /* Stage the map data into the engine's tmpfs homepath BEFORE Com_Init —
+     * the engine FS cannot see the file otherwise. */
+    q3_stage_map();
 
     Com_Init(cmdline);
     write_serial_string("[Q3CL] Com_Init done, entering client frame loop\n");
