@@ -10,6 +10,24 @@ volatile uint8_t mouse_btn = 0;
 volatile int mouse_updated = 0;
 volatile int8_t mouse_scroll = 0;  // scroll wheel delta (positive = up, negative = down)
 
+// v38.103: raw relative motion since the last mouse_take_delta(). Written from
+// IRQ context, read by the desktop loop for the window that captured the
+// mouse; the absolute cursor below is clamped and useless for aiming.
+volatile int mouse_raw_dx = 0, mouse_raw_dy = 0;
+
+// Returns the accumulated relative motion (screen space: +x right, +y down)
+// and clears it. 1 = there was motion, 0 = idle.
+int mouse_take_delta(int *dx, int *dy) {
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    int rx = mouse_raw_dx, ry = mouse_raw_dy;
+    mouse_raw_dx = 0; mouse_raw_dy = 0;
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+    if (dx) *dx = rx;
+    if (dy) *dy = ry;
+    return (rx != 0 || ry != 0);
+}
+
 static uint8_t mouse_cycle = 0;
 static int8_t  mouse_bytes[4];     // 4 bytes for IntelliMouse
 static uint8_t mouse_has_wheel = 0; // 1 = IntelliMouse mode active
@@ -73,6 +91,8 @@ void mouse_feed_byte(uint8_t data) {
                 if (mouse_bytes[0] & 0x10) dx |= (int)0xFFFFFF00;
                 if (mouse_bytes[0] & 0x20) dy |= (int)0xFFFFFF00;
 
+                mouse_raw_dx += dx;
+                mouse_raw_dy -= dy;   // PS/2 +y is up; screen space is +y down
                 mouse_x += dx;
                 mouse_y -= dy;
 
@@ -163,6 +183,8 @@ void mouse_hid_report(uint8_t btn, int8_t dx, int8_t dy, int8_t wheel) {
     entropy_add((uint32_t)(uint8_t)dx);
     entropy_add((uint32_t)(uint8_t)dy);
     mouse_btn = btn & 0x07;
+    mouse_raw_dx += dx;
+    mouse_raw_dy += dy;   // HID +y is already screen space (down)
     mouse_x += dx;
     mouse_y += dy;
     if (mouse_x < 0)               mouse_x = 0;

@@ -456,7 +456,35 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         btn = (int)(uint32_t)mouse_btn;
         __asm__ volatile("sti");
 
-        if (mx != prev_mx || my != prev_my || btn != prev_btn) {
+        // ---- v38.103: game mouse capture ----
+        // While a window owns relative mouse motion (wm_capture_mouse), the
+        // desktop stops resolving hover/drag/resize/taskbar/icon hits from the
+        // absolute cursor: raw packet deltas go to that window's mouse_fn and
+        // the cursor is pinned inside it (and hidden by vga.c). Without this
+        // branch a crosshair would stop at the screen edge and hovering would
+        // never generate a single mouse event.
+        extern int wm_capture_owner(void);
+        int cap_id = wm_capture_owner();
+        if (cap_id >= 0) {
+            int cdx = 0, cdy = 0;
+            extern int mouse_take_delta(int *dx, int *dy);
+            int moved = mouse_take_delta(&cdx, &cdy);
+            if (moved || btn != prev_btn) {
+                extern int wm_capture_event(int dx, int dy, int btn);
+                wm_capture_event(cdx, cdy, btn);
+            }
+            int pinx = 0, piny = 0;
+            extern int wm_capture_center(int *x, int *y);
+            if (wm_capture_center(&pinx, &piny)) {
+                mouse_x = pinx;
+                mouse_y = piny;
+                extern int cursor_draw_x, cursor_draw_y;
+                cursor_draw_x = pinx;
+                cursor_draw_y = piny;
+            }
+            mouse_scroll = 0;   // wheel is not routed while captured
+            prev_btn = btn; prev_mx = mx; prev_my = my;
+        } else if (mx != prev_mx || my != prev_my || btn != prev_btn) {
             // Idle auto-lock (v38.51): any mouse activity restarts the
             // `locktimeout` countdown.
             extern void security_note_input(void);
@@ -695,6 +723,16 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                         needs_redraw = 1;
                     } else if (sc == 0x0F && keyboard_alt_held) {
                         wm_alt_tab_start();
+                        needs_redraw = 1;
+                    } else if (wm_scancode_focus() >= 0) {
+                        // v38.103: a game window that asked for raw scancodes
+                        // (wm_request_scancodes) gets press AND release here —
+                        // the press-only character path below would leave its
+                        // movement keys stuck down and could never deliver ESC,
+                        // arrows or ctrl. Ctrl+C/Z and Ctrl+Alt+L were already
+                        // consumed above, so the desktop stays recoverable.
+                        char cs = (sc < 0x80) ? scancode_to_char_mods(sc, kbd_mods) : 0;
+                        wm_handle_scancode(sc, cs);
                         needs_redraw = 1;
                     } else if (sc < 0x80 || sc == 0xE0) {
                         char c = scancode_to_char_mods(sc, kbd_mods);

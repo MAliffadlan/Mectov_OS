@@ -499,6 +499,8 @@ void draw_soft_shadow(int x, int y, int w, int h, int radius, uint32_t intensity
 
 int cursor_draw_x = 0;
 int cursor_draw_y = 0;
+// v38.103: 1 while a game window captured the mouse (see wm_capture_mouse).
+int cursor_hidden = 0;
 uint32_t* front_buffer_copy = NULL;
 
 // ============================================================
@@ -623,9 +625,12 @@ void swap_buffers(void) {
     // Reset dirty rect
     d_min_x = 9999; d_min_y = 9999; d_max_x = -1; d_max_y = -1;
 
-    // Draw the cursor directly to VRAM on top of everything using stable coordinates
+    // Draw the cursor directly to VRAM on top of everything using stable coordinates.
+    // v38.103: a window with mouse capture (wm_capture_mouse) hides the arrow —
+    // the pointer is meaningless while relative motion drives a game camera.
     extern int cursor_draw_x, cursor_draw_y;
-    draw_mouse_cursor(cursor_draw_x, cursor_draw_y);
+    extern int cursor_hidden;
+    if (!cursor_hidden) draw_mouse_cursor(cursor_draw_x, cursor_draw_y);
 }
 
 // ============================================================

@@ -5,6 +5,7 @@
 #include "../include/serial.h"
 #include "../include/spinlock.h"
 #include "../include/task.h"   // get_current_task / task_get_cid
+#include "../include/mouse.h"  // mouse_x/y, cursor pin for mouse capture (v38.103)
 
 // ---- Reentrant irqsave lock (kernel locking audit v38.4) ----
 //
@@ -45,6 +46,11 @@ void wm_lock_release(void) {
 #define WM_BTN_W 20
 #define WM_BTN_H 16
 #define WM_BTN_VIS_W 16  // rounded hover/pressed background visual width
+
+// v38.103 game input: defined with the rest of the capture code at the bottom
+// of this file, but the window teardown paths (close / task death) above must
+// call it, so it is declared here.
+static void wm_clear_game_input_unlocked(WmWin* w);
 
 // Titlebar button hover state, tracked by wm_track_mouse() on pure mouse
 // moves and read by draw_one(). Indexed by window slot, then which button:
@@ -371,6 +377,8 @@ static int wm_open_unlocked(int x, int y, int w, int h, const char* title,
             wm_wins[i].mouse_fn  = mouse_fn;
             wm_wins[i].owner_ring = 0; // Default to kernel
             wm_wins[i].owner_task = -1; // Set by syscall for Ring 3 apps
+            wm_wins[i].want_scancodes = 0;
+            wm_wins[i].capture_mouse = 0;
             wm_wins[i].visible   = 1;
             wm_wins[i].dragging  = 0;
             wm_wins[i].resizing  = 0;
@@ -447,6 +455,7 @@ static void wm_close_unlocked(int id) {
         if (wm_wins[i].visible && wm_wins[i].id == id) {
             extern void mark_dirty(int, int, int, int);
             mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // Mark closed window area dirty
+            wm_clear_game_input_unlocked(&wm_wins[i]);   // v38.103: drop capture/scancodes
             // If owned by a user task, kill the task.
             // task_kill will automatically call wm_cleanup_task,
             // which will hide the window and remove it from z-order.
@@ -1080,6 +1089,173 @@ void wm_handle_key(char c, uint8_t sc) {
     wm_lock_release();
 }
 
+// ---- v38.103: game input (raw scancodes + mouse capture) ----
+//
+// Games need three things the character-oriented key path cannot express:
+//   * key RELEASE events (a movement key is held down)
+//   * non-printable keys (ESC, arrows, ctrl)
+//   * relative mouse motion that never dead-ends at a screen edge
+// The two opt-ins below are per window and default off, so the desktop, the
+// terminal and every existing app keep the exact behaviour they had.
+
+static int wm_scancode_focus_unlocked(void) {
+    if (wm_focused < 0) return -1;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        WmWin* w = &wm_wins[i];
+        if (w->visible && !w->minimized && w->id == wm_focused &&
+            w->want_scancodes && w->key_fn)
+            return w->id;
+    }
+    return -1;
+}
+
+void wm_request_scancodes(int id, int on) {
+    wm_lock_acquire();
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (wm_wins[i].visible && wm_wins[i].id == id) {
+            wm_wins[i].want_scancodes = on ? 1 : 0;
+            break;
+        }
+    }
+    wm_lock_release();
+}
+
+int wm_scancode_focus(void) {
+    wm_lock_acquire();
+    int id = wm_scancode_focus_unlocked();
+    wm_lock_release();
+    return id;
+}
+
+void wm_handle_scancode(uint8_t sc, char c) {
+    wm_lock_acquire();
+    int id = wm_scancode_focus_unlocked();
+    if (id >= 0) {
+        for (int i = 0; i < MAX_WINDOWS; i++) {
+            if (wm_wins[i].visible && wm_wins[i].id == id) {
+                wm_wins[i].key_fn(id, c, sc);
+                break;
+            }
+        }
+    }
+    wm_lock_release();
+}
+
+// Clear the game-input opt-ins of one window and give the desktop its cursor
+// back. Every teardown path (close, task death, session reset) must funnel
+// through this, or the next frame runs with a hidden arrow and a game that no
+// longer exists still eating relative motion.
+static void wm_clear_capture_unlocked(WmWin* w) {
+    if (!w->capture_mouse) return;
+    w->capture_mouse = 0;
+    mouse_x = w->cap_saved_x;
+    mouse_y = w->cap_saved_y;
+    extern int cursor_draw_x, cursor_draw_y;
+    cursor_draw_x = mouse_x;
+    cursor_draw_y = mouse_y;
+    extern int cursor_hidden;
+    cursor_hidden = 0;
+}
+
+// Teardown path only (window closed / owner died): drop BOTH game-input
+// opt-ins. Capture hand-over between windows must NOT come through here — it
+// would also clear the raw-scancode request, which is how the client first
+// shipped with working keys but no key RELEASES (the capture that follows the
+// request silently unset it, so the desktop fell back to its press-only
+// character path).
+static void wm_clear_game_input_unlocked(WmWin* w) {
+    wm_clear_capture_unlocked(w);
+    w->want_scancodes = 0;
+}
+
+static int wm_capture_center_unlocked(int *x, int *y) {
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        WmWin* w = &wm_wins[i];
+        if (!w->visible || !w->capture_mouse) continue;
+        if (x) *x = w->x + w->w / 2;
+        if (y) *y = w->y + TITLEBAR_H + (w->h - TITLEBAR_H) / 2;
+        return 1;
+    }
+    return 0;
+}
+
+int wm_capture_center(int *x, int *y) {
+    wm_lock_acquire();
+    int r = wm_capture_center_unlocked(x, y);
+    wm_lock_release();
+    return r;
+}
+
+int wm_capture_mouse(int id, int on) {
+    wm_lock_acquire();
+    int ok = 0;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        WmWin* w = &wm_wins[i];
+        if (!w->visible || w->id != id) continue;
+        if (on) {
+            if (w->capture_mouse) { ok = 1; break; }
+            // Exactly one owner: a second capture request steals it, which is
+            // what alt-tabbing between two games must do.
+            for (int j = 0; j < MAX_WINDOWS; j++) wm_clear_capture_unlocked(&wm_wins[j]);
+            w->capture_mouse = 1;
+            w->cap_saved_x = mouse_x;
+            w->cap_saved_y = mouse_y;
+            /* Drop motion that piled up while nothing was capturing (the
+             * desktop was moving the pointer normally). Without this the
+             * game's first look event is every pixel the user ever moved. */
+            {
+                extern int mouse_take_delta(int *dx, int *dy);
+                int junk_x = 0, junk_y = 0;
+                mouse_take_delta(&junk_x, &junk_y);
+            }
+            mouse_x = w->x + w->w / 2;
+            mouse_y = w->y + TITLEBAR_H + (w->h - TITLEBAR_H) / 2;
+            extern int cursor_draw_x, cursor_draw_y;
+            cursor_draw_x = mouse_x;
+            cursor_draw_y = mouse_y;
+            extern int cursor_hidden;
+            cursor_hidden = 1;
+            extern volatile int needs_redraw;
+            needs_redraw = 1;
+            ok = 1;
+        } else if (w->capture_mouse) {
+            wm_clear_game_input_unlocked(w);
+            extern volatile int needs_redraw;
+            needs_redraw = 1;
+            ok = 1;
+        }
+        break;
+    }
+    wm_lock_release();
+    return ok;
+}
+
+int wm_capture_owner(void) {
+    wm_lock_acquire();
+    int id = -1;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (wm_wins[i].visible && wm_wins[i].capture_mouse) { id = wm_wins[i].id; break; }
+    }
+    wm_lock_release();
+    return id;
+}
+
+int wm_capture_event(int dx, int dy, int btn) {
+    wm_lock_acquire();
+    int handled = 0;
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        WmWin* w = &wm_wins[i];
+        if (!w->visible || !w->capture_mouse || !w->mouse_fn) continue;
+        // Under capture mouse_fn() receives DELTAS in its (cx, cy) arguments,
+        // not window-relative coordinates (see wm.h).
+        w->mouse_fn(w->id, dx, dy, btn);
+        handled = 1;
+        break;
+    }
+    wm_lock_release();
+    return handled;
+}
+
 static void wm_tick_all_unlocked() {
     for (int i = 0; i < MAX_WINDOWS; i++)
         if (wm_wins[i].visible && wm_wins[i].tick_fn)
@@ -1114,6 +1290,7 @@ static void wm_cleanup_task_unlocked(int tid) {
             
             extern void mark_dirty(int, int, int, int);
             mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // Mark bounds dirty before hiding
+            wm_clear_game_input_unlocked(&wm_wins[i]);   // v38.103: drop capture/scancodes
             wm_wins[i].visible = 0;
             if (wm_wins[i].content_buffer) {
                 // Defer the free: task_kill() can run while the main-loop thread

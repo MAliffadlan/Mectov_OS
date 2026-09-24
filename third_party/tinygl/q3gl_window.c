@@ -13,12 +13,14 @@
  * the scene keeps rotating while the desktop stays fully interactive.
  *
  * Pixel notes: TinyGL is built with TGL_FEATURE_RENDER_BITS=32, where a
- * PIXEL stores R in bits 16-23, G in 8-15, B in 0-7. The Mectov framebuffer
- * is the standard little-endian 0x00BBGGRR layout (R in 0-7, B in 16-23),
- * so the blit swizzles each pixel once per frame. The ZBuffer is opened
- * with our own pbuf so there is exactly one buffer to swizzle, and the
- * swizzle happens in the window draw callback (compositor context), not in
- * the render loop.
+ * PIXEL stores R in bits 16-23, G in 8-15, B in 0-7 — byte for byte the same
+ * 0x00RRGGBB layout the Mectov framebuffer and every kernel theme constant
+ * use, so the blit is a plain copy (v38.103: it used to swap R and B, which
+ * drew the blue gear red; the kernel's GUI_DESKTOP 0x0011111B reads back as
+ * (17,17,27) in a screendump, which is what settled it). The ZBuffer is
+ * opened with our own pbuf so there is exactly one buffer to copy, and the
+ * copy happens in the window draw callback (compositor context), not in the
+ * render loop.
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -196,10 +198,9 @@ static void draw_scene(void) {
 /* WM window plumbing                                                  */
 /* ---------------------------------------------------------------- */
 
-/* Rasterize the ZBuffer into the window content buffer. Runs in the
- * compositor context (the main loop's draw pass), NOT the render task.
- * TinyGL 32-bit PIXEL is 0x00RRGGBB; the framebuffer wants 0x00BBGGRR,
- * so each pixel gets one rotate-by-16 swizzle. */
+/* Copy the ZBuffer into the window content buffer. Runs in the compositor
+ * context (the main loop's draw pass), NOT the render task. TinyGL's 32-bit
+ * PIXEL and the framebuffer share the 0x00RRGGBB layout, so this is a copy. */
 static void q3gl_win_draw(int id, int cx, int cy, int cw, int ch) {
     (void)id; (void)cx; (void)cy;
     if (!gl_fb || !gl_fb->pbuf || cw <= 0 || ch <= 0) return;
@@ -218,12 +219,7 @@ static void q3gl_win_draw(int id, int cx, int cy, int cw, int ch) {
     for (int y = 0; y < dh; y++) {
         const GLuint *s = src + (long)y * pitch;
         uint32_t *d = dst + (size_t)(oy + y) * cw + ox;
-        for (int x = 0; x < dw; x++) {
-            GLuint p = s[x];
-            d[x] = ((p & 0x000000FFu) << 16)   /* B: bits 0-7  -> 16-23 */
-                 |  (p & 0x0000FF00u)          /* G: 8-15 stays           */
-                 | ((p & 0x00FF0000u) >> 16);  /* R: 16-23 -> 0-7         */
-        }
+        for (int x = 0; x < dw; x++) d[x] = s[x];
     }
     /* Any letterbox strips keep the WM's dark clear color. */
 }

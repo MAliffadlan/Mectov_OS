@@ -421,6 +421,17 @@ jobs:
           # composited desktop, not a frozen framebuffer.
           python3 scripts/q3gl_test.py --iso mectov-q3.iso --timeout 420
 
+      - name: Q3 client loop — TinyGL + WM input (TCG)
+        run: |
+          # v38.103 (Q3 phase 3): the client layer (CL_Init/CL_Frame) renders
+          # a first-person arena through TinyGL into a WM window. The test
+          # pixel-checks the screendump, then drives real input: a held `w`
+          # must arrive as a raw scancode (+forward) and MOVE the camera, and
+          # injected mouse motion must reach CL_MouseEvent through the WM's
+          # capture and turn the view (frame pixels must differ afterwards).
+          # ESC has to shut the client down and hand the desktop back.
+          python3 scripts/q3play_test.py --iso mectov-q3.iso --timeout 480
+
   storage:
     needs: build
     runs-on: ubuntu-latest

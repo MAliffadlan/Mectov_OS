@@ -171,6 +171,7 @@ void cmd_flappy(void);
 void cmd_doom(void);
 void cmd_q3(void);
 void cmd_q3gl(void);
+void cmd_q3play(void);
 void cmd_taskmgr(void);
 void cmd_lock(void);
 void cmd_locktimeout(void);

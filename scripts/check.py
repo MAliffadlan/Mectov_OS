@@ -74,6 +74,10 @@ SUITES = [
     # TinyGL software-GL gears window (v38.102, Q3 phase 2). Same MECTOV_Q3=1
     # ISO requirement as q3 — the renderer compiles only in that variant.
     ("q3gl",             "q3gl_test.py",              420, [], "q3"),
+    # ioquake3 CLIENT loop + TinyGL + WM input (v38.103, Q3 phase 3). Same
+    # MECTOV_Q3=1 ISO: the client layer (CL_Init/CL_Frame) renders the arena
+    # into a WM window and takes keyboard + captured mouse input.
+    ("q3play",           "q3play_test.py",            480, [], "q3"),
     ("virtio",           "virtio_test.py",            360),
     ("socktest",         "socktest.py",               300),
     ("poweroff",         "poweroff_test.py",          240),

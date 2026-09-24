@@ -77,9 +77,13 @@ Q3_SRCS = $(Q3_DIR)/qcommon/q_math.c $(Q3_DIR)/qcommon/q_shared.c \
           $(Q3_DIR)/qcommon/files.c $(Q3_DIR)/qcommon/msg.c \
           $(Q3_DIR)/qcommon/huffman.c $(Q3_DIR)/qcommon/md4.c \
           $(Q3_DIR)/qcommon/md5.c $(Q3_DIR)/qcommon/ioapi.c $(Q3_DIR)/qcommon/unzip.c \
-          $(Q3_DIR)/null/null_client.c $(Q3_DIR)/null/null_input.c $(Q3_DIR)/null/null_snddma.c \
+          $(Q3_DIR)/null/null_input.c $(Q3_DIR)/null/null_snddma.c \
           $(Q3_OUR)/q3_kernel.c $(Q3_OUR)/q3_printf.c \
-          $(Q3_OUR)/q3_platform.c
+          $(Q3_OUR)/q3_platform.c $(Q3_OUR)/q3_client.c
+# null/null_client.c is deliberately NOT built any more (v38.103): q3_client.c
+# replaces the upstream null client with the Mectov client layer — CL_Init,
+# CL_Frame, CL_KeyEvent/CL_CharEvent/CL_MouseEvent, the bind commands and the
+# key-name tables all live there, wired to TinyGL and the WM input paths.
 # TinyGL (v38.102, Q3 phase 2): software OpenGL 1.1 rasterizer rendering the
 # gears scene into a WM window. Vendored from jserv/tinygl (MIT); core only —
 # ztext/glDrawText dropped, allocator shim routes gl_malloc to kmalloc.
@@ -94,7 +98,8 @@ TGL_SRCS = $(TGL_DIR)/src/api.c $(TGL_DIR)/src/arrays.c $(TGL_DIR)/src/clear.c \
            $(TGL_DIR)/src/vertex.c $(TGL_DIR)/src/zbuffer.c $(TGL_DIR)/src/zline.c \
            $(TGL_DIR)/src/zmath.c $(TGL_DIR)/src/zpostprocess.c $(TGL_DIR)/src/zraster.c \
            $(TGL_DIR)/src/ztriangle.c \
-           $(TGL_DIR)/kernel_shim.c $(TGL_DIR)/q3gl_window.c
+           $(TGL_DIR)/kernel_shim.c $(TGL_DIR)/q3gl_window.c \
+           $(TGL_DIR)/q3cl_render.c
 ifeq ($(Q3_ENABLED),1)
 Q3_OBJS = $(patsubst $(Q3_DIR)/%,$(OBJ_DIR)/q3/%,$(Q3_SRCS:.c=.o))
 Q3_OBJS := $(patsubst $(Q3_OUR)/%,$(OBJ_DIR)/q3plat/%,$(Q3_OBJS))
@@ -592,6 +597,13 @@ $(OBJ_DIR)/tgl/q3gl_window.o: $(TGL_DIR)/q3gl_window.c | $(OBJ_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(TGL_CFLAGS) -Isrc/include -c $< -o $@
 
+# q3cl_render.c (v38.103): TinyGL backend for the Q3 client's first-person
+# arena. Same include shape as q3gl_window.c — it includes only <TGL/gl.h>,
+# zbuffer.h and its own header, which the client TU shares.
+$(OBJ_DIR)/tgl/q3cl_render.o: $(TGL_DIR)/q3cl_render.c $(TGL_DIR)/q3cl_render.h | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(TGL_CFLAGS) -c $< -o $@
+
 # DOOM source compilation rule
 $(OBJ_DIR)/doom/%.o: doom/%.c | $(OBJ_DIR)
 	$(CC) $(DOOM_CFLAGS) -c $< -o $@
@@ -652,4 +664,11 @@ check-q3tgl:
 	MECTOV_Q3=1 $(MAKE) iso
 	python3 scripts/check.py --keep-images --only q3gl $(CHECK_ARGS)
 
-.PHONY: all clean clean_all check check-quick check-q3 check-q3tgl iso
+# Q3 client loop (v38.103, Q3 phase 3): the same MECTOV_Q3=1 ISO again, this
+# time driving the engine's CL_Init/CL_Frame with WM keyboard + captured mouse
+# input. `make check-q3play` runs all three Q3-phase suites.
+check-q3play:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3play $(CHECK_ARGS)
+
+.PHONY: all clean clean_all check check-quick check-q3 check-q3tgl check-q3play iso

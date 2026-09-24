@@ -139,7 +139,18 @@ void q3_exit_marker(void) {
 
 /* ===== NET_* stubs (phase 1: net_ip/net_chan tidak dicompile; dedicated
  * core tanpa jaringan). MSG_* format sendiri disediakan msg.c. ===== */
-void NET_Sleep(int msec) { (void)msec; }
+/* v38.103: NET_Sleep is what paces the *client* — Com_Frame's frame limiter
+ * waits here between frames (com_maxfps), so it must actually wait. A hlt loop
+ * keeps interrupts on (timer, keyboard, mouse) while the task sleeps; msec<=0
+ * stays a no-op, which is what the busy-wait path (com_busyWait 1, the phase-1
+ * `q3` engine) asks for. */
+void NET_Sleep(int msec) {
+	if (msec <= 0) return;
+	if (msec > 100) msec = 100;
+	uint32_t t0 = get_ticks();
+	while ((int)(get_ticks() - t0) < msec)
+		__asm__ __volatile__("hlt");
+}
 void NET_FlushPacketQueue(void) {}
 qboolean NET_GetLoopPacket(netsrc_t sock, netadr_t *from, msg_t *msg) { (void)sock; (void)from; (void)msg; return qfalse; }
 
@@ -223,7 +234,8 @@ FILE *Sys_Mkfifo(const char *ospath) { (void)ospath; return NULL; }
 
 /* ===== sisa simbol yang di host spike ada di TU lain ===== */
 int c_traces, c_brush_traces, c_patch_traces, c_pointcontents;
-void Key_KeynameCompletion(void (*callback)(const char *s)) { (void)callback; }
+/* Key_KeynameCompletion now lives in q3_client.c (v38.103): the client owns
+ * the key-name table, so completion reads the same table the binds use. */
 void VM_Init(void) {}
 void SV_Init(void) {}
 void SV_Frame(int msec) { (void)msec; }
