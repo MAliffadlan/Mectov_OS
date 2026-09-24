@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-scripts/q3_test.py — end-to-end test for the v38.98 ioquake3 engine-core port.
+scripts/q3_test.py — end-to-end test for the engine-core port (v38.98 phase 1,
+now running on id Software's official source: third_party/q3a).
 
 Boots mectov.iso (512MB RAM — the Q3 hunk/zone budget needs the enlarged
 kernel heap), logs in, launches the Terminal, then types `q3` and asserts
 the engine's liveness via serial markers:
 
-  [Q3] Starting Quake III Arena (ioq3 subset) on Mectov OS...
-  ioq3 1.36 ...                         (Com_Init banner via Sys_Print)
+  [Q3] Starting Quake III Arena (id Software source) on Mectov OS...
+  Q3 1.32b ... linux-i386 <date>        (Com_Init banner via Sys_Print; the
+                                         1.32b string is id's own Q3_VERSION
+                                         from code/game/q_shared.h)
   [Q3] Com_Init returned — ticking Com_Frame x10
   [Q3] 10 Com_Frame ticks done — engine core alive
 
@@ -31,7 +34,7 @@ Q3_KEYS = ["q", "3", "ret"]
 
 OK_MARKERS = [
     "[Q3] Starting Quake III Arena",
-    "1.36",
+    "Q3 1.32b",
     "[Q3] Com_Init returned",
     "[Q3] 10 Com_Frame ticks done — engine core alive",
 ]

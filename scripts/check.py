@@ -78,6 +78,10 @@ SUITES = [
     # MECTOV_Q3=1 ISO: the client layer (CL_Init/CL_Frame) renders the arena
     # into a WM window and takes keyboard + captured mouse input.
     ("q3play",           "q3play_test.py",            480, [], "q3"),
+    # Official id Software QVM (v38.105, Q3 phase 5): real Quake III Arena
+    # game bytecode — built from third_party/q3a by id's own lcc + q3asm —
+    # executed by id's own QVM interpreter. Same MECTOV_Q3=1 ISO.
+    ("q3vm",             "q3vm_test.py",              480, [], "q3"),
     ("virtio",           "virtio_test.py",            360),
     ("socktest",         "socktest.py",               300),
     ("poweroff",         "poweroff_test.py",          240),

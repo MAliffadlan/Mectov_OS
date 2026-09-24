@@ -54,10 +54,17 @@ SRCS = $(wildcard $(SRC_DIR)/drivers/*.c) \
        $(wildcard $(SRC_DIR)/gui/*.c) \
        kernel.c
 
-# Quake III (v38.98): ioquake3 subset (qcommon core + null client) built
-# into the kernel behind MECTOV_Q3=1 (default off). Stub headers under
-# third_party/q3mectov/stubs alias every libc name to q3_* implementations
-# (q3_kernel.c), so ioq3 objects reference nothing from utils.c/doom_libc.
+# Quake III (v38.98): the engine core built into the kernel behind
+# MECTOV_Q3=1 (default off). Stub headers under third_party/q3mectov/stubs
+# alias every libc name to q3_* implementations (q3_kernel.c), so the engine
+# objects reference nothing from utils.c/doom_libc.
+#
+# v38.105: the sources are the OFFICIAL id Software Quake III Arena release
+# (third_party/q3a — id-Software/Quake-III-Arena, see its UPSTREAM.md), not an
+# engine fork. vm.c + vm_interpreted.c are id's own QVM loader and portable
+# bytecode interpreter, so the kernel can execute qagame.qvm — real Quake III
+# Arena game bytecode built from that same source by id's own lcc + q3asm
+# (scripts/build_qvm.sh).
 Q3_ENABLED := $(shell [ "$(MECTOV_Q3)" = "1" ] && echo 1 || echo 0)
 ifeq ($(Q3_ENABLED),1)
 CFLAGS += -DMECTOV_Q3=1
@@ -70,17 +77,21 @@ Q3_STAMP := $(OBJ_DIR)/.q3mode
 ifneq ($(shell cat $(Q3_STAMP) 2>/dev/null),$(Q3_ENABLED))
 $(shell mkdir -p $(OBJ_DIR); rm -rf $(OBJ_DIR)/*; echo "$(Q3_ENABLED)" > "$(Q3_STAMP)")
 endif
-Q3_DIR = third_party/q3/code
+Q3_DIR = third_party/q3a/code
 Q3_OUR = third_party/q3mectov
-Q3_SRCS = $(Q3_DIR)/qcommon/q_math.c $(Q3_DIR)/qcommon/q_shared.c \
+# q_shared.c/q_math.c live in code/game in the official layout (id moved them
+# out of qcommon after this release), and the official build has no md5.c /
+# ioapi.c / net_ip.c — those are fork additions.
+Q3_SRCS = $(Q3_DIR)/game/q_math.c $(Q3_DIR)/game/q_shared.c \
           $(Q3_DIR)/qcommon/common.c $(Q3_DIR)/qcommon/cvar.c $(Q3_DIR)/qcommon/cmd.c \
           $(Q3_DIR)/qcommon/files.c $(Q3_DIR)/qcommon/msg.c \
           $(Q3_DIR)/qcommon/huffman.c $(Q3_DIR)/qcommon/md4.c \
-          $(Q3_DIR)/qcommon/md5.c $(Q3_DIR)/qcommon/ioapi.c $(Q3_DIR)/qcommon/unzip.c \
+          $(Q3_DIR)/qcommon/net_chan.c $(Q3_DIR)/qcommon/unzip.c \
+          $(Q3_DIR)/qcommon/vm.c $(Q3_DIR)/qcommon/vm_interpreted.c \
           $(Q3_DIR)/null/null_input.c $(Q3_DIR)/null/null_snddma.c \
           $(Q3_OUR)/q3_kernel.c $(Q3_OUR)/q3_printf.c \
           $(Q3_OUR)/q3_platform.c $(Q3_OUR)/q3_client.c \
-          $(Q3_OUR)/q3_map.c
+          $(Q3_OUR)/q3_map.c $(Q3_OUR)/q3_vm.c
 # null/null_client.c is deliberately NOT built any more (v38.103): q3_client.c
 # replaces the upstream null client with the Mectov client layer — CL_Init,
 # CL_Frame, CL_KeyEvent/CL_CharEvent/CL_MouseEvent, the bind commands and the
@@ -111,10 +122,20 @@ TGL_OBJS =
 endif
 # -DSTANDALONE: no CD-key write / no client-only branches (we ship no id
 #   game data); -DDEDICATED would also work but keeps the client light off.
+# id's engine core and DOOM each ship a zone allocator, and id's common.c
+# exports Z_Malloc/Z_Free/Z_FreeTags/Z_CheckHeap/Z_ClearZone plus the mainzone
+# global (its own build never linked DOOM, so the clash could not happen there).
+# obj/doom is not ours to rewrite and third_party/q3a must stay verbatim, so the
+# rename is done in the preprocessor — a build-level alias, not an edit.
+Q3_ZONE_RENAME = -Dmainzone=Q3Z_mainzone -DZ_Malloc=Q3Z_Malloc \
+                 -DZ_Free=Q3Z_Free -DZ_FreeTags=Q3Z_FreeTags \
+                 -DZ_CheckHeap=Q3Z_CheckHeap -DZ_ClearZone=Q3Z_ClearZone
+
 Q3_CFLAGS = -m32 -std=gnu99 -ffreestanding -O1 -MMD -MP \
-              -I$(Q3_OUR)/stubs -I$(Q3_DIR)/qcommon -I$(Q3_DIR)/null \
+              -I$(Q3_OUR)/stubs -I$(Q3_DIR)/qcommon -I$(Q3_DIR)/game \
+              -I$(Q3_DIR)/null \
               -fno-builtin -fno-pie -fno-pic -march=i686 \
-              -DMECTOV_Q3=1 -DSTANDALONE -w
+              -DMECTOV_Q3=1 -DSTANDALONE $(Q3_ZONE_RENAME) -w
 
 # DOOM source files (all .c in doom/ directory)
 DOOM_SRCS = $(wildcard doom/*.c)
@@ -567,12 +588,15 @@ $(OBJ_DIR)/udptest_elf.o: udptest.elf | $(OBJ_DIR)
 $(OBJ_DIR)/wallpaper.bin: assets/wallpaper.png
 	python3 scripts/build_wallpaper.py assets/wallpaper.png $@
 
-# Q3 source compilation rule (objects only enter the link when MECTOV_Q3=1)
-$(OBJ_DIR)/q3/%.o: $(Q3_DIR)/%.c | $(OBJ_DIR)
+# Q3 source compilation rule (objects only enter the link when MECTOV_Q3=1).
+# The Makefile is a prerequisite on purpose: Q3_CFLAGS is not something make's
+# dependency tracking can see, so an edited flag would otherwise silently reuse
+# objects built with the old one (the v38.99 class of bug).
+$(OBJ_DIR)/q3/%.o: $(Q3_DIR)/%.c Makefile | $(OBJ_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(Q3_CFLAGS) -c $< -o $@
 
-$(OBJ_DIR)/q3plat/%.o: $(Q3_OUR)/%.c | $(OBJ_DIR)
+$(OBJ_DIR)/q3plat/%.o: $(Q3_OUR)/%.c Makefile | $(OBJ_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(Q3_CFLAGS) -c $< -o $@
 
@@ -641,7 +665,13 @@ clean_all: clean
 #   make check CHECK_ARGS=--kvm          include fork/fputest KVM regressions
 #                                        (opt-in: some hosts' KVM stalls the qemu32
 #                                        machine at AP wake even with /dev/kvm)
-iso: myos.bin
+ifeq ($(Q3_ENABLED),1)
+# v38.105: the Q3 ISO ships real Quake III Arena bytecode, so building it
+# implies building qagame.qvm from third_party/q3a with id's own lcc + q3asm.
+QVM_PREREQ = qvm
+endif
+
+iso: myos.bin $(QVM_PREREQ)
 	@mkdir -p iso/boot/grub
 	cp myos.bin iso/boot/
 	@printf 'set timeout=0\nset default=0\nmenuentry "Mectov OS" {\n    multiboot /boot/myos.bin\n    boot\n}\n' > iso/boot/grub/grub.cfg
@@ -672,4 +702,17 @@ check-q3play:
 	MECTOV_Q3=1 $(MAKE) iso
 	python3 scripts/check.py --keep-images --only q3play $(CHECK_ARGS)
 
-.PHONY: all clean clean_all check check-quick check-q3 check-q3tgl check-q3play iso
+# Official QVM (v38.105, Q3 phase 5): builds qagame.qvm out of id's own source
+# with id's own lcc + q3asm. Standalone — build_qvm.sh is safe to call directly
+# and is a no-op when the bytecode is already newer than its inputs.
+qvm:
+	@bash scripts/build_qvm.sh
+
+# The phase-5 suite: the same MECTOV_Q3=1 ISO, running the official game
+# module as Quake VM bytecode through id's own interpreter.
+check-q3vm:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3vm $(CHECK_ARGS)
+
+.PHONY: all clean clean_all check check-quick qvm iso \
+        check-q3 check-q3tgl check-q3play check-q3vm

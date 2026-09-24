@@ -25,7 +25,7 @@
 #ifndef Q3_MAP_H
 #define Q3_MAP_H
 
-#include "../q3/code/qcommon/q_shared.h"
+#include "../q3a/code/game/q_shared.h"
 
 #define Q3MAP_MAGIC       "MCTBSP1"
 #define Q3MAP_VERSION     1

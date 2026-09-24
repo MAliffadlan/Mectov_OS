@@ -21,6 +21,7 @@ extern void kfree(void *p);
 extern void *krealloc(void *ptr, unsigned int new_size);
 extern unsigned int get_ticks(void);
 extern void write_serial_string(const char *s);
+extern void write_serial_hex(unsigned int v);
 extern int vfs_get_node(const char *path);
 extern int vfs_read_file_offset(int node, int offset, char *buf, int len);
 extern int vfs_write_file_offset(int node, int offset, const char *buf, int len, int append);
@@ -28,6 +29,17 @@ extern int vfs_create_file(const char *path);
 extern int vfs_delete_node(const char *path);
 extern int vfs_mkdir(const char *path);
 extern unsigned int vfs_get_file_size(int node);
+/* Big single allocations are what the engine's hunk/zone ask for; when one
+ * fails we want the allocator's own numbers in the log instead of a bare
+ * "failed to allocate". (v38.105)
+ *
+ * This TU cannot include the kernel's mem.h, so the layout below mirrors
+ * kmalloc_stats_t there field for field — keep the two in step. It is only
+ * ever read, and only on a >=4MB allocation that already failed. */
+typedef struct { unsigned int heap_base, heap_used, allocated, free_bytes, blocks, free_blocks, largest_free, allocs, frees, oom_count, canary_failures, magic_failures; } q3_heap_stats_t;
+extern void kmalloc_get_stats(void *s);  /* kernel's kmalloc_stats_t — same layout */
+extern unsigned int phys_reserved_bytes(void);
+#define Q3_HEAP_BASE_BYTES (24u * 1024 * 1024)
 extern int vfs_write_file(const char *path, const char *data, int size);
 /* node -> "/name" path: kernel node table keeps a flat name; the Q3 layer
  * only ever writes whole-file to top-level config files, so the path is
@@ -196,6 +208,25 @@ void *q3_malloc(size_t size) {
 void *q3_calloc(size_t num, size_t size) {
 	size_t total = num * size;
 	void *p = q3_malloc(total ? total : 1);
+	if (!p && total >= (4u * 1024 * 1024)) {
+		q3_heap_stats_t st;
+		unsigned int cap = phys_reserved_bytes() - Q3_HEAP_BASE_BYTES;
+		for (unsigned int i = 0; i < sizeof(st); i++) ((unsigned char *)&st)[i] = 0;
+		kmalloc_get_stats(&st);
+		write_serial_string("[Q3] calloc FAILED size=");
+		write_serial_hex((unsigned int)total);
+		write_serial_string(" heap_used=");
+		write_serial_hex(st.heap_used);
+		write_serial_string(" heap_cap=");
+		write_serial_hex(cap);
+		write_serial_string(" largest_free=");
+		write_serial_hex(st.largest_free);
+		write_serial_string(" free=");
+		write_serial_hex(st.free_bytes);
+		write_serial_string(" oom=");
+		write_serial_hex(st.oom_count);
+		write_serial_string("\n");
+	}
 	if (p) q3_memset(p, 0, total);
 	return p;
 }
@@ -499,10 +530,6 @@ size_t q3_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *fp) {
 	struct q3_FILE *f = (struct q3_FILE *)fp;
 	if (!f || f->is_serial || size == 0) return 0;
 	size_t want = size * nmemb;
-	extern void write_serial_string(const char*);
-	write_serial_string("[Q3-FW] entry want=");
-	{ char d[16]; int v=(int)want,i=10; d[11]=0; if(!v){d[i--]='0';} while(v){d[i--]='0'+v%10;v/=10;} write_serial_string(d+i+1);}
-	write_serial_string("\n");
 	const unsigned char *src = ptr;
 	size_t done = 0;
 	static char chunk[1024];
@@ -510,7 +537,6 @@ size_t q3_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *fp) {
 		size_t step = want - done > sizeof(chunk) ? sizeof(chunk) : want - done;
 		q3_memcpy(chunk, src + done, step);
 		int _ow = vfs_write_file_offset(f->node, f->pos + (int)done, chunk, (int)step, 0);
-		write_serial_string(_ow < 0 ? "[Q3-FW] offset-write FAIL\n" : "[Q3-FW] offset-write ok\n");
 		if (_ow < 0) {
 			/* offset-write hanya mendukung FS_RAM_FILE; native FS_FILE
 			 * ditulis whole-file via vfs_write_file (write-through disk). */
@@ -653,6 +679,12 @@ int q3_fprintf(FILE *fp, const char *fmt, ...) {
 	int r = q3_vfprintf(fp, fmt, ap);
 	va_end(ap);
 	return r;
+}
+
+/* NaN test for the official engine core (q_math.c / net_chan.c): a NaN is the
+ * one value that is not equal to itself, which needs no bit fiddling. */
+int q3_isnan(double x) {
+	return x != x;
 }
 
 /* ===== unistd / misc ===== */

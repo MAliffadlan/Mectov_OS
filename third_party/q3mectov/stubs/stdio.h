@@ -47,6 +47,10 @@ int   q3_vprintf(const char *fmt, va_list ap);
 int q3_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 int q3_snprintf(char *buf, size_t size, const char *fmt, ...);
 int q3_sprintf(char *buf, const char *fmt, ...);
+/* id's engine core still uses vsprintf (net_chan.c and friends); the official
+ * Linux build took it from glibc. Unbounded by design — callers pass buffers
+ * sized for the format, exactly as upstream assumed. */
+int q3_vsprintf(char *buf, const char *fmt, va_list ap);
 
 #define fopen     q3_fopen
 #define fclose    q3_fclose
@@ -72,6 +76,7 @@ int q3_sprintf(char *buf, const char *fmt, ...);
 #define sprintf   q3_sprintf
 #define snprintf  q3_snprintf
 #define vsnprintf q3_vsnprintf
+#define vsprintf  q3_vsprintf
 
 #define _IONBF 2
 #define _IOFBF 0

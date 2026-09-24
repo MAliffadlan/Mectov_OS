@@ -7,7 +7,7 @@
 
 #define Q3_HOST_SPIKE 1
 
-#include "../q3/code/qcommon/q_shared.h"
-#include "../q3/code/qcommon/qcommon.h"
+#include "../q3a/code/game/q_shared.h"
+#include "../q3a/code/qcommon/qcommon.h"
 
 #endif /* Q3_MECTOV_H */

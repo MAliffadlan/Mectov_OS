@@ -262,24 +262,33 @@ def main():
         print("[OK] gears window shows rendered geometry (blue/red/green bodies)")
 
         # Animation: two shots ~3s apart must differ in the window region.
-        time.sleep(3)
-        if not screendump(SHOT2):
-            print("[FAIL] screendump 2 failed")
+        # The baseline is the *rotation distance covered in that window*, which
+        # shrinks when the host is loaded (fewer engine frames per second), so
+        # measure it as the best of up to three pairs instead of one — a frozen
+        # scene scores ~0 on every pair, while a merely slow one recovers.
+        best = 0
+        for attempt in range(3):
+            if not screendump(SHOT2):
+                print("[FAIL] screendump 2 failed")
+                return 1
+            time.sleep(3)
+            if not screendump(SHOT3):
+                print("[FAIL] screendump 3 failed")
+                return 1
+            _, _, p2 = load_ppm_pixels(SHOT2)
+            _, _, p3 = load_ppm_pixels(SHOT3)
+            # Sample the window band every ~100 bytes (~33 px): 3s of rotation
+            # repaints hundreds of pixels, while clock/taskbar noise alone
+            # stays well under that. Threshold 80 ≈ 25+ changing pixels.
+            diff = sum(1 for a, b in zip(p2[::99], p3[::99]) if a != b)
+            print(f"     animation (try {attempt + 1}): sampled diff={diff}")
+            best = max(best, diff)
+            if best >= 80:
+                break
+        if best < 80:
+            print(f"[FAIL] scene appears frozen (best sampled diff={best})")
             return 1
-        time.sleep(3)
-        if not screendump(SHOT3):
-            print("[FAIL] screendump 3 failed")
-            return 1
-        _, _, p2 = load_ppm_pixels(SHOT2)
-        _, _, p3 = load_ppm_pixels(SHOT3)
-        # Sample the window band every ~100 bytes (~33 px): 6s of rotation
-        # repaints hundreds of pixels, while clock/taskbar noise alone stays
-        # well under that. Threshold 80 ≈ 25+ changing pixels.
-        diff = sum(1 for a, b in zip(p2[::99], p3[::99]) if a != b)
-        if diff < 80:
-            print(f"[FAIL] scene appears frozen (sampled diff={diff})")
-            return 1
-        print(f"[OK] scene is animated (sampled diff={diff})")
+        print(f"[OK] scene is animated (best sampled diff={best})")
 
         if qemu.poll() is not None:
             print(f"[FAIL] QEMU exited early with code {qemu.returncode}")

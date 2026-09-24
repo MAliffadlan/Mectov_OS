@@ -109,7 +109,18 @@ typedef struct {
 // ioquake3 core (Com_Frame -> Com_EventLoop -> FS stack) overflowed into the
 // guard page and double-faulted. 32KB keeps those frames comfortably inside
 // (peak observed ~16.5KB with headroom for IRQ nesting on the same stack).
+//
+// v38.105: the Q3 variant builds id's own engine core, and id's Com_sprintf()
+// (code/game/q_shared.c) formats through `char bigbuffer[32000]` — a 32,000
+// byte stack frame that a 32KB stack cannot hold. That plus the ~16.5KB of
+// ordinary engine frames is why the engine build doubles the stack; the
+// default ISO keeps 32KB (64 slots, so the difference is 2MB of .bss that only
+// the variant which runs id's code pays for).
+#ifdef MECTOV_Q3
+#define TASK_KSTACK_SIZE 65536
+#else
 #define TASK_KSTACK_SIZE 32768
+#endif
 int task_is_stack_guard(uint32_t addr);       // 1 if addr is in any guard page
 uint32_t task_stack_top(int tid);             // top of task tid's kernel stack
 void task_install_stack_guards(uint32_t page_dir); // unmap guards in a page dir

@@ -45,4 +45,43 @@ seed_one "$ROOT/apps/music.wav" music.wav
 # Q3 phase 4 (v38.104): the Mectov map file — /ext2/mectov1.map, staged by
 # q3play_start() into the engine FS as baseq3/maps/mectov1.map.
 seed_one "$ROOT/assets/maps/mectov1.map" mectov1.map
+# Q3 phase 5 (v38.105): real Quake III Arena game bytecode, built from id's
+# official source by id's own lcc + q3asm (scripts/build_qvm.sh -> build/vm/).
+#
+# It lands in the ext2 image as baseq3/vm/qagame.qvm — the *game directory* on
+# the volume the engine is told is its cd path, so the engine's own FS finds it
+# the way it would find a retail vm/ directory. No staging is involved: the
+# file is too big for the tmpfs cap (256KB per file) and it does not need to be
+# copied anywhere. qagame.map rides along so id's loader can name functions.
+seed_dir() { # $1 = ext2 dir path (created, tolerate exists)
+    debugfs -w -R "mkdir $1" "$IMG" >/dev/null 2>&1
+}
+seed_into() { # $1 = host path, $2 = full ext2 path
+    [ -f "$1" ] || { echo "[seed] missing $1 — skipping $2" >&2; return 0; }
+    debugfs -w -R "rm $2" "$IMG" >/dev/null 2>&1
+    if debugfs -w -R "write $1 $2" "$IMG" >/dev/null 2>&1; then
+        echo "[seed] $2 <- $1"
+    else
+        echo "[seed] FAILED writing $2" >&2
+        return 1
+    fi
+}
+seed_dir /baseq3
+seed_dir /baseq3/vm
+seed_into "$ROOT/build/vm/qagame.qvm" /baseq3/vm/qagame.qvm
+seed_into "$ROOT/build/vm/qagame.map" /baseq3/vm/qagame.map
+
+# productid.txt: what id's own FS check (FS_SetRestrictions in files.c) reads to
+# decide whether the install is the full game. Without it the engine drops into
+# "restricted demo mode", refuses to open anything but .cfg/.menu/.game/.dm_*/
+# .dat from a directory, and no module could be loaded off the volume at all.
+# The bytes are derived from the constant id bakes into files.c — see
+# scripts/build_q3a_productid.py, which explains the whole chain.
+PID="$ROOT/build/vm/productid.txt"
+if python3 "$ROOT/scripts/build_q3a_productid.py" \
+        "$ROOT/third_party/q3a/code/qcommon/files.c" "$PID" >/dev/null 2>&1; then
+    seed_into "$PID" /baseq3/productid.txt
+else
+    echo "[seed] productid.txt generation failed — q3vm will need it" >&2
+fi
 echo "[seed] done: $(debugfs -R 'ls' "$IMG" 2>/dev/null | tr '\n' ' ')"

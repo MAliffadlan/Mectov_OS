@@ -14,6 +14,9 @@ memdisk.tar
 
 # Object directory
 obj/
+# Generated boot artifacts (v38.105: the QVM bytecode built from id's official
+# source by id's lcc + q3asm — see scripts/build_qvm.sh)
+build/
 
 # Temporary/Scratch files
 offset
@@ -83,3 +86,10 @@ rewrite.py
 run_headless
 run_headless.sh
 build.sh
+
+# LAST RULE, ON PURPOSE: the vendored id Software tree (v38.105) ships
+# verbatim, so nothing above may filter it. Its GPL COPYING.txt/README.txt and
+# q3asm's .txt notes fall under `*.txt`, and it carries a build.sh — both would
+# otherwise be silently dropped (last match wins in gitignore, so this has to
+# come after every exclusion pattern).
+!third_party/q3a/**

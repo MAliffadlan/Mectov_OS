@@ -5,6 +5,16 @@
 
 #define PAGE_SIZE 4096
 #define KERNEL_RESERVED_PAGES (80 * 256)  // 80MB NOMINAL reservation (v38.98: +32MB headroom for the Q3 engine hunk/zone); phys_init shrinks it on small-RAM guests — see KERNEL_HEAP_MIN_BYTES
+// v38.105: the OFFICIAL id Software qcommon (third_party/q3a) asks for a 20MB
+// hunk + 6MB zone through calloc() on top of the ~39MB the Q3 app has already
+// taken from kmalloc. The 80MB reservation yields a 56MB heap, which is both
+// too small and too fragmented (largest free block was 9MB → "Hunk data failed
+// to allocate 20 megs"). Guests with RAM to spare get a 160MB reservation
+// (136MB heap) instead; the threshold keeps every smaller configuration on the
+// numbers it was tuned with, and phys_init still applies the 25% frame floor
+// on top of whichever nominal it picks.
+#define KERNEL_RESERVED_PAGES_BIG (160 * 256)          // 160MB on big guests
+#define KERNEL_RESERVED_PAGES_BIG_MIN (384 * 256)      // ≥384MB RAM → use the big nominal
 
 // ---- Kernel heap layout (v38.100/v38.101) ----
 // The kmalloc arena is a fixed PHYSICAL span that starts at KERNEL_HEAP_BASE

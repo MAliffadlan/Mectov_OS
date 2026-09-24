@@ -59,8 +59,8 @@
 
 /* ioq3 types + engine API. Included by relative path, like q3_platform.c, so
  * the libc stub headers never shadow the engine's own headers. */
-#include "../q3/code/qcommon/q_shared.h"
-#include "../q3/code/qcommon/qcommon.h"
+#include "../q3a/code/game/q_shared.h"
+#include "../q3a/code/qcommon/qcommon.h"
 
 #include "../../src/include/wm.h"
 #include "../../src/include/theme.h"
@@ -551,7 +551,8 @@ qboolean CL_GameCommand(void) { return qfalse; }
 qboolean UI_GameCommand(void) { return qfalse; }
 void CL_CDDialog(void) {}
 void CL_FlushMemory(void) {}
-void CL_ShutdownAll(qboolean shutdownRef) { (void)shutdownRef; }
+/* id's qcommon declares these without the fork's extra parameters (v38.105). */
+void CL_ShutdownAll(void) {}
 void CL_InitRef(void) {
     /* The renderer is not a refexport_t module here: q3ref_* is a direct
      * TinyGL backend (see q3cl_render.c), started by CL_StartHunkUsers(). */
@@ -580,8 +581,9 @@ void CL_Disconnect(qboolean showMainMenu) {
 
 /* --- phase 4: map-driven world ----------------------------------------- */
 
-/* The engine FS only sees paths under fs_game (baseq3) inside fs_homepath
- * (/tmp/q3home — tmpfs, v38.99), so whatever the source — the seeded
+/* The engine writes and reads the mod dir under fs_homepath (/tmp/q3home —
+ * tmpfs, v38.99); the volume is on the search path as the CD equivalent but
+ * only read-only data belongs there, so whatever the source — the seeded
  * /ext2/mectov1.map or, when ext2 has none, the embedded fallback text —
  * it is staged ONCE at startup as baseq3/maps/mectov1.map. One loader path
  * downstream: the engine's own FS (the same entry cm_load.c uses for real
@@ -736,9 +738,8 @@ void CL_Init(void) {
 
 /* Renderer + window come up here, called from Com_Init once the filesystem
  * and the command buffer exist (same place ioquake3 starts its ref/UI). */
-void CL_StartHunkUsers(qboolean rendererOnly) {
+void CL_StartHunkUsers(void) {
     if (!cl_inited || cl_win_id >= 0) return;
-    (void)rendererOnly;
 
     if (q3ref_init(Q3CL_W, Q3CL_H) != 0) {
         write_serial_string("[Q3CL] FATAL: TinyGL renderer init failed\n");
@@ -799,8 +800,7 @@ void CL_StartHunkUsers(qboolean rendererOnly) {
     write_serial_string("[Q3CL] world ready\n");
 }
 
-void CL_Shutdown(char *finalmsg, qboolean disconnect, qboolean quit) {
-    (void)disconnect; (void)quit;
+void CL_Shutdown(void) {
     if (cl_win_id >= 0) {
         wm_capture_mouse(cl_win_id, 0);
         wm_request_scancodes(cl_win_id, 0);
@@ -809,9 +809,7 @@ void CL_Shutdown(char *finalmsg, qboolean disconnect, qboolean quit) {
     }
     q3ref_shutdown();
     cl_running = 0;
-    write_serial_string("[Q3CL] shutdown: ");
-    write_serial_string(finalmsg ? finalmsg : "(no message)");
-    write_serial_string("\n");
+    write_serial_string("[Q3CL] shutdown\n");
 }
 
 /* --- the client frame ------------------------------------------------- */
@@ -962,7 +960,7 @@ static void q3play_park(void) {
 }
 
 void q3play_start(void) {
-    write_serial_string("[Q3CL] Starting Quake III client (ioq3 + TinyGL)...\n");
+    write_serial_string("[Q3CL] Starting Quake III client (id Software source + TinyGL)...\n");
 
     static char cmdline[160];
     static const char args[] =

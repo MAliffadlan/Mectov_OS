@@ -93,17 +93,25 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Build ioquake3 kernel variant (MECTOV_Q3=1)
+      - name: Build Q3 kernel variant (MECTOV_Q3=1)
         run: |
           # v38.99: second ISO with the Q3 engine core compiled in. The
           # default ISO must stay engine-free; only the quake3 job boots
           # this variant. disk/ext2 copies ship alongside so the test job
           # gets the same fresh-image state as every other job.
+          #
+          # `make iso` here also runs the `qvm` target (v38.105), which builds
+          # qagame.qvm from id's own source with id's own lcc + q3asm. That
+          # file did not exist when ext2.img was seeded above, so re-seed the
+          # volume afterwards — otherwise ext2-q3.img would ship without the
+          # bytecode the q3vm job boots (seed_ext2.sh skips missing sources).
           MECTOV_Q3=1 make iso
+          bash scripts/seed_ext2.sh ext2.img
           mv mectov.iso mectov-q3.iso
           cp disk.img disk-q3.img
           cp ext2.img ext2-q3.img
           test -f mectov-q3.iso && echo "mectov-q3.iso built OK"
+          test -f build/vm/qagame.qvm && echo "qagame.qvm built OK"
 
       - name: Upload Q3 build artifacts
         uses: actions/upload-artifact@v4
@@ -377,7 +385,7 @@ jobs:
   quake3:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -401,13 +409,15 @@ jobs:
           cp disk-q3.img disk.img
           cp ext2-q3.img ext2.img
 
-      - name: ioquake3 engine core regression (TCG)
+      - name: Q3 engine core regression (TCG)
         run: |
           # v38.99: boots the MECTOV_Q3=1 ISO, types `q3` in the Terminal,
           # and asserts Com_Init + 10 Com_Frame ticks complete with the OS
           # alive. The engine runs on a dedicated kernel task forked by
           # cmd_q3 (IF=1) with its config I/O on tmpfs — never inline in
           # the shell syscall, which executes with interrupts disabled.
+          # The core is id Software's official source (v38.105), so the
+          # Com_Init banner is id's own version string: Q3 1.32b.
           python3 scripts/q3_test.py --iso mectov-q3.iso --timeout 300
 
       - name: TinyGL gears window (visual, TCG)
@@ -431,6 +441,18 @@ jobs:
           # capture and turn the view (frame pixels must differ afterwards).
           # ESC has to shut the client down and hand the desktop back.
           python3 scripts/q3play_test.py --iso mectov-q3.iso --timeout 480
+
+      - name: Official id game bytecode in id's own VM (TCG)
+        run: |
+          # v38.105 (Q3 phase 5): types `q3vm` and asserts that qagame.qvm —
+          # real Quake III Arena game bytecode built from third_party/q3a by
+          # id's own lcc + q3asm, staged on the ext2 volume — is loaded by
+          # id's own QVM loader (1050 symbols parsed from vm/qagame.map),
+          # executed by id's own interpreter, and that GAME_INIT runs
+          # G_InitGame to completion (worldspawn + registered items, zero
+          # unhandled traps). Needs build/vm/qagame.qvm in the checkout for
+          # the byte-size comparison; skipped gracefully when absent.
+          python3 scripts/q3vm_test.py --iso mectov-q3.iso --timeout 480
 
   storage:
     needs: build

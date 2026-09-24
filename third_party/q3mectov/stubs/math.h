@@ -29,8 +29,10 @@ float  q3_atan2f(float y, float x);
 float  q3_sinf(float x);
 float  q3_cosf(float x);
 int    q3_isfinite(double x);
+int    q3_isnan(double x);
 
 #define sin    q3_sin
+#define isnan  q3_isnan
 #define isfinite q3_isfinite
 #define cos    q3_cos
 #define tan    q3_tan

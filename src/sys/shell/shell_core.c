@@ -773,6 +773,7 @@ else if (strcmp(cmd_b, "doom") == 0 || strncmp(cmd_b, "doom ", 5) == 0) { cmd_do
 else if (strcmp(cmd_b, "q3") == 0 || strncmp(cmd_b, "q3 ", 3) == 0) { cmd_q3(); }
 else if (strcmp(cmd_b, "q3gl") == 0 || strncmp(cmd_b, "q3gl ", 5) == 0) { cmd_q3gl(); }
 else if (strcmp(cmd_b, "q3play") == 0 || strncmp(cmd_b, "q3play ", 7) == 0) { cmd_q3play(); }
+else if (strcmp(cmd_b, "q3vm") == 0 || strncmp(cmd_b, "q3vm ", 5) == 0) { cmd_q3vm(); }
 // --- TASKMGR ---
 else if (strcmp(cmd_b, "taskmgr") == 0) cmd_taskmgr();
 // --- LOCK (kunci) ---

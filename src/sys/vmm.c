@@ -78,6 +78,16 @@ void phys_init(uint32_t total_pages) {
     // back via phys_reserved_bytes() to bound the kernel heap to the same
     // boundary.
     uint32_t reserve_pages = KERNEL_RESERVED_PAGES;
+    // Big guests take the larger nominal reservation (v38.105). The official
+    // Q3 engine core cannot boot inside the 56MB heap the 80MB nominal yields
+    // — see KERNEL_RESERVED_PAGES_BIG — and every guest with this much RAM can
+    // afford it without touching the 25% frame floor applied below. Small
+    // guests keep the old nominal bit-for-bit, so their boot/fork numbers do
+    // not move.
+    if (phys_total_pages >= KERNEL_RESERVED_PAGES_BIG_MIN) {
+        reserve_pages = KERNEL_RESERVED_PAGES_BIG;
+        write_serial_string("[PHYS] big-RAM guest: large kernel reservation.\n");
+    }
     uint32_t min_free = phys_total_pages / 4;
     if (reserve_pages + min_free > phys_total_pages) {
         reserve_pages = phys_total_pages - min_free;
