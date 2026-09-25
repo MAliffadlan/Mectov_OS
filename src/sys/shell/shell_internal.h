@@ -173,6 +173,7 @@ void cmd_q3(void);
 void cmd_q3gl(void);
 void cmd_q3play(void);
 void cmd_q3vm(void);
+void cmd_q3arena(void);
 void cmd_taskmgr(void);
 void cmd_lock(void);
 void cmd_locktimeout(void);

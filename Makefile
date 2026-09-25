@@ -94,7 +94,8 @@ Q3_SRCS = $(Q3_DIR)/game/q_math.c $(Q3_DIR)/game/q_shared.c \
           $(Q3_DIR)/null/null_input.c $(Q3_DIR)/null/null_snddma.c \
           $(Q3_OUR)/q3_kernel.c $(Q3_OUR)/q3_printf.c \
           $(Q3_OUR)/q3_platform.c $(Q3_OUR)/q3_client.c \
-          $(Q3_OUR)/q3_map.c $(Q3_OUR)/q3_vm.c
+          $(Q3_OUR)/q3_map.c $(Q3_OUR)/q3_vm.c \
+          $(Q3_OUR)/q3bsp.c
 # null/null_client.c is deliberately NOT built any more (v38.103): q3_client.c
 # replaces the upstream null client with the Mectov client layer — CL_Init,
 # CL_Frame, CL_KeyEvent/CL_CharEvent/CL_MouseEvent, the bind commands and the
@@ -114,7 +115,7 @@ TGL_SRCS = $(TGL_DIR)/src/api.c $(TGL_DIR)/src/arrays.c $(TGL_DIR)/src/clear.c \
            $(TGL_DIR)/src/zmath.c $(TGL_DIR)/src/zpostprocess.c $(TGL_DIR)/src/zraster.c \
            $(TGL_DIR)/src/ztriangle.c \
            $(TGL_DIR)/kernel_shim.c $(TGL_DIR)/q3gl_window.c \
-           $(TGL_DIR)/q3cl_render.c
+           $(TGL_DIR)/q3cl_render.c $(TGL_DIR)/q3world_render.c
 ifeq ($(Q3_ENABLED),1)
 Q3_OBJS = $(patsubst $(Q3_DIR)/%,$(OBJ_DIR)/q3/%,$(Q3_SRCS:.c=.o))
 Q3_OBJS := $(patsubst $(Q3_OUR)/%,$(OBJ_DIR)/q3plat/%,$(Q3_OBJS))
@@ -633,6 +634,7 @@ $(OBJ_DIR)/q3plat/%.o: $(Q3_OUR)/%.c Makefile | $(OBJ_DIR)
 # TinyGL include dirs. TGL_FEATURE_* stay at their defaults (32-bit render).
 TGL_CFLAGS = -m32 -std=gnu99 -ffreestanding -O1 -MMD -MP \
               -I$(Q3_OUR)/stubs -I$(TGL_DIR)/include -I$(TGL_DIR)/src \
+              -I$(Q3_OUR) \
               -fno-builtin -fno-pie -fno-pic -march=i686 \
               -DMECTOV_Q3=1 -DNO_DEBUG_OUTPUT -w
 # memory.c is EXCLUDED from TGL_SRCS: it defines gl_malloc/gl_free over the
@@ -654,6 +656,13 @@ $(OBJ_DIR)/tgl/q3gl_window.o: $(TGL_DIR)/q3gl_window.c | $(OBJ_DIR)
 # arena. Same include shape as q3gl_window.c — it includes only <TGL/gl.h>,
 # zbuffer.h and its own header, which the client TU shares.
 $(OBJ_DIR)/tgl/q3cl_render.o: $(TGL_DIR)/q3cl_render.c $(TGL_DIR)/q3cl_render.h | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(TGL_CFLAGS) -c $< -o $@
+
+# q3world_render.c (v38.108): the .bsp world renderer — textured surfaces from
+# the game module's own level (third_party/q3mectov/q3bsp.h is its data
+# interface, which is why TGL_CFLAGS carries -I$(Q3_OUR)).
+$(OBJ_DIR)/tgl/q3world_render.o: $(TGL_DIR)/q3world_render.c $(TGL_DIR)/q3world_render.h $(Q3_OUR)/q3bsp.h | $(OBJ_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(TGL_CFLAGS) -c $< -o $@
 
@@ -742,5 +751,12 @@ check-q3vm:
 	MECTOV_Q3=1 $(MAKE) iso
 	python3 scripts/check.py --keep-images --only q3vm $(CHECK_ARGS)
 
+# The module's own level, drawn (v38.108, Q3 phase 8): the same session as
+# check-q3vm plus the TinyGL window, the map's textures and pixel assertions on
+# the rendered frame.
+check-q3arena:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3arena $(CHECK_ARGS)
+
 .PHONY: all clean clean_all check check-quick qvm iso \
-        check-q3 check-q3tgl check-q3play check-q3vm
+        check-q3 check-q3tgl check-q3play check-q3vm check-q3arena

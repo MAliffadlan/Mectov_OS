@@ -45,6 +45,23 @@ void q3ref_set_camera(float x, float y, float z, float yaw_deg, float pitch_deg)
  * only q3cl_render.c pulls the real struct in. */
 struct q3map_s;
 void q3ref_set_map(const struct q3map_s *m);
+/* Phase 8: draw a real .bsp (the game module's own level) instead of the
+ * built-in arena. Passing NULL drops back to the arena / MCTBSP1 map. The
+ * mesh must outlive the renderer's use of it — the caller owns it. */
+struct q3bsp_mesh_s;                 /* tag from third_party/q3mectov/q3bsp.h */
+void q3ref_set_bsp(const struct q3bsp_mesh_s *m);
+/* Camera as a full basis, for a caller whose forward vector comes from the game
+ * module (origin + unit forward; the up vector follows the world's Z). */
+void q3ref_set_camera_basis(const float origin[3], const float forward[3]);
+/* Last frame's draw accounting + the texture cache state (for logging/tests).
+ * Any pointer may be NULL. */
+void q3ref_bsp_stats(int *facesDrawn, int *trisDrawn, int *facesCulled,
+                     int *shaders, int *fromDisk, int *placeholders);
+/* Classify the finished frame straight out of the ZBuffer: the renderer's own
+ * account of what it drew, independent of the WM and the compositor. Returns
+ * the number of pixels examined; any output pointer may be NULL. */
+int  q3ref_frame_histogram(int *cyan, int *warm, int *stepgreen, int *violet,
+                           int *bright, int *sky, int *distinct);
 /* Draw the arena. time_sec drives the animated props. */
 void q3ref_draw_world(double time_sec);
 void q3ref_end_frame(void);

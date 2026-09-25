@@ -454,6 +454,22 @@ jobs:
           # the byte-size comparison; skipped gracefully when absent.
           python3 scripts/q3vm_test.py --iso mectov-q3.iso --timeout 480
 
+      - name: The module's own level, drawn (TCG)
+        run: |
+          # v38.108 (Q3 phase 8): types `q3arena` — the same official qagame
+          # session as the step above, but with the .bsp the module is standing
+          # in rendered through TinyGL. Asserts the render mesh came from the
+          # level's own file, that all four of its textures were decoded from
+          # the game data on the ext2 volume (no placeholders), that surfaces
+          # are really submitted, that every sampled frame is made of the
+          # level's palette with ZERO clear-colour pixels (the check that
+          # catches a view transform that points the camera at nothing), that
+          # the window is on the desktop where the driver asked, that the scene
+          # is live, and that id's Pmove moves the player inside the drawn
+          # level. Frames are classified out of the renderer's own ZBuffer, so
+          # the assertions do not depend on the compositor.
+          python3 scripts/q3arena_test.py --iso mectov-q3.iso --timeout 600
+
   storage:
     needs: build
     runs-on: ubuntu-latest

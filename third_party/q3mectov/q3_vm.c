@@ -54,6 +54,13 @@ extern void write_serial_string(const char *s);
 extern void Com_Printf(const char *fmt, ...);
 extern int  Com_Milliseconds(void);
 
+/* v38.108: the windowed path (`q3arena`) — the render mesh for the module's own
+ * level, the TinyGL backend that draws it, and the WM window it presents into. */
+#include "q3bsp.h"
+#include "../tinygl/q3cl_render.h"
+#include "../../src/include/wm.h"
+#include "../../src/include/theme.h"
+
 /* VFS (src/sys/vfs.c) */
 extern int  vfs_mkdir(const char *path);
 extern int  vfs_get_node(const char *path);
@@ -449,12 +456,40 @@ static void q3vm_world_probe(void) {
     }
 }
 
-/* One synthetic player, full throttle forward. serverTime carries the frame's
- * level time; id's own code clamps and resyncs anything else. */
+/* The usercmd the windowed loop builds (see q3vm_fill_usercmd). They live up
+ * here because the trap surface below reads them, while the windowed driver at
+ * the bottom of the file is what fills them in. */
+static int   q3vm_cmd_live;                     /* 1 = windowed input in use */
+static int   q3vm_cmd_forward, q3vm_cmd_right;  /* -127..127, this frame */
+/* The angles this driver ASKS for, accumulated from input. Deliberately not the
+ * module's ps.viewangles: the module adds its own delta_angles (seeded by
+ * SetClientViewAngle at spawn) to whatever a command carries, so feeding the
+ * viewangles back in counts that delta again on every frame and the view walks
+ * itself away — which is exactly what happened here the first time. The
+ * module's angles are used for the CAMERA, these for the COMMAND. */
+static float q3vm_cmd_yaw, q3vm_cmd_pitch;
+
+/* One synthetic player. serverTime carries the frame's level time; id's own
+ * code clamps and resyncs anything else.
+ *
+ * Headless (`q3vm`) that is the whole command: full throttle forward, angles
+ * left at zero — the exact command v38.107's assertions were written against,
+ * so the log the regression suite checks cannot shift because a window was
+ * added. Windowed (`q3arena`) the command carries what the WM delivered:
+ * movement keys, plus the module's own viewangles with the user's pending
+ * mouse/arrow deltas on top. */
 static void q3vm_fill_usercmd(usercmd_t *cmd, int serverTime) {
     memset(cmd, 0, sizeof(*cmd));
     cmd->serverTime = serverTime;
-    cmd->forwardmove = 127;
+    if (!q3vm_cmd_live) {
+        cmd->forwardmove = 127;
+        return;
+    }
+    cmd->forwardmove = (signed char)q3vm_cmd_forward;
+    cmd->rightmove = (signed char)q3vm_cmd_right;
+    cmd->angles[YAW] = ANGLE2SHORT(q3vm_cmd_yaw);
+    cmd->angles[PITCH] = ANGLE2SHORT(q3vm_cmd_pitch);
+    cmd->angles[ROLL] = 0;
 }
 
 /* The userinfo string the retail server would keep per client. "ip" is
@@ -788,6 +823,311 @@ int VM_CallCompiled(vm_t *vm, int *args) {
 	return 0;
 }
 
+/* ===== the world on screen: the `q3arena` path (v38.108) =============== */
+/* v38.108 takes the level the module has been running inside since v38.107 —
+ * collision, entity string, spawn point — and draws it: the same .bsp's
+ * surfaces through TinyGL, textured from the game data on the volume, with the
+ * camera following the module's own playerState (origin + viewheight, forward
+ * out of id's AngleVectors on ps.viewangles). What the window shows is
+ * therefore not this port's idea of a level; it is the geometry the official
+ * game code is standing in.
+ *
+ * Input travels the other way: WM scancodes and captured mouse motion become
+ * the usercmd the module consumes in GAME_CLIENT_THINK, so id's own Pmove does
+ * the moving. With no key pressed the driver holds forward — that keeps the
+ * demo self-driving (and CI-assertable); the first key the window receives
+ * hands control to the user.
+ */
+#define Q3ARENA_W          320
+#define Q3ARENA_H          240
+#define Q3ARENA_FRAMES     300          /* 15 s of game time at FRAMETIME */
+#define Q3ARENA_WALL_MS    150000       /* stop regardless, so CI cannot hang */
+#define Q3ARENA_TURN_DEG   130.0f       /* arrow-key turn rate, per second */
+#define Q3ARENA_SENS       0.18f        /* mouse degrees per pixel */
+
+#define SC_ESC   0x01
+#define SC_W     0x11
+#define SC_A     0x1E
+#define SC_S     0x1F
+#define SC_D     0x20
+#define SC_SPACE 0x39
+#define SC_UP    0x48
+#define SC_LEFT  0x4B
+#define SC_RIGHT 0x4D
+#define SC_DOWN  0x50
+
+static int   a_win = -1;                /* the window, -1 = none */
+static int   a_quit;                    /* set by ESC / window close */
+static int   a_input_seen;              /* a key has reached the window */
+static int   a_frames;                  /* frames rendered */
+static int   a_faces_drawn, a_tris_drawn;   /* totals across the run */
+static unsigned char a_keys[128];       /* scancode -> held (no 0x80 bit) */
+
+static unsigned a_next_ms;              /* when the next frame is due */
+static unsigned a_start_ms;             /* when the frame loop began */
+static q3bsp_mesh_t a_mesh;
+
+static playerState_t *q3vm_ps(vm_t *vm) {
+    if (!vm || vm_ps_ofs < 0) return 0;
+    return (playerState_t *)(vm->dataBase + (vm_ps_ofs & vm->dataMask));
+}
+
+extern int get_win_index(int wid);
+
+static void q3arena_win_draw(int id, int cx, int cy, int cw, int ch) {
+    int idx = get_win_index(id);
+    (void)cx; (void)cy;
+    if (idx < 0) return;
+    if (wm_wins[idx].resizing) return;
+    if (!wm_wins[idx].content_buffer) return;
+    q3ref_blit(wm_wins[idx].content_buffer, cw, ch);
+}
+
+/* The WM delivers raw scancodes to this window (wm_request_scancodes), press
+ * and release alike, which is the only way to hold a movement key. */
+static void q3arena_win_key(int id, char c, uint8_t sc) {
+    uint8_t base = sc & 0x7F;
+    int down = !(sc & 0x80);
+    (void)id; (void)c;
+    if (base >= 128) return;
+    a_keys[base] = (unsigned char)down;
+    a_input_seen = 1;
+    if (base == SC_ESC && down) a_quit = 1;
+}
+
+/* Relative motion while this window owns the capture, exactly like the client
+ * layer's mouse path. Flushed by the next usercmd. */
+static void q3arena_win_mouse(int id, int dx, int dy, int btn) {
+    (void)id; (void)btn;
+    if (wm_capture_owner() != a_win) return;
+    a_input_seen = 1;
+    q3vm_cmd_yaw   -= (float)dx * Q3ARENA_SENS;
+    q3vm_cmd_pitch -= (float)dy * Q3ARENA_SENS;
+    if (q3vm_cmd_pitch > 85.0f) q3vm_cmd_pitch = 85.0f;
+    if (q3vm_cmd_pitch < -85.0f) q3vm_cmd_pitch = -85.0f;
+}
+
+/* Load the render mesh for the map the collision world came from and hand it
+ * to the renderer, which decodes its textures. Failing here is not fatal: the
+ * renderer falls back to its built-in arena, which is what a build with no
+ * game data on the volume must still be able to show. */
+static void q3arena_world_mesh(void) {
+    int rc = q3bsp_load(Q3VM_BSP_FS_PATH, &a_mesh);
+    if (rc != 0 || !a_mesh.valid) {
+        write_serial_string("[Q3ARENA] world mesh: FAILED to build from "
+                            Q3VM_BSP_FS_PATH " (rc=");
+        vm_ser_int(rc);
+        write_serial_string(") — falling back to the built-in arena\n");
+        return;
+    }
+    write_serial_string("[Q3ARENA] world mesh: " Q3VM_BSP_FS_PATH " surfaces=");
+    vm_ser_int(a_mesh.numFaces);
+    write_serial_string(" of=");
+    vm_ser_int(a_mesh.fileSurfaces);
+    write_serial_string(" verts=");
+    vm_ser_int(a_mesh.numVerts);
+    write_serial_string(" shaders=");
+    vm_ser_int(a_mesh.numShaders);
+    write_serial_string(" patches=");
+    vm_ser_int(a_mesh.patchSurfaces);
+    write_serial_string(" skipped=");
+    vm_ser_int(a_mesh.skippedFaces);
+    write_serial_string(" truncated=");
+    vm_ser_int(a_mesh.truncated);
+    write_serial_string("\n");
+    q3ref_set_bsp(&a_mesh);
+}
+
+static void q3arena_open(void) {
+    int ww, wh, wx, wy;
+    extern uint32_t fb_width, fb_height;
+
+    if (q3ref_init(Q3ARENA_W, Q3ARENA_H) != 0) {
+        write_serial_string("[Q3ARENA] FATAL: TinyGL renderer init failed\n");
+        return;
+    }
+    write_serial_string("[Q3ARENA] TinyGL renderer ready w=");
+    vm_ser_int(Q3ARENA_W);
+    write_serial_string(" h=");
+    vm_ser_int(Q3ARENA_H);
+    write_serial_string("\n");
+
+    ww = Q3ARENA_W + 2;
+    wh = Q3ARENA_H + TITLEBAR_H + 2;
+    wx = ((int)fb_width - ww) / 2;  if (wx < 0) wx = 0;
+    wy = ((int)fb_height - TASKBAR_H_PX - wh) / 2; if (wy < 0) wy = 0;
+
+    /* The title says what this is on purpose: id's game module's own level,
+     * drawn by this port — not the retail game. */
+    a_win = wm_open(wx, wy, ww, wh, "Quake III — official qagame VM",
+                    q3arena_win_draw, q3arena_win_key, NULL, q3arena_win_mouse);
+    if (a_win < 0) {
+        write_serial_string("[Q3ARENA] FATAL: could not open WM window\n");
+        q3ref_shutdown();
+        return;
+    }
+    /* The rect is logged because the test has to know where the window ended
+     * up: the WM owns placement, and a screendump assertion that guesses the
+     * geometry silently measures the desktop instead (which is exactly how the
+     * first version of this test passed a violet count it should not have). */
+    write_serial_string("[Q3ARENA] window id=");
+    vm_ser_hex((unsigned int)a_win);
+    write_serial_string(" rect=");
+    vm_ser_int(wx);
+    write_serial_string(",");
+    vm_ser_int(wy);
+    write_serial_string(" " );
+    vm_ser_int(ww);
+    write_serial_string("x");
+    vm_ser_int(wh);
+    write_serial_string(" content=");
+    vm_ser_int(Q3ARENA_W);
+    write_serial_string("x");
+    vm_ser_int(Q3ARENA_H);
+    write_serial_string(" title=\"Quake III — official qagame VM\"\n");
+
+    wm_request_scancodes(a_win, 1);
+    if (wm_capture_mouse(a_win, 1)) {
+        int cx = 0, cy = 0;
+        wm_capture_center(&cx, &cy);
+        write_serial_string("[Q3ARENA] mouse captured (WASD/arrows move, mouse looks, ESC quits)\n");
+    } else {
+        write_serial_string("[Q3ARENA] WARNING: mouse capture refused\n");
+    }
+
+    q3arena_world_mesh();
+}
+
+static void q3arena_close(void) {
+    if (a_win >= 0) {
+        wm_capture_mouse(a_win, 0);
+        wm_request_scancodes(a_win, 0);
+        wm_close(a_win);
+        a_win = -1;
+    }
+    q3ref_shutdown();
+}
+
+/* One frame: hand the module this frame's command, let it run its own frame,
+ * then draw the world from the playerState it produced. */
+static void q3arena_frame(vm_t *vm, int frame) {
+    playerState_t *ps;
+    vec3_t eye, fwd;
+    int drawn = 0, tris = 0, culled = 0;
+    int shaders = 0, from_disk = 0, ph = 0;
+    int cyan = 0, warm = 0, stepgreen = 0, violet = 0, bright = 0, sky = 0;
+    int distinct = 0;
+    unsigned target = a_next_ms;
+
+    /* --- input -> usercmd ------------------------------------------------ */
+    {
+        int fm = 0, rm = 0;
+        if (a_keys[SC_W] || a_keys[SC_UP]) fm += 127;
+        if (a_keys[SC_S] || a_keys[SC_DOWN]) fm -= 127;
+        if (a_keys[SC_D]) rm += 127;
+        if (a_keys[SC_A]) rm -= 127;
+        if (!a_input_seen) fm = 127;    /* self-driving demo until a key lands */
+        if (a_keys[SC_LEFT])  q3vm_cmd_yaw += Q3ARENA_TURN_DEG * ((float)Q3VM_FRAMETIME / 1000.0f);
+        if (a_keys[SC_RIGHT]) q3vm_cmd_yaw -= Q3ARENA_TURN_DEG * ((float)Q3VM_FRAMETIME / 1000.0f);
+        while (q3vm_cmd_yaw > 180.0f)  q3vm_cmd_yaw -= 360.0f;
+        while (q3vm_cmd_yaw < -180.0f) q3vm_cmd_yaw += 360.0f;
+        q3vm_cmd_forward = fm;
+        q3vm_cmd_right = rm;
+    }
+
+    q3vm_frame_time += Q3VM_FRAMETIME;
+    VM_Call(vm, GAME_RUN_FRAME, q3vm_frame_time);
+    VM_Call(vm, GAME_CLIENT_THINK, 0);
+
+    ps = q3vm_ps(vm);
+
+    /* --- the module's viewpoint is the camera ---------------------------- */
+    if (ps) {
+        VectorCopy(ps->origin, eye);
+        eye[2] += (float)ps->viewheight;
+        AngleVectors(ps->viewangles, fwd, NULL, NULL);
+        q3ref_set_camera_basis(eye, fwd);
+    }
+    q3ref_begin_frame();
+    q3ref_draw_world((double)q3vm_frame_time / 1000.0);
+    q3ref_end_frame();
+    q3ref_bsp_stats(&drawn, &tris, &culled, &shaders, &from_disk, &ph);
+    q3ref_frame_histogram(&cyan, &warm, &stepgreen, &violet, &bright, &sky,
+                          &distinct);
+    if (a_win >= 0) wm_invalidate(a_win);
+
+    a_frames++;
+    a_faces_drawn += drawn;
+    a_tris_drawn += tris;
+
+    if ((frame % 20) == 0) {
+        write_serial_string("[Q3ARENA] frame=");
+        vm_ser_int(frame);
+        write_serial_string(" t=");
+        vm_ser_int(q3vm_frame_time);
+        if (ps) {
+            write_serial_string(" pos=(");
+            vm_ser_int((int)ps->origin[0]);
+            write_serial_string(",");
+            vm_ser_int((int)ps->origin[1]);
+            write_serial_string(",");
+            vm_ser_int((int)ps->origin[2]);
+            write_serial_string(") eye_z=");
+            vm_ser_int((int)eye[2]);
+            write_serial_string(" yaw=");
+            vm_ser_int((int)ps->viewangles[YAW]);
+            write_serial_string(" pitch=");
+            vm_ser_int((int)ps->viewangles[PITCH]);
+        }
+        write_serial_string(" drawn=");
+        vm_ser_int(drawn);
+        write_serial_string(" tris=");
+        vm_ser_int(tris);
+        write_serial_string(" culled=");
+        vm_ser_int(culled);
+        write_serial_string("\n");
+
+        /* The finished frame, read back out of the renderer's own buffer: one
+         * line per sampled frame that says what the camera actually saw. */
+        write_serial_string("[Q3ARENA] pixels frame=");
+        vm_ser_int(frame);
+        write_serial_string(" cyan=");
+        vm_ser_int(cyan);
+        write_serial_string(" warm=");
+        vm_ser_int(warm);
+        write_serial_string(" stepgreen=");
+        vm_ser_int(stepgreen);
+        write_serial_string(" violet=");
+        vm_ser_int(violet);
+        write_serial_string(" bright=");
+        vm_ser_int(bright);
+        write_serial_string(" sky=");
+        vm_ser_int(sky);
+        write_serial_string(" distinct=");
+        vm_ser_int(distinct);
+        write_serial_string("\n");
+    }
+
+    /* Pace to the module's own frame time (~20 fps) instead of spinning, so the
+     * desktop keeps its timeslice and the run stays watchable in TCG. A frame
+     * that overran its budget drops the deficit rather than catching up. */
+    a_next_ms += (unsigned)Q3VM_FRAMETIME;
+    for (;;) {
+        unsigned now = (unsigned)Com_Milliseconds();
+        if (now >= target || a_quit) break;
+        __asm__ __volatile__("hlt");
+    }
+    {
+        unsigned now = (unsigned)Com_Milliseconds();
+        if (now > a_next_ms + 250u) a_next_ms = now;
+    }
+    (void)shaders; (void)from_disk; (void)ph;
+    if (a_win >= 0 && wm_is_open(a_win) == 0) {
+        write_serial_string("[Q3ARENA] window closed\n");
+        a_quit = 1;
+    }
+}
+
 /* ===== driver ========================================================== */
 
 static void q3vm_park(void) {
@@ -795,7 +1135,7 @@ static void q3vm_park(void) {
     for (;;) __asm__ __volatile__("hlt");
 }
 
-void q3vm_start(void) {
+static void q3_drive(int windowed) {
     static char cmdline[176];
     static const char args[] =
         "+set dedicated 1 "        /* server-style core: no client, no GL */
@@ -841,6 +1181,17 @@ void q3vm_start(void) {
      * CLIENT_BEGIN. */
     q3vm_world_load();
     q3vm_world_report_spawn();
+
+    /* Windowed only: the renderer, the window and the level's textures come up
+     * before the module runs, so GAME_INIT and the connect sequence happen with
+     * the world already drawable. A failure here (no renderer, no window) is
+     * reported and the session continues headless rather than dying. */
+    if (windowed) {
+        write_serial_string("[Q3ARENA] official qagame VM world rendered through "
+                            "TinyGL (id Software source)\n");
+        q3arena_open();
+        q3vm_cmd_live = 1;
+    }
 
     /* id's loader: reads vm/qagame.qvm through the engine FS, validates the
      * VM_MAGIC header, allocates the data/code segments on the hunk and
@@ -933,24 +1284,41 @@ void q3vm_start(void) {
      * (SV_Frame -> SV_GameFrame: GAME_RUN_FRAME then per-client
      * GAME_CLIENT_THINK). Level time advances FRAMETIME per frame — the
      * server owns the clock, exactly like upstream. Each think hands the
-     * module a full-forward usercmd, so id's own bg_pmove.c accelerates
-     * the player across the floor plane. */
+     * module that frame's usercmd, so id's own bg_pmove.c moves the player:
+     * headless that is full throttle forward (the v38.107 regression, byte for
+     * byte), while `q3arena` feeds the window's input and renders every frame
+     * it runs. */
     {
         int frame;
-        int x0, x1;
+        int x0 = q3vm_ps_x(vm), x1;
+        unsigned t_start = (unsigned)Com_Milliseconds();
+
         write_serial_string("[Q3VM] frame loop: ");
-        vm_ser_int(Q3VM_FRAME_COUNT);
+        vm_ser_int(windowed ? Q3ARENA_FRAMES : Q3VM_FRAME_COUNT);
         write_serial_string(" frames x ");
         vm_ser_int(Q3VM_FRAMETIME);
         write_serial_string(" msec\n");
         q3vm_frame_time = 0;
-        x0 = 0;
-        for (frame = 1; frame <= Q3VM_FRAME_COUNT; frame++) {
-            q3vm_frame_time += Q3VM_FRAMETIME;
-            VM_Call(vm, GAME_RUN_FRAME, q3vm_frame_time);
-            VM_Call(vm, GAME_CLIENT_THINK, 0);
-            if (frame == 1) x0 = q3vm_ps_x(vm);
-            if (frame % 20 == 0) q3vm_log_player_state(vm, frame, q3vm_frame_time);
+
+    if (windowed) {
+        a_start_ms = t_start;
+        a_next_ms = t_start;
+            for (frame = 1; frame <= Q3ARENA_FRAMES; frame++) {
+                q3arena_frame(vm, frame);
+                if (a_quit) break;
+                if ((unsigned)Com_Milliseconds() - t_start > Q3ARENA_WALL_MS) {
+                    write_serial_string("[Q3ARENA] wall-clock budget reached\n");
+                    break;
+                }
+            }
+        } else {
+            for (frame = 1; frame <= Q3VM_FRAME_COUNT; frame++) {
+                q3vm_frame_time += Q3VM_FRAMETIME;
+                VM_Call(vm, GAME_RUN_FRAME, q3vm_frame_time);
+                VM_Call(vm, GAME_CLIENT_THINK, 0);
+                if (frame == 1) x0 = q3vm_ps_x(vm);
+                if (frame % 20 == 0) q3vm_log_player_state(vm, frame, q3vm_frame_time);
+            }
         }
         x1 = q3vm_ps_x(vm);
         write_serial_string("[Q3VM] movement x0=");
@@ -960,7 +1328,28 @@ void q3vm_start(void) {
         write_serial_string(" delta=");
         vm_ser_int(x1 - x0);
         write_serial_string("\n");
+
+        if (windowed) {
+            write_serial_string("[Q3ARENA] render totals: frames=");
+            vm_ser_int(a_frames);
+            write_serial_string(" faces=");
+            vm_ser_int(a_faces_drawn);
+            write_serial_string(" tris=");
+            vm_ser_int(a_tris_drawn);
+            write_serial_string(" wall_ms=");
+            vm_ser_int((int)((unsigned)Com_Milliseconds() - t_start));
+            write_serial_string("\n");
+        }
         write_serial_string("[Q3VM] frame loop done\n");
+    }
+
+    /* Windowed teardown happens before the module is shut down, exactly like
+     * the client layer: the WM window and the renderer go away while the
+     * module's world is still alive, so nothing can be drawn from a freed VM. */
+    if (windowed) {
+        q3arena_close();
+        q3bsp_free(&a_mesh);
+        write_serial_string("[Q3ARENA] done\n");
     }
 
     /* id's own shut-down order (sv_main.c SV_ShutdownGameProgs): the module
@@ -972,3 +1361,10 @@ void q3vm_start(void) {
     write_serial_string("[Q3VM] done\n");
     q3vm_park();
 }
+
+/* ---- the two entry points the shell commands fork into ---------------- */
+/* `q3vm` (v38.105) stays headless: the evidence for the VM milestone is the
+ * serial log, and CI's regression for it must not depend on a window.
+ * `q3arena` (v38.108) is the same session with the level drawn. */
+void q3vm_start(void)   { q3_drive(0); }
+void q3arena_start(void) { q3_drive(1); }

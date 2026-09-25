@@ -24,6 +24,7 @@
 #include <TGL/gl.h>
 #include "zbuffer.h"
 #include "q3cl_render.h"
+#include "q3world_render.h"   /* phase 8: the .bsp world and its textures */
 
 extern void  write_serial_string(const char *s);
 extern void *kmalloc(uint32_t size);
@@ -42,6 +43,22 @@ static int      r_inited;
 static float cam_x = 0.0f, cam_y = 320.0f, cam_z = Q3REF_EYE_H;
 static float cam_yaw = 180.0f;   /* degrees; there is no "default" facing */
 static float cam_pitch = 0.0f;
+
+/* Phase 8 camera mode. The yaw/pitch pair above can express any attitude in
+ * the plane, but the module hands us an arbitrary forward vector (its own
+ * ps.viewangles through id's AngleVectors), so the camera can also be set as a
+ * full basis. The matrix is the standard view transform written the way TinyGL
+ * reads glLoadMatrixf: row 0 = right, row 1 = up, row 2 = -forward, with the
+ * translation folded in, so eye = R * (world - origin). */
+static int   cam_use_basis;
+static float cam_basis[16];
+static float cam_org[3];
+static float cam_fwd[3];
+static float cam_right[3];
+
+/* The .bsp world this backend draws instead of the built-in arena, and the
+ * module's own level comes with its own textures (q3world_render.c). */
+static const q3bsp_mesh_t *r_bsp;
 
 int  q3ref_ready(void)   { return r_inited; }
 int  q3ref_width(void)   { return rw; }
@@ -282,10 +299,23 @@ static void arena(void) {
      * (the Rx(90) puts the camera's -Z along a horizontal world axis and its
      * +Y along world +Z, i.e. z-up). Positive pitch looks UP here; the
      * client negates the mouse delta before it gets here. */
-    glRotatef(cam_pitch, 1.0f, 0.0f, 0.0f);
-    glRotatef(cam_yaw, 0.0f, 0.0f, 1.0f);
-    glRotatef(90.0f, 1.0f, 0.0f, 0.0f);
-    glTranslatef(-cam_x, -cam_y, -cam_z);
+    if (cam_use_basis) {
+        glLoadMatrixf(cam_basis);
+    } else {
+        glRotatef(cam_pitch, 1.0f, 0.0f, 0.0f);
+        glRotatef(cam_yaw, 0.0f, 0.0f, 1.0f);
+        glRotatef(90.0f, 1.0f, 0.0f, 0.0f);
+        glTranslatef(-cam_x, -cam_y, -cam_z);
+    }
+
+    /* Phase 8: a .bsp loaded by the game module's own world is the whole scene
+     * when there is one — that is the point of the phase. The hand-built arena
+     * and the MCTBSP1 map stay reachable as fallbacks, because a build with no
+     * game data on the volume must still render something assertable. */
+    if (r_bsp && r_bsp->valid) {
+        q3w_draw(r_bsp, cam_org, cam_fwd, cam_right);
+        return;
+    }
 
     if (r_map) {
         /* Phase 4: the loaded map is the whole world (its brushes include
@@ -331,6 +361,8 @@ int q3ref_init(int w, int h) {
 }
 
 void q3ref_shutdown(void) {
+    q3w_unload();
+    r_bsp = NULL;
     if (fb) { ZB_close(fb); fb = NULL; }
     if (fb_pbuf) { kfree(fb_pbuf); fb_pbuf = NULL; }
     if (r_inited) { glClose(); r_inited = 0; }
@@ -339,6 +371,88 @@ void q3ref_shutdown(void) {
 void q3ref_set_camera(float x, float y, float z, float yaw_deg, float pitch_deg) {
     cam_x = x; cam_y = y; cam_z = z;
     cam_yaw = yaw_deg; cam_pitch = pitch_deg;
+    cam_use_basis = 0;
+}
+
+void q3ref_set_camera_basis(const float origin[3], const float forward[3]) {
+    float f[3], r[3], u[3], len, h;
+    union { float f; int i; } b;
+
+    f[0] = forward[0]; f[1] = forward[1]; f[2] = forward[2];
+    len = f[0] * f[0] + f[1] * f[1] + f[2] * f[2];
+    if (len <= 1e-9f) { f[0] = 0.0f; f[1] = 1.0f; f[2] = 0.0f; }
+    else {
+        b.f = len; b.i = 0x5f3759df - (b.i >> 1);
+        h = b.f; h = h * (1.5f - 0.5f * len * h * h);
+        h = h * (1.5f - 0.5f * len * h * h);
+        f[0] *= h; f[1] *= h; f[2] *= h;
+    }
+
+    /* right = forward x worldUp. That is exactly the basis the yaw/pitch path
+     * builds (at yaw 0 it is +X, at yaw 180 -X), so a camera that arrives
+     * either way frames the world identically. Straight up or down has no
+     * horizontal component to cross with, so pick a stable fallback. */
+    r[0] = f[1]; r[1] = -f[0]; r[2] = 0.0f;
+    len = r[0] * r[0] + r[1] * r[1];
+    if (len <= 1e-9f) { r[0] = 1.0f; r[1] = 0.0f; r[2] = 0.0f; }
+    else {
+        b.f = len; b.i = 0x5f3759df - (b.i >> 1);
+        h = b.f; h = h * (1.5f - 0.5f * len * h * h);
+        h = h * (1.5f - 0.5f * len * h * h);
+        r[0] *= h; r[1] *= h; r[2] *= h;
+    }
+    /* up = right x forward */
+    u[0] = r[1] * f[2] - r[2] * f[1];
+    u[1] = r[2] * f[0] - r[0] * f[2];
+    u[2] = r[0] * f[1] - r[1] * f[0];
+
+    cam_org[0] = origin[0]; cam_org[1] = origin[1]; cam_org[2] = origin[2];
+    cam_fwd[0] = f[0]; cam_fwd[1] = f[1]; cam_fwd[2] = f[2];
+    cam_right[0] = r[0]; cam_right[1] = r[1]; cam_right[2] = r[2];
+
+    /* glLoadMatrixf takes the STANDARD OpenGL column-major array (TinyGL's
+     * glopLoadMatrix transposes as it stores), so the view matrix M with rows
+     * (right, up, -forward) is written column by column:
+     *   M * (p,1) = (right.(p-cam), up.(p-cam), -forward.(p-cam)).
+     * Writing it row-wise — the obvious first mistake, and this port's — makes
+     * the transform a transposed rotation, which quietly points the camera
+     * somewhere else entirely and renders nothing but the clear colour. */
+    cam_basis[0]  = r[0];  cam_basis[1]  = u[0];  cam_basis[2]  = -f[0];
+    cam_basis[3]  = 0.0f;
+    cam_basis[4]  = r[1];  cam_basis[5]  = u[1];  cam_basis[6]  = -f[1];
+    cam_basis[7]  = 0.0f;
+    cam_basis[8]  = r[2];  cam_basis[9]  = u[2];  cam_basis[10] = -f[2];
+    cam_basis[11] = 0.0f;
+    cam_basis[12] = -(r[0] * cam_org[0] + r[1] * cam_org[1] + r[2] * cam_org[2]);
+    cam_basis[13] = -(u[0] * cam_org[0] + u[1] * cam_org[1] + u[2] * cam_org[2]);
+    cam_basis[14] = f[0] * cam_org[0] + f[1] * cam_org[1] + f[2] * cam_org[2];
+    cam_basis[15] = 1.0f;
+    cam_use_basis = 1;
+}
+
+void q3ref_set_bsp(const q3bsp_mesh_t *mesh) {
+    r_bsp = mesh;
+    cam_use_basis = 0;
+    if (mesh) q3w_load(mesh);
+    else q3w_unload();
+}
+
+void q3ref_bsp_stats(int *facesDrawn, int *trisDrawn, int *facesCulled,
+                     int *shaders, int *fromDisk, int *placeholders) {
+    q3w_frame_stats(facesDrawn, trisDrawn, facesCulled);
+    q3w_load_stats(shaders, fromDisk, placeholders);
+}
+
+/* What is actually in the finished frame, straight out of the ZBuffer: the
+ * renderer's own pixel evidence, independent of where the WM put the window or
+ * what drew over it. A frame that is all clear colour is a failure this
+ * reports immediately (sky ~= total) instead of showing up as a beautiful
+ * screenshot of the desktop. */
+int q3ref_frame_histogram(int *cyan, int *warm, int *stepgreen, int *violet,
+                          int *bright, int *sky, int *distinct) {
+    if (!fb || !fb->pbuf) return 0;
+    return q3w_histogram((const uint32_t *)fb->pbuf, fb->linesize / 4, rw, rh,
+                         cyan, warm, stepgreen, violet, bright, sky, distinct);
 }
 
 void q3ref_begin_frame(void) {

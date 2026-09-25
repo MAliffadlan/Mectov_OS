@@ -8,6 +8,15 @@ v38.107 teaches the port to use id's OWN collision model (``CM_LoadMap`` /
 at z=0. That code path cannot be tested against a retail map: ``pak0.pk3`` is not
 redistributable, so CI has no q3dm1.bsp and never will.
 
+v38.108 adds the other half the same argument applies to: the renderer. The
+arena's surfaces now carry real texture coordinates and the four textures they
+name are written next to it (``baseq3/textures/mectovtest/*.tga``), so drawing
+the level needs decoded image data exactly like a retail map does — while still
+shipping no id art. The textures are generated patterns, not photographs, and
+their colours are deliberately saturated and mutually distinct so a screendump
+can be asserted on: "flat-shaded geometry could not produce this pixel" is what
+makes the render test evidence rather than decoration.
+
 So the test arena is *generated*, here, from nothing. It is our own content —
 no id assets, no third-party data, a few kilobytes of arithmetic — and it is
 deliberately built to make "did the real loader run?" answerable from the serial
@@ -20,8 +29,8 @@ log rather than by eyeballing:
     world had one infinite floor plane and returned fraction 1.0 for any
     sideways move, which is precisely the bug this content exists to catch.
 
-Format notes (id's v46 BSP, as parsed by cm_load.c)
---------------------------------------------------
+Format notes (id's v46 BSP, as parsed by cm_load.c and q3bsp.c)
+--------------------------------------------------------------
 Everything below is dictated by id's own loader, not invented here:
 
 * ``CMod_LoadShaders`` needs at least one shader; every brush side and surface
@@ -34,6 +43,11 @@ Everything below is dictated by id's own loader, not invented here:
 * ``CM_LoadMap`` rejects a map with no shaders/planes/nodes/leafs/models, so all
   five lumps are non-empty even though this arena is one leaf.
 * Node children are ``-(leaf + 1)``, so a child of -1 is leaf 0.
+* Texture coordinates (``st``) are in texture REPEATS, not texels: q3map divides
+  the world coordinate by the texture's width, and so does this script, so one
+  tile of a 64x64 texture covers 64 world units.
+* The textures themselves are 24-bit uncompressed TGA — the format id's own
+  tools emit and the simplest one a decoder can be held to.
 
 The single-leaf tree is honest, not a shortcut: a leaf is just a region, and one
 leaf holding every brush is a valid BSP. Point-contents, brush tracing and
@@ -51,6 +65,11 @@ import sys
 
 MAX_QPATH = 64
 CONTENTS_SOLID = 0x1
+
+# Texture side in texels. Also the world size of one texture tile (see
+# face_st): a 64-unit brush face is covered by exactly one repeat, so the
+# checkerboard below lines up with the geometry instead of drifting across it.
+TEX_SIZE = 64
 
 # Surface types (see qfiles.h). Planar faces are emitted for the renderer that
 # arrives in the next phase; the collision loader only looks at MST_PATCH.
@@ -98,6 +117,22 @@ SHADERS = [
 ]
 SH_FLOOR, SH_WALL, SH_CEIL, SH_STEP = 0, 1, 2, 3
 
+# Generated textures, one per shader (v38.108). 24-bit RGB rows, top-down; the
+# TGA writer below flips them into the file's BGR order. Colours are multiples
+# of 8 so the renderer's 5-bit-per-channel texture format is lossless for them.
+TEX_FLOOR   = (24, 88, 96)      # teal plate
+TEX_FLOOR_B = (8, 56, 64)
+TEX_FLOOR_G = (0, 200, 208)     # bright cyan tile seams
+TEX_WALL    = (168, 136, 96)    # warm sandstone
+TEX_WALL_B  = (128, 96, 64)
+TEX_WALL_M  = (72, 56, 40)      # mortar
+TEX_CEIL    = (112, 112, 160)   # blue-violet (ambient-lit, so a dark face)
+TEX_CEIL_B  = (80, 80, 120)
+TEX_CEIL_G  = (176, 176, 216)
+TEX_STEP    = (152, 176, 72)    # yellow-green metal
+TEX_STEP_B  = (112, 136, 40)
+TEX_STEP_G  = (200, 208, 120)
+
 # (min, max, shader)
 BRUSHES = [
     ((-HALF, -HALF, FLOOR_TOP - 64), (HALF, HALF, FLOOR_TOP), SH_FLOOR),
@@ -122,6 +157,24 @@ SPAWN = (-384.0, -384.0, 120.0)
 WALL_PROBE_TO_X = -896.0
 
 MAP_NAME = "mectovtest"
+
+
+def face_st(normal, corner):
+    """Texture coordinates for one corner of one axial face.
+
+    The face's own normal picks the two tangent axes, so a brush's six faces
+    tile independently instead of sharing one projection (which is what makes a
+    textured box read as a box). One repeat per TEX_SIZE units.
+    """
+    x, y, z = corner
+    ax, ay, az = abs(normal[0]), abs(normal[1]), abs(normal[2])
+    if az >= ax and az >= ay:
+        u, v = x, y                 # floor / ceiling
+    elif ax >= ay:
+        u, v = y, z                 # +-X wall
+    else:
+        u, v = x, z                 # +-Y wall
+    return (u / float(TEX_SIZE), v / float(TEX_SIZE))
 
 
 def f32(x):
@@ -155,6 +208,59 @@ def box_faces(mins, maxs):
         ((0.0, 0.0, -1.0), -z0, ((x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x1, y0, z0))),
         ((0.0, 0.0, 1.0), z1, ((x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1))),
     ]
+
+
+def checker(size, cell, color_a, color_b):
+    """size x size RGB rows, alternating square tiles of cell texels."""
+    px = bytearray()
+    for y in range(size):
+        row_b = (y // cell) % 2
+        for x in range(size):
+            on = ((x // cell) + row_b) % 2 == 0
+            px += bytes(color_a if on else color_b)
+    return px
+
+
+def grid_lines(px, size, step, width, color):
+    """Overwrite a grid of `width`-texel lines every `step` texels."""
+    for y in range(size):
+        for x in range(size):
+            if (x % step) < width or (y % step) < width:
+                o = (y * size + x) * 3
+                px[o:o + 3] = bytes(color)
+
+
+def tga_bytes(px, size):
+    """Uncompressed 24-bit TGA, top-down (image descriptor bit 5)."""
+    header = struct.pack("<BBBHHBHHHHBB",
+                         0, 0, 2, 0, 0, 0, 0, 0, size, size, 24, 0x20)
+    body = bytearray()
+    for i in range(0, len(px), 3):
+        r, g, b = px[i], px[i + 1], px[i + 2]
+        body += bytes((b, g, r))    # TGA stores BGR
+    return header + bytes(body)
+
+
+def texture_files():
+    """{shader name: TGA bytes} for every shader in SHADERS."""
+    out = {}
+
+    px = checker(TEX_SIZE, 16, TEX_FLOOR, TEX_FLOOR_B)
+    grid_lines(px, TEX_SIZE, 16, 2, TEX_FLOOR_G)
+    out[SHADERS[SH_FLOOR][0]] = tga_bytes(px, TEX_SIZE)
+
+    px = checker(TEX_SIZE, 16, TEX_WALL, TEX_WALL_B)
+    grid_lines(px, TEX_SIZE, 32, 3, TEX_WALL_M)
+    out[SHADERS[SH_WALL][0]] = tga_bytes(px, TEX_SIZE)
+
+    px = checker(TEX_SIZE, 8, TEX_CEIL, TEX_CEIL_B)
+    grid_lines(px, TEX_SIZE, 32, 2, TEX_CEIL_G)
+    out[SHADERS[SH_CEIL][0]] = tga_bytes(px, TEX_SIZE)
+
+    px = checker(TEX_SIZE, 8, TEX_STEP, TEX_STEP_B)
+    grid_lines(px, TEX_SIZE, 16, 2, TEX_STEP_G)
+    out[SHADERS[SH_STEP][0]] = tga_bytes(px, TEX_SIZE)
+    return out
 
 
 def entity_string():
@@ -219,7 +325,11 @@ def build():
             first_vert = len(verts)
             first_index = len(indexes)
             for corner in corners:
-                verts.append((corner, (0.0, 0.0), (0.0, 0.0), normal, (255, 255, 255, 255)))
+                # st: texture repeats (see face_st); lightmap st stays 0 — there
+                # are no lightmaps in a generated arena, and the renderer shades
+                # each face from its own plane normal.
+                verts.append((corner, face_st(normal, corner), (0.0, 0.0),
+                              normal, (255, 255, 255, 255)))
             # The draw-index lump stores ABSOLUTE vertex numbers (id's renderer
             # reads them straight into the vertex arrays), so a quad wound
             # v0 v1 v2 / v0 v2 v3 is firstVert + those offsets.
@@ -306,16 +416,28 @@ def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     outdir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(root, "build", "q3data")
     target_dir = os.path.join(outdir, "baseq3", "maps")
+    tex_dir = os.path.join(outdir, "baseq3", "textures", "mectovtest")
     os.makedirs(target_dir, exist_ok=True)
+    os.makedirs(tex_dir, exist_ok=True)
     target = os.path.join(target_dir, MAP_NAME + ".bsp")
 
     data, planes, brush_records, surfaces, verts, indexes = build()
     with open(target, "wb") as fh:
         fh.write(data)
 
+    texs = texture_files()
+    tex_bytes = 0
+    for name, blob in sorted(texs.items()):
+        leaf = os.path.join(tex_dir, os.path.basename(name) + ".tga")
+        with open(leaf, "wb") as fh:
+            fh.write(blob)
+        tex_bytes += len(blob)
+
     print("[testbsp] wrote %s" % target)
     print("[testbsp]   %d bytes, %d planes, %d brushes, %d surfaces, %d verts, %d indexes"
           % (len(data), len(planes), len(brush_records), len(surfaces), len(verts), len(indexes)))
+    print("[testbsp] wrote %d texture(s) into %s (%d bytes, %dx%d TGA)"
+          % (len(texs), tex_dir, tex_bytes, TEX_SIZE, TEX_SIZE))
     print("[testbsp]   floor top z=%d, spawn=(%d %d %d), -X wall face x=%d"
           % (FLOOR_TOP, SPAWN[0], SPAWN[1], SPAWN[2], -HALF))
 
