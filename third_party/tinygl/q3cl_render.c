@@ -478,6 +478,104 @@ void q3ref_end_frame(void) {
     glFlush();
 }
 
+/* ---- v38.110: the in-window perf HUD ----------------------------------
+ * Drawn straight into the finished ZBuffer (0x00RRGGBB), after end_frame and
+ * before the WM blits the buffer to the window — so the user sees the fps and
+ * where the frame budget goes, while the frame histogram (and therefore the
+ * suite's pixel evidence) stays exactly what the 3D pass produced. The HUD
+ * colours are 0xFF...-heavy whites and pure primaries; q3w_histogram's buckets
+ * can only ever COUNT them (bright/warm), never subtract from the buckets the
+ * suite asserts on. */
+static int ov_fps, ov_vm_ms, ov_gl_ms, ov_blit_ms, ov_wm_ms, ov_other_ms;
+
+void q3ref_set_perf_overlay(int fps, int vm_ms, int gl_ms, int blit_ms,
+                            int wm_ms, int other_ms) {
+    ov_fps = fps; ov_vm_ms = vm_ms; ov_gl_ms = gl_ms;
+    ov_blit_ms = blit_ms; ov_wm_ms = wm_ms; ov_other_ms = other_ms;
+}
+
+static void ov_px(int x, int y, uint32_t c) {
+    if (x < 0 || y < 0 || x >= rw || y >= rh) return;
+    ((uint32_t *)fb->pbuf)[(size_t)y * (fb->linesize / 4) + x] = c;
+}
+
+static void ov_char(int x, int y, char ch, uint32_t c) {
+    extern unsigned char font8x16_data[256][16];
+    const unsigned char *g = font8x16_data[(unsigned char)ch];
+    for (int row = 0; row < 16; row++) {
+        unsigned char bits = g[row];
+        if (!bits) continue;
+        for (int col = 0; col < 8; col++)
+            if (bits & (0x80 >> col)) ov_px(x + col, y + row, c);
+    }
+}
+
+static void ov_str(int x, int y, const char *s, uint32_t c) {
+    for (; *s; s++, x += 8) ov_char(x, y, *s, c);
+}
+
+static void ov_num(int x, int y, int v, uint32_t c) {
+    char b[16];
+    int i = (int)sizeof(b) - 1, neg = v < 0;
+    unsigned u = neg ? (unsigned)(-v) : (unsigned)v;
+    b[i] = '\0';
+    do { b[--i] = '0' + (char)(u % 10); u /= 10; } while (u);
+    if (neg) b[--i] = '-';
+    ov_str(x, y, &b[i], c);
+}
+
+void q3ref_draw_perf_overlay(void) {
+    static const uint32_t C_VM    = 0x00FFD24D;  /* amber  — VM step        */
+    static const uint32_t C_GL    = 0x0000E5C0;  /* teal   — software GL    */
+    static const uint32_t C_BLIT  = 0x004D9EFF;  /* blue   — window blit    */
+    static const uint32_t C_WM    = 0x0000CC44;  /* green  — full WM pass   */
+    static const uint32_t C_OTHER = 0x00B0B0B0;  /* grey   — the rest       */
+    static const uint32_t C_TXT   = 0x00FFFFFF;
+    static const uint32_t C_SHAD  = 0x00000000;
+
+    if (!fb || !fb->pbuf) return;
+    int tx = rw - 232, ty = 8;          /* top-right block, 8x16 glyphs */
+    int ty2 = ty + 18;
+
+    /* Backing panel: readable on any scene, cheap (one fill per row). */
+    for (int y = ty - 4; y < ty2 + 62; y++)
+        for (int x = tx - 6; x < rw - 4; x++) ov_px(x, y, 0x00101018);
+
+    ov_num(tx,      ty,  ov_fps, C_TXT);
+    ov_str(tx + 40, ty,  "fps", C_TXT);
+    ov_str(tx + 88, ty,  "vm", C_VM);
+    ov_num(tx + 120, ty, ov_vm_ms, C_TXT);
+    ov_str(tx + 40, ty2, "gl", C_GL);
+    ov_num(tx + 120, ty2, ov_gl_ms, C_TXT);
+    ov_str(tx + 40, ty2 + 18, "blit", C_BLIT);
+    ov_num(tx + 120, ty2 + 18, ov_blit_ms, C_TXT);
+    ov_str(tx + 40, ty2 + 36, "wm", C_WM);
+    ov_num(tx + 120, ty2 + 36, ov_wm_ms, C_TXT);
+    ov_str(tx + 40, ty2 + 54, "other", C_OTHER);
+    ov_num(tx + 120, ty2 + 54, ov_other_ms, C_TXT);
+
+    /* The bar: one cell per 2 ms of the ~50 ms frame budget, draw order. */
+    int by = ty2 + 76;
+    int bx = tx - 6;
+    int cell_w = (rw - 4 - bx) / 25;
+    if (cell_w < 2) cell_w = 2;
+    int cells = (rw - 4 - bx) / cell_w;
+    int used = 0;
+    struct { int ms; uint32_t c; } seg[5] = {
+        { ov_vm_ms, C_VM }, { ov_gl_ms, C_GL }, { ov_blit_ms, C_BLIT },
+        { ov_wm_ms, C_WM }, { ov_other_ms, C_OTHER },
+    };
+    for (int s = 0; s < 5; s++) {
+        int n = seg[s].ms * 500;   /* ms -> half-ms units; cell = 500 units */
+        n = (n + 499) / 500;      /* ceil, so 1 ms still shows one cell */
+        for (int k = 0; k < n && used < cells; k++, used++)
+            for (int yy = by; yy < by + 10; yy++)
+                for (int xx = bx + used * cell_w; xx < bx + (used + 1) * cell_w; xx++)
+                    ov_px(xx, yy, seg[s].c);
+    }
+    for (int xx = bx; xx < bx + cells * cell_w; xx++) ov_px(xx, by + 10, C_SHAD);
+}
+
 /* One pixel, no channel shuffling: TinyGL's 32-bit PIXEL and the Mectov
  * framebuffer share the same 0x00RRGGBB layout (the kernel's own theme
  * constants land on screen unchanged — GUI_DESKTOP 0x0011111B reads back as

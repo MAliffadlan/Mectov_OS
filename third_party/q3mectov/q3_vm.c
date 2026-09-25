@@ -895,6 +895,33 @@ static unsigned a_next_ms;              /* when the next frame is due */
 static unsigned a_start_ms;             /* when the frame loop began */
 static q3bsp_mesh_t a_mesh;
 
+/* ---- v38.110 perf accounting -------------------------------------------
+ * Where a frame's wall time goes: the module (two VM_Call), the software
+ * renderer (begin_frame..end_frame), everything else the driver does
+ * (histogram, camera, pacing remainder = idle), plus — read out of the WM —
+ * what the compositor charged to this window (app draw = q3ref_blit + HUD,
+ * and the content-buffer blit into the desktop's back buffer) and its whole
+ * wm_draw_all pass.
+ *
+ * The clock is the kernel's millisecond tick (get_ticks), NOT rdtsc: the
+ * first version converted rdtsc to microseconds, and under QEMU TCG the
+ * virtual TSC between timer interrupts is garbage — phase deltas came out
+ * negative, or seconds-large for a one-second window (vm_us=209,322,519),
+ * because translated blocks advance the TSC in irregular leaps. The tick
+ * counter is IRQ-driven and monotonic — exactly the property a phase meter
+ * needs — and 1 ms resolution is ample for a 50 ms frame budget.
+ *
+ * No calibration, no 64-bit divide (which the freestanding kernel cannot
+ * even link: __udivdi3), and structurally incapable of the busy-wait-under-
+ * IF=0 deadlock the WM's first calibration had: reading the clock never
+ * waits. */
+extern uint32_t get_ticks(void);
+static int a_ms(void) { return (int)(unsigned)get_ticks(); }
+static int a_ms_since(int t0) { return a_ms() - t0; }
+static int a_ms_vm, a_ms_gl, a_ms_other, a_ms_idle;
+static int    a_perf_frames;            /* frames included in the accounting */
+static int    a_last_fps;               /* whole-run fps, for the HUD */
+
 static playerState_t *q3vm_ps(vm_t *vm) {
     if (!vm || vm_ps_ofs < 0) return 0;
     return (playerState_t *)(vm->dataBase + (vm_ps_ofs & vm->dataMask));
@@ -987,6 +1014,10 @@ static void q3arena_open(void) {
         q3ref_shutdown();
         return;
     }
+    /* v38.110: opt this window into the compositor's perf accounting, so the
+     * breakdown can separate the game window's share (app draw + content
+     * blit) from the rest of the desktop's composite pass. */
+    wm_tag_q3_game(a_win);
     /* The rect is logged because the test has to know where the window ended
      * up: the WM owns placement, and a screendump assertion that guesses the
      * geometry silently measures the desktop instead (which is exactly how the
@@ -1018,7 +1049,9 @@ static void q3arena_close(void) {
 }
 
 /* One frame: hand the module this frame's command, let it run its own frame,
- * then draw the world from the playerState it produced. */
+ * then draw the world from the playerState it produced. Every phase is timed
+ * in microseconds (v38.110) and folded into a window-1s rolling sum that the
+ * sampled frames report as one atomic perf line. */
 static void q3arena_frame(vm_t *vm, int frame) {
     playerState_t *ps;
     vec3_t eye, fwd;
@@ -1028,6 +1061,7 @@ static void q3arena_frame(vm_t *vm, int frame) {
     int patch = 0;
     int distinct = 0;
     unsigned target = a_next_ms;
+    int f_t0 = a_ms();
 
     /* --- input -> usercmd ------------------------------------------------ */
     {
@@ -1046,8 +1080,12 @@ static void q3arena_frame(vm_t *vm, int frame) {
     }
 
     q3vm_frame_time += Q3VM_FRAMETIME;
-    VM_Call(vm, GAME_RUN_FRAME, q3vm_frame_time);
-    VM_Call(vm, GAME_CLIENT_THINK, 0);
+    {
+        int t0 = a_ms();
+        VM_Call(vm, GAME_RUN_FRAME, q3vm_frame_time);
+        VM_Call(vm, GAME_CLIENT_THINK, 0);
+        a_ms_vm += a_ms_since(t0);
+    }
 
     ps = q3vm_ps(vm);
 
@@ -1058,19 +1096,56 @@ static void q3arena_frame(vm_t *vm, int frame) {
         AngleVectors(ps->viewangles, fwd, NULL, NULL);
         q3ref_set_camera_basis(eye, fwd);
     }
-    q3ref_begin_frame();
-    q3ref_draw_world((double)q3vm_frame_time / 1000.0);
-    q3ref_end_frame();
-    q3ref_bsp_stats(&drawn, &tris, &culled, &shaders, &from_disk, &ph);
-    q3ref_frame_histogram(&cyan, &warm, &stepgreen, &violet, &bright, &patch,
-                          &sky, &distinct);
-    if (a_win >= 0) wm_invalidate(a_win);
+    {
+        int t0 = a_ms();
+        q3ref_begin_frame();
+        q3ref_draw_world((double)q3vm_frame_time / 1000.0);
+        q3ref_end_frame();
+        a_ms_gl += a_ms_since(t0);
+    }
+    {
+        int t0 = a_ms();
+        q3ref_bsp_stats(&drawn, &tris, &culled, &shaders, &from_disk, &ph);
+        q3ref_frame_histogram(&cyan, &warm, &stepgreen, &violet, &bright, &patch,
+                              &sky, &distinct);
+        q3ref_draw_perf_overlay();  /* HUD pixels land after the histogram */
+        if (a_win >= 0) wm_invalidate(a_win);
+        a_ms_other += a_ms_since(t0);
+    }
 
     a_frames++;
     a_faces_drawn += drawn;
     a_tris_drawn += tris;
 
     if ((frame % 20) == 0) {
+        /* v38.110: one atomic perf line — phase costs over the window since
+         * the last sampled frame (20 game frames = 1 s of game time), plus
+         * the compositor's charges for this window (accumulated since the
+         * last sample, then drained). sum_ms is that window's wall time, so
+         * the parts are directly comparable to the whole. */
+        {
+            int pass_ms = 0, blit_ms = 0, draw_ms = 0;
+            int fps = 0;
+            int sum_ms = a_ms_vm + a_ms_gl + a_ms_other + a_ms_idle;
+            unsigned elapsed = (unsigned)Com_Milliseconds() - a_start_ms;
+            if (elapsed > 0) fps = (a_frames * 1000) / (int)elapsed;
+            a_last_fps = fps;
+            wm_q3_times(&pass_ms, &blit_ms, &draw_ms);
+            reportf("[Q3ARENA] perf frame=%d fps=%d vm_ms=%d gl_ms=%d "
+                    "blit_ms=%d draw_ms=%d wm_ms=%d other_ms=%d idle_ms=%d "
+                    "sum_ms=%d",
+                    frame, fps,
+                    a_ms_vm, a_ms_gl, blit_ms, draw_ms, pass_ms,
+                    a_ms_other, a_ms_idle, sum_ms);
+            /* The in-window HUD shows the same numbers the log carries: the
+             * window-1s phase costs and the run's fps. The overlay itself is
+             * painted every frame (after this frame's histogram was taken, so
+             * the suite's pixel evidence stays exactly what the 3D pass made). */
+            q3ref_set_perf_overlay(fps, a_ms_vm, a_ms_gl,
+                                   blit_ms, pass_ms, a_ms_other);
+            a_perf_frames += 20;
+            a_ms_vm = a_ms_gl = a_ms_other = a_ms_idle = 0;
+        }
         if (ps) {
             reportf("[Q3ARENA] frame=%d t=%d pos=(%d,%d,%d) eye_z=%d yaw=%d "
                     "pitch=%d drawn=%d tris=%d culled=%d",
@@ -1093,16 +1168,30 @@ static void q3arena_frame(vm_t *vm, int frame) {
 
     /* Pace to the module's own frame time (~20 fps) instead of spinning, so the
      * desktop keeps its timeslice and the run stays watchable in TCG. A frame
-     * that overran its budget drops the deficit rather than catching up. */
+     * that overran its budget drops the deficit rather than catching up. The
+     * wait is itself a measured phase: idle_us is the budget the frame did NOT
+     * spend — headroom a faster renderer could turn into frames. */
     a_next_ms += (unsigned)Q3VM_FRAMETIME;
-    for (;;) {
-        unsigned now = (unsigned)Com_Milliseconds();
-        if (now >= target || a_quit) break;
-        __asm__ __volatile__("hlt");
+    {
+        int t0 = a_ms();
+        for (;;) {
+            unsigned now = (unsigned)Com_Milliseconds();
+            if (now >= target || a_quit) break;
+            __asm__ __volatile__("hlt");
+        }
+        a_ms_idle += a_ms_since(t0);
     }
     {
         unsigned now = (unsigned)Com_Milliseconds();
         if (now > a_next_ms + 250u) a_next_ms = now;
+    }
+    /* Whatever this frame's own bookkeeping cost (camera, counters, the perf
+     * line itself) is not a phase anyone named — charge it to "other" so the
+     * parts of sum_ms stay honest against the whole. */
+    {
+        int spent = a_ms_since(f_t0);
+        int known = a_ms_vm + a_ms_gl + a_ms_other + a_ms_idle;
+        if (spent > known) a_ms_other += spent - known;
     }
     (void)shaders; (void)from_disk; (void)ph;
     if (a_win >= 0 && wm_is_open(a_win) == 0) {

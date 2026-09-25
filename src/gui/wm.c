@@ -6,6 +6,39 @@
 #include "../include/spinlock.h"
 #include "../include/task.h"   // get_current_task / task_get_cid
 #include "../include/mouse.h"  // mouse_x/y, cursor pin for mouse capture (v38.103)
+#include "../include/timer.h"  // get_ticks(): the perf clock, ms ticks (v38.110)
+
+/* Forward decls: the perf block sits above the lock's definitions (the first
+ * use is inside wm_q3_times, further down). */
+void wm_lock_acquire(void);
+void wm_lock_release(void);
+
+/* v38.110: perf accounting for the game window, in kernel MILLISECONDS.
+ * Deliberately not rdtsc: under QEMU TCG the virtual TSC between timer
+ * interrupts advances in irregular leaps (the driver's first rdtsc build
+ * reported seconds-large deltas for one-second windows and negative ones
+ * after), while get_ticks is IRQ-driven and monotonic — the same clock that
+ * paces the game loop. 1 ms resolution is ample against a 50 ms frame.
+ * All reads happen under the WM lock the call sites already hold. */
+/* Accumulated by draw_one(); read+cleared by wm_q3_times(). */
+static uint64_t wm_q3_pass_ms, wm_q3_blit_ms, wm_q3_draw_ms;
+void wm_tag_q3_game(int id) {
+    wm_lock_acquire();
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        if (wm_wins[i].visible && wm_wins[i].id == id) {
+            wm_wins[i].is_q3_game = 1;
+            break;
+        }
+    }
+    wm_lock_release();
+}
+void wm_q3_times(int *pass_ms, int *blit_ms, int *draw_ms) {
+    wm_lock_acquire();
+    if (pass_ms) { *pass_ms = (int)wm_q3_pass_ms; wm_q3_pass_ms = 0; }
+    if (blit_ms) { *blit_ms = (int)wm_q3_blit_ms; wm_q3_blit_ms = 0; }
+    if (draw_ms) { *draw_ms = (int)wm_q3_draw_ms; wm_q3_draw_ms = 0; }
+    wm_lock_release();
+}
 
 // ---- Reentrant irqsave lock (kernel locking audit v38.4) ----
 //
@@ -371,6 +404,7 @@ static int wm_open_unlocked(int x, int y, int w, int h, const char* title,
             wm_wins[i].id        = next_id++;
             wm_wins[i].x         = x; wm_wins[i].y = y;
             wm_wins[i].w         = w; wm_wins[i].h = h;
+            wm_wins[i].is_q3_game = 0;   /* the game window opts in below */
             wm_wins[i].draw_fn   = draw_fn;
             wm_wins[i].key_fn    = key_fn;
             wm_wins[i].tick_fn   = tick_fn;
@@ -694,6 +728,12 @@ static void draw_one(int idx) {
     int cw2 = ww - 2;
     int ch2 = wh - TITLEBAR_H - 2;
 
+    /* v38.110: this window's private cost, in kernel ms ticks. Only the game
+     * window is metered (its app draw is a full TinyGL blit, unlike the other
+     * windows' cheap text buffers), so the perf line's blit/draw numbers are
+     * exactly the game window's share of the composite pass. */
+    int t_app0 = 0, t_blit0 = 0;
+    if (w->is_q3_game) t_app0 = (int)get_ticks();
     if (cw2 > 0 && ch2 > 0) {
         // 1. Grow-only content buffer. Reusing the capacity means live resize
         //    doesn't kmalloc/kfree a fresh cw2*ch2*4 buffer on every mouse move
@@ -770,6 +810,7 @@ static void draw_one(int idx) {
         //    During a resize drag last_cw/last_ch are stale, so blit only the
         //    old-content region and clear the exposed growth strips cleanly.
         if (w->content_buffer) {
+            if (w->is_q3_game) t_blit0 = (int)get_ticks();
             int blit_w = (w->last_cw < cw2) ? w->last_cw : cw2;
             int blit_h = (w->last_ch < ch2) ? w->last_ch : ch2;
             // src_pitch = w->last_cw, NOT blit_w: the buffer keeps its last
@@ -781,6 +822,11 @@ static void draw_one(int idx) {
             vga_blit_buffer(w->content_buffer, blit_w, blit_h, w->last_cw, cx2, cy2);
             if (blit_w < cw2) draw_rect(cx2 + blit_w, cy2, cw2 - blit_w, ch2, 0x001E1E2E);
             if (blit_h < ch2) draw_rect(cx2, cy2 + blit_h, cw2, ch2 - blit_h, 0x001E1E2E);
+            if (w->is_q3_game) {
+                int t_blit1 = (int)get_ticks();
+                wm_q3_blit_ms += t_blit1 - t_blit0;
+                wm_q3_draw_ms += (t_blit0 - t_app0);
+            }
         }
     }
 }
@@ -791,8 +837,18 @@ static void wm_draw_all_unlocked() {
     wm_draw_alt_tab_hud();
 }
 void wm_draw_all() {
+    /* v38.110: the whole pass is metered even without a game window, so the
+     * perf line can compare "everything the compositor did this pass" against
+     * "the game window's share of it". Tick reads never wait, so this is safe
+     * under the lock (the rdtsc calibration this replaces busy-waited and
+     * deadlocked the compositor when done with IF=0 — see the block comment
+     * above wm_q3_times). */
+    int t0 = (int)get_ticks();
     wm_lock_acquire();
     wm_draw_all_unlocked();
+    wm_lock_release();
+    wm_lock_acquire();
+    wm_q3_pass_ms += (uint64_t)((int)get_ticks() - t0);
     wm_lock_release();
 }
 

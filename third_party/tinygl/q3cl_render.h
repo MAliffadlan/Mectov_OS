@@ -66,6 +66,16 @@ int  q3ref_frame_histogram(int *cyan, int *warm, int *stepgreen, int *violet,
 void q3ref_draw_world(double time_sec);
 void q3ref_end_frame(void);
 
+/* v38.110: the in-window perf HUD. The driver feeds the phase costs it
+ * measured (MILLISECONDS of kernel tick) once per sampled frame, then the
+ * overlay is rendered AFTER q3ref_end_frame() — so the finished frame
+ * carries an fps counter and a per-phase cost bar, while the frame histogram
+ * (taken before the overlay) never sees it and the suite's pixel assertions
+ * stay exact. Any value may be zero; zero phases simply draw no segment. */
+void q3ref_set_perf_overlay(int fps, int vm_ms, int gl_ms, int blit_ms,
+                            int wm_ms, int other_ms);
+void q3ref_draw_perf_overlay(void);
+
 /* Swizzle the finished 0x00RRGGBB ZBuffer into the WM's 0x00BBGGRR content
  * buffer, centred. Runs in the compositor's draw pass, never in the render
  * task. */

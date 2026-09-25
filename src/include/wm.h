@@ -47,6 +47,10 @@ typedef struct {
     int capture_mouse;              // 1 = this window owns relative mouse motion
     int cap_saved_x, cap_saved_y;   // cursor position to restore on release
     
+    // v38.110 perf accounting: draw_one() times this window's app draw and
+    // content blit when set (the q3arena game window); the driver reads the
+    // accumulated microseconds through wm_q3_times().
+    int is_q3_game;
     // Composite WM state
     uint32_t* content_buffer; // Off-screen canvas for window content
     int       content_cap;    // Allocated canvas size (pixels) — grow-only, so
@@ -80,6 +84,15 @@ void wm_close(int id);
 int  wm_is_open(int id);
 void wm_invalidate(int id);
 void wm_draw_all();
+/* v38.110: MILLISECOND cost of the last full composite pass (wm_draw_all),
+ * of blitting the q3arena game window's content buffer into the back buffer,
+ * and of that window's app draw callback (q3ref_blit + HUD) — kernel tick
+ * clock, not rdtsc (see wm.c). The renderer task samples these once per
+ * sampled frame for the perf breakdown. */
+void wm_q3_times(int *pass_ms, int *blit_ms, int *draw_ms);
+/* v38.110: the q3arena driver tags its window, opting it into the per-window
+ * game accounting in draw_one(). */
+void wm_tag_q3_game(int id);
 void wm_track_mouse(int mx, int my); // Pure-move hover tracking (titlebar buttons)
 int wm_handle_mouse(int mx, int my, int btn, int pbtn);
 void wm_handle_scroll(int mx, int my, int delta);

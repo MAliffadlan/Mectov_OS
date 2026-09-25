@@ -224,6 +224,10 @@ RECT_RE = re.compile(
 PIXELS_RE = re.compile(
     r"\[Q3ARENA\] pixels frame=(\d+) cyan=(\d+) warm=(\d+) stepgreen=(\d+) "
     r"violet=(\d+) bright=(\d+) patch=(\d+) sky=(\d+) distinct=(\d+)")
+PERF_RE = re.compile(
+    r"\[Q3ARENA\] perf frame=(\d+) fps=(\d+) vm_ms=(-?\d+) gl_ms=(-?\d+) "
+    r"blit_ms=(-?\d+) draw_ms=(-?\d+) wm_ms=(-?\d+) other_ms=(-?\d+) "
+    r"idle_ms=(-?\d+) sum_ms=(-?\d+)")
 FRAME_PIXELS = CONTENT_W * CONTENT_H      # 76800: the whole frame is classified
 
 
@@ -543,6 +547,36 @@ def main():
                           ("violet", 4), ("bright", 5), ("patch", 6),
                           ("sky", 7), ("distinct", 8)):
             best[name] = max(s[idx] for s in seen)
+        # v38.110: where the frame budget goes. The perf line is the driver's
+        # own account of one 20-frame window, on the kernel's tick clock: the
+        # module (vm), the software renderer (gl), the game window's composite
+        # share as the WM charged it (draw = app draw callback, blit = content
+        # buffer into the back buffer, wm = the whole wm_draw_all pass), the
+        # driver's other work, and the pacing remainder (idle = budget nothing
+        # spent). All in milliseconds; sum is that window's wall time, so
+        # parts and whole are directly comparable. The suite sanity-checks the
+        # accounting (non-negative parts, parts within tolerance of their own
+        # wall window) — thresholds on VALUES stay loose because CI hosts run
+        # 2-5x faster than a dev box; the breakdown itself must simply be
+        # present and arithmetically honest.
+        perfs = [tuple(int(x) for x in m.group(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+                 for m in PERF_RE.finditer(read_file(SERIAL_LOG))]
+        if not perfs:
+            print("[FAIL] no [Q3ARENA] perf lines in the log — the frame "
+                  "breakdown vanished")
+            dump_tail(40)
+            return 1
+        print("[OK] frame-time breakdown (kernel ms ticks, 20-frame window):")
+        for (pf, fps, vmm, glm, blitm, drawm, wmm, otherm, idlem, summ) in perfs:
+            parts = vmm + glm + otherm + idlem
+            if min(vmm, glm, otherm, idlem, summ) < 0 or parts > summ * 13 // 10:
+                print(f"[FAIL] perf line frame {pf} does not add up: "
+                      f"vm={vmm} gl={glm} other={otherm} idle={idlem} "
+                      f"(parts={parts}) vs sum={summ}")
+                return 1
+            print(f"     frame {pf:3d}: {fps:3d} fps | vm {vmm:4d} ms | "
+                  f"gl {glm:4d} ms | blit {blitm:3d} ms | wm-pass {wmm:3d} ms | "
+                  f"other {otherm:3d} ms | idle {idlem:4d} ms | sum {summ:4d} ms")
         mostly_clear = 0
         for frame, cyan, warm, stepgreen, violet, bright, patch, sky, distinct in seen:
             live = cyan + warm + stepgreen + violet + bright + patch
