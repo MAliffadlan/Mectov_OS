@@ -1,4 +1,5 @@
 #include "src/include/syscall.h"
+#include "src/include/version.h"
 
 typedef struct {
     int type;
@@ -630,7 +631,9 @@ void _start(void) {
             buf[r][c] = 0; col[r][c] = 0;
         }
     
-    term_print("Mectov OS v36.3 Terminal [Ring 3]\n", 0x0B);
+    // The version comes from version.h (same definition the kernel's help
+    // banner, mfetch and /proc/version print) — never a literal.
+    term_print("Mectov OS v" OS_VERSION " Terminal [Ring 3]\n", 0x0B);
     term_print("Welcome Bos Alif! System ready.\n\n", 0x0D);
     print_prompt();
     cmd_len = 0;

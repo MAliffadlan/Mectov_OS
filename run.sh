@@ -8,10 +8,31 @@ if [ ! -f "disk.img" ]; then
     dd if=/dev/zero of=disk.img bs=512 count=2048 2>/dev/null
 fi
 
+# Volume size follows the staged Q3 payload (v38.107). One retail map's
+# textures and models are tens of MB — far past this image — while the
+# generated test arena is ~14 KB. So a bare build keeps the 16 MB image
+# unchanged, and only an install with data staged by scripts/q3a_data.py grows
+# to 512 MB. The kernel's ext2 driver walks at most 32 block groups, which is
+# why the big image uses 4 KB blocks (512 MB / 4 KB = 4 groups, and 4 KB blocks
+# also lift the per-file ceiling from ~64 MB to ~4 GB).
+Q3DATA_KB=$(du -sk build/q3data 2>/dev/null | cut -f1)
+Q3DATA_KB=${Q3DATA_KB:-0}
+if [ "$Q3DATA_KB" -gt 8192 ]; then
+    EXT2_MIB=512
+    EXT2_MKFS="-b 4096 -m 0"
+    if [ -f ext2.img ] && [ "$(stat -c%s ext2.img)" -lt 536870912 ]; then
+        echo "[!] ext2.img terlalu kecil untuk game data Q3 — dibuat ulang (512MB)..."
+        rm -f ext2.img
+    fi
+else
+    EXT2_MIB=16
+    EXT2_MKFS=""
+fi
+
 if [ ! -f "ext2.img" ]; then
-    echo "[!] Membuat ext2.img baru..."
-    dd if=/dev/zero of=ext2.img bs=1M count=16 2>/dev/null
-    mkfs.ext2 -F ext2.img > /dev/null 2>&1
+    echo "[!] Membuat ext2.img baru (${EXT2_MIB}MB)..."
+    dd if=/dev/zero of=ext2.img bs=1M count=0 seek="$EXT2_MIB" 2>/dev/null
+    mkfs.ext2 -F $EXT2_MKFS ext2.img > /dev/null 2>&1
 fi
 # System blobs (debloat v38.81): the kernel loads doom1.wad /
 # wallpaper.bin / music.wav from /ext2 on demand instead of embedding

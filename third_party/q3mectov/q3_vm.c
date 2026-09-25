@@ -1,4 +1,4 @@
-/* q3_vm.c — Quake III Arena, from id Software's OFFICIAL source (v38.106).
+/* q3_vm.c — Quake III Arena, from id Software's OFFICIAL source (v38.107).
  *
  * Phase 5 of the Q3 port. Phases 1-4 built an engine out of a fork and hand-
  * rolled a game loop; this one runs the real thing:
@@ -21,6 +21,14 @@
  * /ext2 -> tmpfs homepath, so the ENGINE'S filesystem — not a back door — is
  * what loads the module, exactly as it would load a real mod.
  *
+ * Phase 7 (v38.107) gives the module a world. Until then G_TRACE answered from
+ * a hand-written floor plane at z = 0, so "the official gameplay code runs" was
+ * true but "in a level" was not: no brushes, no walls, no entity string from a
+ * map. The kernel now compiles id's own collision model (cm_load/cm_trace/
+ * cm_test/cm_patch/cm_polylib) and CM_LoadMap()s a real .bsp through the
+ * engine's filesystem — the level's entity text reaches G_InitGame through
+ * CM_EntityString(), and every trap_Trace is id's own brush trace.
+ *
  * Design rule: never park on failure. Every step reports and returns, so a
  * broken step costs one FAILED marker instead of a dead machine.
  */
@@ -29,10 +37,15 @@
 
 #include "../q3a/code/game/q_shared.h"
 #include "../q3a/code/qcommon/qcommon.h"
+#include "../q3a/code/qcommon/cm_public.h"
 #include "../q3a/code/game/g_public.h"
 /* id's VM-private header, for read-only inspection of what the loader built
  * (id's own qcommon/vm.c includes it exactly like this). */
 #include "../q3a/code/qcommon/vm_local.h"
+/* v38.107: the collision model's private header, included for the same reason —
+ * to read back what CM_LoadMap actually built (cm.numBrushes, cm.numPlanes, …)
+ * so the log reports the real thing instead of the port's opinion of it. */
+#include "../q3a/code/qcommon/cm_local.h"
 
 /* Mectov platform services */
 extern void write_serial_string(const char *s);
@@ -85,6 +98,46 @@ static void vm_ser_hex(unsigned int v) {
  * off the volume is the point. */
 #define Q3VM_QVM_PATH "/ext2/baseq3/vm/qagame.qvm"
 #define Q3VM_MAP_PATH "/ext2/baseq3/vm/qagame.map"
+
+/* The collision world (v38.107, Q3 phase 7).
+ *
+ * Until this release every trace the game module received came from
+ * q3vm_trace_world() below: one infinite floor plane at z = 0 and nothing else,
+ * which is why the player could only fall or walk on that single surface. The
+ * kernel now compiles id's OWN collision model (qcommon/cm_load.c,
+ * cm_trace.c, cm_test.c, cm_patch.c, cm_polylib.c — see the Makefile) and loads
+ * a real .bsp through the engine's filesystem, so `trap_Trace` answers with
+ * id's brushes, planes and surface flags.
+ *
+ * Two path forms, one file: the FS-relative name is what CM_LoadMap hands to
+ * FS_ReadFile (search path /ext2/baseq3, see Sys_DefaultCDPath), and the /ext2
+ * form is what the VFS can stat to tell whether the map exists at all.
+ *
+ * scripts/build_test_bsp.py generates mectovtest.bsp: our own arena, no id
+ * assets, built so that "did the real loader run?" is answerable from this
+ * log — its floor's top face is z = 64 (the fake world put the player at
+ * exactly z = 24) and it is walled (the fake world returned fraction 1.0 for
+ * every sideways trace). Before this phase that content did not have to exist
+ * because there was nothing that could load it.
+ *
+ * A bare build with no game data still boots: the loader reports the missing
+ * map and the old minimal world stays in place, so `q3vm` runs end to end on an
+ * empty install instead of dying at G_InitGame. */
+#define Q3VM_BSP_FS_PATH  "maps/mectovtest.bsp"
+#define Q3VM_BSP_VFS_PATH "/ext2/baseq3/maps/mectovtest.bsp"
+
+/* bg_public.h's "what stops a player" mask, spelled out here because this
+ * translation unit deliberately does not include the bg layer; every constant
+ * in it comes from q_shared.h. */
+#define Q3VM_MASK_PLAYERSOLID \
+    (CONTENTS_SOLID|CONTENTS_PLAYERCLIP|CONTENTS_BODY|CONTENTS_CORPSE)
+
+static int q3vm_world_real = 0;         /* 1 = id's CM_LoadMap succeeded */
+static int q3vm_world_checksum = 0;
+/* The running VM, kept so the world probes can read the player's own
+ * playerState out of its data segment (same cast q3vm_log_player_state does).
+ * Set once, right after VM_Create. */
+static vm_t *q3vm_vm = 0;
 
 static int q3vm_file_bytes(const char *path) {
     int node = vfs_get_node(path);
@@ -236,6 +289,164 @@ static void q3vm_trace_world(trace_t *tr, const vec3_t start,
     tr->endpos[1] = end[1];
     tr->endpos[2] = end[2];
     tr->entityNum = ENTITYNUM_NONE;
+}
+
+/* ===== loading the map through id's own loader ========================== */
+
+/* A float with three decimals, by integer math — the kernel has no libm and
+ * this is only ever used for log lines the test suite parses. */
+static void vm_ser_f3(float v) {
+    int neg = 0, whole, frac, d;
+    long s;
+    if (v < 0.0f) { neg = 1; v = -v; }
+    s = (long)(v * 1000.0f + 0.5f);
+    whole = (int)(s / 1000);
+    frac  = (int)(s % 1000);
+    if (neg && (whole || frac)) write_serial_string("-");
+    vm_ser_int(whole);
+    write_serial_string(".");
+    for (d = 100; d; d /= 10) vm_ser_int((frac / d) % 10);
+}
+
+static void q3vm_world_load(void) {
+    if (q3vm_file_bytes(Q3VM_BSP_VFS_PATH) <= 0) {
+        write_serial_string("[Q3VM] world: no " Q3VM_BSP_VFS_PATH
+                            " — minimal fallback (single floor plane at z=0)\n");
+        return;
+    }
+    /* id's loader: reads the lump table, validates the version, hunks the
+     * shaders/planes/brushes/leafs/nodes/models and the entity string. It
+     * Com_Error()s on anything malformed, which is why the existence check
+     * above happens first — a missing file is a clean report, a corrupt one is
+     * id's own diagnostic. */
+    CM_LoadMap(Q3VM_BSP_FS_PATH, qfalse, &q3vm_world_checksum);
+    q3vm_world_real = 1;
+    write_serial_string("[Q3VM] world: CM_LoadMap(" Q3VM_BSP_FS_PATH ") shaders=");
+    vm_ser_int(cm.numShaders);
+    write_serial_string(" planes=");
+    vm_ser_int(cm.numPlanes);
+    write_serial_string(" brushes=");
+    vm_ser_int(cm.numBrushes);
+    write_serial_string(" brushsides=");
+    vm_ser_int(cm.numBrushSides);
+    write_serial_string(" nodes=");
+    vm_ser_int(cm.numNodes);
+    write_serial_string(" leafs=");
+    vm_ser_int(cm.numLeafs);
+    write_serial_string(" models=");
+    vm_ser_int(cm.numSubModels);
+    write_serial_string("\n");
+    write_serial_string("[Q3VM] world: entity string chars=");
+    vm_ser_int(cm.numEntityChars);
+    write_serial_string(" checksum=");
+    vm_ser_hex((unsigned int)q3vm_world_checksum);
+    write_serial_string("\n");
+}
+
+/* Where the module's own spawn point came from. The retail server hands the
+ * game its level's entity text (SV_InitGameVM -> CM_EntityString); printing the
+ * first info_player_deathmatch origin out of that text is the difference
+ * between "the module walked its real spawn path" and "the port invented a
+ * spawn at 0 0 24". */
+static void q3vm_world_report_spawn(void) {
+    const char *base, *p;
+    char num[24];
+    int n;
+    if (!q3vm_world_real) return;
+    base = CM_EntityString();
+    p = strstr(base, "info_player_deathmatch");
+    if (!p) {
+        write_serial_string("[Q3VM] world: entity string has no info_player_deathmatch\n");
+        return;
+    }
+    p = strstr(p, "origin");
+    if (!p) return;
+    p += 6;                                  /* past the key's own text */
+    while (*p && *p != '"') p++;             /* the key's closing quote */
+    if (*p) p++;                             /* step over it */
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != '"') return;                   /* key with no quoted value */
+    p++;
+    for (n = 0; *p && *p != '"' && n < (int)sizeof(num) - 1; n++) num[n] = *p++;
+    num[n] = '\0';
+    write_serial_string("[Q3VM] world: map spawn origin=[");
+    write_serial_string(num);
+    write_serial_string("]\n");
+}
+
+/* Two probes whose answers only real brush collision can produce, both run
+ * from where the module actually put the player:
+ *
+ *   down  the floor's TOP face is z = 64 in the generated arena, so a hit
+ *         there is a number the old z = 0 plane could not have produced;
+ *   -X    the -X wall's inner face is x = -512, and a sideways trace STOPS.
+ *         The old world had one infinite floor plane and returned fraction
+ *         1.0 (empty air) for every horizontal move.
+ *
+ * The suite asserts on these lines: "id's loader ran" is then checkable from
+ * the log rather than by trusting the port. */
+static void q3vm_world_probe(void) {
+    trace_t tr;
+    vec3_t start, endpos, zero;
+    playerState_t *ps;
+    if (!q3vm_world_real || vm_ps_ofs < 0) return;
+    ps = (playerState_t *)(q3vm_vm->dataBase + (vm_ps_ofs & q3vm_vm->dataMask));
+    VectorCopy(ps->origin, start);
+    VectorClear(zero);
+
+    write_serial_string("[Q3VM] world: probe from (");
+    vm_ser_int((int)start[0]);
+    write_serial_string(" ");
+    vm_ser_int((int)start[1]);
+    write_serial_string(" ");
+    vm_ser_int((int)start[2]);
+    write_serial_string(")\n");
+
+    /* straight down */
+    VectorCopy(start, endpos);
+    endpos[2] -= 256.0f;
+    CM_BoxTrace(&tr, start, endpos, zero, zero, 0, Q3VM_MASK_PLAYERSOLID, 0);
+    write_serial_string("[Q3VM] world: trace down fraction=");
+    vm_ser_f3(tr.fraction);
+    write_serial_string(" endz=");
+    vm_ser_f3(tr.endpos[2]);
+    write_serial_string(" normal=(");
+    vm_ser_f3(tr.plane.normal[0]);
+    write_serial_string(" ");
+    vm_ser_f3(tr.plane.normal[1]);
+    write_serial_string(" ");
+    vm_ser_f3(tr.plane.normal[2]);
+    write_serial_string(") contents=");
+    vm_ser_int(tr.contents);
+    write_serial_string("\n");
+
+    /* straight -X, into the wall */
+    VectorCopy(start, endpos);
+    endpos[0] -= 512.0f;
+    CM_BoxTrace(&tr, start, endpos, zero, zero, 0, Q3VM_MASK_PLAYERSOLID, 0);
+    write_serial_string("[Q3VM] world: trace -x fraction=");
+    vm_ser_f3(tr.fraction);
+    write_serial_string(" endx=");
+    vm_ser_f3(tr.endpos[0]);
+    write_serial_string(" normal=(");
+    vm_ser_f3(tr.plane.normal[0]);
+    write_serial_string(" ");
+    vm_ser_f3(tr.plane.normal[1]);
+    write_serial_string(" ");
+    vm_ser_f3(tr.plane.normal[2]);
+    write_serial_string(") contents=");
+    vm_ser_int(tr.contents);
+    write_serial_string("\n");
+
+    /* what the player is standing on, straight from id's point-contents */
+    {
+        vec3_t feet;
+        VectorCopy(start, feet);
+        feet[2] -= 24.0f;
+        write_serial_string("[Q3VM] world: point contents at feet=");
+        vm_ser_int(CM_PointContents(feet, 0));
+        write_serial_string("\n");
+    }
 }
 
 /* One synthetic player, full throttle forward. serverTime carries the frame's
@@ -399,7 +610,13 @@ int Q3VM_SystemCalls(int *args) {
             "\"origin\" \"0 0 24\" }\n";
         static char *entp = 0;
         const char *s;
-        if (!entp) entp = entbuf;
+        if (!entp) {
+            /* v38.107: with a real map loaded this is the level's OWN entity
+             * text — what SV_InitGameVM hands G_SpawnEntitiesFromString()
+             * through CM_EntityString(). The literal below survives only for an
+             * install that has no .bsp at all. */
+            entp = q3vm_world_real ? CM_EntityString() : entbuf;
+        }
         s = COM_Parse(&entp);
         Q_strncpyz((char *)VMA(1), s, args[2]);
         if (!entp && !s[0]) return 0;   /* end of spawn string */
@@ -448,16 +665,44 @@ int Q3VM_SystemCalls(int *args) {
         if (args[2] > 0) ((char *)VMA(1))[0] = '\0';
         return 0;
     case G_TRACE:
-        q3vm_trace_world((trace_t *)VMA(1), (const float *)VMA(2),
-                         (const float *)VMA(3), (const float *)VMA(4),
-                         (const float *)VMA(5));
+    case G_TRACECAPSULE: {
+        /* ( trace_t *results, start, mins, maxs, end, passEntityNum, contentMask )
+         * — the argv order is g_syscalls.c's trap_Trace/trap_TraceCapsule.
+         *
+         * v38.107: id's OWN collision model answers this when a .bsp is
+         * loaded, so the module gets real brushes, real planes and the real
+         * content mask. The boxes are copied out of the VM first because
+         * CM_BoxTrace takes non-const vec3_t and there is no reason for id's
+         * code to write back into the module's data segment.
+         *
+         * passEntityNum is deliberately ignored: it exists to skip the
+         * entities the trace is passing through, and the world model is the
+         * only solid thing in this world. */
+        trace_t *tr = (trace_t *)VMA(1);
+        vec3_t start, endp, mins, maxs;
+        VectorCopy((const float *)VMA(2), start);
+        VectorCopy((const float *)VMA(3), mins);
+        VectorCopy((const float *)VMA(4), maxs);
+        VectorCopy((const float *)VMA(5), endp);
+        if (q3vm_world_real) {
+            CM_BoxTrace(tr, start, endp, mins, maxs, 0, args[7],
+                        (args[0] == G_TRACECAPSULE) ? 1 : 0);
+            /* CM_Trace never touches entityNum — the CALLER owns it. The
+             * retail engine's SV_GameTrace sets it right after this same call,
+             * and id's own code depends on it: q_shared.h documents
+             * trace_t.entityNum as an entity number "or ENTITYNUM_NONE,
+             * ENTITYNUM_WORLD", and bg_pmove.c's PM_AddTouchEnt returns early
+             * for ENTITYNUM_WORLD precisely because the world is not a
+             * touchable entity. Left unset, a world hit reported entity 0 — the
+             * worldspawn gentity — so the player "stood on" entity 0 with
+             * ps.groundEntityNum == 0 (v38.107 bring-up saw exactly that:
+             * landed at the floor's z with ground=0). */
+            tr->entityNum = (tr->fraction != 1.0f) ? ENTITYNUM_WORLD : ENTITYNUM_NONE;
+        } else {
+            q3vm_trace_world(tr, start, mins, maxs, endp);
+        }
         return 0;
-    case G_TRACECAPSULE:
-        /* no walls and no boxes: the capsule path sees the same floor */
-        q3vm_trace_world((trace_t *)VMA(1), (const float *)VMA(2),
-                         (const float *)VMA(3), (const float *)VMA(4),
-                         (const float *)VMA(5));
-        return 0;
+    }
 
     case G_GET_USERCMD:
         /* ( int clientNum, usercmd_t *cmd ) — the cmd pointer is args[2] */
@@ -489,6 +734,11 @@ int Q3VM_SystemCalls(int *args) {
     case G_DEBUG_POLYGON_DELETE:
         return 0;
     case G_POINT_CONTENTS:
+        /* ( const vec3_t point, int passEntityNum ) — id's own query when a
+         * .bsp is loaded (v38.107); an empty world answers "nothing" (0). */
+        if (q3vm_world_real)
+            return CM_PointContents((const float *)VMA(1), 0);
+        return 0;
     case G_IN_PVS:
     case G_IN_PVS_IGNORE_PORTALS:
     case G_AREAS_CONNECTED:
@@ -585,6 +835,13 @@ void q3vm_start(void) {
 	 * runs — belt and braces on top of the +set above. */
 	Cvar_Set("developer", "1");
 
+    /* v38.107: load the collision world through id's own loader. It has to
+     * happen before the module runs — G_InitGame walks the level's entity
+     * string during GAME_INIT, and ClientSpawn needs the brushes by
+     * CLIENT_BEGIN. */
+    q3vm_world_load();
+    q3vm_world_report_spawn();
+
     /* id's loader: reads vm/qagame.qvm through the engine FS, validates the
      * VM_MAGIC header, allocates the data/code segments on the hunk and
      * prepares the bytecode for the interpreter. */
@@ -594,6 +851,7 @@ void q3vm_start(void) {
         q3vm_park();
     }
 
+    q3vm_vm = vm;
     write_serial_string("[Q3VM] vm created name=qagame interpret=bytecode symbols=");
     vm_ser_int(vm->numSymbols);
     write_serial_string(" codeLength=");
@@ -659,6 +917,16 @@ void q3vm_start(void) {
     VM_Call(vm, GAME_CLIENT_USERINFO_CHANGED, 0);
     write_serial_string("[Q3VM] client 0: GAME_CLIENT_BEGIN\n");
     VM_Call(vm, GAME_CLIENT_BEGIN, 0);
+
+    /* Where the module decided to put the player, straight out of its own
+     * playerState (frame 0 = the spawn instant, before the loop advances
+     * time). Neither of these numbers is the port's to choose any more: the
+     * origin comes from the map's info_player_deathmatch and the ground from
+     * id's brushes. Then the two probes, whose answers only real collision
+     * can produce (see q3vm_world_probe). */
+    write_serial_string("[Q3VM] player spawn:\n");
+    q3vm_log_player_state(vm, 0, 0);
+    q3vm_world_probe();
 
     /* ---- the game loop: id's real G_RunFrame + ClientThink --------------
      * The same two vmMain calls the retail server frame makes

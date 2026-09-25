@@ -88,6 +88,9 @@ Q3_SRCS = $(Q3_DIR)/game/q_math.c $(Q3_DIR)/game/q_shared.c \
           $(Q3_DIR)/qcommon/huffman.c $(Q3_DIR)/qcommon/md4.c \
           $(Q3_DIR)/qcommon/net_chan.c $(Q3_DIR)/qcommon/unzip.c \
           $(Q3_DIR)/qcommon/vm.c $(Q3_DIR)/qcommon/vm_interpreted.c \
+          $(Q3_DIR)/qcommon/cm_load.c $(Q3_DIR)/qcommon/cm_trace.c \
+          $(Q3_DIR)/qcommon/cm_test.c $(Q3_DIR)/qcommon/cm_patch.c \
+          $(Q3_DIR)/qcommon/cm_polylib.c \
           $(Q3_DIR)/null/null_input.c $(Q3_DIR)/null/null_snddma.c \
           $(Q3_OUR)/q3_kernel.c $(Q3_OUR)/q3_printf.c \
           $(Q3_OUR)/q3_platform.c $(Q3_OUR)/q3_client.c \
@@ -131,11 +134,28 @@ Q3_ZONE_RENAME = -Dmainzone=Q3Z_mainzone -DZ_Malloc=Q3Z_Malloc \
                  -DZ_Free=Q3Z_Free -DZ_FreeTags=Q3Z_FreeTags \
                  -DZ_CheckHeap=Q3Z_CheckHeap -DZ_ClearZone=Q3Z_ClearZone
 
+# -DC_ONLY selects id's portable C implementations. One of them is
+#   BoxOnPlaneSide in game/q_math.c, whose ONLY definition on Linux/i386 sits
+#   behind `#if !((__linux__||__FreeBSD__) && __i386__ && !C_ONLY)` — upstream
+#   expected that combination to come from an assembly object the kernel does
+#   not build, so without this the collision tree has nothing to call (v38.107
+#   hit exactly that as `undefined reference to BoxOnPlaneSide` the moment
+#   cm_test.c joined the link). C_ONLY appears in only three places in the whole
+#   tree: that guard, the branch inside it, and a PowerPC path we never take.
 Q3_CFLAGS = -m32 -std=gnu99 -ffreestanding -O1 -MMD -MP \
               -I$(Q3_OUR)/stubs -I$(Q3_DIR)/qcommon -I$(Q3_DIR)/game \
               -I$(Q3_DIR)/null \
               -fno-builtin -fno-pie -fno-pic -march=i686 \
-              -DMECTOV_Q3=1 -DSTANDALONE $(Q3_ZONE_RENAME) -w
+              -DMECTOV_Q3=1 -DSTANDALONE -DC_ONLY $(Q3_ZONE_RENAME) -w
+
+# v38.107 (Q3 phase 7): id's OWN collision model — cm_load.c, cm_trace.c,
+# cm_test.c, cm_patch.c, cm_polylib.c — is compiled into the kernel above.
+# Until now the port answered G_TRACE from a hand-written world (a floor plane
+# at z=0); CM_LoadMap + CM_BoxTrace replace it with the real .bsp, which is what
+# makes id's own entity string, brush tracing and player collision available to
+# the official game module. They are host-side (not VM) code and need nothing
+# from the QVM loader, which is why they could stay unbuilt until a .bsp existed
+# to load.
 
 # DOOM source files (all .c in doom/ directory)
 DOOM_SRCS = $(wildcard doom/*.c)
@@ -269,7 +289,15 @@ browser.mct: apps/browser.c $(MCT_LIBC_H)
 paint.mct: apps/paint.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/paint.c paint.mct
 
-terminal.mct: apps/terminal.c $(MCT_LIBC_H)
+# v38.107: apps/terminal.c prints the release string from src/include/version.h,
+# so that header is a prerequisite here even though it is not a source file of
+# this target. scripts/build_mct.py emits no dependency files, which means make
+# cannot see a changed header on its own — and the failure is silent: after
+# OS_VERSION moved into version.h, the Terminal still shipped "v38.106" while
+# the kernel reported v38.107, which is the exact class of stale-number bug
+# this release set out to remove. Any app that starts printing the version needs
+# this prerequisite too.
+terminal.mct: apps/terminal.c $(MCT_LIBC_H) src/include/version.h
 	python3 scripts/build_mct.py apps/terminal.c terminal.mct
 
 taskmgr.mct: apps/taskmgr.c $(MCT_LIBC_H)

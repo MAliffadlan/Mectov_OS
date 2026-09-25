@@ -27,8 +27,15 @@ void cmd_q3play(void) {
                 print("q3play: failed to fork client task\n", 0x0C);
                 return;
         }
-        print("Starting Quake III client (TinyGL window)...\n", 0x0C);
+        print("Starting the Quake III engine (TinyGL window)...\n", 0x0C);
         print("WASD move, mouse look, ESC quits.\n", 0x07);
+        // Honest labelling (v38.107). This window is id's engine drawing the
+        // Mectov arena out of /ext2/mectov1.map: the port deliberately ships no
+        // retail game data, so the map, the models and every colour are
+        // Mectov's, not id's. Saying "Quake III client" next to a screenshot of
+        // coloured boxes is what made v38.103-v38.106 read like the retail game.
+        // The official id gameplay bytecode runs under `q3vm` (headless).
+        print("NOTE: id engine + Mectov arena — no retail Q3A content.\n", 0x0E);
 #else
         print("q3play: client not compiled in (build with MECTOV_Q3=1)\n", 0x0C);
 #endif

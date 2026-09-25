@@ -242,7 +242,23 @@ FILE *Sys_FOpen(const char *ospath, const char *mode) {
 FILE *Sys_Mkfifo(const char *ospath) { (void)ospath; return NULL; }
 
 /* ===== sisa simbol yang di host spike ada di TU lain ===== */
-int c_traces, c_brush_traces, c_patch_traces, c_pointcontents;
+/* The trace counters (c_traces / c_brush_traces / c_patch_traces /
+ * c_pointcontents) used to be defined here, because a world with no collision
+ * model had nothing that would count anything. v38.107 compiles id's own
+ * cm_load.c/cm_trace.c/cm_test.c/cm_patch.c into the kernel and they own those
+ * globals, so this definition became a duplicate-symbol link error — and with
+ * it gone the counters finally report real numbers (see `c_traces` in
+ * cm_trace.c, incremented by every CM_BoxTrace the game module makes). */
+
+/* cm_patch.c's debug surface helper calls this under `#ifndef BSPC`. It lives in
+ * botlib, which the kernel does not build yet (Q3 phase 8), so the port supplies
+ * the symbol as an inert stub: CM_DrawDebugSurface is only reached through
+ * r_debugSurface, which nothing sets. The real one arrives with botlib. */
+void BotDrawDebugPolygons(void (*drawPoly)(int color, int numPoints, float *points),
+                          int value) {
+    (void)drawPoly;
+    (void)value;
+}
 /* Key_KeynameCompletion now lives in q3_client.c (v38.103): the client owns
  * the key-name table, so completion reads the same table the binds use. */
 /* VM_Init/VM_Clear now come from id's own qcommon/vm.c (v38.105) — the kernel

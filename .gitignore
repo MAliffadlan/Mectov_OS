@@ -87,6 +87,16 @@ run_headless
 run_headless.sh
 build.sh
 
+# Quake III Arena retail game data — NEVER redistributable (v38.107). The GPL
+# covers id's source and id's game bytecode, never pak0.pk3: the maps, textures,
+# models and sounds in it belong to the retail release. Drop your own copy in
+# assets/q3/pak0.pk3 (or point MECTOV_PAK0 at it) and scripts/q3a_data.py will
+# stage what a map needs; neither the .pk3 nor the extracted tree may ever be
+# committed. `build/` above already covers the extraction directory, these
+# cover a copy dropped into the tree by hand. See README "Game data".
+*.pk3
+assets/q3/
+
 # LAST RULE, ON PURPOSE: the vendored id Software tree (v38.105) ships
 # verbatim, so nothing above may filter it. Its GPL COPYING.txt/README.txt and
 # q3asm's .txt notes fall under `*.txt`, and it carries a build.sh — both would

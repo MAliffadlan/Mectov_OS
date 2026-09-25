@@ -757,7 +757,10 @@ void CL_StartHunkUsers(void) {
     int wx = ((int)fb_width - ww) / 2;  if (wx < 0) wx = 0;
     int wy = ((int)fb_height - TASKBAR_H_PX - wh) / 2; if (wy < 0) wy = 0;
 
-    cl_win_id = wm_open(wx, wy, ww, wh, "Quake III (Mectov)",
+    // The title says what the window actually is (v38.107): id's engine drawing
+    // the Mectov arena, not the retail game. It used to read "Quake III (Mectov)"
+    // with nothing marking the arena as ours.
+    cl_win_id = wm_open(wx, wy, ww, wh, "Quake III engine (Mectov arena)",
                         cl_win_draw, cl_win_key, NULL, cl_win_mouse);
     if (cl_win_id < 0) {
         write_serial_string("[Q3CL] FATAL: could not open WM window\n");

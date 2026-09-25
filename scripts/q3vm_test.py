@@ -94,6 +94,35 @@ FRAME_RE = re.compile(
 ENTITYNUM_WORLD = 1022        # MAX_GENTITIES-2, q_shared.h
 STAND_Z = 33                  # spawn 24 + the +9 the game adds on top
 
+# ---- the generated test arena (scripts/build_test_bsp.py, v38.107) ---------
+# Its numbers are what let the assertions below be exact rather than vague: the
+# arena is our own content, so the collision answers are known in advance — and
+# two of them cannot come out of the hand-written world this release replaced
+# (one floor plane at z=0, fraction 1.0 for every sideways move).
+WORLD_REAL_MARKER = "[Q3VM] world: CM_LoadMap("
+WORLD_FALLBACK_MARKER = "[Q3VM] world: no /ext2/baseq3/maps/mectovtest.bsp"
+SPAWN_ORIGIN_MARKER = "[Q3VM] world: map spawn origin=["
+BSP_NAME = "maps/mectovtest.bsp"
+BSP_FLOOR_TOP = 64            # the floor's TOP face; the fake world had 0
+BSP_WALL_X = -512             # the -X wall's inner face
+BSP_SPAWN = (-384, -384, 120)  # the map's info_player_deathmatch "origin"
+STAND_Z_FLOOR = BSP_FLOOR_TOP + 24   # player mins[2] = -24, so it rests 24 above
+PLAYER_HALF_WIDTH = 15        # DEFAULT_MINS_2, so it stops ~15 short of a wall
+
+WORLD_RE = re.compile(
+    r"\[Q3VM\] world: CM_LoadMap\((\S+)\) shaders=(-?\d+) planes=(-?\d+) "
+    r"brushes=(-?\d+) brushsides=(-?\d+) nodes=(-?\d+) leafs=(-?\d+) "
+    r"models=(-?\d+)")
+ENTITY_CHARS_RE = re.compile(
+    r"\[Q3VM\] world: entity string chars=(-?\d+) checksum=(0x[0-9a-f]+)")
+SPAWN_ORIGIN_RE = re.compile(r"\[Q3VM\] world: map spawn origin=\[([^\]]*)\]")
+PROBE_DOWN_RE = re.compile(
+    r"\[Q3VM\] world: trace down fraction=(-?[\d.]+) endz=(-?[\d.]+) "
+    r"normal=\((-?[\d.]+) (-?[\d.]+) (-?[\d.]+)\) contents=(-?\d+)")
+PROBE_X_RE = re.compile(
+    r"\[Q3VM\] world: trace -x fraction=(-?[\d.]+) endx=(-?[\d.]+) "
+    r"normal=\((-?[\d.]+) (-?[\d.]+) (-?[\d.]+)\) contents=(-?\d+)")
+
 LOCATE_RE = re.compile(
     r"\[Q3VM\] locate_game_data entities=(-?\d+) sizeof_gentity=(-?\d+) "
     r"vm_ofs=(0x[0-9a-f]+)")
@@ -407,7 +436,117 @@ def main():
         print("[OK] retail connect sequence: ClientConnect -> userinfo -> "
               "ClientBegin, 'Mectov entered the game' and all")
 
-        # ---- 5d. the game loop moved the player -----------------------------
+        # ---- 5d. the collision world is id's own .bsp (v38.107) -------------
+        # Until this release G_TRACE answered from a hand-written floor plane at
+        # z=0, so "the official gameplay code runs" was true but "in a level"
+        # was not. Everything asserted here is new information: the loader's own
+        # account of what it built, the level's entity text, and two traces
+        # whose answers the old world could not have produced.
+        if WORLD_FALLBACK_MARKER in log:
+            print("[FAIL] the map never loaded — the port fell back to its "
+                  "minimal world (was the test arena seeded onto /ext2?)")
+            return 1
+        if WORLD_REAL_MARKER not in log:
+            print("[FAIL] id's own collision loader (CM_LoadMap) never ran")
+            dump_tail(40)
+            return 1
+        wm = WORLD_RE.search(log)
+        if not wm:
+            print("[FAIL] CM_LoadMap did not report what it built")
+            dump_tail(40)
+            return 1
+        bsp_name = wm.group(1)
+        shaders, planes, brushes, brushsides, nodes, leafs, models = \
+            (int(wm.group(i)) for i in range(2, 9))
+        if bsp_name != BSP_NAME:
+            print(f"[FAIL] the wrong map was loaded: {bsp_name}")
+            return 1
+        if min(shaders, planes, brushes, brushsides, nodes, leafs, models) <= 0:
+            print(f"[FAIL] CM_LoadMap built an empty world: shaders={shaders} "
+                  f"planes={planes} brushes={brushes} brushsides={brushsides} "
+                  f"nodes={nodes} leafs={leafs} models={models}")
+            return 1
+        print(f"[OK] id's own collision loader built the world from "
+              f"{bsp_name}: {shaders} shaders, {planes} planes, {brushes} "
+              f"brushes, {brushsides} brushsides, {nodes} node, {leafs} leaf, "
+              f"{models} model")
+
+        mchar = ENTITY_CHARS_RE.search(log)
+        if not mchar or int(mchar.group(1)) < 100:
+            print("[FAIL] the level's entity text is missing or empty")
+            return 1
+        print(f"[OK] the level's own entity text reached the module "
+              f"({mchar.group(1)} chars, checksum {mchar.group(2)})")
+
+        if SPAWN_ORIGIN_MARKER not in log:
+            print("[FAIL] no info_player_deathmatch in the level's entity text")
+            dump_tail(40)
+            return 1
+        so = SPAWN_ORIGIN_RE.search(log)
+        spawn = tuple(int(v) for v in so.group(1).split()) if so else None
+        if spawn != BSP_SPAWN:
+            print(f"[FAIL] the module's spawn is {spawn}, not the map's "
+                  f"{BSP_SPAWN}")
+            return 1
+        print(f"[OK] the module's spawn point came out of the map's own entity "
+              f"string: origin={spawn}")
+
+        # A downward trace must stop on the arena's floor slab, whose top face
+        # is z = 64. The old world's single plane sat at z = 0, so its answer
+        # was 0 — this number is the map's geometry, not a convention.
+        pd = PROBE_DOWN_RE.search(log)
+        if not pd:
+            print("[FAIL] the driver's downward probe produced no trace")
+            dump_tail(40)
+            return 1
+        pfrac, endz, nx, ny, nz, contents = (float(pd.group(1)),
+                                            float(pd.group(2)),
+                                            float(pd.group(3)),
+                                            float(pd.group(4)),
+                                            float(pd.group(5)),
+                                            int(pd.group(6)))
+        if abs(nz - 1.0) > 0.01 or abs(nx) > 0.01 or abs(ny) > 0.01:
+            print(f"[FAIL] the surface under the player is not horizontal: "
+                  f"normal=({nx} {ny} {nz})")
+            return 1
+        if abs(endz - BSP_FLOOR_TOP) > 1.0:
+            print(f"[FAIL] the floor is at z={endz}, not the generated arena's "
+                  f"{BSP_FLOOR_TOP} — that is not this map's geometry")
+            return 1
+        if contents != 1:            # CONTENTS_SOLID
+            print(f"[FAIL] the floor is not CONTENTS_SOLID (got {contents})")
+            return 1
+        print(f"[OK] a downward trace from the player stops on the map's floor "
+              f"slab: fraction={pfrac:.3f} endz={endz:.3f} normal=(0 0 1) "
+              f"contents=SOLID")
+
+        # The sideways trace is the one the old world could never get right: it
+        # had no walls, so every horizontal move came back fraction 1.0 (open
+        # air all the way). Stopping on the -X face at x = -512 with a +X plane
+        # normal means real brushes are being swept.
+        px = PROBE_X_RE.search(log)
+        if not px:
+            print("[FAIL] the driver's sideways probe produced no trace")
+            dump_tail(40)
+            return 1
+        xfrac, endx, wnx = float(px.group(1)), float(px.group(2)), float(px.group(3))
+        if not (0.20 <= xfrac <= 0.30):
+            print(f"[FAIL] the wall probe hit at fraction={xfrac}, expected "
+                  f"~0.25 (spawn x=-384, wall at {BSP_WALL_X}, 512-unit trace)")
+            return 1
+        if abs(endx - BSP_WALL_X) > 1.0:
+            print(f"[FAIL] the wall probe stopped at x={endx}, not the wall "
+                  f"face {BSP_WALL_X}")
+            return 1
+        if wnx < 0.99:
+            print(f"[FAIL] the wall's plane normal points the wrong way: "
+                  f"({wnx})")
+            return 1
+        print(f"[OK] a sideways trace stops on the map's wall — the hand-written "
+              f"world had no walls and returned fraction 1.0 for this: "
+              f"fraction={xfrac:.3f} endx={endx:.3f} normal=(1 0 0)")
+
+        # ---- 5e. the game loop moved the player -----------------------------
         if FRAME_LOOP_MARKER not in log:
             print("[FAIL] the game loop never started")
             dump_tail(40)
@@ -425,6 +564,15 @@ def main():
             return 1
         first = frames[0]
         last = frames[-1]
+
+        # The spawn has to be the MAP's, not a number the port chose: the old
+        # hand-written world handed the module "0 0 24" and the player started
+        # at the origin. Frame 0 is the spawn instant, before the loop ticks.
+        if (int(first[2]), int(first[3])) != (BSP_SPAWN[0], BSP_SPAWN[1]):
+            print(f"[FAIL] the player spawned at ({first[2]},{first[3]}), not at "
+                  f"the map's spawn point ({BSP_SPAWN[0]},{BSP_SPAWN[1]})")
+            return 1
+
         dx = int(last[2]) - int(first[2])
         if dx <= 500:
             print(f"[FAIL] the player barely moved: x {first[2]} -> {last[2]} "
@@ -433,15 +581,34 @@ def main():
         ground = int(last[5])
         z = int(last[4])
         if ground != ENTITYNUM_WORLD:
-            print(f"[FAIL] the player never landed (ground={ground})")
+            print(f"[FAIL] the player never landed on the world "
+                  f"(ground={ground}) — trace.entityNum is the caller's to set "
+                  f"(ENTITYNUM_WORLD for the world model, ENTITYNUM_NONE for a "
+                  f"miss)")
             return 1
-        if not (20 <= z <= 60):
-            print(f"[FAIL] implausible standing height z={z} (want ~{STAND_Z})")
+        # It stands on the arena's floor slab, so its eye height is the floor's
+        # top face plus the 24-unit box stand-off — 88, not the 24 the z=0 plane
+        # used to produce.
+        if not (STAND_Z_FLOOR - 4 <= z <= STAND_Z_FLOOR + 4):
+            print(f"[FAIL] standing height z={z}; the map's floor top is "
+                  f"{BSP_FLOOR_TOP} so id's collision should hold the player "
+                  f"near {STAND_Z_FLOOR} (floor + the 24-unit player box)")
+            return 1
+        # The arena is walled, so no amount of walking can leave it. Without
+        # walls — which is exactly what the old world had — the player slid off
+        # the map forever and still "landed".
+        last_x, last_y = int(last[2]), int(last[3])
+        bound = 512 - PLAYER_HALF_WIDTH + 2
+        if abs(last_x) > bound or abs(last_y) > bound:
+            print(f"[FAIL] the player left the arena: ({last_x},{last_y}) is past "
+                  f"the walls at +/-512 — the map's brushes did not block it")
             return 1
         print(f"[OK] official gameplay code moved the player: frame "
-              f"{first[0]} x={first[2]} -> frame {last[0]} x={last[2]} "
-              f"(delta {dx} units in {int(last[1]) - int(first[1])} msec of "
-              f"game time), landed on the floor (z={z}, ground=WORLD)")
+              f"{first[0]} ({first[2]},{first[3]},{first[4]}) -> frame "
+              f"{last[0]} ({last_x},{last_y},{z}) — {dx} units of x in "
+              f"{int(last[1]) - int(first[1])} msec of game time, spawned at the "
+              f"map's own point, stopped by the map's walls, standing on the "
+              f"map's floor (ground=WORLD)")
         mm2 = re.search(r"\[Q3VM\] movement x0=(-?\d+) x1=(-?\d+) delta=(-?\d+)", log)
         if mm2 and int(mm2.group(3)) <= 0:
             print("[FAIL] the driver's own accounting says the player did not "

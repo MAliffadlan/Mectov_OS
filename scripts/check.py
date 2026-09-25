@@ -162,10 +162,32 @@ def recreate_images():
     os.chdir(ROOT)
     subprocess.run(["dd", "if=/dev/zero", "of=disk.img", "bs=512",
                     "count=2048", "status=none"], check=True)
-    subprocess.run(["dd", "if=/dev/zero", "of=ext2.img", "bs=1M",
-                    "count=16", "status=none"], check=True)
-    subprocess.run(["mkfs.ext2", "-F", "ext2.img"], check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # v38.107: the volume is sized from the staged Q3 payload. The generated
+    # test arena is ~14 KB, so CI (and every run without retail game data) gets
+    # the same 16 MB image as before and the ext2-q3.img artifact stays small;
+    # an install where scripts/q3a_data.py staged a retail map's assets gets
+    # 512 MB with 4 KB blocks (the kernel's ext2 driver walks 32 block groups,
+    # and 4 KB blocks put 512 MB at four of them).
+    q3data = os.path.join(ROOT, "build", "q3data")
+    payload_kb = 0
+    for dirpath, _dirnames, filenames in os.walk(q3data):
+        for fn in filenames:
+            try:
+                payload_kb += os.path.getsize(os.path.join(dirpath, fn)) // 1024 + 1
+            except OSError:
+                pass
+    if payload_kb > 8192:
+        print("[check] staged Q3 game data: %d KB -> 512 MB ext2 volume" % payload_kb)
+        subprocess.run(["dd", "if=/dev/zero", "of=ext2.img", "bs=1M",
+                        "count=0", "seek=512", "status=none"], check=True)
+        subprocess.run(["mkfs.ext2", "-F", "-b", "4096", "-m", "0",
+                        "ext2.img"], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.run(["dd", "if=/dev/zero", "of=ext2.img", "bs=1M",
+                        "count=16", "status=none"], check=True)
+        subprocess.run(["mkfs.ext2", "-F", "ext2.img"], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # System blobs for the debloated kernel (v38.81): doom1.wad /
     # wallpaper.bin / music.wav live on /ext2, loaded on demand.
     subprocess.run(["bash", "scripts/seed_ext2.sh", "ext2.img"], check=True)

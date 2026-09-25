@@ -84,4 +84,33 @@ if python3 "$ROOT/scripts/build_q3a_productid.py" \
 else
     echo "[seed] productid.txt generation failed — q3vm will need it" >&2
 fi
+# --- Quake III game data (v38.107, Q3 phase 7) -----------------------------
+# build/q3data/baseq3 is the staging tree for the engine's game directory:
+#   * scripts/build_test_bsp.py writes the free test arena into it (maps/*.bsp);
+#   * scripts/q3a_data.py writes whatever it extracted from the user's OWN
+#     pak0.pk3 into it, so a retail map and its textures can be loaded.
+# Everything under it is mirrored onto the volume as /baseq3/... — the game
+# directory the engine is told is its cd path (Sys_DefaultCDPath), so id's own
+# filesystem finds the map the way it would find a retail one.
+#
+# The test arena is GENERATED here rather than stored: build/ is not in the
+# repository, and every seeding path differs in what it has built already
+# (run.sh seeds before `make`, CI seeds before the kernel exists, check.py seeds
+# after the ISO). Generating it in the one script all of them call removes that
+# ordering trap. It is ~14 KB of content that a non-Q3 image never opens.
+Q3DATA="$ROOT/build/q3data/baseq3"
+if ! python3 "$ROOT/scripts/build_test_bsp.py" >/dev/null 2>&1; then
+    echo "[seed] test arena generation failed — q3vm falls back to the minimal world" >&2
+fi
+if [ -d "$Q3DATA" ]; then
+    while IFS= read -r d; do
+        seed_dir "/baseq3/${d#$Q3DATA/}"
+    done < <(find "$Q3DATA" -mindepth 1 -type d | sort)
+    n=0
+    while IFS= read -r f; do
+        seed_into "$f" "/baseq3/${f#$Q3DATA/}" && n=$((n + 1))
+    done < <(find "$Q3DATA" -type f | sort)
+    echo "[seed] q3 game data: $n file(s) under /baseq3"
+fi
+
 echo "[seed] done: $(debugfs -R 'ls' "$IMG" 2>/dev/null | tr '\n' ' ')"
