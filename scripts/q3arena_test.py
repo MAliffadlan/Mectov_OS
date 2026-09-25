@@ -538,7 +538,7 @@ def main():
         for fm in FRAME_RE.finditer(read_file(SERIAL_LOG)):
             n = int(fm.group(1))
             poses[n] = (fm.group(3), fm.group(4), fm.group(5),
-                        fm.group(6), fm.group(7))
+                        fm.group(6), fm.group(7), fm.group(8))
         for name, idx in (("cyan", 1), ("warm", 2), ("stepgreen", 3),
                           ("violet", 4), ("bright", 5), ("patch", 6),
                           ("sky", 7), ("distinct", 8)):
@@ -546,8 +546,8 @@ def main():
         mostly_clear = 0
         for frame, cyan, warm, stepgreen, violet, bright, patch, sky, distinct in seen:
             live = cyan + warm + stepgreen + violet + bright + patch
-            px, py, pz, yaw, pitch = poses.get(frame, ("?", "?", "?", "?", "?"))
-            print(f"     frame {frame} pos=({px},{py},{pz}) yaw={yaw} pitch={pitch}: "
+            px, py, pz, ez, yw, pt = poses.get(frame, ("?", "?", "?", "?", "?", "?"))
+            print(f"     frame {frame} pos=({px},{py},{pz}) eye_z={ez} yaw={yw} pitch={pt}: "
                   f"floor={cyan} walls={warm} "
                   f"step={stepgreen} ceiling={violet} crosshair={bright} "
                   f"curve={patch} clear={sky} distinct={distinct}")
