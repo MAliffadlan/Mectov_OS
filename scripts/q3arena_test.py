@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/q3arena_test.py — end-to-end test for the v38.108 Quake III Arena port
+scripts/q3arena_test.py — end-to-end test for the v38.109 Quake III Arena port
 (Q3 phase 8): the OFFICIAL id game module's own level, drawn.
 
 What it proves, in order:
@@ -11,6 +11,12 @@ What it proves, in order:
   2. the render mesh is built from the level's own file: q3bsp_load() read
      maps/mectovtest.bsp and reports the surfaces, vertices and shaders it
      found. Nothing in this number is hand-written by the test.
+  2b. the level's CURVED surface is tessellated, not skipped (v38.109): the mesh
+     line carries the patch accounting separately — patchdrawn out of patches
+     found, the quads the tessellator emitted and the vertices they cost — and
+     the suite checks the arithmetic between them (four vertices per quad, every
+     surface either planar-drawn, a patch, or counted as skipped). Before this
+     release a patch was a hole in the wall.
   3. the level's textures are decoded from the game data on the volume: one
      "[Q3ARENA] tex <n> <path> tga=WxH bytes=N gl=ID" line per shader, and NOT
      ONE placeholder. That is the assertion that makes the pixels meaningful —
@@ -20,7 +26,9 @@ What it proves, in order:
   5. the level is ON SCREEN, textured: every sampled frame's finished pixels are
      classified out of the renderer's own buffer (its ZBuffer, not a screendump)
      and must be made of the generated arena's texture colours — teal floor,
-     sandstone walls, yellow-green step, ambient-lit violet ceiling — with the
+     sandstone walls, yellow-green step, ambient-lit violet ceiling, and the
+     cove's magenta, a colour no planar texture here can produce at any light
+     level — with the
      clear colour accounting for only a small part of the frame. That last
      number is the one that catches "the camera points at nothing": a broken
      view transform renders a frame that is all clear colour, and this suite
@@ -79,11 +87,14 @@ EXPECTED_TEX = [
     "textures/mectovtest/wall.tga",
     "textures/mectovtest/ceiling.tga",
     "textures/mectovtest/step.tga",
+    "textures/mectovtest/curve.tga",   # the curved surface's own texture
 ]
 
 MESH_RE = re.compile(
     r"\[Q3ARENA\] world mesh: (\S+) surfaces=(-?\d+) of=(-?\d+) verts=(-?\d+) "
-    r"shaders=(-?\d+) patches=(-?\d+) skipped=(-?\d+) truncated=(-?\d+)")
+    r"shaders=(-?\d+) planar=(-?\d+) patches=(-?\d+) patchdrawn=(-?\d+) "
+    r"patchquads=(-?\d+) patchverts=(-?\d+) patchskipped=(-?\d+) "
+    r"skipped=(-?\d+) truncated=(-?\d+)")
 TEX_RE = re.compile(
     r"\[Q3ARENA\] tex (\d+) (\S+) tga=(\d+)x(\d+) bytes=(\d+) gl=(\d+)")
 TEX_MISSING_RE = re.compile(r"\[Q3ARENA\] tex (\d+) (\S+) missing=1")
@@ -212,7 +223,7 @@ RECT_RE = re.compile(
     r"content=(\d+)x(\d+)")
 PIXELS_RE = re.compile(
     r"\[Q3ARENA\] pixels frame=(\d+) cyan=(\d+) warm=(\d+) stepgreen=(\d+) "
-    r"violet=(\d+) bright=(\d+) sky=(\d+) distinct=(\d+)")
+    r"violet=(\d+) bright=(\d+) patch=(\d+) sky=(\d+) distinct=(\d+)")
 FRAME_PIXELS = CONTENT_W * CONTENT_H      # 76800: the whole frame is classified
 
 
@@ -354,9 +365,9 @@ def main():
             print("[FAIL] no mesh marker to parse")
             dump_tail()
             return 1
-        bsp, faces, listed, verts, shaders, patches, skipped, truncated = (
-            m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)),
-            int(m.group(5)), int(m.group(6)), int(m.group(7)), int(m.group(8)))
+        (bsp, faces, listed, verts, shaders, planar, patches, patchdrawn,
+         patchquads, patchverts, patchskipped, skipped, truncated) = (
+            m.group(1),) + tuple(int(m.group(i)) for i in range(2, 14))
         if bsp != BSP_NAME:
             print(f"[FAIL] the mesh was built from {bsp}, not {BSP_NAME}")
             return 1
@@ -367,14 +378,48 @@ def main():
         if truncated:
             print("[FAIL] the mesh was truncated (vertex cap hit)")
             return 1
-        if listed != faces + patches + skipped:
+        if listed != planar + patches + skipped:
             print(f"[FAIL] the surface accounting does not add up: {listed} in "
-                  f"the file, {faces} drawn + {patches} patches + {skipped} "
-                  f"skipped")
+                  f"the file, {planar} planar + {patches} patches + "
+                  f"{skipped} skipped")
+            return 1
+        if faces != planar + patchquads:
+            print(f"[FAIL] the drawn face count does not come from the "
+                  f"surfaces: {faces} drawn against {planar} planar + "
+                  f"{patchquads} patch quads")
+            return 1
+        if verts <= patchverts:
+            print(f"[FAIL] the mesh has {verts} vertices of which {patchverts} "
+                  f"are the patch's — the planar surfaces contributed nothing")
             return 1
         print(f"[OK] the render mesh is the level's own file: {BSP_NAME} "
               f"{faces}/{listed} surfaces, {verts} vertices, {shaders} shaders "
-              f"({patches} patches, {skipped} skipped)")
+              f"({planar} planar, {patches} curved, {skipped} skipped)")
+
+        # ---- 1b. the curved surface was tessellated, not skipped ------------
+        # The arena has a patch (the cove along the +X wall), so a release that
+        # skipped patches would report patchdrawn=0 and draw a hole where the
+        # wall's curve should be. The vertex count is an exact invariant of the
+        # tessellator: every quad it emits becomes one four-vertex face.
+        if patches < 1:
+            print(f"[FAIL] the level has {patches} curved surfaces — the test "
+                  f"arena writes one, so the loader lost it")
+            return 1
+        if patchdrawn != patches or patchskipped:
+            print(f"[FAIL] {patchdrawn}/{patches} curved surfaces drawn, "
+                  f"{patchskipped} skipped")
+            return 1
+        if patchquads < 8:
+            print(f"[FAIL] the tessellator produced only {patchquads} quads for "
+                  f"{patches} patch(es): the curve was not subdivided")
+            return 1
+        if patchverts != patchquads * 4:
+            print(f"[FAIL] {patchquads} quads cost {patchverts} vertices, "
+                  f"expected {patchquads * 4}")
+            return 1
+        print(f"[OK] the level's curved surface is tessellated, not skipped: "
+              f"{patchdrawn} patch(es) -> {patchquads} quads, {patchverts} "
+              f"vertices ({patchquads // max(patches, 1)} quads each)")
 
         # ---- 2. its textures were decoded from the volume -------------------
         if TEX_MISSING_RE.search(log):
@@ -474,7 +519,7 @@ def main():
         seen = []
         best = {}
         for _ in range(20):
-            samples = [tuple(int(x) for x in m.group(1, 2, 3, 4, 5, 6, 7, 8))
+            samples = [tuple(int(x) for x in m.group(1, 2, 3, 4, 5, 6, 7, 8, 9))
                        for m in PIXELS_RE.finditer(read_file(SERIAL_LOG))]
             seen = [s for s in samples if s[0] >= 20]
             if len(seen) >= 4 and seen[-1][0] >= 60:
@@ -485,14 +530,14 @@ def main():
             dump_tail(40)
             return 1
         for name, idx in (("cyan", 1), ("warm", 2), ("stepgreen", 3),
-                          ("violet", 4), ("bright", 5), ("sky", 6),
-                          ("distinct", 7)):
+                          ("violet", 4), ("bright", 5), ("patch", 6),
+                          ("sky", 7), ("distinct", 8)):
             best[name] = max(s[idx] for s in seen)
-        for frame, cyan, warm, stepgreen, violet, bright, sky, distinct in seen:
-            live = cyan + warm + stepgreen + violet + bright
+        for frame, cyan, warm, stepgreen, violet, bright, patch, sky, distinct in seen:
+            live = cyan + warm + stepgreen + violet + bright + patch
             print(f"     frame {frame}: floor={cyan} walls={warm} "
                   f"step={stepgreen} ceiling={violet} crosshair={bright} "
-                  f"clear={sky} distinct={distinct}")
+                  f"curve={patch} clear={sky} distinct={distinct}")
             if sky > FRAME_PIXELS // 4:
                 print(f"[FAIL] frame {frame} is {sky}/{FRAME_PIXELS} clear "
                       f"colour — the camera is looking at nothing "
@@ -510,7 +555,8 @@ def main():
         # shaders are the floor, the walls, the ceiling and the step block.
         for name, key, want in (("floor", "cyan", 5000), ("walls", "warm", 20),
                                 ("step block", "stepgreen", 8),
-                                ("ceiling", "violet", 1000)):
+                                ("ceiling", "violet", 1000),
+                                ("curved surface", "patch", 100)):
             if best[key] < want:
                 print(f"[FAIL] the {name} never appeared on screen (best "
                       f"{best[key]} pixels, wanted {want})")
@@ -522,7 +568,8 @@ def main():
         print(f"[OK] the module's own level is on screen, textured: floor "
               f"(teal) up to {best['cyan']} px, walls (sandstone) "
               f"{best['warm']} px, the step block (yellow-green) "
-              f"{best['stepgreen']} px, ceiling (violet) {best['violet']} px "
+              f"{best['stepgreen']} px, ceiling (violet) {best['violet']} px, "
+              f"the tessellated cove (magenta) {best['patch']} px "
               f"of {FRAME_PIXELS}")
 
         # ---- 6. the scene is live, and the module is moving in it -----------

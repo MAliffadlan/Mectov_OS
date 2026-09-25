@@ -82,6 +82,10 @@ Q3_OUR = third_party/q3mectov
 # q_shared.c/q_math.c live in code/game in the official layout (id moved them
 # out of qcommon after this release), and the official build has no md5.c /
 # ioapi.c / net_ip.c — those are fork additions.
+# cm_patch.c is compiled through $(Q3_OUR)/cm_patch_stack.c rather than directly
+# (v38.109): that port file redefines MAC_STATIC to `static` before including it,
+# which is what keeps CM_GeneratePatchCollide's 333 KB of grids off a 64 KB
+# kernel stack. See the header of that file for the measurement and reasoning.
 Q3_SRCS = $(Q3_DIR)/game/q_math.c $(Q3_DIR)/game/q_shared.c \
           $(Q3_DIR)/qcommon/common.c $(Q3_DIR)/qcommon/cvar.c $(Q3_DIR)/qcommon/cmd.c \
           $(Q3_DIR)/qcommon/files.c $(Q3_DIR)/qcommon/msg.c \
@@ -89,7 +93,7 @@ Q3_SRCS = $(Q3_DIR)/game/q_math.c $(Q3_DIR)/game/q_shared.c \
           $(Q3_DIR)/qcommon/net_chan.c $(Q3_DIR)/qcommon/unzip.c \
           $(Q3_DIR)/qcommon/vm.c $(Q3_DIR)/qcommon/vm_interpreted.c \
           $(Q3_DIR)/qcommon/cm_load.c $(Q3_DIR)/qcommon/cm_trace.c \
-          $(Q3_DIR)/qcommon/cm_test.c $(Q3_DIR)/qcommon/cm_patch.c \
+          $(Q3_DIR)/qcommon/cm_test.c $(Q3_OUR)/cm_patch_stack.c \
           $(Q3_DIR)/qcommon/cm_polylib.c \
           $(Q3_DIR)/null/null_input.c $(Q3_DIR)/null/null_snddma.c \
           $(Q3_OUR)/q3_kernel.c $(Q3_OUR)/q3_printf.c \
@@ -628,6 +632,10 @@ $(OBJ_DIR)/q3/%.o: $(Q3_DIR)/%.c Makefile | $(OBJ_DIR)
 $(OBJ_DIR)/q3plat/%.o: $(Q3_OUR)/%.c Makefile | $(OBJ_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(Q3_CFLAGS) -c $< -o $@
+
+# cm_patch_stack.c #includes the vendored cm_patch.c, which make cannot see
+# through, so that dependency is spelled out (v38.109).
+$(OBJ_DIR)/q3plat/cm_patch_stack.o: $(Q3_DIR)/qcommon/cm_patch.c
 
 # TinyGL (v38.102): compiled like the Q3 tree — libc names resolve through
 # the q3 stub headers (-I$(Q3_OUR)/stubs) to kmalloc-backed shims, plus the

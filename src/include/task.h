@@ -116,8 +116,21 @@ typedef struct {
 // ordinary engine frames is why the engine build doubles the stack; the
 // default ISO keeps 32KB (64 slots, so the difference is 2MB of .bss that only
 // the variant which runs id's code pays for).
+//
+// v38.109: id's patch-mesh collision (code/qcommon/cm_patch.c) is the first code
+// in this tree to need MORE than a stack can hold: CM_GeneratePatchCollide works
+// in a cGrid_t (129*129*3 floats) plus an int[129][129][2], measured at 332,976
+// bytes of frame. That one is fixed at the source — the port compiles cm_patch.c
+// through third_party/q3mectov/cm_patch_stack.c, which redefines id's MAC_STATIC
+// to `static` so the two grids live in .bss, which is what id's own comment says
+// it intended. What stayed on a stack is id's FS_Seek(), whose dead `char
+// foo[65536]` measures 65,584 bytes: 48 bytes MORE than the 64KB this variant
+// had, so any call to it — reachable from a module through the FS_SEEK trap in
+// q3_vm.c — was a guaranteed overflow. 96KB covers it with room for the trap
+// chain, and the remaining engine frames are all under 17KB (also measured:
+// FS_ListFilteredFiles 16,752, Com_EventLoop 16,512, CMod_LoadPatches 12,368).
 #ifdef MECTOV_Q3
-#define TASK_KSTACK_SIZE 65536
+#define TASK_KSTACK_SIZE 98304
 #else
 #define TASK_KSTACK_SIZE 32768
 #endif

@@ -70,6 +70,67 @@ extern unsigned int vfs_get_file_size(int node);
 
 /* ===== serial helpers (the rest of the port writes these by hand too) ==== */
 
+/* reportf — one formatted line, one atomic write.
+ *
+ * The suite parses these lines out of the shared serial log with regexes, and
+ * write_serial_string is atomic per CALL (it takes the serial lock with
+ * interrupts off). A line assembled from a dozen calls is therefore a dozen
+ * windows in which any other task's output can interleave — which happened for
+ * real: a mesh line came out as "verts=.[LOAD] c0=0x00000044 296 ..." and the
+ * suite's regex found nothing, so a green build failed on log shape alone.
+ * Every line a test parses is now formatted whole into this buffer and written
+ * in a single call; callers that truly stream (the engine's own Com_Printf
+ * path, human-only lines) keep using write_serial_string directly.
+ *
+ * The buffer is static because the report lines are long (the mesh line runs
+ * ~200 characters) and this driver's stacks are budgeted; all reportf call
+ * sites are on one task's thread, serialized by construction.
+ *
+ * Formatting goes through q3_vsnprintf (the stub stdio.h's name for the port
+ * shim that reaches the kernel's own vsnprintf), which is already in scope
+ * here — declaring the kernel symbol directly under the name `vsnprintf` is
+ * impossible in this TU, because the stub #defines that name to q3_vsnprintf
+ * and the signatures disagree. */
+static void reportf(const char *fmt, ...) {
+    static char rbuf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    q3_vsnprintf(rbuf, (size_t)sizeof(rbuf), fmt, ap);
+    va_end(ap);
+    write_serial_string(rbuf);
+}
+
+/* Append a decimal int to dst (nul-terminated); returns chars written. The
+ * hand-composed lines below (two hex-bearing ones and the symbol lines) use
+ * this instead of reportf, because they mix formats reportf has no verb for. */
+static int rpt_int(char *dst, int v) {
+    static char nb[13];
+    int n = 0, i = 0;
+    unsigned u;
+    if (v < 0) { dst[i++] = '-'; u = (unsigned)(-v); } else u = (unsigned)v;
+    if (u == 0) nb[n++] = '0';
+    while (u) { nb[n++] = (char)('0' + u % 10); u /= 10; }
+    while (n) dst[i++] = nb[--n];
+    dst[i] = '\0';
+    return i;
+}
+
+/* vm_ofs/ps_ofs print as 0x%08x, and "0x%x" of a small value would regress the
+ * suite's (0x[0-9a-f]+) match shape it has asserted since v38.106 — so the
+ * zero-padded form stays available through the same one-write discipline. */
+static void reportf_hex0(const char *label, unsigned int v) {
+    static char hbuf[64];
+    char hex[9];
+    int i;
+    for (i = 7; i >= 0; i--) { hex[i] = "0123456789abcdef"[v & 0xF]; v >>= 4; }
+    hex[8] = '\0';
+    for (i = 0; label[i] && i < (int)sizeof(hbuf) - 12; i++) hbuf[i] = label[i];
+    hbuf[i] = '\0';
+    for (int j = 0; j < 8 && i < (int)sizeof(hbuf) - 1; j++) hbuf[i++] = hex[j];
+    hbuf[i] = '\0';
+    write_serial_string(hbuf);
+}
+
 static void vm_ser_int(int v) {
     char buf[16];
     int n = 0, neg = 0;
@@ -301,18 +362,32 @@ static void q3vm_trace_world(trace_t *tr, const vec3_t start,
 /* ===== loading the map through id's own loader ========================== */
 
 /* A float with three decimals, by integer math — the kernel has no libm and
- * this is only ever used for log lines the test suite parses. */
-static void vm_ser_f3(float v) {
+ * this is only ever used for log lines the test suite parses. The string form
+ * (f3s) is what the one-write report lines consume; it rotates through eight
+ * slots because a single line can carry five of these at once. */
+static const char *f3s(float v) {
+    static char fbuf[8][16];
+    static int fidx;
+    char *dst = fbuf[fidx++ & 7];
     int neg = 0, whole, frac, d;
     long s;
+    int p = 0;
     if (v < 0.0f) { neg = 1; v = -v; }
     s = (long)(v * 1000.0f + 0.5f);
     whole = (int)(s / 1000);
     frac  = (int)(s % 1000);
-    if (neg && (whole || frac)) write_serial_string("-");
-    vm_ser_int(whole);
-    write_serial_string(".");
-    for (d = 100; d; d /= 10) vm_ser_int((frac / d) % 10);
+    if (neg && (whole || frac)) dst[p++] = '-';
+    {
+        char digits[16];
+        int n = 0;
+        if (whole == 0) digits[n++] = '0';
+        while (whole) { digits[n++] = (char)('0' + whole % 10); whole /= 10; }
+        while (n) dst[p++] = digits[--n];
+    }
+    dst[p++] = '.';
+    for (d = 100; d; d /= 10) dst[p++] = (char)('0' + (frac / d) % 10);
+    dst[p] = '\0';
+    return dst;
 }
 
 static void q3vm_world_load(void) {
@@ -328,26 +403,24 @@ static void q3vm_world_load(void) {
      * id's own diagnostic. */
     CM_LoadMap(Q3VM_BSP_FS_PATH, qfalse, &q3vm_world_checksum);
     q3vm_world_real = 1;
-    write_serial_string("[Q3VM] world: CM_LoadMap(" Q3VM_BSP_FS_PATH ") shaders=");
-    vm_ser_int(cm.numShaders);
-    write_serial_string(" planes=");
-    vm_ser_int(cm.numPlanes);
-    write_serial_string(" brushes=");
-    vm_ser_int(cm.numBrushes);
-    write_serial_string(" brushsides=");
-    vm_ser_int(cm.numBrushSides);
-    write_serial_string(" nodes=");
-    vm_ser_int(cm.numNodes);
-    write_serial_string(" leafs=");
-    vm_ser_int(cm.numLeafs);
-    write_serial_string(" models=");
-    vm_ser_int(cm.numSubModels);
-    write_serial_string("\n");
-    write_serial_string("[Q3VM] world: entity string chars=");
-    vm_ser_int(cm.numEntityChars);
-    write_serial_string(" checksum=");
-    vm_ser_hex((unsigned int)q3vm_world_checksum);
-    write_serial_string("\n");
+    reportf("[Q3VM] world: CM_LoadMap(" Q3VM_BSP_FS_PATH
+            ") shaders=%d planes=%d brushes=%d brushsides=%d nodes=%d leafs=%d models=%d",
+            cm.numShaders, cm.numPlanes, cm.numBrushes, cm.numBrushSides,
+            cm.numNodes, cm.numLeafs, cm.numSubModels);
+    /* chars=%d checksum=0x%08x, composed into one buffer by hand: reportf has
+     * no hex verb, and two writes would open the interleave window this exists
+     * to close. */
+    {
+        static char ebuf[80];
+        int i = 0;
+        unsigned int c = (unsigned int)q3vm_world_checksum;
+        for (const char *s = "[Q3VM] world: entity string chars="; *s; s++) ebuf[i++] = *s;
+        i += rpt_int(ebuf + i, cm.numEntityChars);
+        for (const char *s = " checksum=0x"; *s; s++) ebuf[i++] = *s;
+        for (int k = 7; k >= 0; k--) ebuf[i++] = "0123456789abcdef"[(c >> (k * 4)) & 0xF];
+        ebuf[i] = '\0';
+        write_serial_string(ebuf);
+    }
 }
 
 /* Where the module's own spawn point came from. The retail server hands the
@@ -359,7 +432,7 @@ static void q3vm_world_report_spawn(void) {
     const char *base, *p;
     char num[24];
     int n;
-    if (!q3vm_world_real) return;
+    if (!q3vm_world_real) return;  /* (origin line is one write, below) */
     base = CM_EntityString();
     p = strstr(base, "info_player_deathmatch");
     if (!p) {
@@ -376,9 +449,7 @@ static void q3vm_world_report_spawn(void) {
     p++;
     for (n = 0; *p && *p != '"' && n < (int)sizeof(num) - 1; n++) num[n] = *p++;
     num[n] = '\0';
-    write_serial_string("[Q3VM] world: map spawn origin=[");
-    write_serial_string(num);
-    write_serial_string("]\n");
+    reportf("[Q3VM] world: map spawn origin=[%s]", num);
 }
 
 /* Two probes whose answers only real brush collision can produce, both run
@@ -401,58 +472,33 @@ static void q3vm_world_probe(void) {
     VectorCopy(ps->origin, start);
     VectorClear(zero);
 
-    write_serial_string("[Q3VM] world: probe from (");
-    vm_ser_int((int)start[0]);
-    write_serial_string(" ");
-    vm_ser_int((int)start[1]);
-    write_serial_string(" ");
-    vm_ser_int((int)start[2]);
-    write_serial_string(")\n");
+    reportf("[Q3VM] world: probe from (%d %d %d)",
+            (int)start[0], (int)start[1], (int)start[2]);
 
     /* straight down */
     VectorCopy(start, endpos);
     endpos[2] -= 256.0f;
     CM_BoxTrace(&tr, start, endpos, zero, zero, 0, Q3VM_MASK_PLAYERSOLID, 0);
-    write_serial_string("[Q3VM] world: trace down fraction=");
-    vm_ser_f3(tr.fraction);
-    write_serial_string(" endz=");
-    vm_ser_f3(tr.endpos[2]);
-    write_serial_string(" normal=(");
-    vm_ser_f3(tr.plane.normal[0]);
-    write_serial_string(" ");
-    vm_ser_f3(tr.plane.normal[1]);
-    write_serial_string(" ");
-    vm_ser_f3(tr.plane.normal[2]);
-    write_serial_string(") contents=");
-    vm_ser_int(tr.contents);
-    write_serial_string("\n");
+    reportf("[Q3VM] world: trace down fraction=%s endz=%s normal=(%s %s %s) contents=%d",
+            f3s(tr.fraction), f3s(tr.endpos[2]),
+            f3s(tr.plane.normal[0]), f3s(tr.plane.normal[1]), f3s(tr.plane.normal[2]),
+            tr.contents);
 
     /* straight -X, into the wall */
     VectorCopy(start, endpos);
     endpos[0] -= 512.0f;
     CM_BoxTrace(&tr, start, endpos, zero, zero, 0, Q3VM_MASK_PLAYERSOLID, 0);
-    write_serial_string("[Q3VM] world: trace -x fraction=");
-    vm_ser_f3(tr.fraction);
-    write_serial_string(" endx=");
-    vm_ser_f3(tr.endpos[0]);
-    write_serial_string(" normal=(");
-    vm_ser_f3(tr.plane.normal[0]);
-    write_serial_string(" ");
-    vm_ser_f3(tr.plane.normal[1]);
-    write_serial_string(" ");
-    vm_ser_f3(tr.plane.normal[2]);
-    write_serial_string(") contents=");
-    vm_ser_int(tr.contents);
-    write_serial_string("\n");
+    reportf("[Q3VM] world: trace -x fraction=%s endx=%s normal=(%s %s %s) contents=%d",
+            f3s(tr.fraction), f3s(tr.endpos[0]),
+            f3s(tr.plane.normal[0]), f3s(tr.plane.normal[1]), f3s(tr.plane.normal[2]),
+            tr.contents);
 
     /* what the player is standing on, straight from id's point-contents */
     {
         vec3_t feet;
         VectorCopy(start, feet);
         feet[2] -= 24.0f;
-        write_serial_string("[Q3VM] world: point contents at feet=");
-        vm_ser_int(CM_PointContents(feet, 0));
-        write_serial_string("\n");
+        reportf("[Q3VM] world: point contents at feet=%d", CM_PointContents(feet, 0));
     }
 }
 
@@ -505,11 +551,7 @@ static void q3vm_get_userinfo(char *dst, int size) {
 }
 
 static void q3vm_log_server_command(int clientNum, const char *text) {
-    write_serial_string("[Q3VM] server command to ");
-    vm_ser_int(clientNum);
-    write_serial_string(": ");
-    write_serial_string(text);
-    write_serial_string("\n");
+    reportf("[Q3VM] server command to %d: %s", clientNum, text);
 }
 
 /* ===== reading the module's world back out of the VM ==================== */
@@ -521,25 +563,11 @@ static void q3vm_log_player_state(vm_t *vm, int frame, int levelTime) {
     playerState_t *ps;
     if (vm_ps_ofs < 0) return;
     ps = (playerState_t *)(vm->dataBase + (vm_ps_ofs & vm->dataMask));
-    write_serial_string("[Q3VM] frame ");
-    vm_ser_int(frame);
-    write_serial_string(" t=");
-    vm_ser_int(levelTime);
-    write_serial_string(" origin=(");
-    vm_ser_int((int)ps->origin[0]);
-    write_serial_string(",");
-    vm_ser_int((int)ps->origin[1]);
-    write_serial_string(",");
-    vm_ser_int((int)ps->origin[2]);
-    write_serial_string(") ground=");
-    vm_ser_int(ps->groundEntityNum);
-    write_serial_string(" velocity=(");
-    vm_ser_int((int)ps->velocity[0]);
-    write_serial_string(",");
-    vm_ser_int((int)ps->velocity[1]);
-    write_serial_string(",");
-    vm_ser_int((int)ps->velocity[2]);
-    write_serial_string(")\n");
+    reportf("[Q3VM] frame %d t=%d origin=(%d,%d,%d) ground=%d velocity=(%d,%d,%d)",
+            frame, levelTime,
+            (int)ps->origin[0], (int)ps->origin[1], (int)ps->origin[2],
+            ps->groundEntityNum,
+            (int)ps->velocity[0], (int)ps->velocity[1], (int)ps->velocity[2]);
 }
 
 static int q3vm_ps_x(vm_t *vm) {
@@ -914,27 +942,20 @@ static void q3arena_win_mouse(int id, int dx, int dy, int btn) {
 static void q3arena_world_mesh(void) {
     int rc = q3bsp_load(Q3VM_BSP_FS_PATH, &a_mesh);
     if (rc != 0 || !a_mesh.valid) {
-        write_serial_string("[Q3ARENA] world mesh: FAILED to build from "
-                            Q3VM_BSP_FS_PATH " (rc=");
-        vm_ser_int(rc);
-        write_serial_string(") — falling back to the built-in arena\n");
+        reportf("[Q3ARENA] world mesh: FAILED to build from " Q3VM_BSP_FS_PATH
+                " (rc=%d) — falling back to the built-in arena", rc);
         return;
     }
-    write_serial_string("[Q3ARENA] world mesh: " Q3VM_BSP_FS_PATH " surfaces=");
-    vm_ser_int(a_mesh.numFaces);
-    write_serial_string(" of=");
-    vm_ser_int(a_mesh.fileSurfaces);
-    write_serial_string(" verts=");
-    vm_ser_int(a_mesh.numVerts);
-    write_serial_string(" shaders=");
-    vm_ser_int(a_mesh.numShaders);
-    write_serial_string(" patches=");
-    vm_ser_int(a_mesh.patchSurfaces);
-    write_serial_string(" skipped=");
-    vm_ser_int(a_mesh.skippedFaces);
-    write_serial_string(" truncated=");
-    vm_ser_int(a_mesh.truncated);
-    write_serial_string("\n");
+    /* One line, one write: the suite's MESH_RE parses every field of this, and
+     * this was the line that died of interleaving ("verts=.[LOAD] c0=..."). */
+    reportf("[Q3ARENA] world mesh: " Q3VM_BSP_FS_PATH
+            " surfaces=%d of=%d verts=%d shaders=%d planar=%d patches=%d "
+            "patchdrawn=%d patchquads=%d patchverts=%d patchskipped=%d "
+            "skipped=%d truncated=%d",
+            a_mesh.numFaces, a_mesh.fileSurfaces, a_mesh.numVerts,
+            a_mesh.numShaders, a_mesh.planarFaces, a_mesh.patchSurfaces,
+            a_mesh.patchesDrawn, a_mesh.patchQuads, a_mesh.patchVerts,
+            a_mesh.patchSkipped, a_mesh.skippedFaces, a_mesh.truncated);
     q3ref_set_bsp(&a_mesh);
 }
 
@@ -970,21 +991,9 @@ static void q3arena_open(void) {
      * up: the WM owns placement, and a screendump assertion that guesses the
      * geometry silently measures the desktop instead (which is exactly how the
      * first version of this test passed a violet count it should not have). */
-    write_serial_string("[Q3ARENA] window id=");
-    vm_ser_hex((unsigned int)a_win);
-    write_serial_string(" rect=");
-    vm_ser_int(wx);
-    write_serial_string(",");
-    vm_ser_int(wy);
-    write_serial_string(" " );
-    vm_ser_int(ww);
-    write_serial_string("x");
-    vm_ser_int(wh);
-    write_serial_string(" content=");
-    vm_ser_int(Q3ARENA_W);
-    write_serial_string("x");
-    vm_ser_int(Q3ARENA_H);
-    write_serial_string(" title=\"Quake III — official qagame VM\"\n");
+    reportf("[Q3ARENA] window id=0x%x rect=%d,%d %dx%d content=%dx%d "
+            "title=\"Quake III — official qagame VM\"",
+            (unsigned)a_win, wx, wy, ww, wh, Q3ARENA_W, Q3ARENA_H);
 
     wm_request_scancodes(a_win, 1);
     if (wm_capture_mouse(a_win, 1)) {
@@ -1016,6 +1025,7 @@ static void q3arena_frame(vm_t *vm, int frame) {
     int drawn = 0, tris = 0, culled = 0;
     int shaders = 0, from_disk = 0, ph = 0;
     int cyan = 0, warm = 0, stepgreen = 0, violet = 0, bright = 0, sky = 0;
+    int patch = 0;
     int distinct = 0;
     unsigned target = a_next_ms;
 
@@ -1052,8 +1062,8 @@ static void q3arena_frame(vm_t *vm, int frame) {
     q3ref_draw_world((double)q3vm_frame_time / 1000.0);
     q3ref_end_frame();
     q3ref_bsp_stats(&drawn, &tris, &culled, &shaders, &from_disk, &ph);
-    q3ref_frame_histogram(&cyan, &warm, &stepgreen, &violet, &bright, &sky,
-                          &distinct);
+    q3ref_frame_histogram(&cyan, &warm, &stepgreen, &violet, &bright, &patch,
+                          &sky, &distinct);
     if (a_win >= 0) wm_invalidate(a_win);
 
     a_frames++;
@@ -1061,51 +1071,24 @@ static void q3arena_frame(vm_t *vm, int frame) {
     a_tris_drawn += tris;
 
     if ((frame % 20) == 0) {
-        write_serial_string("[Q3ARENA] frame=");
-        vm_ser_int(frame);
-        write_serial_string(" t=");
-        vm_ser_int(q3vm_frame_time);
         if (ps) {
-            write_serial_string(" pos=(");
-            vm_ser_int((int)ps->origin[0]);
-            write_serial_string(",");
-            vm_ser_int((int)ps->origin[1]);
-            write_serial_string(",");
-            vm_ser_int((int)ps->origin[2]);
-            write_serial_string(") eye_z=");
-            vm_ser_int((int)eye[2]);
-            write_serial_string(" yaw=");
-            vm_ser_int((int)ps->viewangles[YAW]);
-            write_serial_string(" pitch=");
-            vm_ser_int((int)ps->viewangles[PITCH]);
+            reportf("[Q3ARENA] frame=%d t=%d pos=(%d,%d,%d) eye_z=%d yaw=%d "
+                    "pitch=%d drawn=%d tris=%d culled=%d",
+                    frame, q3vm_frame_time,
+                    (int)ps->origin[0], (int)ps->origin[1], (int)ps->origin[2],
+                    (int)eye[2], (int)ps->viewangles[YAW], (int)ps->viewangles[PITCH],
+                    drawn, tris, culled);
+        } else {
+            reportf("[Q3ARENA] frame=%d t=%d drawn=%d tris=%d culled=%d",
+                    frame, q3vm_frame_time, drawn, tris, culled);
         }
-        write_serial_string(" drawn=");
-        vm_ser_int(drawn);
-        write_serial_string(" tris=");
-        vm_ser_int(tris);
-        write_serial_string(" culled=");
-        vm_ser_int(culled);
-        write_serial_string("\n");
 
         /* The finished frame, read back out of the renderer's own buffer: one
          * line per sampled frame that says what the camera actually saw. */
-        write_serial_string("[Q3ARENA] pixels frame=");
-        vm_ser_int(frame);
-        write_serial_string(" cyan=");
-        vm_ser_int(cyan);
-        write_serial_string(" warm=");
-        vm_ser_int(warm);
-        write_serial_string(" stepgreen=");
-        vm_ser_int(stepgreen);
-        write_serial_string(" violet=");
-        vm_ser_int(violet);
-        write_serial_string(" bright=");
-        vm_ser_int(bright);
-        write_serial_string(" sky=");
-        vm_ser_int(sky);
-        write_serial_string(" distinct=");
-        vm_ser_int(distinct);
-        write_serial_string("\n");
+        reportf("[Q3ARENA] pixels frame=%d cyan=%d warm=%d stepgreen=%d "
+                "violet=%d bright=%d patch=%d sky=%d distinct=%d",
+                frame, cyan, warm, stepgreen, violet, bright, patch, sky,
+                distinct);
     }
 
     /* Pace to the module's own frame time (~20 fps) instead of spinning, so the
@@ -1203,24 +1186,29 @@ static void q3_drive(int windowed) {
     }
 
     q3vm_vm = vm;
-    write_serial_string("[Q3VM] vm created name=qagame interpret=bytecode symbols=");
-    vm_ser_int(vm->numSymbols);
-    write_serial_string(" codeLength=");
-    vm_ser_int(vm->codeLength);
-    write_serial_string(" dataMask=");
-    vm_ser_int(vm->dataMask);
-    write_serial_string("\n");
+    reportf("[Q3VM] vm created name=qagame interpret=bytecode symbols=%d "
+            "codeLength=%d dataMask=%d",
+            vm->numSymbols, vm->codeLength, vm->dataMask);
 
     /* Print a couple of real symbol names out of id's own .map file, so the
      * log proves the symbol table came across. */
     {
         int names = 0;
         for (vmSymbol_t *s = vm->symbols; s && names < 3; s = s->next, names++) {
-            write_serial_string("[Q3VM] symbol ");
-            vm_ser_hex((unsigned int)s->symValue);
-            write_serial_string(" ");
-            write_serial_string(s->symName);
-            write_serial_string("\n");
+            static char sbuf[96];
+            int i = 0;
+            for (const char *t = "[Q3VM] symbol 0x"; *t; t++) sbuf[i++] = *t;
+            {
+                unsigned int v = (unsigned int)s->symValue;
+                for (int k = 7; k >= 0; k--)
+                    sbuf[i++] = "0123456789abcdef"[(v >> (k * 4)) & 0xF];
+            }
+            sbuf[i++] = ' ';
+            for (int k = 0; s->symName[k] && i < (int)sizeof(sbuf) - 2; k++)
+                sbuf[i++] = s->symName[k];
+            sbuf[i++] = '\n';
+            sbuf[i] = '\0';
+            write_serial_string(sbuf);
         }
     }
 
@@ -1235,27 +1223,30 @@ static void q3_drive(int windowed) {
     write_serial_string("[Q3VM] calling vmMain(GAME_INIT) — official id game code\n");
     int before = vm_syscalls;
     int r = VM_Call(vm, GAME_INIT, Com_Milliseconds(), Com_Milliseconds(), 0);
-    write_serial_string("[Q3VM] GAME_INIT returned ");
-    vm_ser_int(r);
-    write_serial_string(" traps=");
-    vm_ser_int(vm_syscalls - before);
-    write_serial_string(" total=");
-    vm_ser_int(vm_syscalls);
-    write_serial_string(" errors=");
-    vm_ser_int(vm_errors);
-    write_serial_string(" unhandled=");
-    vm_ser_int(vm_unhandled);
-    write_serial_string("\n");
+    reportf("[Q3VM] GAME_INIT returned %d traps=%d total=%d errors=%d unhandled=%d",
+            r, vm_syscalls - before, vm_syscalls, vm_errors, vm_unhandled);
 
-    write_serial_string("[Q3VM] locate_game_data entities=");
-    vm_ser_int(vm_num_entities);
-    write_serial_string(" sizeof_gentity=");
-    vm_ser_int(vm_sizeof_gentity);
-    write_serial_string(" vm_ofs=");
-    vm_ser_hex((unsigned int)vm_gentity_ofs);
-    write_serial_string(" ps_ofs=");
-    vm_ser_hex((unsigned int)vm_ps_ofs);
-    write_serial_string("\n");
+    reportf("[Q3VM] locate_game_data entities=%d sizeof_gentity=%d",
+            vm_num_entities, vm_sizeof_gentity);
+    /* vm_ofs printed as one line (0x%08x appended by hand — reportf's verbs do
+     * not include hex) with ps_ofs riding the same buffer, so the suite's
+     * LOCATE_RE keeps matching a single, uninterleavable line. */
+    {
+        static char lbuf[112];
+        int i = 0;
+        unsigned int g = (unsigned int)vm_gentity_ofs;
+        for (const char *s = "[Q3VM] locate_game_data entities="; *s; s++) lbuf[i++] = *s;
+        i += rpt_int(lbuf + i, vm_num_entities);
+        for (const char *s = " sizeof_gentity="; *s; s++) lbuf[i++] = *s;
+        i += rpt_int(lbuf + i, vm_sizeof_gentity);
+        for (const char *s = " vm_ofs=0x"; *s; s++) lbuf[i++] = *s;
+        for (int k = 7; k >= 0; k--) lbuf[i++] = "0123456789abcdef"[(g >> (k * 4)) & 0xF];
+        for (const char *s = " ps_ofs=0x"; *s; s++) lbuf[i++] = *s;
+        for (int k = 7; k >= 0; k--)
+            lbuf[i++] = "0123456789abcdef"[(((unsigned int)vm_ps_ofs) >> (k * 4)) & 0xF];
+        lbuf[i] = '\0';
+        write_serial_string(lbuf);
+    }
 
     /* ---- the retail server's connect sequence (sv_client.c order) -------
      * ClientConnect reads userinfo (name "Mectov", ip localhost),
@@ -1293,11 +1284,8 @@ static void q3_drive(int windowed) {
         int x0 = q3vm_ps_x(vm), x1;
         unsigned t_start = (unsigned)Com_Milliseconds();
 
-        write_serial_string("[Q3VM] frame loop: ");
-        vm_ser_int(windowed ? Q3ARENA_FRAMES : Q3VM_FRAME_COUNT);
-        write_serial_string(" frames x ");
-        vm_ser_int(Q3VM_FRAMETIME);
-        write_serial_string(" msec\n");
+        reportf("[Q3VM] frame loop: %d frames x %d msec",
+                windowed ? Q3ARENA_FRAMES : Q3VM_FRAME_COUNT, Q3VM_FRAMETIME);
         q3vm_frame_time = 0;
 
     if (windowed) {
@@ -1321,24 +1309,12 @@ static void q3_drive(int windowed) {
             }
         }
         x1 = q3vm_ps_x(vm);
-        write_serial_string("[Q3VM] movement x0=");
-        vm_ser_int(x0);
-        write_serial_string(" x1=");
-        vm_ser_int(x1);
-        write_serial_string(" delta=");
-        vm_ser_int(x1 - x0);
-        write_serial_string("\n");
+        reportf("[Q3VM] movement x0=%d x1=%d delta=%d", x0, x1, x1 - x0);
 
         if (windowed) {
-            write_serial_string("[Q3ARENA] render totals: frames=");
-            vm_ser_int(a_frames);
-            write_serial_string(" faces=");
-            vm_ser_int(a_faces_drawn);
-            write_serial_string(" tris=");
-            vm_ser_int(a_tris_drawn);
-            write_serial_string(" wall_ms=");
-            vm_ser_int((int)((unsigned)Com_Milliseconds() - t_start));
-            write_serial_string("\n");
+            reportf("[Q3ARENA] render totals: frames=%d faces=%d tris=%d wall_ms=%d",
+                    a_frames, a_faces_drawn, a_tris_drawn,
+                    (int)((unsigned)Com_Milliseconds() - t_start));
         }
         write_serial_string("[Q3VM] frame loop done\n");
     }

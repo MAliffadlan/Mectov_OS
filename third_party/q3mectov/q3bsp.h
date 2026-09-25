@@ -1,4 +1,4 @@
-/* q3bsp.h — the RENDER-side view of a Quake III .bsp (v38.108, Q3 phase 8).
+/* q3bsp.h — the RENDER-side view of a Quake III .bsp (v38.109, Q3 phase 8).
  *
  * Collision and rendering read the same file but want different things out of
  * it, and id splits them the same way (qcommon/cm_load.c vs the renderer's
@@ -6,6 +6,13 @@
  * This module keeps what a camera needs: the surfaces' triangles, their
  * texture coordinates, the shader name each one is drawn with, and a per-face
  * normal it can shade from.
+ *
+ * Curved surfaces are tessellated here too (v38.109). A patch mesh stores a
+ * control GRID, not vertices, so a quarter of the work the renderer needs from
+ * a .bsp is arithmetic rather than copying; the alternative — leaving patches
+ * out — draws every arch and dome in a retail map as a hole. Each tessellated
+ * quad becomes an ordinary four-vertex face, so nothing downstream of this
+ * header has a new case to handle.
  *
  * The mesh is plain C data on purpose. The renderer lives in the TinyGL
  * directory and is compiled with TinyGL's flags (no id headers on its include
@@ -66,7 +73,12 @@ typedef struct q3bsp_mesh_s {
     /* Reporting: how much of the file the mesh covers, so the log can say what
      * was skipped rather than quietly drawing a hole. */
     int   fileSurfaces;             /* surfaces in the lump */
-    int   patchSurfaces;            /* MST_PATCH (curved) — not drawn yet */
+    int   planarFaces;              /* MST_PLANAR faces drawn one-to-one */
+    int   patchSurfaces;            /* MST_PATCH (curved) in the lump */
+    int   patchesDrawn;             /* of those, tessellated and drawn */
+    int   patchQuads;               /* quads the tessellator emitted */
+    int   patchVerts;               /* vertices those quads cost */
+    int   patchSkipped;             /* a patch that could not be tessellated */
     int   skippedFaces;             /* no vertices / no index */
     int   truncated;                /* hit Q3BSP_MAX_VERTS */
     int   shaderNumOverflow;        /* a shaderNum out of range */

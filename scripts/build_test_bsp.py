@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/build_test_bsp.py — write the free test arena as a Quake III .bsp (v38.107).
+"""scripts/build_test_bsp.py — write the free test arena as a Quake III .bsp (v38.109).
 
 Why this exists
 ---------------
@@ -16,6 +16,24 @@ shipping no id art. The textures are generated patterns, not photographs, and
 their colours are deliberately saturated and mutually distinct so a screendump
 can be asserted on: "flat-shaded geometry could not produce this pixel" is what
 makes the render test evidence rather than decoration.
+
+v38.109 adds the kind of surface a generated box can never exercise: a **curved
+patch mesh** (``MST_PATCH``), the quadratic Bezier geometry q3map emits for every
+arch, dome and rounded pillar in the retail maps. It is the one surface the
+render mesh cannot copy out of the lump face-by-face — the file stores a control
+GRID, and the visible surface exists only after tessellation. So the arena now
+carries a quarter-round cove along the +X wall: a classic quadratic fillet,
+tangent to the floor and to the wall, with five control points across the curve
+and three along its run. Both are odd-sized, which id's patch parser requires,
+and five control points is that curve split in half by de Casteljau — so the two
+blocks the renderer sees reproduce the same curve, sharing a control column.
+
+The cove is deliberately **non-solid** (content flags 0, like the decorative
+patches in a retail map's ceilings and trim). Its curve is fully exercised by the
+renderer — which tessellates by surface type and does not care about contents —
+while collision stays exactly what v38.107 tested, so the walking assertions in
+``q3vm_test.py`` keep their meaning instead of being re-tuned around new
+geometry.
 
 So the test arena is *generated*, here, from nothing. It is our own content —
 no id assets, no third-party data, a few kilobytes of arithmetic — and it is
@@ -59,6 +77,7 @@ its own tree from q3map.
 Usage:
     scripts/build_test_bsp.py [output_dir]     # default: build/q3data
 """
+import math
 import os
 import struct
 import sys
@@ -71,9 +90,10 @@ CONTENTS_SOLID = 0x1
 # checkerboard below lines up with the geometry instead of drifting across it.
 TEX_SIZE = 64
 
-# Surface types (see qfiles.h). Planar faces are emitted for the renderer that
-# arrives in the next phase; the collision loader only looks at MST_PATCH.
+# Surface types (see qfiles.h). Planar faces are what the renderer copies out of
+# the lump one-to-one; a patch mesh is a control grid it has to tessellate.
 MST_PLANAR = 1
+MST_PATCH = 2
 
 LUMP_ENTITIES = 0
 LUMP_SHADERS = 1
@@ -114,8 +134,12 @@ SHADERS = [
     ("textures/mectovtest/wall", 0, CONTENTS_SOLID),
     ("textures/mectovtest/ceiling", 0, CONTENTS_SOLID),
     ("textures/mectovtest/step", 0, CONTENTS_SOLID),
+    # The curved surface's shader: content flags 0, so CM_TraceThroughLeaf skips
+    # it (`if (!(patch->contents & tw->contents)) continue;`) and the collision
+    # world the walking tests assert on is byte-for-byte what it was.
+    ("textures/mectovtest/curve", 0, 0),
 ]
-SH_FLOOR, SH_WALL, SH_CEIL, SH_STEP = 0, 1, 2, 3
+SH_FLOOR, SH_WALL, SH_CEIL, SH_STEP, SH_CURVE = 0, 1, 2, 3, 4
 
 # Generated textures, one per shader (v38.108). 24-bit RGB rows, top-down; the
 # TGA writer below flips them into the file's BGR order. Colours are multiples
@@ -132,6 +156,12 @@ TEX_CEIL_G  = (176, 176, 216)
 TEX_STEP    = (152, 176, 72)    # yellow-green metal
 TEX_STEP_B  = (112, 136, 40)
 TEX_STEP_G  = (200, 208, 120)
+# Magenta, and magenta for a reason: no other texture here has both red and blue
+# far above green, so "the curved surface reached the screen" is a pixel test no
+# planar face can satisfy, at any light level the shading can produce.
+TEX_CURVE   = (224, 48, 176)
+TEX_CURVE_B = (176, 32, 136)
+TEX_CURVE_G = (248, 96, 200)
 
 # (min, max, shader)
 BRUSHES = [
@@ -140,7 +170,11 @@ BRUSHES = [
     ((-HALF - WALL, -HALF, WALL_BOTTOM), (-HALF, HALF, CEIL_BOTTOM), SH_WALL),
     ((HALF, -HALF, WALL_BOTTOM), (HALF + WALL, HALF, CEIL_BOTTOM), SH_WALL),
     ((-HALF, -HALF - WALL, WALL_BOTTOM), (HALF, -HALF, CEIL_BOTTOM), SH_WALL),
-    ((-HALF, HALF, WALL_BOTTOM), (HALF, HALF + WALL, CEIL_BOTTOM), SH_WALL),
+    # The +Y wall runs past the +X wall's outer face (x = 576, not 512): two
+    # slabs that merely meet at (512,512) leave the corner quadrant open, and a
+    # camera standing in that corner looks straight through the seam at the
+    # clear colour. Real maps overlap their walls; this one now does too.
+    ((-HALF, HALF, WALL_BOTTOM), (HALF + WALL, HALF + WALL, CEIL_BOTTOM), SH_WALL),
     # A waist-high block off to one side: something to stand on, walk into and
     # (in the renderer phase) see.
     ((128, 128, FLOOR_TOP), (256, 256, FLOOR_TOP + 64), SH_STEP),
@@ -260,7 +294,60 @@ def texture_files():
     px = checker(TEX_SIZE, 8, TEX_STEP, TEX_STEP_B)
     grid_lines(px, TEX_SIZE, 16, 2, TEX_STEP_G)
     out[SHADERS[SH_STEP][0]] = tga_bytes(px, TEX_SIZE)
+
+    px = checker(TEX_SIZE, 8, TEX_CURVE, TEX_CURVE_B)
+    grid_lines(px, TEX_SIZE, 16, 2, TEX_CURVE_G)
+    out[SHADERS[SH_CURVE][0]] = tga_bytes(px, TEX_SIZE)
     return out
+
+
+# --- the curved surface ----------------------------------------------------
+# A quarter-round cove along the +X wall: the fillet every retail map has where
+# a wall meets a floor, and the shape a planar-only renderer cannot draw. It is
+# tangent to the floor at (HALF-R, FLOOR_TOP) and to the wall at
+# (HALF, FLOOR_TOP+R), so all of its curvature is in one plane and the patch is a
+# straight run of that curve.
+COVE_R = 192.0
+PATCH_W, PATCH_H = 5, 3                       # control points across and along
+# The run is written in DECREASING y on purpose. Which way a patch's surface
+# faces is decided by its control grid's winding, exactly as it is for a brush
+# plane: this order puts the cove's normals on the room's side (up and -X), not
+# into the floor and wall it is cut out of.
+COVE_Y = (320.0, 256.0, 192.0)
+
+
+def cove_control_points():
+    """The 5x3 control grid of the cove, in the .bsp's own order.
+
+    A patch lump stores its control points as ``points[j*width + i]`` — that is
+    not a choice made here, it is id's indexing (cm_patch.c:
+    ``grid.points[i][j] = points[j*width + i]``), so the loop order below is the
+    file format.
+
+    The curve is the quadratic fillet through P0=(HALF-R, FLOOR_TOP) with its
+    control point at P1=(HALF, FLOOR_TOP), where the floor's tangent and the
+    wall's tangent meet. Five control points is that single quadratic segment
+    split in half by de Casteljau — the two halves reproduce the same curve
+    exactly (and are tangent-continuous at the joint), which is also how an
+    editor subdivides a patch. Doing it here is deliberate: sharing a control
+    column between two blocks is precisely the case the tessellator has to get
+    right, and a single 3x3 grid would never exercise it.
+    """
+
+    def mid(a, b):
+        return ((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5)
+
+    p0 = (HALF - COVE_R, float(FLOOR_TOP))
+    p1 = (float(HALF), float(FLOOR_TOP))
+    p2 = (float(HALF), FLOOR_TOP + COVE_R)
+    curve = [p0, mid(p0, p1), mid(mid(p0, p1), mid(p1, p2)), mid(p1, p2), p2]
+
+    pts = []
+    for j in range(PATCH_H):
+        y = COVE_Y[j]
+        for x, z in curve:
+            pts.append((x, y, z))
+    return pts, curve
 
 
 def entity_string():
@@ -335,7 +422,26 @@ def build():
             # v0 v1 v2 / v0 v2 v3 is firstVert + those offsets.
             indexes.extend([first_vert, first_vert + 1, first_vert + 2,
                             first_vert, first_vert + 2, first_vert + 3])
-            surfaces.append((shader, -1, MST_PLANAR, first_vert, 4, first_index, 6))
+            surfaces.append((shader, -1, MST_PLANAR, first_vert, 4, first_index, 6,
+                             0, 0))
+
+    # --- the curved surface: a control grid, not a face list ---------------
+    # firstVert/numVerts point at the grid exactly like a planar face's vertices;
+    # there are no indexes (id's patch renderer walks the grid, not the index
+    # lump), and patchWidth/patchHeight are what tells both loaders the surface
+    # is a Bezier mesh at all. 5 and 3 are odd for the same reason the columns
+    # above alternate interpolating/approximating control points.
+    patch_verts, curve = cove_control_points()
+    patch_first = len(verts)
+    for x, y, z in patch_verts:
+        # st is a LINEAR function of position (that is what q3map's texvec
+        # produces): one repeat per TEX_SIZE units along +Y and +X. The render
+        # tessellator evaluates st with the same Bezier weights as the position,
+        # which is exact for a linear projection at every subdivision level.
+        verts.append(((x, y, z), (y / float(TEX_SIZE), x / float(TEX_SIZE)),
+                      (0.0, 0.0), (0.0, 0.0, 1.0), (255, 255, 255, 255)))
+    surfaces.append((SH_CURVE, -1, MST_PATCH, patch_first, len(patch_verts),
+                     0, 0, PATCH_W, PATCH_H))
 
     lumps[LUMP_DRAWVERTS] = b"".join(
         b"".join(f32(v) for v in xyz) + b"".join(f32(v) for v in st)
@@ -349,8 +455,9 @@ def build():
                                   -1, 0, 0, 0, 0))
         + b"".join(f32(0.0) for _ in range(3))
         + b"".join(f32(0.0) for _ in range(9))
-        + i32(0) + i32(0)
-        for shader, fog, stype, first_vert, num_verts, first_index, num_indexes in surfaces
+        + i32(patch_w) + i32(patch_h)
+        for (shader, fog, stype, first_vert, num_verts, first_index, num_indexes,
+             patch_w, patch_h) in surfaces
     )
 
     # --- one leaf holding every brush and every surface --------------------
@@ -440,6 +547,9 @@ def main():
           % (len(texs), tex_dir, tex_bytes, TEX_SIZE, TEX_SIZE))
     print("[testbsp]   floor top z=%d, spawn=(%d %d %d), -X wall face x=%d"
           % (FLOOR_TOP, SPAWN[0], SPAWN[1], SPAWN[2], -HALF))
+    print("[testbsp]   curved: %dx%d control points -> quarter-round cove along "
+          "the +X wall, radius %d, tangent to the floor at x=%d (non-solid)"
+          % (PATCH_W, PATCH_H, int(COVE_R), int(HALF - COVE_R)))
 
 
 if __name__ == "__main__":

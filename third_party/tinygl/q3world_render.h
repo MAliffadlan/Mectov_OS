@@ -36,9 +36,14 @@ void q3w_load_stats(int *shaders, int *fromDisk, int *placeholders);
 /* Classify a finished 0x00RRGGBB framebuffer into the world's palette buckets
  * (plus the clear colour, which is what an empty scene is made of). Returns
  * the number of pixels examined; `distinct` counts 4-bit-per-channel colours,
- * which is what separates a textured surface from a flat fill. */
+ * which is what separates a textured surface from a flat fill.
+ *
+ * `patch` is the bucket for the tessellated (curved) surface's magenta, a colour
+ * chosen because no other texture in the level can produce it at any light
+ * level — so "the curve reached the screen" is a question a pixel count can
+ * answer. */
 int q3w_histogram(const uint32_t *px, int pitch, int w, int h,
                   int *cyan, int *warm, int *stepgreen, int *violet,
-                  int *bright, int *sky, int *distinct);
+                  int *bright, int *patch, int *sky, int *distinct);
 
 #endif /* Q3WORLD_RENDER_H */

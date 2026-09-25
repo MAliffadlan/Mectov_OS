@@ -449,10 +449,11 @@ void q3ref_bsp_stats(int *facesDrawn, int *trisDrawn, int *facesCulled,
  * reports immediately (sky ~= total) instead of showing up as a beautiful
  * screenshot of the desktop. */
 int q3ref_frame_histogram(int *cyan, int *warm, int *stepgreen, int *violet,
-                          int *bright, int *sky, int *distinct) {
+                          int *bright, int *patch, int *sky, int *distinct) {
     if (!fb || !fb->pbuf) return 0;
     return q3w_histogram((const uint32_t *)fb->pbuf, fb->linesize / 4, rw, rh,
-                         cyan, warm, stepgreen, violet, bright, sky, distinct);
+                         cyan, warm, stepgreen, violet, bright, patch, sky,
+                         distinct);
 }
 
 void q3ref_begin_frame(void) {

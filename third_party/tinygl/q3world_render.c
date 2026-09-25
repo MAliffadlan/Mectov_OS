@@ -56,21 +56,21 @@ static int       tex_inited;
 
 static int  v_faces, v_tris, v_culled;   /* last frame */
 
-/* --- serial helpers (this TU has no formatted output of its own) -------- */
-static void wr_int(int v) {
+/* --- serial helpers ------------------------------------------------------
+ * wr_int only formats now; the CALLER writes, and every line a test parses is
+ * one write. write_serial_string is atomic per call, so a line assembled from
+ * several calls could be (and was — a stray [LOAD] landed mid-line) split by
+ * another task's output; texture lines are written whole. */
+static int wr_int(char *dst, int v) {
     static char buf[13];
-    int n = 0;
+    int n = 0, i = 0;
     unsigned u;
-    if (v < 0) { write_serial_string("-"); u = (unsigned)(-v); } else u = (unsigned)v;
-    if (u == 0) { write_serial_string("0"); return; }
+    if (v < 0) { dst[i++] = '-'; u = (unsigned)(-v); } else u = (unsigned)v;
+    if (u == 0) buf[n++] = '0';
     while (u && n < 12) { buf[n++] = (char)('0' + (u % 10)); u /= 10; }
-    for (int i = 0; i < n / 2; i++) {
-        char t = buf[i];
-        buf[i] = buf[n - 1 - i];
-        buf[n - 1 - i] = t;
-    }
-    buf[n] = '\0';
-    write_serial_string(buf);
+    while (n) dst[i++] = buf[--n];
+    dst[i] = '\0';
+    return i;
 }
 
 /* --- TGA --------------------------------------------------------------- */
@@ -232,9 +232,15 @@ int q3w_load(const q3bsp_mesh_t *m) {
     if (!m || !m->valid || m->numShaders <= 0) return 0;
 
     tex_shaders = m->numShaders;
-    write_serial_string("[Q3ARENA] textures: ");
-    wr_int(tex_shaders);
-    write_serial_string(" shader(s) named by the map\n");
+    {
+        static char sbuf[64];
+        int i = 0;
+        for (const char *s = "[Q3ARENA] textures: "; *s; s++) sbuf[i++] = *s;
+        i += wr_int(sbuf + i, tex_shaders);
+        for (const char *s = " shader(s) named by the map\n"; *s; s++) sbuf[i++] = *s;
+        sbuf[i] = '\0';
+        write_serial_string(sbuf);
+    }
 
     ph = (unsigned char *)kmalloc((uint32_t)(Q3W_PH_SIZE * Q3W_PH_SIZE * 3));
     if (!ph) return 0;
@@ -256,19 +262,26 @@ int q3w_load(const q3bsp_mesh_t *m) {
             slot->width = w;
             slot->height = h;
             tex_from_disk++;
-            write_serial_string("[Q3ARENA] tex ");
-            wr_int(i);
-            write_serial_string(" ");
-            write_serial_string(slot->path);
-            write_serial_string(" tga=");
-            wr_int(w);
-            write_serial_string("x");
-            wr_int(h);
-            write_serial_string(" bytes=");
-            wr_int(len);
-            write_serial_string(" gl=");
-            wr_int((int)id);
-            write_serial_string("\n");
+            /* One write: the suite's TEX_RE parses every field of this line. */
+            {
+                static char tbuf[Q3BSP_MAX_NAME + 96];
+                int p = 0;
+                for (const char *s = "[Q3ARENA] tex "; *s; s++) tbuf[p++] = *s;
+                p += wr_int(tbuf + p, i);
+                tbuf[p++] = ' ';
+                for (int k = 0; slot->path[k]; k++) tbuf[p++] = slot->path[k];
+                for (const char *s = " tga="; *s; s++) tbuf[p++] = *s;
+                p += wr_int(tbuf + p, w);
+                tbuf[p++] = 'x';
+                p += wr_int(tbuf + p, h);
+                for (const char *s = " bytes="; *s; s++) tbuf[p++] = *s;
+                p += wr_int(tbuf + p, len);
+                for (const char *s = " gl="; *s; s++) tbuf[p++] = *s;
+                p += wr_int(tbuf + p, (int)id);
+                tbuf[p++] = '\n';
+                tbuf[p] = '\0';
+                write_serial_string(tbuf);
+            }
             kfree(rgb);
         } else {
             placeholder_rgb(m->shaderNames[i], ph);
@@ -277,13 +290,19 @@ int q3w_load(const q3bsp_mesh_t *m) {
             slot->width = Q3W_PH_SIZE;
             slot->height = Q3W_PH_SIZE;
             tex_placeholders++;
-            write_serial_string("[Q3ARENA] tex ");
-            wr_int(i);
-            write_serial_string(" ");
-            write_serial_string(slot->path);
-            write_serial_string(" missing=1 placeholder gl=");
-            wr_int((int)id);
-            write_serial_string("\n");
+            {
+                static char tbuf[Q3BSP_MAX_NAME + 96];
+                int p = 0;
+                for (const char *s = "[Q3ARENA] tex "; *s; s++) tbuf[p++] = *s;
+                p += wr_int(tbuf + p, i);
+                tbuf[p++] = ' ';
+                for (int k = 0; slot->path[k]; k++) tbuf[p++] = slot->path[k];
+                for (const char *s = " missing=1 placeholder gl="; *s; s++) tbuf[p++] = *s;
+                p += wr_int(tbuf + p, (int)id);
+                tbuf[p++] = '\n';
+                tbuf[p] = '\0';
+                write_serial_string(tbuf);
+            }
         }
         tex_id[i] = id;
         if (raw) q3bsp_free_file(raw);
@@ -309,10 +328,11 @@ void q3w_load_stats(int *shaders, int *fromDisk, int *placeholders) {
  * screendump as evidence for a human rather than as the pass/fail gate. */
 int q3w_histogram(const uint32_t *px, int pitch, int w, int h,
                   int *cyan, int *warm, int *stepgreen, int *violet,
-                  int *bright, int *sky, int *distinct) {
+                  int *bright, int *patch, int *sky, int *distinct) {
     unsigned char seen[4096 / 8];
     int n = 0, distinct_count = 0;
     int c_cyan = 0, c_warm = 0, c_step = 0, c_violet = 0, c_bright = 0, c_sky = 0;
+    int c_patch = 0;
 
     if (!px || w <= 0 || h <= 0) return 0;
     memset(seen, 0, sizeof(seen));
@@ -340,7 +360,13 @@ int q3w_histogram(const uint32_t *px, int pitch, int w, int h,
                 if (db < 0) db = -db;
                 if (dg <= 12 && db <= 12) { c_sky++; continue; }
             }
-            if (g > r + 25 && b > r + 25) c_cyan++;
+            /* The tessellated surface's magenta, tested by ratio rather than by
+             * absolute level so the shading cannot hide it: red and blue both
+             * more than twice green. No planar texture here is anywhere near
+             * that (the sandstone's red is only ~1.2x its green), and the light
+             * this renderer bakes never scales one channel more than another. */
+            if (r > 40 && r > g * 2 && b > g * 2) c_patch++;
+            else if (g > r + 25 && b > r + 25) c_cyan++;
             else if (r > g + 15 && g > b + 10 && r > 60) c_warm++;
             else if (g > r + 12 && g > b + 40 && g > 80) c_step++;
             else if (b > r + 5 && b > g + 5 && r >= 30 && r < 80 &&
@@ -354,6 +380,7 @@ int q3w_histogram(const uint32_t *px, int pitch, int w, int h,
     if (stepgreen) *stepgreen = c_step;
     if (violet) *violet = c_violet;
     if (bright) *bright = c_bright;
+    if (patch) *patch = c_patch;
     if (sky) *sky = c_sky;
     if (distinct) *distinct = distinct_count;
     return n;

@@ -61,7 +61,7 @@ void q3ref_bsp_stats(int *facesDrawn, int *trisDrawn, int *facesCulled,
  * account of what it drew, independent of the WM and the compositor. Returns
  * the number of pixels examined; any output pointer may be NULL. */
 int  q3ref_frame_histogram(int *cyan, int *warm, int *stepgreen, int *violet,
-                           int *bright, int *sky, int *distinct);
+                           int *bright, int *patch, int *sky, int *distinct);
 /* Draw the arena. time_sec drives the animated props. */
 void q3ref_draw_world(double time_sec);
 void q3ref_end_frame(void);
