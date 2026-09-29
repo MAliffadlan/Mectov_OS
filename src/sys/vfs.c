@@ -871,6 +871,14 @@ void vfs_init() {
                 // Mount point must point at the ext2 root directory inode (2),
                 // otherwise create/write hooks would pass inode 0.
                 fs_nodes[ext2_node].ext2_inode = 2;
+                // v38.111: like FAT32 below, ext2 is an external volume whose
+                // nodes are rebuilt from the image every boot. Without this the
+                // node table PERSISTED by the previous boot (vfs_save) is still
+                // there, and populate's vfs_create_node then hits the stale
+                // /baseq3 entry, returns -2, and SKIPS the whole recursion —
+                // the guest browses last boot's tree while reading this image's
+                // files (a staged scripts/*.shader was invisible this way).
+                vfs_clear_children(ext2_node);
                 ext2_populate_vfs(2, ext2_node); // Inode 2 is the root directory
                 mount_register(ext2_node, MOUNT_EXT2, 1, 2);
             }
@@ -1298,6 +1306,10 @@ void vfs_init() {
         }
         if (ext2_node >= 0) {
             fs_nodes[ext2_node].ext2_inode = 2; // mount point = root dir inode
+            // Rebuild from the image, never from the persisted table (v38.111):
+            // a stale /baseq3 child makes populate's vfs_create_node return -2
+            // and the recursion into that subtree is skipped entirely.
+            vfs_clear_children(ext2_node);
             ext2_populate_vfs(2, ext2_node);    // Inode 2 is the root directory
             mount_register(ext2_node, MOUNT_EXT2, 1, 2);
         }
@@ -3120,9 +3132,10 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
 }
 
 static int vfs_alloc_sectors(int sectors_needed, int exclude_node) {
-    // VFS_DATA_START begins at 257 (1 magic + 256 node sectors with the
-    // 256-node table). sector_map is VFS_DISK_SECTORS bytes so marking
-    // [0, VFS_DATA_START) as metadata is in-bounds by construction.
+    // VFS_DATA_START begins at 1025 (1 magic + 1024 node sectors with the
+    // 1024-node table, v4). sector_map is VFS_DISK_SECTORS bytes (4 KB of
+    // stack) so marking [0, VFS_DATA_START) as metadata is in-bounds by
+    // construction.
     uint8_t sector_map[VFS_DISK_SECTORS];
     memset(sector_map, 0, sizeof(sector_map));
     

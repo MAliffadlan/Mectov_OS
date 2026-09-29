@@ -536,6 +536,61 @@ void init_double_buffer(void) {
 }
 
 // ============================================================
+// v38.119: exclusive fullscreen present (see vga.h)
+// ============================================================
+static volatile int fb_exclusive_flag = 0;
+
+int vga_fullscreen_active(void) { return fb_exclusive_flag; }
+
+static void fb_exclusive_mark_all(void) {
+    extern volatile int needs_redraw;
+    /* mark_dirty() only records damage while the back buffer is the render
+     * target, and a game window draw may have left the WM's content buffer
+     * installed — put it back before claiming the screen. */
+    vga_set_render_target(NULL, 0, 0, 0);
+    mark_dirty(0, 0, (int)fb_width, (int)fb_height);
+    needs_redraw = 1;
+}
+
+void vga_fullscreen_enter(void) {
+    fb_exclusive_flag = 1;
+    fb_exclusive_mark_all();
+}
+
+void vga_fullscreen_leave(void) {
+    fb_exclusive_flag = 0;
+    fb_exclusive_mark_all();
+}
+
+uint32_t *vga_fullscreen_target(int *w, int *h, int *pitch_px) {
+    if (!back_buffer) return NULL;
+    /* v38.125: this used to claim the screen HERE — mark everything dirty and
+     * set needs_redraw — which invited the kernel main loop to swap the back
+     * buffer while the game had not written a single pixel of the frame yet.
+     * Handing over a buffer is not the same as presenting it, and the two are
+     * not interchangeable here: swap_buffers() RESETS the damage rect when it
+     * runs, so a swap that lands mid-write presents a torn frame whose
+     * not-yet-written rows are also no longer marked dirty — they stay off
+     * screen until something marks them again. Claiming the screen is the
+     * caller's business, and it belongs AFTER the write: see
+     * vga_fullscreen_present(). */
+    if (w) *w = (int)fb_width;
+    if (h) *h = (int)fb_height;
+    if (pitch_px) *pitch_px = (int)(bb_pitch / 4);
+    return back_buffer;
+}
+
+/* v38.125: the caller has finished writing its frame into the buffer
+ * vga_fullscreen_target() handed it, so the screen can be claimed: put the
+ * render target back to the back buffer (mark_dirty() only records damage while
+ * that is the target), damage the whole screen and ask the kernel main loop for
+ * the swap that presents it. */
+void vga_fullscreen_present(void) {
+    if (!fb_exclusive_flag) return;
+    fb_exclusive_mark_all();
+}
+
+// ============================================================
 // Dirty Rectangle Tracking
 // ============================================================
 int d_min_x = 9999, d_min_y = 9999, d_max_x = -1, d_max_y = -1;

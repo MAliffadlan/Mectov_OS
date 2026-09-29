@@ -58,8 +58,25 @@ extern int  Com_Milliseconds(void);
  * level, the TinyGL backend that draws it, and the WM window it presents into. */
 #include "q3bsp.h"
 #include "../tinygl/q3cl_render.h"
+/* v38.121: front-to-back face sort (q3world_render.h pulls q3bsp.h, whose
+ * include path this unit does not carry — the two externs are declared here
+ * instead). */
+extern void q3w_set_sort(int on);
+extern void q3w_sort_stats(int *enabled, int *pool, int *sorted);
 #include "../../src/include/wm.h"
 #include "../../src/include/theme.h"
+
+/* v38.119: the exclusive fullscreen present path (src/drivers/vga.c). Declared
+ * here rather than by including vga.h: this TU also pulls in id's engine
+ * headers, and vga.h's globals (cx, cy, cur_col) collide with them. */
+extern void vga_fullscreen_enter(void);
+extern void vga_fullscreen_leave(void);
+extern int  vga_fullscreen_active(void);
+
+/* v38.119: the microsecond profile clock (src/drivers/timer.c). Declared here
+ * for the same reason as the vga_* trio above — timer.h pulls in kernel types
+ * this TU already has other names for — and it is one symbol. */
+extern uint32_t timer_get_us(void);
 
 /* VFS (src/sys/vfs.c) */
 extern int  vfs_mkdir(const char *path);
@@ -190,9 +207,16 @@ static void vm_ser_hex(unsigned int v) {
  *
  * A bare build with no game data still boots: the loader reports the missing
  * map and the old minimal world stays in place, so `q3vm` runs end to end on an
- * empty install instead of dying at G_InitGame. */
-#define Q3VM_BSP_FS_PATH  "maps/mectovtest.bsp"
-#define Q3VM_BSP_VFS_PATH "/ext2/baseq3/maps/mectovtest.bsp"
+ * empty install instead of dying at G_InitGame.
+ *
+ * v38.111: WHICH map is the map arg's business now. cmd_q3arena validates a
+ * [a-z0-9_] name from the command line and hands it to this task through its
+ * launch_arg; an empty arg keeps the generated test arena, so every existing
+ * regression and CI run behaves exactly as before. The two strings below are
+ * built at run time from it. */
+static char q3vm_bsp_name[64]  = "mectovtest";   /* without maps/ and .bsp */
+static char q3vm_bsp_fs[80]    = "maps/mectovtest.bsp";
+static char q3vm_bsp_vfs[112]  = "/ext2/baseq3/maps/mectovtest.bsp";
 
 /* bg_public.h's "what stops a player" mask, spelled out here because this
  * translation unit deliberately does not include the bg layer; every constant
@@ -243,7 +267,7 @@ static int vm_sizeof_gentity;
 /* The level time the driver feeds into each GAME_RUN_FRAME. G_GET_USERCMD
  * stamps the same time into the usercmd so the module's own command-time
  * gating (ClientThink_real: msec = serverTime - ps.commandTime) accepts it. */
-static int q3vm_frame_time;
+int q3vm_frame_time;   /* non-static for the v38.117 [BF] diagnostic */
 
 #define Q3VM_FRAMETIME  50              /* id's own FRAMETIME (g_local.h) */
 #define Q3VM_FRAME_COUNT 200            /* 10 seconds of game time */
@@ -391,9 +415,10 @@ static const char *f3s(float v) {
 }
 
 static void q3vm_world_load(void) {
-    if (q3vm_file_bytes(Q3VM_BSP_VFS_PATH) <= 0) {
-        write_serial_string("[Q3VM] world: no " Q3VM_BSP_VFS_PATH
-                            " — minimal fallback (single floor plane at z=0)\n");
+    if (q3vm_file_bytes(q3vm_bsp_vfs) <= 0) {
+        write_serial_string("[Q3VM] world: no ");
+        write_serial_string(q3vm_bsp_vfs);
+        write_serial_string(" — minimal fallback (single floor plane at z=0)\n");
         return;
     }
     /* id's loader: reads the lump table, validates the version, hunks the
@@ -401,12 +426,12 @@ static void q3vm_world_load(void) {
      * Com_Error()s on anything malformed, which is why the existence check
      * above happens first — a missing file is a clean report, a corrupt one is
      * id's own diagnostic. */
-    CM_LoadMap(Q3VM_BSP_FS_PATH, qfalse, &q3vm_world_checksum);
+    CM_LoadMap(q3vm_bsp_fs, qfalse, &q3vm_world_checksum);
     q3vm_world_real = 1;
-    reportf("[Q3VM] world: CM_LoadMap(" Q3VM_BSP_FS_PATH
-            ") shaders=%d planes=%d brushes=%d brushsides=%d nodes=%d leafs=%d models=%d",
-            cm.numShaders, cm.numPlanes, cm.numBrushes, cm.numBrushSides,
-            cm.numNodes, cm.numLeafs, cm.numSubModels);
+    reportf("[Q3VM] world: CM_LoadMap(%s) shaders=%d planes=%d brushes=%d "
+            "brushsides=%d nodes=%d leafs=%d models=%d",
+            q3vm_bsp_fs, cm.numShaders, cm.numPlanes, cm.numBrushes,
+            cm.numBrushSides, cm.numNodes, cm.numLeafs, cm.numSubModels);
     /* chars=%d checksum=0x%08x, composed into one buffer by hand: reportf has
      * no hex verb, and two writes would open the interleave window this exists
      * to close. */
@@ -507,6 +532,11 @@ static void q3vm_world_probe(void) {
  * the bottom of the file is what fills them in. */
 static int   q3vm_cmd_live;                     /* 1 = windowed input in use */
 static int   q3vm_cmd_forward, q3vm_cmd_right;  /* -127..127, this frame */
+/* v38.122: the vertical and button channels (upmove/BUTTON_ATTACK), filled
+ * from the window's key/mouse state or the scheduled jump=/fire= knobs.
+ * Declared here, above q3vm_fill_usercmd, which writes them into the cmd. */
+static int   a_up;                      /* -127..127, this frame */
+static int   a_btn;                     /* cmd.buttons, this frame */
 /* The angles this driver ASKS for, accumulated from input. Deliberately not the
  * module's ps.viewangles: the module adds its own delta_angles (seeded by
  * SetClientViewAngle at spawn) to whatever a command carries, so feeding the
@@ -536,6 +566,15 @@ static void q3vm_fill_usercmd(usercmd_t *cmd, int serverTime) {
     cmd->angles[YAW] = ANGLE2SHORT(q3vm_cmd_yaw);
     cmd->angles[PITCH] = ANGLE2SHORT(q3vm_cmd_pitch);
     cmd->angles[ROLL] = 0;
+    /* v38.122: the vertical and button channels the driver never used to
+     * fill. Pmove id: upmove >= 10 while grounded = jump (gate PMF_JUMP_HELD
+     * forces a release first), upmove < 0 = duck; buttons & BUTTON_ATTACK
+     * (=1, q_shared.h's first button bit) in PM_Weapon = fire (ammo-- then
+     * EV_FIRE_WEAPON, which the server turns into FireWeapon). Headless q3vm
+     * never gets here (upmove/buttons stay 0, so that suite's log shape is
+     * unchanged). */
+    cmd->upmove = (signed char)a_up;
+    cmd->buttons = (unsigned char)a_btn;
 }
 
 /* The userinfo string the retail server would keep per client. "ip" is
@@ -868,8 +907,17 @@ int VM_CallCompiled(vm_t *vm, int *args) {
  */
 #define Q3ARENA_W          320
 #define Q3ARENA_H          240
-#define Q3ARENA_FRAMES     300          /* 15 s of game time at FRAMETIME */
-#define Q3ARENA_WALL_MS    150000       /* stop regardless, so CI cannot hang */
+/* v38.116: the cap is in RENDER frames now, and the render clock is free-run
+ * (server ticks stay 50 ms of game time each, but several can land in one
+ * rendered frame). 10800 frames at ~60 fps is the same ~180 s of play the old
+ * 3600-frame cap gave at 20 fps; CI ends sessions long before this either way. */
+#define Q3ARENA_FRAMES     10800        /* ~3 min of play; ESC ends sooner */
+/* v38.116: minimum wall time per RENDERED frame (com_maxfps-style limiter).
+ * 15 ms ~= a 66 fps ceiling; without it a free-running loop would starve the
+ * desktop's timeslice — the old code spent this wait on the 20 Hz server tick
+ * instead, which is exactly what capped fps at 20. */
+#define RENDER_MIN_MS      15
+#define Q3ARENA_WALL_MS    600000       /* stop regardless, so CI cannot hang */
 #define Q3ARENA_TURN_DEG   130.0f       /* arrow-key turn rate, per second */
 #define Q3ARENA_SENS       0.18f        /* mouse degrees per pixel */
 
@@ -883,9 +931,50 @@ int VM_CallCompiled(vm_t *vm, int *args) {
 #define SC_LEFT  0x4B
 #define SC_RIGHT 0x4D
 #define SC_DOWN  0x50
+#define SC_C     0x2E    /* v38.122: duck (upmove < 0) */
+#define SC_LCTRL 0x1D    /* v38.122: attack hold (fire alias) */
+#define SC_F3    0x3D    /* v38.126: perf detail panel (default off) */
 
 static int   a_win = -1;                /* the window, -1 = none */
 static int   a_quit;                    /* set by ESC / window close */
+/* v38.119 test/driver knobs, all from the `q3arena` argument (see
+ * q3vm_apply_map_arg): the camera can be PINNED at an exact pose so a heavy
+ * view is reproducible frame for frame (the walk the bench drives is not), the
+ * world-space frustum clip can be turned off for an A/B on one ISO, and the
+ * present path can be taken over (fullscreen). */
+static int   a_fullscreen;
+static int   a_sort = 1;        /* v38.121: front-to-back face sort (nosort=off) */
+/* v38.122: gameplay input. a_up feeds cmd.upmove (127 = jump intent, -127 =
+ * duck), a_btn feeds cmd.buttons (BUTTON_ATTACK). The two jump=/fire= knobs
+ * schedule the same inputs from the command line so CI can assert id's own
+ * Pmove/FireWeapon chain without injecting keys; a_jump_pending/a_fire_left
+ * are the scheduled actions' remaining state. a_shots/a_jumps count INTENTS
+ * for the play line; the module's own reaction is read out of ps. */
+static int   a_jump_left;               /* scheduled jumps remaining  */
+static int   a_fire_left;               /* scheduled fire bursts left */
+static int   a_fire_t;                  /* frames left in the current burst */
+static unsigned a_jump_at;              /* frame the next jump fires on  */
+static unsigned a_fire_at;              /* frame the next burst starts on */
+/* v38.122: bg_public.h's values, spelled out — g_public.h does not pull that
+ * header, and the numbers are stable across every Q3A derivative.
+ *   BUTTON_ATTACK = 1      (q_shared.h: first usercmd button bit)
+ *   WP_MACHINEGUN = 2      (bg_public.h weapon enum, after WP_NONE/GAUNTLET)
+ *   STAT_HEALTH   = 0      (bg_public.h statIndex_t)
+ *   ENTITYNUM_NONE= 1023   (bg_public.h; what ps.groundEntityNum reads while
+ *                           airborne — the world entity is 0) */
+#define Q3VM_BUTTON_ATTACK   1
+#define Q3VM_WP_MACHINEGUN   2
+#define Q3VM_STAT_HEALTH     0
+static int   a_jumps, a_shots;          /* intent counters (diag line) */
+static int   vm_firing_diag;            /* v38.123: STICKY latch — any tick that ran the fire path; sampled diag line reports it (never cleared) */
+static unsigned a_jump_seen;            /* frames a jump intent was held */
+static unsigned a_fire_seen;            /* frames BUTTON_ATTACK was held */
+static int   a_jump_gap = 40;           /* frames between scheduled jumps  */
+static int   a_fire_gap = 20;           /* frames between scheduled bursts */
+static int   a_jump_t;                  /* the current jump's tick phase  */
+static unsigned a_jump_tick0;           /* tick count when the intent was raised */
+static int   a_pose_set;
+static float a_pose_x, a_pose_y, a_pose_z, a_pose_yaw, a_pose_pitch;
 static int   a_input_seen;              /* a key has reached the window */
 static int   a_frames;                  /* frames rendered */
 static int   a_faces_drawn, a_tris_drawn;   /* totals across the run */
@@ -916,11 +1005,63 @@ static q3bsp_mesh_t a_mesh;
  * IF=0 deadlock the WM's first calibration had: reading the clock never
  * waits. */
 extern uint32_t get_ticks(void);
+/* Pacing clock: get_ticks() at 10 ms is exactly the resolution a 15 ms frame
+ * budget wants, and every existing repro of "46 fps, not 66" is a statement
+ * about THIS clock, so pacing stays on it. */
 static int a_ms(void) { return (int)(unsigned)get_ticks(); }
 static int a_ms_since(int t0) { return a_ms() - t0; }
-static int a_ms_vm, a_ms_gl, a_ms_other, a_ms_idle;
+
+/* v38.119: the PROFILE clock, in microseconds. Every *_ms field below used to
+ * be the difference of two get_ticks() samples, so any phase cheaper than one
+ * tick read as zero unless it happened to straddle a boundary: `blit_ms=0
+ * draw_ms=0 wm_ms=0` in window after window was not "the compositor is free",
+ * it was a resolution artefact, and it hid the answer to the only question that
+ * mattered (where the 25 ms frame goes). timer_get_us() = tick ms + latched PIT
+ * count, so a 0.4 ms phase measures as 0.4 ms. Accumulated in us, printed in
+ * ms; a negative delta (PIT latch racing the tick rollover) is clamped, never
+ * added. */
+static int a_us(void) { return (int)(unsigned)timer_get_us(); }
+static int a_us_since(int t0) { int d = a_us() - t0; return d > 0 ? d : 0; }
+static int a_us_vm, a_us_gl, a_us_other, a_us_idle;
+/* v38.116 sub-profile of gl_ms: where the render phase's time actually sits
+ * (viewport+clear / the world draw itself / end-of-frame present snapshot).
+ * Printed only in the deep-profile line so the perf line stays parseable. */
+static int a_us_gl_begin, a_us_gl_draw, a_us_gl_end;
+/* v38.119: the parts of "other" that are not the GL phase. `o_stats` is the
+ * per-frame counter readback, `o_hist` the every-20th-frame pixel histogram,
+ * `o_hud` the perf overlay painted into the finished frame, `o_pres` the
+ * snapshot the compositor blits. They exist because "other_ms" was 25% of the
+ * frame and named nothing. */
+static int a_us_o_stats, a_us_o_hist, a_us_o_hud, a_us_o_pres;
+/* v38.116 server clock catch-up state: game time advances in 50 ms ticks
+ * decoupled from the render loop (see q3arena_frame). */
+static unsigned a_srv_last_ms;          /* wall time of the last server tick */
+static int a_srv_acc;                   /* accumulated remainder, msec */
+static int a_srv_ticks;                 /* ticks the camera has not consumed yet */
+static int a_srv_ticks_win;             /* v38.118: ticks since the last sample line */
+static unsigned a_srv_ticks_total;      /* v38.122: every tick ever run (jump intent release) */
+static int a_srv_ms;                    /* real ms those ticks represent */
+static int a_last_glfps;                /* render-only instantaneous fps */
 static int    a_perf_frames;            /* frames included in the accounting */
-static int    a_last_fps;               /* whole-run fps, for the HUD */
+static int    a_last_fps;               /* whole-run fps (the perf line's `fps=`) */
+static int    a_last_fps_win;           /* v38.126: the fps the HUD shows — this
+                                         * window's, not the run average      */
+static unsigned a_win_ms;               /* v38.126: start of the fps window    */
+static int    a_perf_detail;            /* v38.126: F3 -> the six-number panel */
+
+/* v38.118: camera interpolation. The server still simulates on its 50 ms tick
+ * (Pmove untouched), but the RENDERED camera must not teleport once per tick:
+ * at 44 fps that is 2-3 frames of frozen pose, then a ~16-unit jump - the
+ * stutter the user measures as "patah-patah saat gerak, semua map". The frame
+ * camera is lerped between the last two tick-end poses with the same frac-
+ *tional phase the server accumulator holds, so the eye moves EVERY rendered
+ * frame while G_RunFrame's tick grid stays exactly what a 20 Hz server makes. */
+static vec3_t a_cam_prev_pos;           /* pose at the previous tick end */
+static vec3_t a_cam_cur_pos;            /* pose at the latest tick end */
+static float  a_cam_prev_yaw, a_cam_prev_pitch;
+static float  a_cam_cur_yaw,  a_cam_cur_pitch;
+static int    a_cam_have;               /* pose pairs collected */
+static int    a_last_cam_alpha;         /* for the sample log line */
 
 static playerState_t *q3vm_ps(vm_t *vm) {
     if (!vm || vm_ps_ofs < 0) return 0;
@@ -947,17 +1088,67 @@ static void q3arena_win_key(int id, char c, uint8_t sc) {
     if (base >= 128) return;
     a_keys[base] = (unsigned char)down;
     a_input_seen = 1;
-    if (base == SC_ESC && down) a_quit = 1;
+    /* v38.122: the vertical and fire channels. SPACE = jump intent (Pmove
+     * wants upmove >= 10 while grounded, and its PMF_JUMP_HELD gate requires
+     * a real release before the next jump — holding SPACE auto-hops at id's
+     * own cadence). C = duck (upmove < 0, PMF_DUCKED). Left-CTRL = fire alias
+     * for keyboards without a mouse; the mouse button is the primary fire.
+     * The driver holds NOTHING back: it just reflects key state, exactly like
+     * a real client's in_*.c would. */
+    if (base == SC_SPACE)      a_up = down ?  127 : 0;
+    else if (base == SC_C)     a_up = down ? -127 : 0;
+    else if (base == SC_LCTRL) {
+        if (down) a_btn |=  Q3VM_BUTTON_ATTACK;
+        else      a_btn &= ~Q3VM_BUTTON_ATTACK;
+    }
+    /* v38.126: F3 brings the six-number perf panel back (it is what the user
+     * boxed and asked to lose, kept as an instrument, hidden by default). The
+     * corner fps readout is always on; this only adds the detail. F3 reaches
+     * this handler untouched: with a game window holding the raw-scancode
+     * focus the kernel consumes only F12 (GDB stub), Ctrl+C/Z and Ctrl+Alt+L. */
+    if (base == SC_F3 && down) {
+        a_perf_detail = !a_perf_detail;
+        q3ref_set_perf_detail(a_perf_detail);
+        /* write_serial_string, not reportf: this runs in the compositor's
+         * context (the WM calls the key handler), while reportf's scratch
+         * buffer belongs to the frame task — the ESC branch below writes the
+         * same way for the same reason. */
+        write_serial_string("[Q3ARENA] perf detail ");
+        write_serial_string(a_perf_detail ? "on (F3)\n" : "off (F3)\n");
+    }
+    if (base == SC_ESC && down) {
+        /* v38.119: in fullscreen the first ESC hands the screen back to the
+         * desktop and keeps playing in the window (the same window, the same
+         * mouse capture); the next ESC quits, exactly as it did before. */
+        if (a_fullscreen) {
+            a_fullscreen = 0;
+            vga_fullscreen_leave();
+            write_serial_string("[Q3ARENA] fullscreen off (ESC)\n");
+        } else {
+            a_quit = 1;
+        }
+    }
 }
 
 /* Relative motion while this window owns the capture, exactly like the client
  * layer's mouse path. Flushed by the next usercmd. */
 static void q3arena_win_mouse(int id, int dx, int dy, int btn) {
-    (void)id; (void)btn;
+    (void)id;
+    /* v38.122: button bit 0 = left = BUTTON_ATTACK, press and release alike
+     * (the kernel main loop only calls wm_capture_event when the button state
+     * CHANGES or the pointer moved, so this is edge-correct). */
+    if (btn & 1) a_btn |=  Q3VM_BUTTON_ATTACK;
+    else         a_btn &= ~Q3VM_BUTTON_ATTACK;
     if (wm_capture_owner() != a_win) return;
     a_input_seen = 1;
     q3vm_cmd_yaw   -= (float)dx * Q3ARENA_SENS;
-    q3vm_cmd_pitch -= (float)dy * Q3ARENA_SENS;
+    /* v38.118 sign fix: the driver feeds id's REAL qagame, whose pitch is
+     * positive-DOWN (AngleVectors: forward[2] = -sin(pitch)), and the mouse
+     * driver delivers +dy for downward motion (mouse.c: "PS/2 +y is up;
+     * screen space is +y down"). Down-mouse must therefore ADD to pitch —
+     * the old minus made every look direction vertical-inverted, exactly
+     * the "mouse ke bawah, gamenya nengok ke atas" the user reported. */
+    q3vm_cmd_pitch += (float)dy * Q3ARENA_SENS;
     if (q3vm_cmd_pitch > 85.0f) q3vm_cmd_pitch = 85.0f;
     if (q3vm_cmd_pitch < -85.0f) q3vm_cmd_pitch = -85.0f;
 }
@@ -967,28 +1158,85 @@ static void q3arena_win_mouse(int id, int dx, int dy, int btn) {
  * renderer falls back to its built-in arena, which is what a build with no
  * game data on the volume must still be able to show. */
 static void q3arena_world_mesh(void) {
-    int rc = q3bsp_load(Q3VM_BSP_FS_PATH, &a_mesh);
+    int rc = q3bsp_load(q3vm_bsp_fs, &a_mesh);
     if (rc != 0 || !a_mesh.valid) {
-        reportf("[Q3ARENA] world mesh: FAILED to build from " Q3VM_BSP_FS_PATH
-                " (rc=%d) — falling back to the built-in arena", rc);
+        reportf("[Q3ARENA] world mesh: FAILED to build from %s (rc=%d) — "
+                "falling back to the built-in arena", q3vm_bsp_fs, rc);
         return;
     }
     /* One line, one write: the suite's MESH_RE parses every field of this, and
      * this was the line that died of interleaving ("verts=.[LOAD] c0=..."). */
-    reportf("[Q3ARENA] world mesh: " Q3VM_BSP_FS_PATH
-            " surfaces=%d of=%d verts=%d shaders=%d planar=%d patches=%d "
-            "patchdrawn=%d patchquads=%d patchverts=%d patchskipped=%d "
-            "skipped=%d truncated=%d",
+    reportf("[Q3ARENA] world mesh: %s surfaces=%d of=%d verts=%d shaders=%d "
+            "planar=%d patches=%d patchdrawn=%d patchquads=%d patchverts=%d "
+            "patchskipped=%d skipped=%d truncated=%d",
+            q3vm_bsp_fs,
             a_mesh.numFaces, a_mesh.fileSurfaces, a_mesh.numVerts,
             a_mesh.numShaders, a_mesh.planarFaces, a_mesh.patchSurfaces,
             a_mesh.patchesDrawn, a_mesh.patchQuads, a_mesh.patchVerts,
             a_mesh.patchSkipped, a_mesh.skippedFaces, a_mesh.truncated);
+    /* v38.114: how much of that mesh the level's own lightmaps light. Printed
+     * for every map, fixture included — a fixture that says lit=0 unlit=74 is
+     * the release's proof that the sun fallback is still what a map with no
+     * lightmap lump gets. */
+    reportf("[Q3ARENA] lightmap faces: pages=%d dim=%d lit=%d unlit=%d "
+            "dropped=%d",
+            a_mesh.numLightmaps, a_mesh.lightmapDim, a_mesh.facesLit,
+            a_mesh.facesUnlit, a_mesh.lightmapDropped);
     q3ref_set_bsp(&a_mesh);
+
+    /* v38.125: what the map's shader scripts asked of the draw pass. `add`
+     * counts definitions with a GL_ONE GL_ONE stage (id draws those in a pass
+     * of its own — `sort additive`) and `culloff` those with `cull none` (fire
+     * and lava are two-sided). Both are read from the scripts, not the BSP, so
+     * they are also the proof that the scripts were parsed for more than image
+     * names. A fixture arena's scripts ask for neither: additive=0 culloff=0 is
+     * that suite's "nothing changed" reading. */
+    {
+        int f_add = 0, f_cull = 0;
+        q3ref_draw_flag_stats(&f_add, &f_cull, NULL, NULL);
+        reportf("[Q3ARENA] draw flags: additive=%d culloff=%d", f_add, f_cull);
+    }
+}
+
+/* v38.124: id's own weapon view model, loaded ONCE, on the first frame the
+ * module has a playerState — the weapon in it is what names the model, so the
+ * choice is id's own state rather than a constant in this driver. A load of 0
+ * parts (no pak0 staged, or a weapon with no row in the table) leaves the
+ * v38.123 silhouette as the fallback, and q3viewmodel.c logs which of the two
+ * it is: the fake gun was only ever a problem while it was indistinguishable
+ * from the real thing.
+ *
+ * Called before the frame's clock starts: the file reads and the two JPEG
+ * decodes are a one-off ~10 ms and must not land inside a measured phase. */
+static int a_vm_tried;
+
+static void q3arena_viewmodel(vm_t *vm) {
+    playerState_t *ps;
+
+    if (a_vm_tried) return;
+    ps = q3vm_ps(vm);
+    if (!ps) return;
+    a_vm_tried = 1;
+
+    /* bg_public.h's weapon_t: WP_MACHINEGUN = 2. This port arms exactly one
+     * weapon (ammo_mg is the only ammo it manages), so the table has exactly
+     * one row; anything else loads nothing and draws the fallback, and says
+     * which weapon it did not have a model for. The path has no extension:
+     * q3viewmodel.c adds .md3, _barrel.md3 and _flash.md3 itself. */
+    if ((int)ps->weapon == 2) {
+        q3ref_viewmodel_load("models/weapons2/machinegun/machinegun");
+    } else {
+        reportf("[Q3ARENA] viewmodel: weapon=%d has no staged view model path "
+                "- procedural fallback", (int)ps->weapon);
+    }
 }
 
 static void q3arena_open(void) {
     int ww, wh, wx, wy;
     extern uint32_t fb_width, fb_height;
+#ifndef Q3ARENA_SCALE
+#define Q3ARENA_SCALE 1
+#endif
 
     if (q3ref_init(Q3ARENA_W, Q3ARENA_H) != 0) {
         write_serial_string("[Q3ARENA] FATAL: TinyGL renderer init failed\n");
@@ -1000,8 +1248,16 @@ static void q3arena_open(void) {
     vm_ser_int(Q3ARENA_H);
     write_serial_string("\n");
 
-    ww = Q3ARENA_W + 2;
-    wh = Q3ARENA_H + TITLEBAR_H + 2;
+    /* v38.113: integer upscale at blit time, DOOM-style — the 3D pass keeps
+     * the cheap 320x240 (the fps must not move), but the window and the copy
+     * to it are Q3ARENA_SCALE x bigger, so on a 1024-wide desktop the game
+     * fills 2x more screen at the same render cost. */
+#if Q3ARENA_SCALE > 1
+    q3ref_set_blit_scale(Q3ARENA_SCALE);
+    q3w_set_sort(a_sort);   /* v38.121: `nosort` restores the v38.120 order */
+#endif
+    ww = Q3ARENA_W * Q3ARENA_SCALE + 2;
+    wh = Q3ARENA_H * Q3ARENA_SCALE + TITLEBAR_H + 2;
     wx = ((int)fb_width - ww) / 2;  if (wx < 0) wx = 0;
     wy = ((int)fb_height - TASKBAR_H_PX - wh) / 2; if (wy < 0) wy = 0;
 
@@ -1035,10 +1291,19 @@ static void q3arena_open(void) {
         write_serial_string("[Q3ARENA] WARNING: mouse capture refused\n");
     }
 
+    /* v38.119: take the present path over if the argument asked for it. The
+     * window stays (it owns the input routes); what stops is the desktop
+     * compositing, which is one core's worth of work the game needs more. */
+    if (a_fullscreen) {
+        vga_fullscreen_enter();
+        write_serial_string("[Q3ARENA] fullscreen: direct present (ESC returns to the window)\n");
+    }
+
     q3arena_world_mesh();
 }
 
 static void q3arena_close(void) {
+    if (vga_fullscreen_active()) vga_fullscreen_leave();
     if (a_win >= 0) {
         wm_capture_mouse(a_win, 0);
         wm_request_scancodes(a_win, 0);
@@ -1057,11 +1322,26 @@ static void q3arena_frame(vm_t *vm, int frame) {
     vec3_t eye, fwd;
     int drawn = 0, tris = 0, culled = 0;
     int shaders = 0, from_disk = 0, ph = 0;
+    /* v38.112: the map's own visibility data, per sampled frame. -1 marks
+     * mean "no PVS in this map": every face was drawn. */
+    int vis_marked = -1, vis_total = 0, vis_cluster = -1, vis_leafs = 0;
+    int cull_pvs = 0, cull_frustum = 0, cull_planes = 0, cull_back = 0;
     int cyan = 0, warm = 0, stepgreen = 0, violet = 0, bright = 0, sky = 0;
+    int wall = 0;
     int patch = 0;
     int distinct = 0;
     unsigned target = a_next_ms;
-    int f_t0 = a_ms();
+
+    /* v38.124: the view model loads before this frame's clock starts. */
+    q3arena_viewmodel(vm);
+
+    int f_t0 = a_us();
+    /* v38.116: the pixel histogram and the culling counters are read once per
+     * SAMPLED frame (frame % 20), not every frame — on q3dm1 the histogram
+     * alone was 7.4 ms of "other" per frame at 20 fps, i.e. ~1.5 fps of pure
+     * bookkeeping. Locals now keep their LAST sampled values so the lines
+     * emitted in the sample block stay byte-identical with the old shape. */
+    int sample = (frame % 20) == 0;
 
     /* --- input -> usercmd ------------------------------------------------ */
     {
@@ -1078,39 +1358,298 @@ static void q3arena_frame(vm_t *vm, int frame) {
         q3vm_cmd_forward = fm;
         q3vm_cmd_right = rm;
     }
-
-    q3vm_frame_time += Q3VM_FRAMETIME;
+    /* v38.122: scheduled jump=/fire= actions (the suite's hands). Jump holds
+     * the intent for ONE game tick then releases and waits out its gap —
+     * PMF_JUMP_HELD needs a real release before the next jump counts. Fire is
+     * a BURST: 20 frames of BUTTON_ATTACK, then released until the next burst
+     * comes due — PM_Weapon's weaponTime paces the shots at id's own 100 ms
+     * machinegun cadence. Both only ever ADD intent; real key state is
+     * applied on top of it afterwards. */
+    /* Jump: the intent is raised on a rendered frame and held until one GAME
+     * TICK has consumed it (a_srv_ticks_total moves), then released. Holding
+     * for a fixed number of RENDERED frames loses jumps under the v38.116
+     * catch-up — most rendered frames run zero ticks, so a one-frame intent
+     * usually expired unseen. The hold is safe because PMF_JUMP_HELD blocks a
+     * second jump until the release. a_jumps counts CONFIRMED jumps (a tick
+     * took the intent), not raises. */
+    if (a_jump_t && a_srv_ticks_total != a_jump_tick0) {
+        playerState_t *pj = q3vm_ps(vm);
+        a_jump_t = 0;
+        a_up = 0;                       /* the hold is over */
+        a_jump_left--;
+        a_jumps++;
+        a_jump_at = frame + (unsigned)a_jump_gap;
+        /* The tick that consumed the intent has run, so ps is post-jump
+         * RIGHT NOW: velocity[2] = JUMP_VELOCITY (270), ground = ENTITYNUM_NONE.
+         * Sampling this through the every-100th-frame play line races the
+         * ~23-frame airtime; this one-shot line is the suite's guaranteed
+         * evidence that PM_CheckJump ran. */
+        if (pj)
+            reportf("[Q3ARENA] jump hit frame=%d vel_z=%d ground=%d jumps=%d",
+                    frame, (int)pj->velocity[2], (int)pj->groundEntityNum,
+                    a_jumps);
+    }
+    /* v38.125: a SCHEDULED jump waits for the ground. The frame grid says when
+     * the driver wants to jump; Pmove says whether it can, and the two come
+     * apart whenever the tick feed starves — on a slow host the rendered frames
+     * race ahead of the game clock, the spawn drop has not finished by the
+     * frame the grid names, and the intent is then consumed by a tick in
+     * mid-air where PM_CheckJump refuses (it fires only for
+     * groundEntityNum != ENTITYNUM_NONE). v38.124 called that a "jump hit" and
+     * the suite read vel_z=-239 for a jump that never happened. Waiting for the
+     * floor here is what a player does with the key and makes the evidence
+     * honest at any frame rate: the tick that consumes the intent is a tick in
+     * which PM_CheckJump can actually run. 1023 is ENTITYNUM_NONE. */
+    if (a_jump_left && !a_jump_t && frame >= a_jump_at) {
+        playerState_t *pg = q3vm_ps(vm);
+        if (pg && pg->groundEntityNum != 1023) {
+            a_up = 127;
+            a_jump_seen++;
+            a_jump_t = 1;
+            a_jump_tick0 = a_srv_ticks_total;
+        }
+    }
+    if (a_fire_left) {
+        if (frame >= a_fire_at) {
+            a_btn |= Q3VM_BUTTON_ATTACK;
+            a_fire_seen++;
+            a_shots++;
+            if (++a_fire_t >= 20) {     /* the burst is done */
+                a_fire_t = 0;
+                a_fire_left--;
+                a_fire_at = frame + (unsigned)a_fire_gap;
+                if (!a_fire_left)       /* the LAST burst: hand off the button */
+                    a_btn &= ~Q3VM_BUTTON_ATTACK;
+            }
+        } else {
+            a_btn &= ~Q3VM_BUTTON_ATTACK;
+        }
+    }
+    /* v38.123: the sampled diag line CANNOT catch the flash on its own grid —
+     * it prints every 100th rendered frame while a burst holds BUTTON_ATTACK
+     * for only 20 — so the driver latches "a tick ran the fire path" into a
+     * sticky flag the line always reports (weaponstate returns to WEAPON_READY
+     * between bursts, but the latch proves the state machine got there). The
+     * enum lives in bg_public.h (TORSO_ATTACK=7, not in this unit's includes);
+     * ps.torsoAnim is the module's own record of having played the attack. */
     {
-        int t0 = a_ms();
-        VM_Call(vm, GAME_RUN_FRAME, q3vm_frame_time);
-        VM_Call(vm, GAME_CLIENT_THINK, 0);
-        a_ms_vm += a_ms_since(t0);
+        playerState_t *pf = q3vm_ps(vm);
+        if (pf) {
+            if (pf->weaponstate == 3) vm_firing_diag = 1;
+            else if ((pf->torsoAnim & ~128/*ANIM_TOGGLEBIT, bg_public.h:541*/) == 7)
+                vm_firing_diag = 1;
+        }
+    }
+    /* Real key state lands AFTER the scheduler, so a human overrides the
+     * knobs: SPACE held keeps the intent up even when no jump is scheduled,
+     * and a released SPACE clears it (the scheduler's one-tick hold already
+     * reset a_up itself). */
+    if (a_keys[SC_SPACE])  a_up = 127;
+    else if (a_keys[SC_C]) a_up = -127;
+    else if (!a_jump_t) a_up = a_keys[SC_C] ? -127 : 0;
+
+    /* v38.116 server catch-up: game time is still 50 ms per tick and paced by
+     * the WALL clock — G_RunFrame sees exactly the tick grid a 20 Hz server
+     * produces, so Pmove's physics are unchanged — but 0..2 ticks now run per
+     * RENDERED frame, so a fast renderer is no longer chained to the module's
+     * tick. A stall caps at 125 ms of catch-up (2 ticks) rather than spiralling. */
+    {
+        unsigned now = (unsigned)Com_Milliseconds();
+        int dt = (int)(now - a_srv_last_ms);
+        a_srv_last_ms = now;
+        a_srv_acc += dt;
+        if (a_srv_acc > 125) a_srv_acc = 125;
+        while (a_srv_acc >= Q3VM_FRAMETIME) {
+            int t0;
+            a_srv_acc -= Q3VM_FRAMETIME;
+            q3vm_frame_time += Q3VM_FRAMETIME;
+            t0 = a_us();
+            VM_Call(vm, GAME_RUN_FRAME, q3vm_frame_time);
+            VM_Call(vm, GAME_CLIENT_THINK, 0);
+            a_us_vm += a_us_since(t0);
+            a_srv_ticks++;
+            a_srv_ticks_total++;
+            a_srv_ticks_win++;
+            a_srv_ms += Q3VM_FRAMETIME;
+        }
     }
 
     ps = q3vm_ps(vm);
 
-    /* --- the module's viewpoint is the camera ---------------------------- */
+    /* --- the module's viewpoint is the camera (v38.118: interpolated) -----
+     * Record the fresh tick pose, then draw from the phase-correct point
+     * BETWEEN the last two tick ends: alpha = a_srv_acc / 50 (the wall-clock
+     * phase since `cur` was consumed). The eye therefore sits ~one tick
+     * behind the simulation - exactly the deal Q3's own client makes: it
+     * renders between server snapshots and hides the delay with prediction,
+     * which a VM-local driver has no equivalent of, so the cost is a flat
+     * 50 ms of pose latency and the benefit is a camera that moves on EVERY
+     * rendered frame instead of 20 times a second. The first frame and the
+     * frame after a teleport/respawn (pose jumped > 512 units) snap instead
+     * of lerp. Angles lerp through the wrap (yaw lives on -180..180); pitch
+     * needs none. Eye height rides in at draw time, not in the poses. */
     if (ps) {
-        VectorCopy(ps->origin, eye);
-        eye[2] += (float)ps->viewheight;
-        AngleVectors(ps->viewangles, fwd, NULL, NULL);
+        if (a_cam_have) {
+            float dx = ps->origin[0] - a_cam_cur_pos[0];
+            float dy = ps->origin[1] - a_cam_cur_pos[1];
+            float dz = ps->origin[2] - a_cam_cur_pos[2];
+            if (dx * dx + dy * dy + dz * dz > 512.0f * 512.0f) a_cam_have = 0;
+        }
+        if (!a_cam_have) {
+            a_cam_have = 1;
+            VectorCopy(ps->origin, a_cam_prev_pos);
+            VectorCopy(ps->origin, a_cam_cur_pos);
+            a_cam_prev_yaw = a_cam_cur_yaw = ps->viewangles[YAW];
+            a_cam_prev_pitch = a_cam_cur_pitch = ps->viewangles[PITCH];
+        }
+        if (a_srv_ticks) {
+            VectorCopy(a_cam_cur_pos, a_cam_prev_pos);
+            a_cam_prev_yaw = a_cam_cur_yaw;
+            a_cam_prev_pitch = a_cam_cur_pitch;
+            VectorCopy(ps->origin, a_cam_cur_pos);
+            a_cam_cur_yaw = ps->viewangles[YAW];
+            a_cam_cur_pitch = ps->viewangles[PITCH];
+            a_srv_ticks = 0;
+        }
+        {
+            float alpha = (float)a_srv_acc * (1.0f / (float)Q3VM_FRAMETIME);
+            float dyaw = a_cam_cur_yaw - a_cam_prev_yaw;
+            vec3_t e;
+            if (dyaw > 180.0f) dyaw -= 360.0f;
+            if (dyaw < -180.0f) dyaw += 360.0f;
+            if (alpha < 0.0f) alpha = 0.0f;
+            if (alpha > 1.0f) alpha = 1.0f;
+            e[0] = a_cam_prev_pos[0] + (a_cam_cur_pos[0] - a_cam_prev_pos[0]) * alpha;
+            e[1] = a_cam_prev_pos[1] + (a_cam_cur_pos[1] - a_cam_prev_pos[1]) * alpha;
+            e[2] = a_cam_prev_pos[2] + (a_cam_cur_pos[2] - a_cam_prev_pos[2]) * alpha;
+            e[2] += (float)ps->viewheight;
+            {
+                /* Reuse the module's own AngleVectors through a temp angle
+                 * vector - no freestanding trig, identical convention. */
+                vec3_t va;
+                va[YAW] = a_cam_prev_yaw + dyaw * alpha;
+                va[PITCH] = a_cam_prev_pitch +
+                            (a_cam_cur_pitch - a_cam_prev_pitch) * alpha;
+                va[ROLL] = 0.0f;
+                AngleVectors(va, fwd, NULL, NULL);
+                a_last_cam_alpha = (int)(alpha * 100.0f);
+            }
+            VectorCopy(e, eye);
+        }
+        /* v38.119: a pinned pose overrides the interpolated camera for tests
+         * (the bench drives a deterministic walk, but a heavy VIEW needs an
+         * exact pose; the module keeps simulating and moving its player, only
+         * the eye is pinned, so the scene is reproducible frame for frame). */
+        if (a_pose_set) {
+            vec3_t va;
+            eye[0] = a_pose_x; eye[1] = a_pose_y; eye[2] = a_pose_z;
+            va[YAW] = a_pose_yaw; va[PITCH] = a_pose_pitch; va[ROLL] = 0.0f;
+            AngleVectors(va, fwd, NULL, NULL);
+        }
         q3ref_set_camera_basis(eye, fwd);
     }
     {
-        int t0 = a_ms();
+        int t0 = a_us();
         q3ref_begin_frame();
+        int t1 = a_us();
         q3ref_draw_world((double)q3vm_frame_time / 1000.0);
+        int t2 = a_us();
         q3ref_end_frame();
-        a_ms_gl += a_ms_since(t0);
+        int t3 = a_us();
+        {
+            /* These are differences of the timestamps captured ABOVE. Calling
+             * the clock again here (a_us_since) would measure from the phase's
+             * start to NOW, which is past the end of all three - the first
+             * version did exactly that and reported a GL phase ~3x its real
+             * cost, which is how a 1.9 ms clear, 10 ms world and 0.1 ms present
+             * became `gl_ms=600` in a 360 ms window. */
+            int d_begin = t1 - t0;          /* viewport + clear */
+            int d_draw  = t2 - t1;          /* the world itself   */
+            int d_end   = t3 - t2;          /* the present snapshot */
+            if (d_begin < 0) d_begin = 0;
+            if (d_draw  < 0) d_draw  = 0;
+            if (d_end   < 0) d_end   = 0;
+            a_us_gl += d_begin + d_draw + d_end;
+            /* v38.116: where inside the render phase the time sits — the
+             * clear, the world itself, or the present snapshot. Drives the
+             * next optimisation instead of a guess. glfps is this frame's own
+             * render-only rate: what the limiter removed, the log shows. */
+            a_us_gl_begin += d_begin;
+            a_us_gl_draw += d_draw;
+            a_us_gl_end += d_end;
+        }
+        a_last_glfps = (t3 > t0) ? 1000000 / (t3 - t0) : 0;
     }
     {
-        int t0 = a_ms();
+        int t0 = a_us();
+        int o_stats, o_hist, o_hud;
         q3ref_bsp_stats(&drawn, &tris, &culled, &shaders, &from_disk, &ph);
-        q3ref_frame_histogram(&cyan, &warm, &stepgreen, &violet, &bright, &patch,
-                              &sky, &distinct);
-        q3ref_draw_perf_overlay();  /* HUD pixels land after the histogram */
-        if (a_win >= 0) wm_invalidate(a_win);
-        a_ms_other += a_ms_since(t0);
+        /* v38.112: how much of the mesh the map's own PVS kept this frame. */
+        q3ref_vis_stats(&vis_marked, &vis_total, &vis_cluster, &vis_leafs);
+        q3ref_cull_stats(&cull_pvs, &cull_frustum, &cull_planes, &cull_back);
+        o_stats = a_us_since(t0);
+        if (sample) {
+            q3ref_frame_histogram(&cyan, &warm, &stepgreen, &violet, &bright,
+                                  &patch, &sky, &distinct, &wall);
+        }
+        o_hist = a_us_since(t0) - o_stats;
+        /* v38.119: the overlay is painted EVERY frame (it is the user's only
+         * live readout) into the same 320x240 buffer the world just filled —
+         * v38.120 shrank it to a ~124x56 mini panel (4x8 glyphs, 25% blend)
+         * after the old solid 236x140 slab covered half the view — and its
+         * cost is picked up here, separately from the present snapshot below,
+         * because the two are the only sizable things left in "other" and
+         * they are fixed by completely different changes. */
+        q3ref_draw_perf_overlay();  /* F3 panel only, and only if toggled on:
+                                     * the default HUD (the fps readout) is
+                                     * painted after the upscale instead, in
+                                     * q3ref_blit/q3ref_present_fullscreen */
+        /* v38.123: the gun rides the same buffer — state straight out of the
+         * module's own playerState (weaponstate/groundEntityNum/bobCycle),
+         * drawn after the overlay so the readout stays on top. Cost folds
+         * into o_hud: it is the same category of fixed per-frame overlay. */
+        if (ps) {
+            extern void q3ref_set_viewmodel(int firing, int grounded, int bob);
+            extern void q3ref_draw_viewmodel(void);
+            q3ref_set_viewmodel(
+                ps->weaponstate == 3 /* WEAPON_FIRING, bg_public.h */,
+                ps->groundEntityNum != 1023 /* ENTITYNUM_NONE */,
+                ps->bobCycle);
+            q3ref_draw_viewmodel();
+            /* vm_firing_diag deliberately NOT touched here: a plain
+             * per-frame assignment erased the sticky latch before the
+             * frame%100 diag line ever sampled it (v38.123 regression —
+             * the flash column always read 0). Latch-only, see above. */
+        }
+        o_hud = a_us_since(t0) - o_stats - o_hist;
+        a_us_o_stats += o_stats > 0 ? o_stats : 0;
+        a_us_o_hist += o_hist > 0 ? o_hist : 0;
+        a_us_o_hud += o_hud > 0 ? o_hud : 0;
+        /* v38.116: the snapshot the compositor blits is taken HERE, after the
+         * HUD, so the fps counter and the cost bar are actually on screen.
+         * v38.119: in fullscreen the same snapshot is upscaled straight into
+         * the back buffer instead of being handed to the WM window — the
+         * kernel main loop then only swaps it (no desktop composite). */
+        {
+            int p0 = a_us();
+            if (a_fullscreen) q3ref_present_fullscreen();
+            else              q3ref_present_frame();
+            { int p1 = a_us(); if (p1 > p0) a_us_o_pres += p1 - p0; }
+            /* v38.125: not while fullscreen owns the screen. v38.118 made
+             * wm_invalidate() schedule a composition (it sets needs_redraw),
+             * which is right for a window and wrong here: the window is not the
+             * screen any more, and the invalidation is a standing invitation for
+             * the kernel's swap to land in the MIDDLE of the next frame's
+             * upscale — and a swap that lands mid-write presents a torn frame
+             * AND clears the damage rect, so the rows it had not reached are
+             * left off screen until something marks them dirty again. The
+             * exclusive path claims the screen itself, after the write
+             * (vga_fullscreen_present); the window's buffer is re-invalidated
+             * the moment ESC hands the screen back, because this line runs
+             * again on that very frame. */
+            if (a_win >= 0 && !a_fullscreen) wm_invalidate(a_win);
+        }
+        a_us_other += a_us_since(t0);
     }
 
     a_frames++;
@@ -1126,72 +1665,297 @@ static void q3arena_frame(vm_t *vm, int frame) {
         {
             int pass_ms = 0, blit_ms = 0, draw_ms = 0;
             int fps = 0;
-            int sum_ms = a_ms_vm + a_ms_gl + a_ms_other + a_ms_idle;
+            /* The four phases are accumulated in us and reported in ms; the
+             * sum is taken in us first so rounding cannot make the parts
+             * disagree with the whole by more than the truncation. */
+            int vm_ms = a_us_vm / 1000, gl_ms = a_us_gl / 1000;
+            int other_ms = a_us_other / 1000, idle_ms = a_us_idle / 1000;
+            int sum_ms = (a_us_vm + a_us_gl + a_us_other + a_us_idle) / 1000;
             unsigned elapsed = (unsigned)Com_Milliseconds() - a_start_ms;
             if (elapsed > 0) fps = (a_frames * 1000) / (int)elapsed;
             a_last_fps = fps;
+            /* v38.126: the HUD shows THIS window's fps (20 frames over the
+             * window's wall ms, same clock the limiter and the server feed
+             * use), not the run average. The user's own session is why: at
+             * frame 4900 the average read 20 fps while the window's own phases
+             * summed to 45 ms/frame -> 22 fps, and the parked view read 50. An
+             * average that lags the game by minutes answers "berapa fps nya"
+             * with a number about the whole session. The perf line keeps the
+             * average in `fps=` — that field is what the suites read. */
+            {
+                unsigned wnow = (unsigned)Com_Milliseconds();
+                unsigned wms = wnow - a_win_ms;
+                a_win_ms = wnow;
+                a_last_fps_win = (wms > 0) ? (int)((20u * 1000u) / wms) : 0;
+            }
             wm_q3_times(&pass_ms, &blit_ms, &draw_ms);
             reportf("[Q3ARENA] perf frame=%d fps=%d vm_ms=%d gl_ms=%d "
                     "blit_ms=%d draw_ms=%d wm_ms=%d other_ms=%d idle_ms=%d "
                     "sum_ms=%d",
                     frame, fps,
-                    a_ms_vm, a_ms_gl, blit_ms, draw_ms, pass_ms,
-                    a_ms_other, a_ms_idle, sum_ms);
+                    vm_ms, gl_ms, blit_ms, draw_ms, pass_ms,
+                    other_ms, idle_ms, sum_ms);
             /* The in-window HUD shows the same numbers the log carries: the
              * window-1s phase costs and the run's fps. The overlay itself is
              * painted every frame (after this frame's histogram was taken, so
              * the suite's pixel evidence stays exactly what the 3D pass made). */
-            q3ref_set_perf_overlay(fps, a_ms_vm, a_ms_gl,
-                                   blit_ms, pass_ms, a_ms_other);
+            q3ref_set_perf_overlay(a_last_fps_win, vm_ms, gl_ms,
+                                   blit_ms, pass_ms, other_ms);
             a_perf_frames += 20;
-            a_ms_vm = a_ms_gl = a_ms_other = a_ms_idle = 0;
+            a_us_vm = a_us_gl = a_us_other = a_us_idle = 0;
+            /* v38.116 deep profile: where gl_ms sits (begin = viewport+clear,
+             * draw = the world, end = the present snapshot), and what the two
+             * decoupled clocks did over this window: srv_ticks x 50 ms of game
+             * time actually simulated, and the render-only fps.
+             *
+             * v38.119: this and the two glcyc/ps blocks below are DEV
+             * diagnostics — no suite parses them — and they are only printed
+             * every fifth window now. Serial output is not free: at 115200 8N1
+             * the sampled block above is ~1 KB of text, which is 87 ms of UART
+             * time per window, and that cost lands in `other_ms` where it was
+             * 25% of a heavy frame (it is what the 4-6 ms residual in `other`
+             * was). Cutting the dev lines to 1 window in 5 gives ~10% of the
+             * frame back on a view where the serial line was the second
+             * largest consumer after the raster. The accumulators are still
+             * RESET every window, so the numbers printed here still describe
+             * the last 20 frames exactly as before. */
+            if ((frame % 100) == 0) {
+                {
+                    int s_en = 0, s_pool = 0, s_sorted = 0;
+                    q3w_sort_stats(&s_en, &s_pool, &s_sorted);
+                    reportf("[Q3ARENA] f2b frame=%d sort=%d sorted=%d pool=%d",
+                            frame, s_en, s_sorted, s_pool);
+                }
+                reportf("[Q3ARENA] glsplit frame=%d begin=%d draw=%d end=%d "
+                        "srv_ticks=%d srv_ms=%d glfps=%d stats=%d hist=%d "
+                        "hud=%d pres=%d fps_win=%d detail=%d",
+                        frame, a_us_gl_begin / 1000, a_us_gl_draw / 1000,
+                        a_us_gl_end / 1000,
+                        a_srv_ticks_win, a_srv_ms, a_last_glfps,
+                        a_us_o_stats / 1000, a_us_o_hist / 1000,
+                        a_us_o_hud / 1000, a_us_o_pres / 1000,
+                        a_last_fps_win, a_perf_detail);
+            }
+            a_us_o_stats = a_us_o_hist = a_us_o_hud = a_us_o_pres = 0;
+            /* v38.116: and where INSIDE draw the time is. The 10 ms kernel
+             * clock cannot split a 35 ms GL phase, so TinyGL accumulates TSC
+             * cycles around the glVertex path (transform + clip + the raster
+             * nested in it) and around the raster alone; the two are drained
+             * here as per-frame kcycles plus the fill share. `tris` is the
+             * number the raster saw, which is what makes the cycles
+             * comparable across frames that drew different views. */
+            {
+                unsigned long long vc = 0, fc = 0;
+                unsigned int tn = 0;
+                int vkc, fkc, fpc;
+                q3ref_glsplit_stats(&vc, &fc, &tn);
+                /* The window is 20 frames, so per-frame costs are the 20-frame
+                 * totals over 20 — but a freestanding kernel link has no
+                 * __udivdi3, and a 20-frame window can exceed 2^32 cycles.
+                 * Shifting first (2^20 = "megacycles") keeps every division in
+                 * 32-bit: at 2.2e9 cycles per window the shifted value is 2100,
+                 * and x1000 puts the result in kcycles per frame. */
+                vkc = (int)(((unsigned)(vc >> 20)) * 1000u / 20u);
+                fkc = (int)(((unsigned)(fc >> 20)) * 1000u / 20u);
+                fpc = vc ? (int)(((unsigned)(fc >> 20)) * 100u /
+                                 ((unsigned)(vc >> 20) ? (unsigned)(vc >> 20) : 1u))
+                         : 0;
+                /* `tris` in this line is a 20-FRAME total (it is drained with
+                 * the cycle counters) while the frame line's `tris` is one
+                 * frame's fan count. Comparing the two directly is how v38.119
+                 * came to believe the raster was amplifying each face ~19x — it
+                 * was comparing 20 frames against one. */
+                if ((frame % 100) == 0) {
+                    /* v38.124: the view model's own share, same units and the
+                     * same 20-frame window. The world's numbers above exclude
+                     * it on purpose; WITHOUT this the gun's cost would simply
+                     * vanish from the profile, which is the one way a new pass
+                     * can hide a frame regression. */
+                    unsigned long long vmv = 0, vmf = 0;
+                    unsigned int vmt = 0;
+                    q3ref_viewmodel_cycles(&vmv, &vmf, &vmt);
+                    reportf("[Q3ARENA] glcyc frame=%d tris=%d vert_kc=%d "
+                            "fill_kc=%d fill_pct=%d vm_tris=%d vm_fill_kc=%d",
+                            frame, (int)tn, vkc, fkc, fpc, (int)vmt,
+                            (int)(((unsigned)(vmf >> 20)) * 1000u / 20u));
+                }
+                q3ref_glsplit_reset();
+            }
+            /* v38.122: the gameplay channel, on the record. up/btn are what
+             * this driver built into the usercmd; weapon/ammo/health are read
+             * STRAIGHT OUT of the module's ps (shared memory — the same read
+             * the retail server makes), so the suite asserts id's own state
+             * machine, not the port's bookkeeping. ammo indexes by weapon:
+             * ps->ammo[WP_MACHINEGUN] starts at 100 (FFA spawn, g_client.c)
+             * and PM_Weapon takes one per shot. */
+            if ((frame % 100) == 0 && ps) {
+                /* bg_public.h's enums are not in this unit's include path
+                 * (g_public.h does not pull it), and the values are stable
+                 * across every Q3A derivative: weapon 2 = WP_MACHINEGUN,
+                 * stats[0] = STAT_HEALTH, ammo is indexed by the same weapon
+                 * enum. Spell the numbers, cite the header. */
+                reportf("[Q3ARENA] play frame=%d up=%d btn=%d weapon=%d "
+                        "ammo_mg=%d health=%d ground=%d jumps=%d shots=%d "
+                        "vel_z=%d",
+                        frame, a_up, a_btn, (int)ps->weapon,
+                        (int)ps->ammo[Q3VM_WP_MACHINEGUN],
+                        (int)ps->stats[Q3VM_STAT_HEALTH],
+                        (int)ps->groundEntityNum,
+                        a_jumps, a_shots, (int)ps->velocity[2]);
+                /* v38.123: the viewmodel's inputs, same sampling grid —
+                 * flash is id's own WEAPON_FIRING, bob the raw bobCycle,
+                 * ground the air state. v38.124 split the flash column in
+                 * two, because one number was doing two jobs: `flash` is the
+                 * LIVE weaponstate this frame (literally the value handed to
+                 * q3ref_set_viewmodel above, and therefore the one that decides
+                 * whether the flash's triangles were submitted), and `latched`
+                 * is the sticky "a tick ran the fire path" flag a 100-frame
+                 * sampling grid needs to see a 20-frame window at all. Reading
+                 * the latch as if it were the drawing state made `drawn` look
+                 * wrong on every non-firing sample.
+                 *
+                 * v38.124: the same line now reports WHAT was drawn, because
+                 * "a gun is on screen" stopped being enough the moment there
+                 * were two possible guns. model/parts is the .md3 loader's own
+                 * count (0 = no model on the volume, the silhouette below is
+                 * what ran), surf/tris are the geometry it parsed, drawn the
+                 * triangles the last pass SUBMITTED (equal to tris whenever the
+                 * whole model reached the rasterizer, minus the flash's share
+                 * when this frame was not firing — flash_tris is on the loader
+                 * line), tex the body's image, box the model's screen
+                 * rectangle as the draw pass projected it, and distinct the
+                 * number of 4-bit colours inside that box — the one number a
+                 * flat hand-drawn slab can never produce. The old px anchor
+                 * (rw-92+kick) is gone with the silhouette it described;
+                 * model=0 is the signal to read the fallback's field instead.
+                 *
+                 * v38.125 adds the two fields that make the FLASH testable:
+                 * add is 1 when this pass submitted the muzzle flash
+                 * additively (id's own blendfunc for f_machinegun; drawing it
+                 * opaque painted its black surround over the screen, which is
+                 * what the user's screenshot showed) and add=0 whenever no
+                 * flash was drawn, so the pair (flash, add) says both "it
+                 * fired this frame" and "it was composited id's way". dark is
+                 * the count of near-black pixels inside the box: additive can
+                 * only add light, so a firing frame's dark count can never
+                 * beat the idle one's. */
+                {
+                    int vm_parts = 0, vm_surf = 0, vm_tris = 0, vm_drawn = 0;
+                    int vm_tw = 0, vm_th = 0, vm_dist = 0;
+                    int vm_bright = 0, vm_dark = 0;
+                    int vx0 = 0, vy0 = 0, vx1 = 0, vy1 = 0;
+                    q3ref_viewmodel_stats(&vm_parts, &vm_surf, &vm_tris,
+                                          &vm_drawn, &vm_tw, &vm_th, &vx0,
+                                          &vy0, &vx1, &vy1, &vm_dist);
+                    q3ref_viewmodel_box(&vm_dist, &vm_bright, &vm_dark);
+                    reportf("[Q3ARENA] viewmodel frame=%d weapon=%d flash=%d "
+                            "latched=%d ground=%d bob=%d model=%d surf=%d "
+                            "tris=%d drawn=%d tex=%dx%d box=%d,%d,%d,%d "
+                            "distinct=%d add=%d bright=%d dark=%d",
+                            frame, (int)ps->weapon,
+                            ps->weaponstate == 3 /* the live state the draw
+                                                  * above was given */,
+                            vm_firing_diag,
+                            ps->groundEntityNum != 1023,
+                            ps->bobCycle & 255,
+                            vm_parts, vm_surf, vm_tris, vm_drawn,
+                            vm_tw, vm_th,
+                            vx0, vy0, vx1, vy1, vm_dist,
+                            q3ref_viewmodel_flash(), vm_bright, vm_dark);
+                }
+            }
+            a_us_gl_begin = a_us_gl_draw = a_us_gl_end = 0;
+            a_srv_ticks = 0;
+            a_srv_ticks_win = 0;
+            a_srv_ms = 0;
         }
-        if (ps) {
-            reportf("[Q3ARENA] frame=%d t=%d pos=(%d,%d,%d) eye_z=%d yaw=%d "
-                    "pitch=%d drawn=%d tris=%d culled=%d",
-                    frame, q3vm_frame_time,
-                    (int)ps->origin[0], (int)ps->origin[1], (int)ps->origin[2],
-                    (int)eye[2], (int)ps->viewangles[YAW], (int)ps->viewangles[PITCH],
-                    drawn, tris, culled);
-        } else {
-            reportf("[Q3ARENA] frame=%d t=%d drawn=%d tris=%d culled=%d",
-                    frame, q3vm_frame_time, drawn, tris, culled);
+    if (ps) {
+        reportf("[Q3ARENA] frame=%d t=%d pos=(%d,%d,%d) eye_z=%d yaw=%d "
+                "pitch=%d drawn=%d tris=%d culled=%d vis=%d/%d cluster=%d "
+                "cull_pvs=%d cull_frustum=%d planes=%d back=%d cam_alpha=%d",
+                frame, q3vm_frame_time,
+                (int)ps->origin[0], (int)ps->origin[1], (int)ps->origin[2],
+                (int)eye[2], (int)ps->viewangles[YAW], (int)ps->viewangles[PITCH],
+                drawn, tris, culled, vis_marked, vis_total, vis_cluster,
+                cull_pvs, cull_frustum, cull_planes, cull_back,
+                a_last_cam_alpha);
+        /* v38.113 diagnostics: WHY is the player where it is? The walk gate in
+         * the module is `msec = cmd.serverTime - ps.commandTime; if (msec < 1)
+         * return;` — and the counters below say whether that gate ever opens
+         * (commandTime stuck at 0), whether Pmove is even in play (velocity
+         * and groundEntity stuck at their spawn values), and whose turn it
+         * is (pm_type). No suite reads this line and it is one of the longest
+         * in the block, so v38.119 prints it once every fifth window; the
+         * information a pixel/suite assertion needs is in the frame line. */
+        if ((frame % 100) == 0) {
+            reportf("[Q3ARENA] ps frame=%d cmd_time=%d commandTime=%d "
+                    "pm_type=%d vel=(%d,%d,%d) ground=%d flags=0x%x "
+                    "input_seen=%d cmd_fm=%d cmd_yaw=%d",
+                    frame, q3vm_frame_time, (int)ps->commandTime,
+                    (int)ps->pm_type, (int)ps->velocity[0],
+                    (int)ps->velocity[1], (int)ps->velocity[2],
+                    (int)ps->groundEntityNum,
+                    (unsigned)ps->pm_flags, a_input_seen,
+                    (int)q3vm_cmd_forward, (int)q3vm_cmd_yaw);
+        }
+    } else {
+            reportf("[Q3ARENA] frame=%d t=%d drawn=%d tris=%d culled=%d "
+                    "vis=%d/%d cluster=%d cull_pvs=%d cull_frustum=%d planes=%d back=%d",
+                    frame, q3vm_frame_time, drawn, tris, culled,
+                    vis_marked, vis_total, vis_cluster,
+                    cull_pvs, cull_frustum, cull_planes, cull_back);
         }
 
         /* The finished frame, read back out of the renderer's own buffer: one
-         * line per sampled frame that says what the camera actually saw. */
+         * line per sampled frame that says what the camera actually saw.
+         * v38.117 adds `wall` — the wall textures' own colour at the light
+         * this renderer bakes, which the buckets before it all rejected (the
+         * old `warm` count was a z-fight artefact on the fixture's wall tops,
+         * not a wall pixel). */
         reportf("[Q3ARENA] pixels frame=%d cyan=%d warm=%d stepgreen=%d "
-                "violet=%d bright=%d patch=%d sky=%d distinct=%d",
+                "violet=%d bright=%d patch=%d sky=%d wall=%d distinct=%d",
                 frame, cyan, warm, stepgreen, violet, bright, patch, sky,
-                distinct);
+                wall, distinct);
     }
 
-    /* Pace to the module's own frame time (~20 fps) instead of spinning, so the
-     * desktop keeps its timeslice and the run stays watchable in TCG. A frame
-     * that overran its budget drops the deficit rather than catching up. The
-     * wait is itself a measured phase: idle_us is the budget the frame did NOT
-     * spend — headroom a faster renderer could turn into frames. */
-    a_next_ms += (unsigned)Q3VM_FRAMETIME;
+    /* v38.116 pacing: the render loop runs free. Its only delay is a frame
+     * limiter (com_maxfps-style): when a frame finished early, wait out the
+     * remainder of RENDER_MIN_MS so the desktop keeps a timeslice. There is no
+     * waiting for the server any more — server ticks are caught up at the top
+     * of the next frame — so idle_ms now means limiter wait, not a locked 20 Hz. */
+    a_next_ms += (unsigned)RENDER_MIN_MS;
     {
-        int t0 = a_ms();
+        int t0 = a_us();
         for (;;) {
             unsigned now = (unsigned)Com_Milliseconds();
             if (now >= target || a_quit) break;
             __asm__ __volatile__("hlt");
         }
-        a_ms_idle += a_ms_since(t0);
+        a_us_idle += a_us_since(t0);
     }
-    {
-        unsigned now = (unsigned)Com_Milliseconds();
-        if (now > a_next_ms + 250u) a_next_ms = now;
-    }
+    /* v38.125: an end-of-frame "drop the drift" clause lived here —
+     *     if (now > a_srv_last_ms + 250u) a_srv_last_ms = now;
+     * — and it is what starved the tick feed on a slow host. Moving the
+     * REFERENCE forward is not the same as dropping the DRIFT: the next
+     * frame's catch-up then measures the time since the END of the previous
+     * frame (a few microseconds) instead of since its start, so dt collapses to
+     * zero and the game clock crawls. Measured on TCG before this change: 0.3
+     * ticks per rendered frame at 333 ms/frame, i.e. the module simulated about
+     * a tenth of real time, and the earlier reading of that as "this VM's clock
+     * disagrees with itself" (v38.119) was this clause, not the clock. The
+     * spiral it was guarding against cannot happen anyway: the tick block caps
+     * the accumulator at 125 ms — 2 ticks per frame — whatever the stall was,
+     * so a 5-second stall still advances the world by exactly 100 ms. Nothing
+     * changes on a host whose frames are under 250 ms — the clause never fired
+     * there, which is why every real session (40+ fps) has always read a
+     * healthy srv_ticks. */
     /* Whatever this frame's own bookkeeping cost (camera, counters, the perf
      * line itself) is not a phase anyone named — charge it to "other" so the
      * parts of sum_ms stay honest against the whole. */
     {
-        int spent = a_ms_since(f_t0);
-        int known = a_ms_vm + a_ms_gl + a_ms_other + a_ms_idle;
-        if (spent > known) a_ms_other += spent - known;
+        int spent = a_us_since(f_t0);
+        int known = a_us_vm + a_us_gl + a_us_other + a_us_idle;
+        if (spent > known) a_us_other += spent - known;
     }
     (void)shaders; (void)from_disk; (void)ph;
     if (a_win >= 0 && wm_is_open(a_win) == 0) {
@@ -1207,6 +1971,182 @@ static void q3vm_park(void) {
     for (;;) __asm__ __volatile__("hlt");
 }
 
+/* v38.111: map selection. cmd_q3arena passes "q3arena" for the generated test
+ * arena (so every existing regression keeps its meaning) or "q3arena <name>"
+ * for a staged retail map. The name is validated HERE as well — the launch_arg
+ * string is attacker-controlled in principle, and only [a-z0-9_] may ever be
+ * part of a maps/*.bsp qpath this driver opens. Anything odd (empty, too long,
+ * other characters) silently keeps the default arena.
+ *
+ * v38.119: the payload is a token list, still validated character by character:
+ *     *     q3arena [<map>] [fullscreen] [@x,y,z,yaw[,pitch]]
+     *
+     * `fullscreen` takes the present path over (vga_fullscreen_*), and `@...`
+     * pins the camera at an exact pose (integers; the eye position and the view
+     * angles, in degrees) so a heavy view can be replayed frame for frame —
+     * that is how the heavy-view suite measures, and how the render cost of one
+     * fixed view is compared between builds. Every token is optional and
+     * order-free; an unknown token invalidates the whole argument and the run
+     * falls back to "generated arena, windowed", which is what every existing
+     * suite asserts. */
+#define Q3VM_TOKEN_MAX 24
+
+/* Parse one signed integer. Returns the new index, or -1. */
+static int q3vm_arg_int(const char *s, int i, int *out) {
+    int neg = 0, v = 0, digits = 0;
+    if (s[i] == '-') { neg = 1; i++; }
+    while (s[i] >= '0' && s[i] <= '9' && digits < 7) {
+        v = v * 10 + (s[i] - '0');
+        i++; digits++;
+    }
+    if (!digits) return -1;
+    *out = neg ? -v : v;
+    return i;
+}
+
+static int q3vm_arg_pose(const char *s, int i) {
+    int c[5], k;
+    for (k = 0; k < 5; k++) c[k] = 0;
+    if (s[i] != '@') return -1;
+    i++;
+    for (k = 0; k < 5; k++) {
+        int ni = q3vm_arg_int(s, i, &c[k]);
+        if (ni < 0) return -1;
+        i = ni;
+        if (k == 4) break;
+        if (s[i] == ',') { i++; continue; }
+        if (k >= 3) break;              /* 4th field (pitch) is optional */
+        return -1;
+    }
+    if (s[i] != '\0' && s[i] != ' ') return -1;
+    a_pose_x = (float)c[0]; a_pose_y = (float)c[1]; a_pose_z = (float)c[2];
+    a_pose_yaw = (float)c[3]; a_pose_pitch = (float)c[4];
+    a_pose_set = 1;
+    return i;
+}
+
+static void q3vm_apply_map_arg(void) {
+    extern int get_current_task(void);
+    extern const char* task_get_launch_arg(int tid);
+    const char *arg = task_get_launch_arg(get_current_task());
+    static const char prefix[] = "q3arena ";
+    int i = 0, n = 0, seen_map = 0;
+
+    if (!arg) return;
+    while (prefix[i] && arg[i] == prefix[i]) i++;
+    if (prefix[i]) return;                       /* not "q3arena ..." */
+
+    /* Token walk. A bad token aborts the whole parse (name included) so a
+     * half-understood argument can never half-configure a run. Whitespace is a
+     * separator and nothing else: the first version forgot to consume it, so
+     * the space after the map name hit the "unknown character" arm and every
+     * multi-token line ("q3dm1 fullscreen", any pinned pose) silently ran the
+     * generated arena instead. */
+    while (arg[i]) {
+        if (arg[i] == ' ') { i++; continue; }
+        if ((arg[i] >= 'a' && arg[i] <= 'z') || (arg[i] >= '0' && arg[i] <= '9') ||
+            arg[i] == '_') {
+            /* a word: `fullscreen`, or the map name. Every character has to be
+             * part of the [a-z0-9_] alphabet the qpath allows — a word is never
+             * skipped just because its HEAD looks legal. */
+            int w0 = i, wl = 0;
+            while (arg[i] && arg[i] != ' ' && arg[i] != '=') {
+                char ch = arg[i];
+                if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'))
+                    return;
+                i++; wl++;
+            }
+            if (wl == 0 || wl >= Q3VM_TOKEN_MAX) return;
+            if (wl == 10) {
+                static const char kw[] = "fullscreen";
+                int k = 0;
+                while (kw[k] && arg[w0 + k] == kw[k]) k++;
+                if (k == 10) { a_fullscreen = 1; continue; }
+            }
+            if (wl == 6) {
+                static const char kw[] = "nosort";
+                int k = 0;
+                while (kw[k] && arg[w0 + k] == kw[k]) k++;
+                if (k == 6) { a_sort = 0; continue; }   /* v38.121 A/B knob */
+            }
+            /* v38.122: `=` is NOT in the word alphabet, and the walk used to
+             * treat anything else as a fatal (the whole parse silently
+             * discarded). Stop at `=` instead so the kv form can be handled
+             * here: jump=<n> / fire=<n> schedule n actions from frame 40, one
+             * every a_jump_gap / a_fire_gap frames. A word of any other shape
+             * followed by `=` is still a fatal. */
+            if (arg[i] == '=' && wl > 0 && wl < 5) {
+                static const char kwj[] = "jump";
+                static const char kwf[] = "fire";
+                int isj = (wl == 4), isf = (wl == 4), k2;
+                for (k2 = 0; k2 < wl; k2++) {
+                    if (arg[w0 + k2] != kwj[k2]) isj = 0;
+                    if (arg[w0 + k2] != kwf[k2]) isf = 0;
+                }
+                if (!isj && !isf) return;
+                i = w0 + wl + 1;                  /* past the '=' */
+                {
+                    int val = 0, digits = 0;
+                    while (arg[i] >= '0' && arg[i] <= '9' && digits < 3) {
+                        val = val * 10 + (arg[i] - '0'); i++; digits++;
+                    }
+                    if (!digits) return;          /* 'jump=' with no number */
+                    if (arg[i] != ' ' && arg[i] != '\0') return;
+                    if (isj) {
+                        a_jump_left = val;
+                        a_jump_at = 40;
+                    } else {
+                        a_fire_left = val;
+                        a_fire_at = 40;
+                    }
+                }
+                continue;
+            }
+            if (seen_map) return;                /* two names: not a map arg */
+            seen_map = 1;
+            n = wl;
+            for (int k = 0; k < n; k++) q3vm_bsp_name[k] = arg[w0 + k];
+            q3vm_bsp_name[n] = '\0';
+            continue;
+        }
+        if (arg[i] == '@') {
+            int ni = q3vm_arg_pose(arg, i);
+            if (ni < 0) { a_pose_set = 0; return; }
+            i = ni;
+            continue;
+        }
+        return;                                  /* unknown character */
+    }
+    if (arg[i] != '\0') return;
+
+    /* The knobs apply whether or not a map name came with them. */
+    reportf("[Q3ARENA] args: map='%s' fullscreen=%d pose=%d sort=%d "
+            "jump=%d fire=%d",
+            n ? q3vm_bsp_name : "(generated arena)",
+            a_fullscreen, a_pose_set, a_sort, a_jump_left, a_fire_left);
+    if (a_pose_set)
+        reportf("[Q3ARENA] pose pinned: eye=(%d,%d,%d) yaw=%d pitch=%d",
+                (int)a_pose_x, (int)a_pose_y, (int)a_pose_z,
+                (int)a_pose_yaw, (int)a_pose_pitch);
+
+    if (n == 0) return;
+    {
+        const char *dot = ".bsp";
+        int p = 0, q = 0, k;
+        for (; "maps/"[p]; p++) q3vm_bsp_fs[p] = "maps/"[p];
+        for (k = 0; k < n; k++) q3vm_bsp_fs[p + k] = q3vm_bsp_name[k];
+        p += n;
+        for (k = 0; dot[k]; k++) q3vm_bsp_fs[p + k] = dot[k];
+        q3vm_bsp_fs[p + 4] = '\0';
+        for (; "/ext2/baseq3/maps/"[q]; q++) q3vm_bsp_vfs[q] = "/ext2/baseq3/maps/"[q];
+        for (k = 0; k < n; k++) q3vm_bsp_vfs[q + k] = q3vm_bsp_name[k];
+        q += n;
+        for (k = 0; dot[k]; k++) q3vm_bsp_vfs[q + k] = dot[k];
+        q3vm_bsp_vfs[q + 4] = '\0';
+    }
+    reportf("[Q3VM] map arg: '%s'", q3vm_bsp_name);
+}
+
 static void q3_drive(int windowed) {
     static char cmdline[176];
     static const char args[] =
@@ -1220,6 +2160,9 @@ static void q3_drive(int windowed) {
         "+set fs_cdpath /ext2";   /* the volume the game data lives on */
 
     for (int i = 0; i < (int)sizeof(args); i++) cmdline[i] = args[i];
+
+    /* Map selection first: the world load below opens whatever this resolved. */
+    q3vm_apply_map_arg();
 
     /* id's FS_InitFilesystem() fatals out ("Couldn't load default.cfg") unless
      * a default.cfg is reachable from the search path. Homepath is tmpfs, so
@@ -1307,11 +2250,19 @@ static void q3_drive(int windowed) {
 
     /* Bytecode really executing: GAME_INIT runs G_InitGame(), which walks the
      * game module's cvar table, registers its world with the server and prints
-     * through trap_Printf -> our serial log. Same call the retail engine makes
-     * (sv_game.c: VM_Call( gvm, GAME_INIT, svs.time, Com_Milliseconds(), restart )). */
+     * through trap_Printf -> our serial log. The first argument is LEVEL TIME,
+     * and a real server starts it at 0 (svs.time), never at the wall clock:
+     * v38.105 passed Com_Milliseconds() here and worked only because loading
+     * was fast — on q3dm1 the 80 s texture load put level.time ~80 s AHEAD of
+     * the driver's frame clock, so id's own gate in ClientThink_real
+     * (`msec = cmd.serverTime - ps.commandTime; if (msec < 1) return;`)
+     * rejected every command and the player stood frozen for the whole
+     * session. The driver owns the server clock (q3vm_frame_time starts at 0
+     * too), so the module and the driver now start on the same timeline. The
+     * second argument stays the wall clock: it is only a random seed. */
     write_serial_string("[Q3VM] calling vmMain(GAME_INIT) — official id game code\n");
     int before = vm_syscalls;
-    int r = VM_Call(vm, GAME_INIT, Com_Milliseconds(), Com_Milliseconds(), 0);
+    int r = VM_Call(vm, GAME_INIT, 0, Com_Milliseconds(), 0);
     reportf("[Q3VM] GAME_INIT returned %d traps=%d total=%d errors=%d unhandled=%d",
             r, vm_syscalls - before, vm_syscalls, vm_errors, vm_unhandled);
 
@@ -1380,6 +2331,10 @@ static void q3_drive(int windowed) {
     if (windowed) {
         a_start_ms = t_start;
         a_next_ms = t_start;
+        a_win_ms  = t_start;   /* v38.126: the fps window starts here too */
+        a_srv_last_ms = t_start;   /* v38.116: both clocks start together */
+        a_srv_acc = 0;
+        a_cam_have = 0;
             for (frame = 1; frame <= Q3ARENA_FRAMES; frame++) {
                 q3arena_frame(vm, frame);
                 if (a_quit) break;
@@ -1401,9 +2356,18 @@ static void q3_drive(int windowed) {
         reportf("[Q3VM] movement x0=%d x1=%d delta=%d", x0, x1, x1 - x0);
 
         if (windowed) {
-            reportf("[Q3ARENA] render totals: frames=%d faces=%d tris=%d wall_ms=%d",
-                    a_frames, a_faces_drawn, a_tris_drawn,
-                    (int)((unsigned)Com_Milliseconds() - t_start));
+            {
+                int lit_last = 0, lit_total = 0;
+                int f_addfaces = 0;
+                q3ref_light_stats(&lit_last, &lit_total);
+                q3ref_draw_flag_stats(NULL, NULL, NULL, &f_addfaces);
+                reportf("[Q3ARENA] render totals: frames=%d faces=%d tris=%d "
+                        "wall_ms=%d litfaces=%d litfaces_total=%d "
+                        "addfaces=%d",
+                        a_frames, a_faces_drawn, a_tris_drawn,
+                        (int)((unsigned)Com_Milliseconds() - t_start),
+                        lit_last, lit_total, f_addfaces);
+            }
         }
         write_serial_string("[Q3VM] frame loop done\n");
     }

@@ -327,7 +327,12 @@ static void memset_s(void *adr, GLint val, GLint count)
     p = adr;
     v = val | (val << 16);
 
-    n = count >> 3;
+    /* v38.113: four GLushort per 32-bit store, so the 32-bit loop is
+     * count/4 groups — the old `count >> 3` was half the needed stores and
+     * the 16-bit tail then re-did the same slots (see memset_l's longer
+     * note; the 16-bit build is not linked here but the bug is the same
+     * shape, fixed so a future build inherits correct code). */
+    n = count >> 2;
     for (i = 0; i < n; i++) {
         p[0] = v;
         p[1] = v;
@@ -337,7 +342,7 @@ static void memset_s(void *adr, GLint val, GLint count)
     }
 
     q = (GLushort *) p;
-    n = count & 7;
+    n = count & 3;
     for (i = 0; i < n; i++)
         *q++ = val;
 }
@@ -349,16 +354,21 @@ static void memset_l(void *adr, GLint val, GLint count)
     GLuint *p;
     p = adr;
     v = val;
-    n = count >> 2;
-    for (i = 0; i < n; i++) {
+    n = count;
+    /* v38.113: the old body ran `n = count >> 2` iterations of FOUR stores
+     * each — sixteen pixels per 4-pixel group, four times past the caller's
+     * row. On the 320x240 buffer every ZB_clear smeared the clear colour
+     * four rows deep over geometry the raster had already drawn, which is
+     * the "blue glitch" the retail run showed: clear colour appearing where
+     * faces had just been drawn, moving with the overshoot. */
+    for (i = 0; i + 4 <= n; i += 4) {
         p[0] = v;
         p[1] = v;
         p[2] = v;
         p[3] = v;
         p += 4;
     }
-    n = count & 3;
-    for (i = 0; i < n; i++)
+    for (; i < n; i++)
         *p++ = val;
 }
 

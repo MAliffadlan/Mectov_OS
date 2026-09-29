@@ -14,7 +14,7 @@ void cmd_help(void) {
         print(" JOBS    : ", 0x0B); print("cmd & (background), jobs, fg [n], bg [n], kill [%n]\n", 0x0F);
         print(" REDIR   : ", 0x0B); print("cmd > file (truncate), cmd >> file (append), cmd < file (stdin)\n", 0x0F);
         print(" APPS GUI: ", 0x0B); print("flappy, doom, taskmgr, snake, run [app.mct], run [app.mct] &\n", 0x0A);
-        print(" NET & HW: ", 0x0B); print("ping [ip], host [domain], fetch [domain], lspci\n", 0x0F);
+        print(" NET & HW: ", 0x0B); print("ping [ip], host [domain], fetch [domain], lspci, gpustat\n", 0x0F);
         print(" UTILS   : ", 0x0B); print("echo [msg], sleep [sec], wc [file], cat -n, cd -, type [cmd], yes [str] &\n", 0x0F);
         print(" TOOLKIT : ", 0x0B); print("printf FMT [args], sort [file], uniq [-c] [file], tee FILE, find [dir] [-name GLOB]\n", 0x0F);
         print(" POWER   : ", 0x0B); print("reboot, shutdown\n", 0x0C);

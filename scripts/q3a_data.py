@@ -40,7 +40,13 @@ Usage:
     scripts/q3a_data.py --pak ~/q3/pak0.pk3                 # default map q3dm1
     scripts/q3a_data.py --pak ~/q3/pak0.pk3 --map q3dm17
     scripts/q3a_data.py --pak ~/q3/pak0.pk3 --list           # plan only
+    scripts/q3a_data.py --pak ... --with-viewmodel
     scripts/q3a_data.py --pak ... --with-models --with-sounds
+
+v38.124: --with-viewmodel stages models/weapons2/machinegun/* — the three .md3
+parts and the two JPEGs the port's own view model draws (q3viewmodel.c). The
+Quake III Arena DEMO pak0 ships it, so `--with-viewmodel` on a demo install is
+the whole first-person weapon.
 
 Honesty note: this script's job is to be *verifiable*. `--verify` re-reads the
 staged .bsp and reports any shader name that resolved to no file at all, so a
@@ -219,7 +225,7 @@ class Pak(object):
         return [n for n in self.by_name if n.startswith(prefix) and n.endswith(suffix)]
 
 
-def plan(pak, mapname, with_models, with_sounds):
+def plan(pak, mapname, with_models, with_sounds, with_viewmodel=False):
     """Everything to extract, as (source entry, staged relative path)."""
     wanted = {}
 
@@ -275,6 +281,17 @@ def plan(pak, mapname, with_models, with_sounds):
             if pak.exists(model + extra):
                 want(model + extra)
 
+    if with_viewmodel:
+        # v38.124: the weapon the port actually holds. One weapon's worth of
+        # .md3 + textures is ~48 KB, against megabytes for --with-models' whole
+        # player/weapon set — and q3viewmodel.c needs exactly these files:
+        # the body, its _barrel and _flash parts and the two JPEGs they name.
+        for entry in pak.glob("models/weapons2/machinegun/", ".md3") + \
+                pak.glob("models/weapons2/machinegun/", ".skin") + \
+                pak.glob("models/weapons2/machinegun/", ".tga") + \
+                pak.glob("models/weapons2/machinegun/", ".jpg"):
+            want(entry)
+
     if with_models:
         for entry in pak.glob("models/players/", ".md3") + \
                 pak.glob("models/players/", ".skin") + \
@@ -309,6 +326,9 @@ def main():
     ap.add_argument("--verify", action="store_true",
                     help="after extracting, report names that resolved to nothing")
     ap.add_argument("--with-models", action="store_true", help="also stage player/weapon models")
+    ap.add_argument("--with-viewmodel", action="store_true",
+                    help="also stage the machinegun view model (v38.124: the .md3 "
+                         "parts and textures the first-person gun is drawn from)")
     ap.add_argument("--with-sounds", action="store_true", help="also stage every sound")
     args = ap.parse_args()
 
@@ -326,7 +346,8 @@ def main():
     baseq3 = os.path.join(outdir, "baseq3")
 
     pak = Pak(args.pak)
-    wanted, unresolved, shader_names = plan(pak, args.map, args.with_models, args.with_sounds)
+    wanted, unresolved, shader_names = plan(pak, args.map, args.with_models,
+                                           args.with_sounds, args.with_viewmodel)
 
     print("[q3data] pak      : %s (%s)" % (args.pak, human(os.path.getsize(args.pak))))
     print("[q3data] map      : %s" % args.map)

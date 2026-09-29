@@ -57,11 +57,28 @@ void q3ref_set_camera_basis(const float origin[3], const float forward[3]);
  * Any pointer may be NULL. */
 void q3ref_bsp_stats(int *facesDrawn, int *trisDrawn, int *facesCulled,
                      int *shaders, int *fromDisk, int *placeholders);
+/* v38.125: the additive/cull-none census of the shader scripts, and how many
+ * faces the last frame (and the run) drew in the additive pass. See
+ * q3w_flag_stats — this is its renderer-side spelling. */
+void q3ref_draw_flag_stats(int *addShaders, int *cullShaders, int *addFaces,
+                           int *addFacesRun);
+/* v38.112: how much of the last frame the .bsp's PVS kept (marked/total), and
+ * where the camera sat in the map's tree. `marked` is -1 when the map carries
+ * no PVS and every face was drawn; cluster/leaf are -1 then too. */
+void q3ref_vis_stats(int *marked, int *total, int *cluster, int *leafs);
+/* v38.112: which culling stage dropped the last frame's faces. */
+void q3ref_cull_stats(int *byVis, int *byFrustum, int *planes, int *byBack);
+/* v38.114: how many faces the last frame drew out of a .bsp lightmap page, and
+ * the run's total. Zero on every mesh without a lightmap lump, which is every
+ * generated fixture arena — so "the level is lit from the file" is a number a
+ * test can read rather than a look a human has to judge. */
+void q3ref_light_stats(int *litFacesLast, int *litFacesTotal);
 /* Classify the finished frame straight out of the ZBuffer: the renderer's own
  * account of what it drew, independent of the WM and the compositor. Returns
  * the number of pixels examined; any output pointer may be NULL. */
 int  q3ref_frame_histogram(int *cyan, int *warm, int *stepgreen, int *violet,
-                           int *bright, int *patch, int *sky, int *distinct);
+                           int *bright, int *patch, int *sky, int *distinct,
+                           int *wall);
 /* Draw the arena. time_sec drives the animated props. */
 void q3ref_draw_world(double time_sec);
 void q3ref_end_frame(void);
@@ -75,10 +92,77 @@ void q3ref_end_frame(void);
 void q3ref_set_perf_overlay(int fps, int vm_ms, int gl_ms, int blit_ms,
                             int wm_ms, int other_ms);
 void q3ref_draw_perf_overlay(void);
+/* v38.126: the six-number panel is opt-in (F3 in the driver) and OFF by
+ * default; the driver calls this from its key handler. `fps` above is the
+ * LAST SECOND's fps, which is what the readout shows — the run average is a
+ * different number and stays in the log's perf line. */
+void q3ref_set_perf_detail(int on);
+/* v38.123: the first-person gun. `firing` is the module's own
+ * weaponstate == WEAPON_FIRING, `grounded` is groundEntityNum !=
+ * ENTITYNUM_NONE, `bob` is ps.bobCycle (0..255 footstep phase). Drawn after
+ * the overlay so the HUD stays on top.
+ *
+ * v38.124: q3ref_viewmodel_load() points it at id's own .md3 parts
+ * ("models/weapons2/machinegun/machinegun", no extension) and what is drawn
+ * becomes that model — geometry, textures and tag-chained muzzle flash
+ * (q3viewmodel.c). A load of 0 parts leaves the v38.123 silhouette in place as
+ * the fallback, which is what a volume without a pak0 gets. The stats call
+ * reports which of the two is on screen: parts/surfaces/triangles of the
+ * model, the triangles the LAST PASS submitted (`drawn`, which must equal the
+ * loaded count when the model is drawn whole), its texture, the screen box the
+ * pass covered and how many distinct 4-bit colours are inside it. */
+int  q3ref_viewmodel_load(const char *base);
+void q3ref_set_viewmodel(int firing, int grounded, int bob);
+void q3ref_viewmodel_stats(int *parts, int *surfaces, int *tris,
+                           int *drawn, int *texw, int *texh, int *x0, int *y0,
+                           int *x1, int *y1, int *distinct);
+
+/* v38.125: 1 when the last pass composited the muzzle flash ADDITIVELY (id's
+ * own blendfunc for models/weapons2/machinegun/f_machinegun). The flash's image
+ * is a bright star on black, so "was it drawn" and "was it composited the way
+ * id composites it" are different questions — v38.124 answered only the first,
+ * and the opaque answer blacked out the view. */
+int  q3ref_viewmodel_flash(void);
+
+/* What the last pass left inside the box q3ref_viewmodel_stats reports:
+ * distinct 4-bit colours, pixels that are nearly white and pixels that are
+ * nearly black. The black count is what makes additive testable — additive
+ * compositing can only ADD light, so a firing frame can never be darker than
+ * an idle one, while an opaque flash paints its black surround over the view. */
+void q3ref_viewmodel_box(int *distinct, int *bright, int *dark);
+
+void q3ref_draw_viewmodel(void);
+
+/* v38.116: snapshot the finished frame for the compositor. Call it LAST in a
+ * frame — after the HUD, which is painted into the same ZBuffer — because the
+ * compositor blits this snapshot and nothing else. */
+void q3ref_present_frame(void);
+
+/* v38.116: the cycle split inside gl_ms — setup (transform + clip) vs raster
+ * fill — drained once per sampled frame. See tgl_cyc.h for what is counted. */
+void q3ref_glsplit_stats(unsigned long long *vert, unsigned long long *fill,
+                         unsigned int *tri);
+void q3ref_glsplit_reset(void);
+
+/* v38.124: the view model pass's own share of those cycles, drained with
+ * q3ref_glsplit_reset(). The world's numbers above deliberately EXCLUDE it
+ * (see the snapshot note in q3cl_render.c); this is where they are instead. */
+void q3ref_viewmodel_cycles(unsigned long long *vert, unsigned long long *fill,
+                            unsigned int *tri);
 
 /* Swizzle the finished 0x00RRGGBB ZBuffer into the WM's 0x00BBGGRR content
  * buffer, centred. Runs in the compositor's draw pass, never in the render
  * task. */
 void q3ref_blit(uint32_t *dst, int cw, int ch);
+
+/* v38.113: integer upscale at blit time (DOOM-style 2x). 1 = off. The 3D
+ * pass keeps its resolution; only the compositor's copy is scaled. */
+void q3ref_set_blit_scale(int s);
+int  q3ref_blit_scale(void);
+
+/* v38.119: fullscreen present — snapshot the frame (like q3ref_present_frame)
+ * and upscale it straight into the back buffer. Only valid while the VGA driver
+ * is in exclusive mode (vga_fullscreen_enter). */
+void q3ref_present_fullscreen(void);
 
 #endif /* Q3CL_RENDER_H */

@@ -3,7 +3,7 @@
 
 #include "types.h"
 
-#define MAX_NODES     256
+#define MAX_NODES     1024
 #define MAX_PATH      256
 #define MAX_FILENAME  32
 
@@ -11,25 +11,34 @@
 // sectors, created by `dd if=/dev/zero of=disk.img bs=512 count=2048` in
 // run.sh and CI — keep the count in sync with VFS_DISK_SECTORS):
 //   Sector 0                          : magic "MECTOVFS" + metadata
-//   Sector 1 .. VFS_NODE_SECTORS      : node table (256 nodes × 512 bytes)
+//   Sector 1 .. VFS_NODE_SECTORS      : node table (nodes × 512 bytes)
 //   VFS_DATA_START .. VFS_DISK_SECTORS-1 : file data blocks
-// Bumped from 64 to 256 nodes (layout v1 → v2): vfs_load() rejects an old
-// image so the node table is rebuilt from the embedded apps instead of
-// reading garbage into nodes 64..255. Kept here (not vfs.c) so shell's
-// `df` reports the same numbers.
+// Bumped from 64 to 256 nodes (layout v1 → v2), then from 256 to 1024
+// (layout v3 → v4, v38.111): a staged Quake III map brings hundreds of
+// files (scripts/, textures/, maps/ — one node each on the ext2 mount),
+// and Sys_ListFiles needs the table, not just the mount roots. vfs_load()
+// rejects an old image so the node table is rebuilt from the embedded
+// apps instead of reading garbage into nodes 256..1023. Kept here (not
+// vfs.c) so shell's `df` reports the same numbers. RAM cost: 1024 × 512B
+// = 512 KB of BSS against a ~136 MB kernel heap budget.
 #define VFS_MAGIC_SECTOR  0
 #define VFS_NODE_START    1
-#define VFS_NODE_SECTORS  256  // 256 nodes * 512 bytes = 128KB on disk
+#define VFS_NODE_SECTORS  1024  // 1024 nodes * 512 bytes = 512KB on disk
 
 // v38.96: tmpfs budget. Global cap on RAM committed to FS_RAM_FILE buffers
 // (kernel heap); per-file cap lives in vfs.c and matches the fd write path.
 #define VFS_TMPFS_MAX_BYTES (2 * 1024 * 1024)   // 2MB
 #define VFS_DATA_START    (VFS_NODE_START + VFS_NODE_SECTORS)
-#define VFS_DISK_SECTORS  2048 // total sectors on the 1MB image
+#define VFS_DISK_SECTORS  4096 // total sectors on the 2MB image (v4: the node
+                               // table grew to 512KB, so the data area keeps
+                               // its pre-v4 size — run.sh and check.py create
+                               // the image with the same count)
 // v3 (v38.23): node table gained uid/gid/mode (ownership + permissions). An
 // image written by an older layout is rejected so the table is rebuilt with
 // the new fields instead of reading garbage ownership into every node.
-#define VFS_LAYOUT_VERSION 3
+// v4 (v38.111): node table widened to 1024 entries (512 KB on disk) — same
+// rejection-and-rebuild rule applies to images written by v38.110 and older.
+#define VFS_LAYOUT_VERSION 4
 
 typedef enum { FS_FILE, FS_DIR, FS_DEV, FS_EXT2_FILE, FS_EXT2_DIR, FS_FAT32_FILE, FS_FAT32_DIR, FS_PROC, FS_SYMLINK,
                // v38.96: tmpfs — RAM-backed nodes (buffers in the kernel heap,

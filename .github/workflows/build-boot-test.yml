@@ -72,7 +72,7 @@ jobs:
       - name: Create disk images
         run: |
           # Fresh, empty images — the same way run.sh creates them locally.
-          dd if=/dev/zero of=disk.img bs=512 count=2048 status=none
+          dd if=/dev/zero of=disk.img bs=512 count=4096 status=none
           dd if=/dev/zero of=ext2.img bs=1M count=16 status=none
           mkfs.ext2 -F ext2.img > /dev/null 2>&1
           # System blobs for the debloated kernel (v38.81): doom1.wad /
@@ -121,8 +121,21 @@ jobs:
             mectov-q3.iso
             disk-q3.img
             ext2-q3.img
+            build/vm/qagame.qvm
+            build/vm/qagame.map
           if-no-files-found: error
           retention-days: 1
+      # The two bytecode files are here because the q3arena / q3vis / q3retail
+      # suites RECREATE ext2.img themselves (q3_images.fresh_images, v38.111+)
+      # rather than trusting the shipped one — that is what makes each suite's
+      # assertions independent of whatever ran before it. seed_ext2.sh SKIPS a
+      # missing qagame.qvm without failing (it is a developer convenience when
+      # the engine was built without MECTOV_Q3=1), so a checkout that lacks
+      # build/ produced a volume with no bytecode and the guest parked at
+      # "[Q3VM] FAILED: no qagame.qvm" — silently, and only in CI. The build/
+      # tree is git-ignored, so shipping the files in the artifact is the only
+      # way the test job gets them. qagame.map rides along because q3vm_test.py
+      # asserts id's loader can name symbols out of it.
 
   # Shared setup for every test job: install QEMU + PIL, pull the artifacts,
   # recreate the FAT32 scratch image (fat32.img is deliberately NOT shipped —
@@ -404,6 +417,27 @@ jobs:
           name: mectov-q3-artifacts
           path: .
 
+      # The bytecode must be on disk BEFORE any suite that re-seeds a volume.
+      # seed_ext2.sh treats a missing qagame.qvm as "engine not built" and
+      # moves on, so this is the one place that can catch it — the suites
+      # themselves just time out waiting for a marker that never arrives.
+      - name: Verify the game bytecode arrived
+        run: |
+          set -euo pipefail
+          for f in build/vm/qagame.qvm build/vm/qagame.map; do
+            if [ ! -s "$f" ]; then
+              echo "[!] missing or empty: $f" >&2
+              echo "    seed_ext2.sh would skip it silently and every QVM" >&2
+              echo "    suite would fail at its ready-marker instead." >&2
+              exit 1
+            fi
+          done
+          ls -l build/vm/qagame.qvm build/vm/qagame.map
+          # Readable by q3vm_test.py's byte-size identity check, which compares
+          # the staged copy against the host build.
+          test "$(stat -c%s build/vm/qagame.qvm)" -gt 100000
+          test "$(stat -c%s build/vm/qagame.map)" -gt 1000
+
       - name: Restore disk image names
         run: |
           cp disk-q3.img disk.img
@@ -470,6 +504,36 @@ jobs:
           # the assertions do not depend on the compositor.
           python3 scripts/q3arena_test.py --iso mectov-q3.iso --timeout 600
 
+      - name: The map's own PVS decides what is drawn (TCG)
+        run: |
+          # v38.112 (Q3 phase 10): types `q3arena mectovvis` — the same session
+          # as the arena step, but against a fixture whose tree has TWO leaves
+          # and a real two-cluster visibility lump (mectovvis.bsp: the camera
+          # spawns in the west leaf, which sees only itself, and the scripted
+          # walk crosses the split at x=100). Asserts the loader kept the file's
+          # tree and lump, that its own leaf walk AGREES with id's
+          # CM_PointLeafnum at every sample point, that the marked count at the
+          # spawn is exactly the west half (computed from the generator, not
+          # hard-coded) and rises to the whole mesh once the camera changes
+          # leaf, that marked + culled-by-PVS equals the mesh's face count on
+          # every sampled frame, and that a culled frame is still the live,
+          # textured level rather than a black screen.
+          python3 scripts/q3vis_test.py --iso mectov-q3.iso --timeout 600
+
+      - name: The retail-map path — staged pak0, shader scripts, JPEG (TCG)
+        run: |
+          # v38.111 (Q3 phase 9): the whole pipeline a user's own pak0 goes
+          # through, with no id data: build_q3pak.py wraps the generated arena
+          # in a genuine pk3 (scripts/*.shader, TGA textures, one JPEG),
+          # q3a_data.py stages it — the shader script REBINDS the curve shader
+          # to a JPEG, so staging proves the definitions were actually read —
+          # and the suite boots the result and runs `q3arena mectovtest`.
+          # Asserts the mesh came from the staged map, the curve shader
+          # resolved to the JPEG through the script (fmt=jpg), the four
+          # directly-named textures resolved to their TGAs, no placeholders,
+          # and the world is really drawn and live.
+          python3 scripts/q3retail_test.py --iso mectov-q3.iso --timeout 600
+
   storage:
     needs: build
     runs-on: ubuntu-latest
@@ -521,6 +585,17 @@ jobs:
           # Legacy 1AF4:1001 virtqueue, `mount /vblk fat32 12`, `cp`, mtools
           # byte-compare, and per-volume coexistence (boot FAT32 drive 3).
           python3 scripts/virtio_test.py --timeout 360
+
+      - name: VirtIO-GPU driver regression (modern virtio-pci, 2D round trip, TCG)
+        run: |
+          # This device has NO legacy interface (1AF4:1050, no I/O BAR under any
+          # flag), so the suite asserts the modern bring-up itself — the four
+          # vendor-capability regions, the 64-bit feature word with
+          # VIRTIO_F_VERSION_1, the control queue — and then the data path:
+          # a screendump OF THE DEVICE's own scanout must match the pattern the
+          # driver handed it in all 16384 pixels, and `gpustat` must repeat the
+          # live checksum. No GL needed (the script's --gl flag is opt-in).
+          python3 scripts/virtiogpu_test.py --timeout 360
 
       - name: IDE DMA + multi-sector disk read regression (TCG)
         run: |

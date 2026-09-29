@@ -15,10 +15,15 @@
  *     identical grid for tracing), and the quads come out as ordinary faces.
  *     Until v38.109 these were counted and skipped, which drew every arch and
  *     dome of a retail map as a hole.
- *   * Lightmaps are ignored: the face's own unit normal is shaded against a
- *     fixed sun instead. That is honest for a generated arena with no lightmap
- *     lump, and it is what makes a screendump assertable at all (a dark
- *     unlit face would be indistinguishable from a hole).
+ *   * Lightmaps come out of the file (v38.114). Every surface that names a
+ *     lightmap page is sampled at each vertex's own page-space coordinate and
+ *     the result is stored as the vertex colour the renderer modulates its
+ *     texture with — which is what id's lightmap stage does on the GPU. A
+ *     surface without a page (q3dm1 has 75 of them, and every generated fixture
+ *     map has nothing but them) keeps the v38.113 fallback: the face's own unit
+ *     normal shaded against a fixed sun. That fallback is also what makes the
+ *     screendump tests assertable — an unlit face would be indistinguishable
+ *     from a hole.
  *   * Nothing is culled by contents. A non-solid decorative patch draws exactly
  *     like a structural one — id's renderer draws patches by surface type too,
  *     and it is what lets the generated arena test the curve without changing
@@ -78,6 +83,319 @@ int q3bsp_read_file(const char *qpath, unsigned char **data, int *len) {
 
 void q3bsp_free_file(unsigned char *data) {
     if (data) FS_FreeFile(data);
+}
+
+/* ----------------------------------------------------------------------- */
+/* Shader-script definitions (v38.111).                                    */
+/*                                                                        */
+/* A .bsp only ever names its textures — the definitions that say WHICH     */
+/* image a name means live in a shader script under scripts/. id's FS can   */
+/* them (FS_GetFileList), so this walks the same list, parses each file in  */
+/* place, and returns pointers INTO the loaded bytes; the caller frees      */
+/* buffers, not names. The parser is deliberately minimal: it finds         */
+/* definition blocks, the first REAL image each names (a map/clampmap      */
+/* operand, or an animMap's first frame) and the two flags the draw pass    */
+/* reads off that same stage — additive blending and cull-none. skyParms    */
+/* faces and tcMod are the lightmap phase's work and are skipped.           */
+/*                                                                          */
+/* v38.125: taking the operand VERBATIM was the bug. id's scripts spell the */
+/* extension ("map textures/skies/killsky_1.tga") and the renderer then    */
+/* probed "…killsky_1.tga.jpg", so every such shader — the sky, the lava,   */
+/* the torches — came out as the placeholder checkerboard while the two     */
+/* images it named sat on the volume. The rule id's own tools follow, and   */
+/* the one scripts/q3a_data.py already implements: engine-provided          */
+/* ($lightmap, $whiteimage, …) operands are not files, keep looking; a real */
+/* operand with an extension names that file, and the renderer strips the   */
+/* extension before trying id's extension order.                            */
+/* ----------------------------------------------------------------------- */
+
+/* Skip whitespace and the two comment forms Q3's sources are full of: a     */
+/* commented-out `map` line is common, and treating it as live would bind a  */
+/* name to an image the level never draws.                                  */
+static const char *decl_skip_ws(const char *p, const char *end) {
+    for (;;) {
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' ||
+                           *p == '\n'))
+            p++;
+        if (p + 1 < end && p[0] == '/' && p[1] == '/') {
+            p += 2;
+            while (p < end && *p != '\n') p++;
+            continue;
+        }
+        if (p + 1 < end && p[0] == '/' && p[1] == '*') {
+            p += 2;
+            while (p + 1 < end && !(p[0] == '*' && p[1] == '/')) p++;
+            p = (p + 1 < end) ? p + 2 : end;
+            continue;
+        }
+        return p;
+    }
+}
+
+/* One token (quoted, bare, or a single brace), returned as [start, end)     */
+/* with the quotes excluded. Returns p on "nothing here" (token == end).      */
+/* A brace is a token in its own right — the caller counts them to find the  */
+/* body of a definition. Scanning braces as *separators* (the first version  */
+/* did) yields a zero-length token that does not advance p, so the parser    */
+/* bailed out at the first '{' and every script produced zero definitions.   */
+static const char *decl_token(const char *p, const char *end,
+                              const char **tok, int *tokLen) {
+    p = decl_skip_ws(p, end);
+    if (p >= end) { *tok = p; *tokLen = 0; return p; }
+    if (*p == '"') {
+        const char *s = ++p;
+        while (p < end && *p != '"') p++;
+        *tok = s; *tokLen = (int)(p - s);
+        return (p < end) ? p + 1 : p;
+    }
+    if (*p == '{' || *p == '}') {
+        *tok = p; *tokLen = 1;
+        return p + 1;
+    }
+    {
+        const char *s = p;
+        while (p < end && *p != ' ' && *p != '\t' && *p != '\r' &&
+               *p != '\n' && *p != '{' && *p != '}')
+            p++;
+        *tok = s; *tokLen = (int)(p - s);
+        return p;
+    }
+}
+
+/* Case-insensitive compare of a token against a literal, lexer-style.       */
+/* Case-insensitive token compare against `lit`, which MUST be spelled in
+ * lower case: the TOKEN is folded, the literal is not. v38.125 spelled two of
+ * these in the file's own mixed case ("GL_ONE", "animMap") and they could
+ * never match — the flame's blendFunc pair and id's animMap-only torch stages
+ * silently fell through. A literal with an upper-case letter in it is a bug
+ * here, not a style choice. */
+static int decl_is(const char *t, int n, const char *lit) {
+    int i;
+    for (i = 0; i < n; i++) {
+        char a = t[i];
+        char b = lit[i];
+        if (!b) return 0;
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (a != b) return 0;
+    }
+    return lit[i] == '\0';
+}
+
+int q3bsp_read_shader_decls(q3bsp_shader_decls_t *out) {
+    /* id's FS_GetFileList is buffer-shaped: NUL-separated names, count      */
+    /* returned. One call lists every shader script on the search path —    */
+    /* or none, which is success-with-zero-decls and leaves the renderer's   */
+    /* direct-image fallback resolving every name. */
+    char listbuf[4096];
+    int numFiles;
+    const char *fname;
+    int cap = 0, num = 0, bufCap, numBufs = 0;
+    q3bsp_shader_decl_t *decls = NULL;
+    unsigned char **buffers = NULL;
+    int rc = 0, i;
+
+    if (!out) return -1;
+    out->decls = NULL; out->num = 0;
+    out->buffers = NULL; out->numBuffers = 0;
+
+    numFiles = FS_GetFileList("scripts", ".shader", listbuf, (int)sizeof(listbuf));
+    if (numFiles <= 0) {
+        Com_Printf("[Q3BSP] shader scripts: none listed (%d)\n", numFiles);
+        return 0;
+    }
+
+    cap = 16;
+    decls = (q3bsp_shader_decl_t *)kmalloc((uint32_t)(cap * sizeof(*decls)));
+    bufCap = numFiles;
+    buffers = (unsigned char **)kmalloc((uint32_t)(bufCap * sizeof(*buffers)));
+    if (!decls || !buffers) {
+        if (decls) kfree(decls);
+        if (buffers) kfree(buffers);
+        return -5;
+    }
+
+    fname = listbuf;
+    for (i = 0; i < numFiles && rc == 0; i++, fname += strlen(fname) + 1) {
+        unsigned char *buf = NULL;
+        int len = 0;
+        const char *p, *end;
+        char qpathBuf[96];
+        int pl = 0;
+
+        /* Rebuild "scripts/<name>.shader" from the listed relative name.     */
+        {
+            const char *src = fname;
+            const char *lit = "scripts/";
+            while (*lit && pl < (int)sizeof(qpathBuf) - 1) qpathBuf[pl++] = *lit++;
+            while (*src && pl < (int)sizeof(qpathBuf) - 1) qpathBuf[pl++] = *src++;
+            qpathBuf[pl] = '\0';
+        }
+        /* id lowercases every qpath it stores; match that behaviour so       */
+        /* FS_ReadFile resolves the file on a case-folding FS too.            */
+        for (int q = 7; q < pl; q++)
+            if (qpathBuf[q] >= 'A' && qpathBuf[q] <= 'Z')
+                qpathBuf[q] += 32;
+
+        if (q3bsp_read_file(qpathBuf, &buf, &len) != 0 || !buf || len <= 0)
+            continue;                       /* vanished or unreadable: skip */
+        if (numBufs >= bufCap) {
+            q3bsp_free_file(buf);
+            continue;
+        }
+        buffers[numBufs++] = buf;
+
+        p = (const char *)buf;
+        end = p + len;
+        while (p < end) {
+            const char *nameTok; int nameLen;
+            int depth = 0;
+            int captured = 0;
+            int add = 0, culloff = 0, curDecl = -1;
+
+            p = decl_token(p, end, &nameTok, &nameLen);
+            if (nameLen <= 0) break;
+
+            /* Flags may sit between the name and the opening brace; skip     */
+            /* until the brace that opens this definition's body.             */
+            while (p < end) {
+                const char *t; int tl;
+                p = decl_token(p, end, &t, &tl);
+                if (tl == 1 && t[0] == '{') { depth = 1; break; }
+                if (tl == 0) break;
+            }
+            if (!depth) break;              /* truncated file: stop cleanly */
+
+            /* Walk the body tracking brace depth; capture the FIRST real    */
+            /* image it names (nested stages included) — a definition binds  */
+            /* one name to one image here, and stage ordering stays the      */
+            /* lightmap phase's concern. `stageDepth` is the depth inside    */
+            /* the stage that supplied the image: the blendFunc that belongs */
+            /* to THAT stage is what decides how the image is drawn, so the  */
+            /* additive search stops at the stage's closing brace (a glow    */
+            /* layer three stages down must not turn the base image         */
+            /* additive — that is textures/gothic_light/pentagram_light1_1K).*/
+            {
+                int capDepth = -1;          /* depth inside the captured stage */
+                int blendWant = 0;          /* 1: want src, 2: want dst */
+                int pairAdd = 0;            /* last blendFunc was GL_ONE GL_ONE */
+                int pairDepth = -1;         /* the depth that blendFunc sat at */
+                const char *blA = NULL; int blALen = 0;
+
+                while (p < end && depth > 0) {
+                    const char *t; int tl;
+                    p = decl_token(p, end, &t, &tl);
+                    if (tl <= 0) break;
+                    if (tl == 1 && t[0] == '{') { depth++; continue; }
+                    if (tl == 1 && t[0] == '}') {
+                        depth--;
+                        if (capDepth >= 0 && depth < capDepth) capDepth = -1;
+                        continue;
+                    }
+                    if (blendWant == 1) { blA = t; blALen = tl; blendWant = 2; continue; }
+                    if (blendWant == 2) {
+                        blendWant = 0;
+                        pairAdd = decl_is(blA, blALen, "gl_one") &&
+                                  decl_is(t, tl, "gl_one");
+                        pairDepth = depth;
+                        /* Only the stage that supplied the image may flip it  */
+                        /* to additive: a glow stage further down (or further  */
+                        /* up) describes a different layer.                    */
+                        if (capDepth >= 0 && depth == capDepth && pairAdd) add = 1;
+                        continue;
+                    }
+                    if (decl_is(t, tl, "blendfunc")) {
+                        blendWant = 1;
+                        continue;
+                    }
+                    if (decl_is(t, tl, "cull")) {
+                        const char *c; int cl;
+                        p = decl_token(p, end, &c, &cl);
+                        if (decl_is(c, cl, "none") || decl_is(c, cl, "disable"))
+                            culloff = 1;
+                        continue;
+                    }
+                    if (!captured && (decl_is(t, tl, "map") ||
+                                      decl_is(t, tl, "clampmap") ||
+                                      decl_is(t, tl, "animmap"))) {
+                        const char *im; int iml;
+                        p = decl_token(p, end, &im, &iml);
+                        if (decl_is(t, tl, "animmap")) {
+                            /* animMap <fps> <frame0> <frame1> … — the first   */
+                            /* FRAME is the operand after the rate.           */
+                            p = decl_token(p, end, &im, &iml);
+                        }
+                        /* $lightmap and friends are engine-provided, not    */
+                        /* files: keep walking to the stage that names one.  */
+                        if (iml > 0 && im[0] != '$') {
+                            if (num >= cap) {
+                                int nc = cap * 2;
+                                q3bsp_shader_decl_t *nd =
+                                    (q3bsp_shader_decl_t *)kmalloc(
+                                        (uint32_t)(nc * sizeof(*nd)));
+                                if (!nd) { rc = -5; break; }
+                                for (int c = 0; c < num; c++) nd[c] = decls[c];
+                                kfree(decls);
+                                decls = nd;
+                                cap = nc;
+                            }
+                            curDecl = num;
+                            decls[num].name = nameTok;
+                            decls[num].nameLen = nameLen;
+                            decls[num].image = im;
+                            decls[num].imageLen = iml;
+                            decls[num].additive = 0;
+                            decls[num].cullNone = 0;
+                            num++;
+                            captured = 1;
+                            /* Keep watching the rest of this stage for the  */
+                            /* blendFunc that describes how the image is     */
+                            /* drawn — and honour one written BEFORE it.     */
+                            capDepth = depth;
+                            if (pairDepth == depth) add = pairAdd;
+                        }
+                    }
+                }
+                /* The flags are only known once the stage has closed. */
+                if (curDecl >= 0) {
+                    decls[curDecl].additive = add;
+                    decls[curDecl].cullNone = culloff;
+                }
+            }
+        }
+    }
+
+    if (rc != 0) {
+        for (int b = 0; b < numBufs; b++) q3bsp_free_file(buffers[b]);
+        kfree(buffers);
+        if (decls) kfree(decls);
+        return rc;
+    }
+    if (num == 0) {
+        for (int b = 0; b < numBufs; b++) q3bsp_free_file(buffers[b]);
+        kfree(buffers);
+        kfree(decls);
+        Com_Printf("[Q3BSP] shader scripts: %d file(s) listed, no usable definition\n",
+                   numFiles);
+        return 0;                           /* nothing usable in any file */
+    }
+    Com_Printf("[Q3BSP] shader scripts: %d file(s) listed, %d definition(s)\n",
+               numFiles, num);
+    out->decls = decls;
+    out->num = num;
+    out->buffers = buffers;
+    out->numBuffers = numBufs;
+    return 0;
+}
+
+void q3bsp_free_decls(q3bsp_shader_decls_t *d) {
+    int i;
+    if (!d) return;
+    for (i = 0; i < d->numBuffers; i++)
+        if (d->buffers && d->buffers[i]) q3bsp_free_file(d->buffers[i]);
+    if (d->buffers) kfree(d->buffers);
+    if (d->decls) kfree(d->decls);
+    d->decls = NULL; d->num = 0;
+    d->buffers = NULL; d->numBuffers = 0;
 }
 
 static void bsp_copy_name(char *dst, const char *src) {
@@ -144,6 +462,8 @@ static void bsp_patch_block(const drawVert_t *dv, int firstVert, int width,
             c[i][j].xyz[2] = v->xyz[2];
             c[i][j].st[0] = v->st[0];
             c[i][j].st[1] = v->st[1];
+            c[i][j].lm[0] = v->lightmap[0];
+            c[i][j].lm[1] = v->lightmap[1];
         }
     }
 }
@@ -159,6 +479,12 @@ approximation: q3map bakes a patch's texture coordinates as a linear function of
 position (the texvec projection), so combining the control points' st the same
 way the control points' positions are combined reproduces that function at every
 subdivision level — no drift as N grows, no seam between neighbouring blocks.
+ *
+ * The same argument carries the lightmap coordinate (v38.114): q3map writes a
+ * patch's lightmap st from its lightmap projection, which is linear in position
+ * for the very same reason, so the identical weights reproduce it exactly. A
+ * curved patch's interior really is lit differently from its rim, and this is
+ * what lets that gradient reach the screen instead of one flat quad colour.
 =================
 */
 static void bsp_patch_eval(const q3bsp_vert_t c[3][3], float u, float v,
@@ -170,12 +496,20 @@ static void bsp_patch_eval(const q3bsp_vert_t c[3][3], float u, float v,
     bsp_bern2(v, bv);
     for (k = 0; k < 3; k++) out->xyz[k] = 0.0f;
     out->st[0] = out->st[1] = 0.0f;
+    out->lm[0] = out->lm[1] = 0.0f;
+    out->light[0] = out->light[1] = out->light[2] = 0;
+    for (k = 0; k < 3; k++) out->normal[k] = 0.0f;
     for (j = 0; j < 3; j++) {
         for (i = 0; i < 3; i++) {
             float w = bu[i] * bv[j];
-            for (k = 0; k < 3; k++) out->xyz[k] += w * c[i][j].xyz[k];
+            for (k = 0; k < 3; k++) {
+                out->xyz[k] += w * c[i][j].xyz[k];
+                out->normal[k] += w * c[i][j].normal[k];
+            }
             out->st[0] += w * c[i][j].st[0];
             out->st[1] += w * c[i][j].st[1];
+            out->lm[0] += w * c[i][j].lm[0];
+            out->lm[1] += w * c[i][j].lm[1];
         }
     }
 }
@@ -236,8 +570,102 @@ static int bsp_patch_valid(const dsurface_t *s, int numDv, int *pw, int *ph) {
     return 1;
 }
 
-/* The face's derived fields — centre, plane normal, radius, baked light — all
- * come from its vertices, so planar and tessellated faces share one path. */
+/*
+=================
+bsp_lightmap_shift
+
+id's R_ColorShiftLightingBytes (tr_map.c), applied to a whole page at load: shift
+left, and when any channel overflows, scale the texel by 255/max instead of
+clipping each channel — a saturated torch then stays orange rather than turning
+white. Done once here rather than per sample, which is also what id does (it
+shifts at texture upload and lets the GPU filter the result).
+=================
+*/
+static void bsp_lightmap_shift(unsigned char *p, int count, int shift) {
+    int i;
+
+    if (!p || shift <= 0) return;
+    for (i = 0; i + 2 < count; i += 3) {
+        int r = p[i] << shift, g = p[i + 1] << shift, b = p[i + 2] << shift;
+
+        if ((r | g | b) > 255) {
+            int mx = r > g ? r : g;
+            mx = mx > b ? mx : b;
+            if (mx > 0) {
+                r = r * 255 / mx;
+                g = g * 255 / mx;
+                b = b * 255 / mx;
+            }
+        }
+        p[i] = (unsigned char)r;
+        p[i + 1] = (unsigned char)g;
+        p[i + 2] = (unsigned char)b;
+    }
+}
+
+/* floor() without libm: the kernel links no floating-point math library, and
+ * the only caller feeds it a range small enough that a cast plus a sign check
+ * is exact. */
+static int bsp_floor_i(float x) {
+    int i = (int)x;
+    return (x < (float)i) ? i - 1 : i;
+}
+
+/*
+=================
+bsp_lightmap_sample
+
+One bilinear sample of a 128x128 RGB page at a page-space coordinate, written
+out as 0..255 per channel.
+
+The coordinate comes out of a lump as four bytes of float, so it is clamped
+before any arithmetic: a NaN or a 1e9 would otherwise index the page. Clamping
+(rather than wrapping) is also what id's GL_CLAMP sampling does, so a vertex
+sitting exactly on a page edge fades to the edge texel instead of to the far
+side of the page. Texel i is centred at (i + 0.5) / 128, hence the -0.5.
+=================
+*/
+static void bsp_lightmap_sample(const unsigned char *page, const float uv[2],
+                                unsigned char out[3]) {
+    float fu, fv, tx, ty;
+    int x0, y0, x1, y1, ch;
+
+    fu = uv[0];
+    fv = uv[1];
+    if (!(fu > 0.0f)) fu = 0.0f; else if (fu > 1.0f) fu = 1.0f;
+    if (!(fv > 0.0f)) fv = 0.0f; else if (fv > 1.0f) fv = 1.0f;
+    fu = fu * (float)Q3BSP_LIGHTMAP_DIM - 0.5f;
+    fv = fv * (float)Q3BSP_LIGHTMAP_DIM - 0.5f;
+    x0 = bsp_floor_i(fu);
+    y0 = bsp_floor_i(fv);
+    tx = fu - (float)x0;
+    ty = fv - (float)y0;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x0 > Q3BSP_LIGHTMAP_DIM - 1) x0 = Q3BSP_LIGHTMAP_DIM - 1;
+    if (y0 > Q3BSP_LIGHTMAP_DIM - 1) y0 = Q3BSP_LIGHTMAP_DIM - 1;
+    x1 = (x0 < Q3BSP_LIGHTMAP_DIM - 1) ? x0 + 1 : x0;
+    y1 = (y0 < Q3BSP_LIGHTMAP_DIM - 1) ? y0 + 1 : y0;
+
+    for (ch = 0; ch < 3; ch++) {
+        const unsigned char *p = page + ch;
+        float a = (float)p[(y0 * Q3BSP_LIGHTMAP_DIM + x0) * 3];
+        float b = (float)p[(y0 * Q3BSP_LIGHTMAP_DIM + x1) * 3];
+        float c = (float)p[(y1 * Q3BSP_LIGHTMAP_DIM + x0) * 3];
+        float d = (float)p[(y1 * Q3BSP_LIGHTMAP_DIM + x1) * 3];
+        float lo = a + (b - a) * tx;
+        float hi = c + (d - c) * tx;
+        float v  = lo + (hi - lo) * ty;
+
+        if (v < 0.0f) v = 0.0f;
+        if (v > 255.0f) v = 255.0f;
+        out[ch] = (unsigned char)(v + 0.5f);
+    }
+}
+
+/* The face's derived fields — centre, plane normal, radius, baked light, and
+ * the light its vertices end up carrying — all come from its vertices, so
+ * planar and tessellated faces share one path. */
 static void bsp_face_finish(q3bsp_mesh_t *m, q3bsp_face_t *f) {
     int j;
     const float *a = m->verts[f->firstVert].xyz;
@@ -246,15 +674,26 @@ static void bsp_face_finish(q3bsp_mesh_t *m, q3bsp_face_t *f) {
     float u[3], w[3];
 
     f->center[0] = f->center[1] = f->center[2] = 0.0f;
+    /* v38.117: the face's FRONT normal is the mean of the file's own vertex
+     * normals (q3map writes them pointing at the visible side; on a curved
+     * patch the Bezier combination already produced per-vertex normals). This
+     * is what backface culling reads — id's R_CullDotTri uses exactly these
+     * — and unlike the winding normal it is right on EVERY planar face.
+     * `normal` (below) keeps its winding-derived meaning for the baked sun. */
+    f->frontNormal[0] = f->frontNormal[1] = f->frontNormal[2] = 0.0f;
     for (j = 0; j < f->numVerts; j++) {
-        const float *p = m->verts[f->firstVert + j].xyz;
-        f->center[0] += p[0];
-        f->center[1] += p[1];
-        f->center[2] += p[2];
+        const q3bsp_vert_t *p = &m->verts[f->firstVert + j];
+        f->center[0] += p->xyz[0];
+        f->center[1] += p->xyz[1];
+        f->center[2] += p->xyz[2];
+        f->frontNormal[0] += p->normal[0];
+        f->frontNormal[1] += p->normal[1];
+        f->frontNormal[2] += p->normal[2];
     }
     f->center[0] /= (float)f->numVerts;
     f->center[1] /= (float)f->numVerts;
     f->center[2] /= (float)f->numVerts;
+    bsp_normalize(f->frontNormal);
 
     /* The normal from the winding (id's own normal[] on a planar face is just
      * this repeated per vertex; deriving it means a map with no normals still
@@ -300,6 +739,38 @@ static void bsp_face_finish(q3bsp_mesh_t *m, q3bsp_face_t *f) {
         if (d > 1.0f) d = 1.0f;
         f->light = Q3BSP_AMBIENT + (1.0f - Q3BSP_AMBIENT) * d;
     }
+
+    /* v38.114: the light this face's vertices carry. A face whose surface names
+     * a page is sampled out of it — once, here, because the draw path is
+     * per-frame and this is per-map. Every other face leaves `light` zeroed and
+     * keeps `f->light` (the sun), which is what the renderer tests on
+     * lightmapNum.
+     *
+     * The mean over the lit faces is kept only so the log can say how bright
+     * the level came out: on a retail map the lightmaps are the difference
+     * between 9 pages of data and a camera looking at a cave. */
+    if (m->lightmaps && f->lightmapNum >= 0 && f->lightmapNum < m->numLightmaps) {
+        const unsigned char *page = m->lightmaps +
+            (int)f->lightmapNum * (Q3BSP_LIGHTMAP_DIM * Q3BSP_LIGHTMAP_DIM * 3);
+        int sum[3];
+
+        sum[0] = sum[1] = sum[2] = 0;
+        for (j = 0; j < f->numVerts; j++) {
+            q3bsp_vert_t *v = &m->verts[f->firstVert + j];
+            bsp_lightmap_sample(page, v->lm, v->light);
+            sum[0] += v->light[0];
+            sum[1] += v->light[1];
+            sum[2] += v->light[2];
+        }
+        m->litMean[0] += sum[0];
+        m->litMean[1] += sum[1];
+        m->litMean[2] += sum[2];
+        m->litVerts += f->numVerts;
+        m->facesLit++;
+    } else {
+        f->lightmapNum = -1;
+        m->facesUnlit++;
+    }
 }
 
 /* One pass over the level's surfaces. A curved surface is a single entry in the
@@ -316,6 +787,13 @@ typedef struct {
     const dsurface_t *sv;
     const drawVert_t *dv;
     int   numDv;
+
+    /* Filling pass only: which faces each surface (a lump index) produced.
+     * Faces are appended surface by surface, so a surface's faces are always
+     * CONTIGUOUS — which is what lets a leaf name a range instead of a list.
+     * NULL in the counting pass. */
+    int  *surfFirst;
+    int  *surfCount;
 
     int   faces, verts;
     int   planarFaces;
@@ -337,6 +815,7 @@ static void bsp_planar_emit(bsp_build_t *b, const dsurface_t *s, int *faceIdx,
     f->firstVert = *vertIdx;
     f->numVerts = s->numVerts;
     f->shaderNum = bsp_shader_num(b, s->shaderNum);
+    f->lightmapNum = s->lightmapNum;
     for (j = 0; j < s->numVerts; j++) {
         const drawVert_t *v = &b->dv[s->firstVert + j];
         q3bsp_vert_t *dst = &b->m->verts[*vertIdx + j];
@@ -345,6 +824,14 @@ static void bsp_planar_emit(bsp_build_t *b, const dsurface_t *s, int *faceIdx,
         dst->xyz[2] = v->xyz[2];
         dst->st[0] = v->st[0];
         dst->st[1] = v->st[1];
+        dst->lm[0] = v->lightmap[0];
+        dst->lm[1] = v->lightmap[1];
+        /* v38.117: the file's own vertex normal — the authoritative front side
+         * (id culls planar faces with it in R_CullDotTri). */
+        dst->normal[0] = v->normal[0];
+        dst->normal[1] = v->normal[1];
+        dst->normal[2] = v->normal[2];
+        dst->light[0] = dst->light[1] = dst->light[2] = 0;
     }
     bsp_face_finish(b->m, f);
     *vertIdx += s->numVerts;
@@ -377,15 +864,23 @@ static void bsp_patch_emit(bsp_build_t *b, const dsurface_t *s, int pw, int ph,
                     f->firstVert = *vertIdx;
                     f->numVerts = 4;
                     f->shaderNum = bsp_shader_num(b, s->shaderNum);
-                    /* Wound A D C B, which is the triangle-fan order that puts
-                     * the face's normal on the same side of the surface as id's
-                     * collision facet for the same quad: cm_patch.c builds its
-                     * planes from (i,j),(i+1,j),(i+1,j+1) as cross(C-A, B-A),
-                     * and this order reproduces exactly that. */
+                    f->lightmapNum = s->lightmapNum;
+                    /* v38.116: wound A B C D. The old A D C B reproduced id's
+                     * COLLISION facet (cm_patch.c builds cross(C-A,B-A) from
+                     * (i,j),(i+1,j),(i+1,j+1)) and that order still stands in
+                     * the collision world — but the RENDER side now culls
+                     * backfaces with id's front-face convention (GL_CW,
+                     * q3world_render.c), and measured on the fixture map the
+                     * tessellated quads came out opposite to the planar faces'
+                     * screen winding: with A D C B the curve vanished under the
+                     * cull while every wall stayed, and with A B C D both draw.
+                     * Patches are lit from lightmaps (v38.114), not from the
+                     * winding normal, so only the fixture's unlit-curve flat
+                     * shade changes with this. */
                     b->m->verts[*vertIdx + 0] = a;
-                    b->m->verts[*vertIdx + 1] = vd;
+                    b->m->verts[*vertIdx + 1] = vb;
                     b->m->verts[*vertIdx + 2] = vc;
-                    b->m->verts[*vertIdx + 3] = vb;
+                    b->m->verts[*vertIdx + 3] = vd;
                     bsp_face_finish(b->m, f);
                     *vertIdx += 4;
                     (*faceIdx)++;
@@ -400,7 +895,7 @@ static void bsp_build(bsp_build_t *b, int emit) {
 
     for (i = 0; i < b->m->fileSurfaces; i++) {
         const dsurface_t *s = &b->sv[i];
-        int pw, ph;
+        int pw, ph, firstFace = faceIdx;
 
         if (b->m->numShaders > 0 && (s->shaderNum < 0 || s->shaderNum >= b->m->numShaders))
             b->shaderOverflow++;
@@ -411,7 +906,7 @@ static void bsp_build(bsp_build_t *b, int emit) {
             b->patchSurfaces++;
             if (!bsp_patch_valid(s, b->numDv, &pw, &ph)) {
                 b->patchSkipped++;
-                continue;
+                goto next_surface;
             }
             for (bj = 0; bj < (ph - 1) / 2; bj++) {
                 for (bi = 0; bi < (pw - 1) / 2; bi++) {
@@ -434,13 +929,13 @@ static void bsp_build(bsp_build_t *b, int emit) {
             b->patchVerts += pverts;
             b->faces += quads;
             b->verts += pverts;
-            continue;
+            goto next_surface;
         }
 
         if (s->surfaceType != MST_PLANAR || s->numVerts < 3 ||
             s->firstVert < 0 || s->firstVert + s->numVerts > b->numDv) {
             b->skipped++;
-            continue;
+            goto next_surface;
         }
         if (b->verts + s->numVerts > Q3BSP_MAX_VERTS) {
             b->truncated = 1;
@@ -450,7 +945,290 @@ static void bsp_build(bsp_build_t *b, int emit) {
         b->planarFaces++;
         b->faces++;
         b->verts += s->numVerts;
+
+next_surface:               /* v38.112: record this surface's face range */
+        if (b->surfFirst) {
+            b->surfFirst[i] = firstFace;
+            b->surfCount[i] = faceIdx - firstFace;
+        }
     }
+}
+
+/* ----------------------------------------------------------------------- */
+/* The map's own tree, its leaves and its PVS (v38.112).                   */
+/*                                                                        */
+/* Everything here is the file's data, read the way id's collision loader  */
+/* (cm_load.c) reads it — the same lumps, the same row-major visibility    */
+/* matrix, the same front-of-plane rule as CM_PointLeafnum_r. Why a second */
+/* copy at all: q3bsp.c must be able to answer "which of MY faces can a    */
+/* camera at p see" without assuming which map the collision module is     */
+/* holding right now, and the face list is this module's own (a surface    */
+/* became one face, or — for a patch — many).                              */
+/*                                                                        */
+/* The one thing worth trusting over cleverness here: a WRONG tree culls   */
+/* geometry that is really there, which is far worse than not culling. So  */
+/* every parse step is validated against the lump's own lengths and the    */
+/* result is cross-checked against id's CM_PointLeafnum (which has been    */
+/* tracing this very map since v38.107) before it is allowed to cull       */
+/* anything. A disagreement turns culling off and says so in the log.      */
+/* ----------------------------------------------------------------------- */
+
+static void bsp_vis_reset(q3bsp_vis_t *v) {
+    if (!v) return;
+    v->planes = NULL; v->nodes = NULL;
+    v->leafCluster = NULL; v->leafFirstFace = NULL; v->leafNumFaces = NULL;
+    v->leafFaces = NULL;
+    v->vis = NULL; v->bitOfs = NULL;
+    v->numPlanes = v->numNodes = v->numLeafs = v->numLeafFaces = 0;
+    v->visLen = 0; v->numClusters = 0;
+    v->ready = 0; v->hasVis = 0;
+}
+
+static void bsp_vis_free(q3bsp_vis_t *v) {
+    if (!v) return;
+    if (v->planes) kfree(v->planes);
+    if (v->nodes) kfree(v->nodes);
+    if (v->leafCluster) kfree(v->leafCluster);
+    if (v->leafFirstFace) kfree(v->leafFirstFace);
+    if (v->leafNumFaces) kfree(v->leafNumFaces);
+    if (v->leafFaces) kfree(v->leafFaces);
+    if (v->vis) kfree(v->vis);
+    if (v->bitOfs) kfree(v->bitOfs);
+    bsp_vis_reset(v);
+}
+
+/* Copy the tree, the leaves' surface lists and the visibility matrix out of
+ * the file. Best effort by design: any failure leaves vis.ready == 0 and the
+ * renderer draws everything, which is exactly what it did before v38.112. */
+static void bsp_load_vis(q3bsp_mesh_t *m, const unsigned char *buf,
+                         const dheader_t *hdr, const int *surfFirst,
+                         const int *surfCount) {
+    q3bsp_vis_t *v = &m->vis;
+    const dnode_t *dn = (const dnode_t *)(buf + hdr->lumps[LUMP_NODES].fileofs);
+    const dleaf_t *dl = (const dleaf_t *)(buf + hdr->lumps[LUMP_LEAFS].fileofs);
+    const dplane_t *dp = (const dplane_t *)(buf + hdr->lumps[LUMP_PLANES].fileofs);
+    const int *ls = (const int *)(buf + hdr->lumps[LUMP_LEAFSURFACES].fileofs);
+    int numLs = hdr->lumps[LUMP_LEAFSURFACES].filelen / (int)sizeof(int);
+    int i, j, total = 0, at = 0;
+
+    bsp_vis_reset(v);
+
+    v->numPlanes = hdr->lumps[LUMP_PLANES].filelen / (int)sizeof(dplane_t);
+    v->numNodes  = hdr->lumps[LUMP_NODES].filelen / (int)sizeof(dnode_t);
+    v->numLeafs  = hdr->lumps[LUMP_LEAFS].filelen / (int)sizeof(dleaf_t);
+    if (v->numPlanes <= 0 || v->numNodes <= 0 || v->numLeafs <= 0) return;
+    if (v->numPlanes > Q3BSP_MAX_PLANES || v->numNodes > Q3BSP_MAX_NODES ||
+        v->numLeafs > Q3BSP_MAX_LEAFS) {
+        Com_Printf("[Q3BSP] vis: tree too large (planes=%d nodes=%d leafs=%d) "
+                   "— culling off\n", v->numPlanes, v->numNodes, v->numLeafs);
+        bsp_vis_reset(v);
+        return;
+    }
+
+    v->planes = (float (*)[4])kmalloc((uint32_t)(v->numPlanes * (int)sizeof(float[4])));
+    v->nodes  = (q3bsp_node_t *)kmalloc((uint32_t)(v->numNodes * (int)sizeof(q3bsp_node_t)));
+    v->leafCluster = (int *)kmalloc((uint32_t)(v->numLeafs * (int)sizeof(int)));
+    v->leafFirstFace = (int *)kmalloc((uint32_t)(v->numLeafs * (int)sizeof(int)));
+    v->leafNumFaces  = (int *)kmalloc((uint32_t)(v->numLeafs * (int)sizeof(int)));
+    if (!v->planes || !v->nodes || !v->leafCluster ||
+        !v->leafFirstFace || !v->leafNumFaces) {
+        Com_Printf("[Q3BSP] vis: out of memory — culling off\n");
+        bsp_vis_free(v);
+        return;
+    }
+
+    for (i = 0; i < v->numPlanes; i++) {
+        v->planes[i][0] = dp[i].normal[0];
+        v->planes[i][1] = dp[i].normal[1];
+        v->planes[i][2] = dp[i].normal[2];
+        v->planes[i][3] = dp[i].dist;
+    }
+    for (i = 0; i < v->numNodes; i++) {
+        if (dn[i].planeNum < 0 || dn[i].planeNum >= v->numPlanes) {
+            Com_Printf("[Q3BSP] vis: node %d has a bad plane (%d) — culling off\n",
+                       i, dn[i].planeNum);
+            bsp_vis_free(v);
+            return;
+        }
+        v->nodes[i].planeNum = dn[i].planeNum;
+        v->nodes[i].children[0] = dn[i].children[0];
+        v->nodes[i].children[1] = dn[i].children[1];
+    }
+
+    /* First: how many of OUR faces each leaf owns. A leaf names surfaces; a
+     * surface owns a contiguous run of faces (patches expand to many). Two
+     * facts about the file shape the sanity check here: the list is indexed
+     * by RAW surface number (id's cm.surfaces keeps NULLs for non-patches
+     * but never renumbers), and a surface appears once per leaf it touches —
+     * q3dm1's 113 patch surfaces are listed ~150 times each, so the summed
+     * face count is NOT a bound (31828 for a 6780-face mesh is legitimate).
+     * id's own renderer dedups with a marked array; our bound is DISTINCT
+     * surfaces, which can never exceed the file's surface count. */
+    for (i = 0; i < v->numLeafs; i++) {
+        int fs = dl[i].firstLeafSurface, nl = dl[i].numLeafSurfaces;
+        v->leafCluster[i] = dl[i].cluster;
+        v->leafFirstFace[i] = 0;
+        v->leafNumFaces[i] = 0;
+        if (fs < 0 || nl < 0 || fs > numLs || nl > numLs - fs) continue;
+        for (j = 0; j < nl; j++) {
+            int si = ls[fs + j];
+            if (si < 0 || si >= m->fileSurfaces) continue;
+            total += surfCount[si];
+        }
+    }
+    if (total > 0) {
+        unsigned char *seen = (unsigned char *)kmalloc(
+            (uint32_t)m->fileSurfaces);
+        int distinct = 0;
+        if (!seen) {
+            Com_Printf("[Q3BSP] vis: out of memory checking the leaf "
+                       "surface lists — culling off\n");
+            bsp_vis_free(v);
+            return;
+        }
+        memset(seen, 0, (size_t)m->fileSurfaces);
+        for (i = 0; i < v->numLeafs && distinct <= m->fileSurfaces; i++) {
+            int fs = dl[i].firstLeafSurface, nl = dl[i].numLeafSurfaces;
+            if (fs < 0 || nl < 0 || fs > numLs || nl > numLs - fs) continue;
+            for (j = 0; j < nl; j++) {
+                int si = ls[fs + j];
+                if (si < 0 || si >= m->fileSurfaces) continue;
+                if (!seen[si]) {
+                    seen[si] = 1;
+                    distinct++;
+                }
+            }
+        }
+        kfree(seen);
+        if (distinct > m->fileSurfaces) {   /* impossible without a bad index */
+            Com_Printf("[Q3BSP] vis: leaf surface lists name %d surfaces for "
+                       "a %d-surface file — culling off\n",
+                       distinct, m->fileSurfaces);
+            bsp_vis_free(v);
+            return;
+        }
+        v->leafFaces = (int *)kmalloc((uint32_t)(total * (int)sizeof(int)));
+        if (!v->leafFaces) {
+            Com_Printf("[Q3BSP] vis: out of memory for the leaf face lists — "
+                       "culling off\n");
+            bsp_vis_free(v);
+            return;
+        }
+        for (i = 0; i < v->numLeafs; i++) {
+            int fs = dl[i].firstLeafSurface, nl = dl[i].numLeafSurfaces;
+            if (fs < 0 || nl < 0 || fs > numLs || nl > numLs - fs) continue;
+            v->leafFirstFace[i] = at;
+            for (j = 0; j < nl; j++) {
+                int si = ls[fs + j], k;
+                if (si < 0 || si >= m->fileSurfaces) continue;
+                for (k = 0; k < surfCount[si]; k++)
+                    v->leafFaces[at++] = surfFirst[si] + k;
+            }
+            v->leafNumFaces[i] = at - v->leafFirstFace[i];
+        }
+        v->numLeafFaces = at;
+    }
+
+    v->ready = 1;
+
+    /* --- the visibility matrix ------------------------------------------- */
+    /* On disk, exactly as cm_load.c reads it: two ints (cluster count and the
+     * row stride in bytes) followed by the rows, one bit per cluster. id's
+     * collision module turns this into CM_ClusterPVS(); this is the same
+     * matrix, kept here because the renderer needs it per frame. */
+    {
+        const int vl = LUMP_VISIBILITY;
+        int vlen = hdr->lumps[vl].filelen;
+        const unsigned char *vb = buf + hdr->lumps[vl].fileofs;
+        int ncl, cbytes;
+
+        if (vlen >= 8) {
+            memcpy(&ncl, vb, 4);
+            memcpy(&cbytes, vb + 4, 4);
+            /* The row stride is bit-packed: (clusters+7)/8 bytes, and q3map
+             * pads at most a little. The upper bound keeps the stride * count
+             * product inside 32 bits (this kernel has no 64-bit divide and
+             * does not want an overflowed offset either). */
+            if (ncl > 0 && ncl <= Q3BSP_MAX_CLUSTERS &&
+                cbytes >= (ncl + 7) / 8 && cbytes <= 16384 &&
+                ncl <= (vlen - 8) / cbytes) {
+                v->vis = (unsigned char *)kmalloc((uint32_t)(vlen - 8));
+                if (v->vis) {
+                    memcpy(v->vis, vb + 8, (size_t)(vlen - 8));
+                    v->visLen = vlen - 8;
+                    v->numClusters = ncl;
+                    v->bitOfs = (int *)kmalloc((uint32_t)(ncl * (int)sizeof(int)));
+                    if (v->bitOfs) {
+                        for (i = 0; i < ncl; i++) v->bitOfs[i] = i * cbytes;
+                        v->hasVis = 1;
+                    } else {
+                        kfree(v->vis);
+                        v->vis = NULL;
+                        v->visLen = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    Com_Printf("[Q3BSP] vis: planes=%d nodes=%d leafs=%d faces-in-leafs=%d "
+               "clusters=%d%s\n", v->numPlanes, v->numNodes, v->numLeafs,
+               v->numLeafFaces, v->numClusters,
+               v->hasVis ? "" : " (no PVS lump: every face drawn)");
+}
+
+/* The camera's leaf, child for child as CM_PointLeafnum_r (cm_test.c) does it:
+ * front of the plane is children[0], the leaf number is (-1 - child). */
+int q3bsp_leaf_for_point(const q3bsp_mesh_t *m, const float p[3]) {
+    const q3bsp_vis_t *v;
+    int num = 0, guard;
+
+    if (!m || !p) return -1;
+    v = &m->vis;
+    if (!v->ready || !v->nodes || !v->planes) return -1;
+
+    for (guard = 0; num >= 0; guard++) {
+        const q3bsp_node_t *n;
+        const float *pl;
+        float d;
+
+        if (num >= v->numNodes || guard > v->numNodes + 1) return -1;
+        n = &v->nodes[num];
+        pl = v->planes[n->planeNum];
+        d = pl[0] * p[0] + pl[1] * p[1] + pl[2] * p[2] - pl[3];
+        num = (d < 0.0f) ? n->children[1] : n->children[0];
+    }
+    num = -1 - num;
+    if (num < 0 || num >= v->numLeafs) return -1;
+    return num;
+}
+
+/* Does our copy of the tree send the same points to the same leaves id's
+ * collision module does? Sampled at real geometry (face centres) and the
+ * world's centre; any disagreement is treated as "this tree is not to be
+ * trusted" and culling stays off. */
+static void bsp_vis_check_against_cm(q3bsp_mesh_t *m) {
+    q3bsp_vis_t *v = &m->vis;
+    int i, checked = 0, bad = 0, step;
+
+    if (!v->ready || !m->numFaces) return;
+    step = m->numFaces / 8;
+    if (step < 1) step = 1;
+    for (i = 0; i < m->numFaces; i += step) {
+        int mine = q3bsp_leaf_for_point(m, m->faces[i].center);
+        int theirs = CM_PointLeafnum(m->faces[i].center);
+        checked++;
+        if (mine != theirs) bad++;
+    }
+    if (bad) {
+        Com_Printf("[Q3BSP] vis: our leaf walk disagrees with CM_PointLeafnum "
+                   "at %d/%d sample points — culling off\n", bad, checked);
+        v->ready = 0;
+        v->hasVis = 0;
+        return;
+    }
+    Com_Printf("[Q3BSP] vis: leaf walk agrees with CM_PointLeafnum at all %d "
+               "sample point(s)\n", checked);
 }
 
 int q3bsp_load(const char *qpath, q3bsp_mesh_t *out) {
@@ -510,6 +1288,52 @@ int q3bsp_load(const char *qpath, q3bsp_mesh_t *out) {
         }
     }
 
+    /* --- lightmaps: the level's baked lighting (v38.114) -------------------
+     *
+     * The lump is a whole number of 128x128x3 pages. Anything left over (a
+     * deliberately malformed file) is ignored rather than sampled, and pages
+     * past Q3BSP_MAX_LIGHTMAPS, or a failed allocation, leave the map fully
+     * sun-lit — with `lightmapDropped` set so the log can say which of the two
+     * happened. */
+    {
+        const int ll = LUMP_LIGHTMAPS;
+        const int pageBytes = Q3BSP_LIGHTMAP_DIM * Q3BSP_LIGHTMAP_DIM * 3;
+        int pages = hdr->lumps[ll].filelen / pageBytes;
+
+        if (pages > Q3BSP_MAX_LIGHTMAPS) {
+            out->lightmapDropped = pages - Q3BSP_MAX_LIGHTMAPS;
+            pages = Q3BSP_MAX_LIGHTMAPS;
+        }
+        if (pages > 0) {
+            int n = pages * pageBytes;
+            unsigned char *p = (unsigned char *)kmalloc((uint32_t)n);
+
+            if (p) {
+                int sum[3], k, i2;
+                memcpy(p, buf + hdr->lumps[ll].fileofs, (size_t)n);
+                out->lightmaps = p;
+                out->numLightmaps = pages;
+                out->lightmapDim = Q3BSP_LIGHTMAP_DIM;
+                out->lightmapBytes = n;
+                /* The raw mean is reported before the shift: it is the honest
+                 * answer to "how dark is this map's lighting in the file?", and
+                 * litMean below is the answer to "how bright did the map come
+                 * out here?". */
+                sum[0] = sum[1] = sum[2] = 0;
+                for (i2 = 0; i2 < n; i2 += 3) {
+                    sum[0] += p[i2];
+                    sum[1] += p[i2 + 1];
+                    sum[2] += p[i2 + 2];
+                }
+                for (k = 0; k < 3; k++) out->lightmapMean[k] = sum[k] / (n / 3);
+                bsp_lightmap_shift(p, n, Q3BSP_LIGHTMAP_SHIFT);
+                out->lightmapShift = Q3BSP_LIGHTMAP_SHIFT;
+            } else {
+                out->lightmapDropped = pages;
+            }
+        }
+    }
+
     /* --- surfaces --------------------------------------------------------- */
     out->fileSurfaces = hdr->lumps[LUMP_SURFACES].filelen / (int)sizeof(dsurface_t);
     {
@@ -551,9 +1375,34 @@ int q3bsp_load(const char *qpath, q3bsp_mesh_t *out) {
             return -5;
         }
 
+        /* v38.112: the filling pass also records which faces each SURFACE
+         * produced, because the leaves in the file name surfaces and the
+         * renderer culls faces. */
+        b.surfFirst = (int *)kmalloc((uint32_t)(out->fileSurfaces * (int)sizeof(int)));
+        b.surfCount = (int *)kmalloc((uint32_t)(out->fileSurfaces * (int)sizeof(int)));
+        if (!b.surfFirst || !b.surfCount) {
+            if (b.surfFirst) kfree(b.surfFirst);
+            if (b.surfCount) kfree(b.surfCount);
+            kfree(out->faces);
+            kfree(out->verts);
+            out->faces = NULL;
+            out->verts = NULL;
+            q3bsp_free_file(buf);
+            return -5;
+        }
+        for (i = 0; i < out->fileSurfaces; i++) {
+            b.surfFirst[i] = 0;
+            b.surfCount[i] = 0;
+        }
+
         bsp_build(&b, 1);                    /* fill them */
         out->numFaces = faceCount;
         out->numVerts = vertCount;
+
+        bsp_load_vis(out, buf, hdr, b.surfFirst, b.surfCount);
+        bsp_vis_check_against_cm(out);
+        kfree(b.surfFirst);
+        kfree(b.surfCount);
     }
 
     q3bsp_free_file(buf);
@@ -565,7 +1414,11 @@ void q3bsp_free(q3bsp_mesh_t *m) {
     if (!m) return;
     if (m->faces) kfree(m->faces);
     if (m->verts) kfree(m->verts);
+    if (m->lightmaps) kfree(m->lightmaps);
     m->faces = NULL;
     m->verts = NULL;
+    m->lightmaps = NULL;
+    m->numLightmaps = 0;
+    bsp_vis_free(&m->vis);
     m->valid = 0;
 }

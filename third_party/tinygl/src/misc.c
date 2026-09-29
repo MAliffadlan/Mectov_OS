@@ -177,7 +177,12 @@ void glopFrontFace(GLParam *p)
 {
     GLContext *c = gl_get_context();
     GLint code = p[1].i;
-    c->current_front_face = code;
+    /* v38.116 FIX: clip.c consumes this field as a 0/1 FLAG (front =
+     * norm<0 XOR current_front_face), but this op stored the raw GL enum —
+     * GL_CCW = 0x0901 / GL_CW = 0x0900 — so the XOR toggled on BOTH settings
+     * and glFrontFace was a no-op that also inverted the default. Normalise to
+     * the flag init.h documents: 0 = GL_CCW, 1 = GL_CW. */
+    c->current_front_face = (code == GL_CW) ? 1 : 0;
 }
 
 void glopPolygonMode(GLParam *p)

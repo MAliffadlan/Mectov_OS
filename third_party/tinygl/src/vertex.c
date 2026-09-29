@@ -1,5 +1,12 @@
 #include <string.h>
 #include "zgl.h"
+#include "tgl_cyc.h"
+
+/* v38.116: the whole glVertex3f path, timer included, in cycles (tgl_cyc.h).
+ * In immediate mode a triangle is drawn by the glVertex call that completes it,
+ * so this accumulator is the GL phase minus nothing — and `vert - fill`, the
+ * part that is transform + clip + viewport mapping, is the setup cost. */
+unsigned long long tgl_cyc_vert;
 
 void glopNormal(GLParam *p)
 {
@@ -245,6 +252,7 @@ static void gl_vertex_transform(GLContext *c, GLVertex *v)
 void glopVertex(GLParam *p)
 {
     GLint n;
+    unsigned long long tgl_cyc0 = tgl_rdtsc();
     GLContext *c = gl_get_context();
 #if TGL_HAS(ERROR_CHECK)
     if (c->in_begin == 0)
@@ -393,6 +401,7 @@ void glopVertex(GLParam *p)
     }
 
     c->vertex_n = n;
+    tgl_cyc_vert += tgl_rdtsc() - tgl_cyc0;
 }
 
 void glopEnd(GLParam *param)

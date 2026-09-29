@@ -119,7 +119,8 @@ TGL_SRCS = $(TGL_DIR)/src/api.c $(TGL_DIR)/src/arrays.c $(TGL_DIR)/src/clear.c \
            $(TGL_DIR)/src/zmath.c $(TGL_DIR)/src/zpostprocess.c $(TGL_DIR)/src/zraster.c \
            $(TGL_DIR)/src/ztriangle.c \
            $(TGL_DIR)/kernel_shim.c $(TGL_DIR)/q3gl_window.c \
-           $(TGL_DIR)/q3cl_render.c $(TGL_DIR)/q3world_render.c
+           $(TGL_DIR)/q3cl_render.c $(TGL_DIR)/q3world_render.c \
+           $(TGL_DIR)/q3viewmodel.c $(TGL_DIR)/q3jpeg.c
 ifeq ($(Q3_ENABLED),1)
 Q3_OBJS = $(patsubst $(Q3_DIR)/%,$(OBJ_DIR)/q3/%,$(Q3_SRCS:.c=.o))
 Q3_OBJS := $(patsubst $(Q3_OUR)/%,$(OBJ_DIR)/q3plat/%,$(Q3_OBJS))
@@ -152,6 +153,20 @@ Q3_CFLAGS = -m32 -std=gnu99 -ffreestanding -O1 -MMD -MP \
               -I$(Q3_DIR)/null \
               -fno-builtin -fno-pie -fno-pic -march=i686 \
               -DMECTOV_Q3=1 -DSTANDALONE -DC_ONLY $(Q3_ZONE_RENAME) -w
+# Window upscale for `q3arena`, DOOM-style (v38.113): the 3D pass stays at
+# 320x240, the blit repeats pixels. 1 = 1:1 (CI parity), 2 = 640x480 window.
+Q3ARENA_SCALE ?= 1
+Q3_CFLAGS += -DQ3ARENA_SCALE=$(Q3ARENA_SCALE)
+# The scale is a -D flag make cannot see, and `quake.sh` builds with 2 while
+# the suites build with 1: track the last-built scale in a stamp and drop the
+# two flag consumers' objects at parse time whenever it moved, or an ISO
+# claimed as scale-1 keeps the previous build's scale-2 objects (the
+# 642x502-vs-322x262 suite failure this rule was written after).
+Q3_SCALE_STAMP := obj/.q3arena_scale
+ifneq ($(shell cat $(Q3_SCALE_STAMP) 2>/dev/null),$(Q3ARENA_SCALE))
+$(shell mkdir -p obj && echo $(Q3ARENA_SCALE) > $(Q3_SCALE_STAMP))
+$(shell rm -f obj/q3plat/q3_vm.o obj/tgl/q3cl_render.o)
+endif
 
 # v38.107 (Q3 phase 7): id's OWN collision model — cm_load.c, cm_trace.c,
 # cm_test.c, cm_patch.c, cm_polylib.c — is compiled into the kernel above.
@@ -640,6 +655,12 @@ $(OBJ_DIR)/q3plat/cm_patch_stack.o: $(Q3_DIR)/qcommon/cm_patch.c
 # TinyGL (v38.102): compiled like the Q3 tree — libc names resolve through
 # the q3 stub headers (-I$(Q3_OUR)/stubs) to kmalloc-backed shims, plus the
 # TinyGL include dirs. TGL_FEATURE_* stay at their defaults (32-bit render).
+# v38.116 tried -O2 here for the whole TinyGL tree and MEASURED IT SLOWER —
+# the same q3dm1 view, the same build otherwise, gl_ms 17.4 -> 27.1. The GL
+# phase is a per-pixel loop (zbuffer/ztriangle) and -O2's unrolling/bloat loses
+# more to the i686 register file and the instruction cache than it gains. -O1
+# stays, now for a measured reason instead of an inherited one; numbers in
+# README.md's v38.116 history row.
 TGL_CFLAGS = -m32 -std=gnu99 -ffreestanding -O1 -MMD -MP \
               -I$(Q3_OUR)/stubs -I$(TGL_DIR)/include -I$(TGL_DIR)/src \
               -I$(Q3_OUR) \
@@ -671,6 +692,20 @@ $(OBJ_DIR)/tgl/q3cl_render.o: $(TGL_DIR)/q3cl_render.c $(TGL_DIR)/q3cl_render.h 
 # the game module's own level (third_party/q3mectov/q3bsp.h is its data
 # interface, which is why TGL_CFLAGS carries -I$(Q3_OUR)).
 $(OBJ_DIR)/tgl/q3world_render.o: $(TGL_DIR)/q3world_render.c $(TGL_DIR)/q3world_render.h $(Q3_OUR)/q3bsp.h | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(TGL_CFLAGS) -c $< -o $@
+
+# q3viewmodel.c (v38.124): id's own weapon view model — a .md3 loader plus the
+# pass that draws it, textured through q3world_render's image path (hence both
+# headers in the prerequisites).
+$(OBJ_DIR)/tgl/q3viewmodel.o: $(TGL_DIR)/q3viewmodel.c $(TGL_DIR)/q3viewmodel.h $(TGL_DIR)/q3world_render.h $(Q3_OUR)/q3bsp.h | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(TGL_CFLAGS) -c $< -o $@
+
+# q3jpeg.c (v38.111): baseline JPEG decoder for the world texture path — the
+# same freestanding rules as the renderer (no libc, fixed point, no 64-bit
+# divide), so it compiles under TGL_CFLAGS too.
+$(OBJ_DIR)/tgl/q3jpeg.o: $(TGL_DIR)/q3jpeg.c $(TGL_DIR)/q3jpeg.h | $(OBJ_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(TGL_CFLAGS) -c $< -o $@
 
@@ -766,5 +801,65 @@ check-q3arena:
 	MECTOV_Q3=1 $(MAKE) iso
 	python3 scripts/check.py --keep-images --only q3arena $(CHECK_ARGS)
 
+# The retail-map path (v38.111, Q3 phase 9): the suite itself builds a
+# synthetic pak0 (build_q3pak.py), stages it through the REAL q3a_data.py
+# (shader scripts decide which images exist), seeds a volume from the staged
+# tree, and runs `q3arena mectovtest` on the MECTOV_Q3=1 ISO.
+check-q3retail:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3retail $(CHECK_ARGS)
+
+# PVS culling (v38.112, Q3 phase 10): the renderer locates the camera in the
+# map's own tree and draws what the map's visibility lump says that leaf can
+# see. The suite runs it on mectovvis.bsp — the second map build_test_bsp.py
+# writes, two leaves and a real two-cluster PVS — rather than on the arena,
+# whose empty visibility lump means "draw everything".
+check-q3vis:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3vis $(CHECK_ARGS)
+
+# Exclusive fullscreen present + a pinned pose (v38.119, Q3 phase 11): the game
+# takes the present path away from the compositor (`q3arena <map> fullscreen`)
+# and can be pinned to an exact camera pose (`@x,y,z,yaw[,pitch]`). The present
+# path cannot be seen in the renderer's own pixels, so the suite reads QEMU
+# screendumps: the desktop must be GONE while fullscreen owns the screen, and
+# back after ESC — which must return to the window rather than quit.
+check-q3heavy:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3heavy $(CHECK_ARGS)
+
+# Jump + fire (v38.122, Q3 phase 12): the driver fills cmd.upmove and
+# cmd.buttons, so id's own PM_CheckJump and PM_Weapon/FireWeapon chains run
+# for real. The suite schedules the actions on a frame grid (`jump=4 fire=3`)
+# and asserts the module's own playerState: velocity.z at JUMP_VELOCITY while
+# airborne, a landing, and machinegun ammo below its spawn value.
+check-q3jump: # DEV-NOTE: no --keep-images by default; pass CHECK_ARGS=--keep-images
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3jump $(CHECK_ARGS)
+
+# The weapon view model (v38.124, Q3 phase 13): the first-person gun is id's
+# own .md3 geometry — body, barrel and muzzle flash, textured with the images
+# its surfaces name, the flash placed by the tag chain the model carries. The
+# suite builds a synthetic model in that format (build_q3pak.py) and stages it
+# through the REAL `q3a_data.py --with-viewmodel`, so the loader is provable
+# with none of id's data on the machine (CI) and identically on one that has
+# the demo pak.
+check-q3viewmodel:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3viewmodel $(CHECK_ARGS)
+
+# VirtIO-GPU (v38.115, GPU phase 1): the kernel's first MODERN virtio-pci
+# driver — the device has no legacy interface to drive, so the transport itself
+# (capability walk, 64-bit features, control queue, notify) is half the work.
+# The suite attaches its own virtio-gpu-pci, asserts the bring-up from the
+# device's own numbers, byte-compares a screendump of THE DEVICE's console
+# against the pattern the driver handed it, and runs `gpustat` to prove the
+# command reads live state. No GL and no MECTOV_Q3 variant needed; the script's
+# `--gl` flag covers the 3D-capable device when the host has EGL.
+check-virtiogpu:
+	$(MAKE) iso
+	python3 scripts/check.py --keep-images --only virtiogpu $(CHECK_ARGS)
+
 .PHONY: all clean clean_all check check-quick qvm iso \
-        check-q3 check-q3tgl check-q3play check-q3vm check-q3arena
+        check-q3 check-q3tgl check-q3play check-q3vm check-q3arena check-q3retail \
+        check-q3vis check-q3heavy check-q3jump check-q3viewmodel check-virtiogpu

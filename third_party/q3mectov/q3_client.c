@@ -933,6 +933,7 @@ void CL_Frame(int msec) {
     q3ref_begin_frame();
     q3ref_draw_world(t);
     q3ref_end_frame();
+    q3ref_present_frame();      /* v38.116: the compositor blits the snapshot */
     CLTR("draw-done");
     wm_invalidate(cl_win_id);
     needs_redraw = 1;

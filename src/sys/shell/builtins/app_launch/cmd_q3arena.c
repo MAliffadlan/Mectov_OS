@@ -7,6 +7,14 @@
 // playerState, and the window's keyboard/mouse input going back in as the
 // usercmd that id's Pmove consumes.
 //
+// v38.111 (retail-map path): `q3arena <name>` loads maps/<name>.bsp from the
+// staged game data instead of the generated test arena — the first step of
+// "your own pak0's q3dm1 runs here". The name is validated to [a-z0-9_]
+// BEFORE it leaves the shell (lowercase qpath, no separators, no escapes), so
+// the argument can only ever select among maps/*.bsp on the volume, never open
+// anything else. `q3arena` bare keeps the generated arena, which is what every
+// regression and CI run asserts on.
+//
 // Scope, stated plainly because the last time this project drew a window it
 // said "Quake III (Mectov)" over a map it had made itself: what this shows is
 // id's game code in id's BSP format, rendered by a hand-written renderer, with
@@ -28,11 +36,87 @@ static void q3arena_task_entry(void) {
 
 void cmd_q3arena(void) {
 #ifdef MECTOV_Q3
-        extern int task_fork_kernel(void (*entry)(void), const char* child_arg);
-        int pid = task_fork_kernel(q3arena_task_entry, "q3arena");
-        if (pid < 0) {
-                print("q3arena: failed to fork VM task\n", 0x0C);
-                return;
+        /* cmd_b holds the whole command line. v38.119 grammar, after the
+         * command word and one space:
+         *
+         *     [<map>] [fullscreen] [@x,y,z,yaw[,pitch]]
+         *
+         * The payload is forwarded verbatim (the driver tokenises and
+         * re-validates it — this is not a trusted channel), but it is screened
+         * here first so a typo reaches the user as "bad argument" instead of a
+         * silently different run: every character must be one of
+         * [a-z0-9_ @,-], spaces separate tokens and never repeat, and the whole
+         * payload must end the line. Anything else means "no argument at all",
+         * exactly like the old map-only form. */
+        extern char cmd_b[];
+        static const char cmd_word[] = "q3arena";
+        static char child_arg[128];     /* "q3arena " + payload + NUL */
+        int pn = 0, ok = 1;
+        const char *s;
+
+        {
+                int i = 0;
+                while (cmd_word[i] && cmd_b[i] == cmd_word[i]) i++;
+                if (cmd_word[i] || (cmd_b[i] != ' ' && cmd_b[i] != '\t')) goto noarg;
+                s = cmd_b + i + 1;
+                while (*s == ' ' || *s == '\t') s++;
+                {
+                        int prev_space = 1;     /* leading spaces already eaten */
+                        while (s[pn] && pn < 118) {
+                                char ch = s[pn];
+                                if (ch == ' ') {
+                                        if (prev_space) { ok = 0; break; }
+                                        prev_space = 1;
+                                } else {
+                                        if (!((ch >= 'a' && ch <= 'z') ||
+                                              (ch >= '0' && ch <= '9') ||
+                                              ch == '_' || ch == '@' ||
+                                              ch == ',' || ch == '-' ||
+                                              ch == '=')) {
+                                                ok = 0;
+                                                break;
+                                        }
+                                        prev_space = 0;
+                                }
+                                pn++;
+                        }
+                        if (s[pn] != '\0') ok = 0;      /* over-long or rejected */
+                        if (ok && prev_space) ok = 0;   /* trailing space */
+                }
+                if (!ok) {
+                        print("q3arena: bad argument (want: [<map>] "
+                              "[fullscreen] [nosort] [jump=n] [fire=n] "
+                              "[@x,y,z,yaw[,pitch]])\n", 0x0C);
+                        goto noarg;
+                }
+                if (pn == 0) goto noarg;
+        }
+        {
+                /* launch_arg: "q3arena <payload>" — the driver strips the
+                 * prefix back off and parses the tokens. task_fork_kernel
+                 * copies it before the child can run. */
+                int k;
+                for (k = 0; cmd_word[k]; k++) child_arg[k] = cmd_word[k];
+                child_arg[7] = ' ';
+                for (k = 0; k < pn; k++) child_arg[8 + k] = s[k];
+                child_arg[8 + pn] = '\0';
+                print("Quake III: ", 0x0B);
+                print(child_arg + 8, 0x0B);
+                print("\n", 0x0B);
+                goto fork;
+        }
+noarg:
+        child_arg[0] = 'q'; child_arg[1] = '3'; child_arg[2] = 'a';
+        child_arg[3] = 'r'; child_arg[4] = 'e'; child_arg[5] = 'n';
+        child_arg[6] = 'a'; child_arg[7] = '\0';
+fork:
+        {
+                extern int task_fork_kernel(void (*entry)(void), const char* child_arg);
+                int pid = task_fork_kernel(q3arena_task_entry, child_arg);
+                if (pid < 0) {
+                        print("q3arena: failed to fork VM task\n", 0x0C);
+                        return;
+                }
         }
         print("Starting the official qagame VM with its level on screen...\n", 0x0C);
         print("WASD/arrows move, mouse looks, ESC quits. id's own Pmove drives it.\n", 0x07);

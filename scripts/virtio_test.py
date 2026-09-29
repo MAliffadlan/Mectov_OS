@@ -119,7 +119,7 @@ def ensure_boot_images(disk, ext2, fat32):
     # fat32.img is recreated too: step 5 writes F32.TXT into it and the
     # host-side proof requires exactly one known-good copy.
     steps = [
-        ["dd", "if=/dev/zero", f"of={disk}", "bs=512", "count=2048", "status=none"],
+        ["dd", "if=/dev/zero", f"of={disk}", "bs=512", "count=4096", "status=none"],
         ["dd", "if=/dev/zero", f"of={ext2}", "bs=1M", "count=16", "status=none"],
         ["mkfs.ext2", "-F", ext2],
         ["dd", "if=/dev/zero", f"of={fat32}", "bs=1M", "count=16", "status=none"],

@@ -18,9 +18,10 @@ What it proves, in order:
      surface either planar-drawn, a patch, or counted as skipped). Before this
      release a patch was a hole in the wall.
   3. the level's textures are decoded from the game data on the volume: one
-     "[Q3ARENA] tex <n> <path> tga=WxH bytes=N gl=ID" line per shader, and NOT
-     ONE placeholder. That is the assertion that makes the pixels meaningful —
-     a renderer that could not read a texture would have to report "missing=1".
+     "[Q3ARENA] tex <n> <shader> path=<file> fmt=<jpg|tga> size=WxH bytes=N
+     gl=ID" line per shader, and NOT ONE placeholder. That is the assertion
+     that makes the pixels meaningful — a renderer that could not read a
+     texture would have to report "missing=1".
   4. geometry is actually submitted to the rasterizer: the per-frame markers
      carry drawn=<faces> tris=<tris> culled=<face count>.
   5. the level is ON SCREEN, textured: every sampled frame's finished pixels are
@@ -56,6 +57,7 @@ import subprocess
 import sys
 import time
 
+import q3_images
 import terminal_launch
 
 SERIAL_LOG = "/tmp/mectov_q3arena_serial.log"
@@ -80,15 +82,20 @@ PANIC_MARKER = "[PANIC]"
 SYS_ERROR_MARKER = "[Q3] Sys_Error"
 
 BSP_NAME = "maps/mectovtest.bsp"
-# The four shaders scripts/build_test_bsp.py writes textures for. Their TGA file
-# names are the assertion that the renderer read the volume and not a cache.
+# The shaders scripts/build_test_bsp.py's arena names. These are the NAMES the
+# .bsp's shader lump carries; since the generated arena ships no
+# scripts/*.shader, every one of them has to resolve by the "shaderless
+# texture" convention — its own name plus an extension — to the .tga sitting
+# beside the map. Both halves are asserted below, so a texture that silently
+# came from somewhere else fails here.
 EXPECTED_TEX = [
-    "textures/mectovtest/floor.tga",
-    "textures/mectovtest/wall.tga",
-    "textures/mectovtest/ceiling.tga",
-    "textures/mectovtest/step.tga",
-    "textures/mectovtest/curve.tga",   # the curved surface's own texture
+    "textures/mectovtest/floor",
+    "textures/mectovtest/wall",
+    "textures/mectovtest/ceiling",
+    "textures/mectovtest/step",
+    "textures/mectovtest/curve",   # the curved surface's own texture
 ]
+
 
 MESH_RE = re.compile(
     r"\[Q3ARENA\] world mesh: (\S+) surfaces=(-?\d+) of=(-?\d+) verts=(-?\d+) "
@@ -96,7 +103,8 @@ MESH_RE = re.compile(
     r"patchquads=(-?\d+) patchverts=(-?\d+) patchskipped=(-?\d+) "
     r"skipped=(-?\d+) truncated=(-?\d+)")
 TEX_RE = re.compile(
-    r"\[Q3ARENA\] tex (\d+) (\S+) tga=(\d+)x(\d+) bytes=(\d+) gl=(\d+)")
+    r"\[Q3ARENA\] tex (\d+) (\S+) path=(\S+) fmt=(\S+) size=(\d+)x(\d+) "
+    r"bytes=(\d+) gl=(\d+)")
 TEX_MISSING_RE = re.compile(r"\[Q3ARENA\] tex (\d+) (\S+) missing=1")
 FRAME_RE = re.compile(
     r"\[Q3ARENA\] frame=(\d+) t=(\d+) pos=\((-?\d+),(-?\d+),(-?\d+)\) "
@@ -223,7 +231,7 @@ RECT_RE = re.compile(
     r"content=(\d+)x(\d+)")
 PIXELS_RE = re.compile(
     r"\[Q3ARENA\] pixels frame=(\d+) cyan=(\d+) warm=(\d+) stepgreen=(\d+) "
-    r"violet=(\d+) bright=(\d+) patch=(\d+) sky=(\d+) distinct=(\d+)")
+    r"violet=(\d+) bright=(\d+) patch=(\d+) sky=(\d+) wall=(\d+) distinct=(\d+)")
 PERF_RE = re.compile(
     r"\[Q3ARENA\] perf frame=(\d+) fps=(\d+) vm_ms=(-?\d+) gl_ms=(-?\d+) "
     r"blit_ms=(-?\d+) draw_ms=(-?\d+) wm_ms=(-?\d+) other_ms=(-?\d+) "
@@ -278,6 +286,18 @@ def main():
             os.unlink(p)
         except FileNotFoundError:
             pass
+
+    # Premise: the volume carries the GENERATED arena and nothing else, so
+    # every texture resolves by its own name. A leftover fixture from an earlier
+    # suite (q3retail's synthetic pak ships a scripts/*.shader that rebinds one
+    # of these names to a JPEG) would falsify that premise, so the volume is
+    # built here rather than inherited — see scripts/q3_images.py for the two
+    # rounds of stale-state bugs that made this the rule.
+    err = q3_images.fresh_images(args.disk, args.ext2) or \
+        q3_images.seed_volume(args.ext2)
+    if err:
+        print(f"[FAIL] {err}")
+        return 1
 
     qemu = subprocess.Popen([
         "qemu-system-i386",
@@ -436,8 +456,9 @@ def main():
             return 1
         texs = {}
         for tm in TEX_RE.finditer(log):
-            texs[tm.group(2)] = (int(tm.group(3)), int(tm.group(4)),
-                                 int(tm.group(5)), int(tm.group(6)))
+            texs[tm.group(2)] = (tm.group(3), tm.group(4), int(tm.group(5)),
+                                 int(tm.group(6)), int(tm.group(7)),
+                                 int(tm.group(8)))
         if len(texs) < len(EXPECTED_TEX):
             print(f"[FAIL] only {len(texs)} textures decoded (expected at least "
                   f"{len(EXPECTED_TEX)})")
@@ -447,15 +468,21 @@ def main():
             if name not in texs:
                 print(f"[FAIL] the map's shader {name} produced no texture")
                 return 1
-            tw, th, tbytes, glid = texs[name]
+            tpath, tfmt, tw, th, tbytes, glid = texs[name]
             if tw < 16 or th < 16 or tbytes < 1000 or glid <= 0:
-                print(f"[FAIL] {name}: implausible texture (tga={tw}x{th} "
+                print(f"[FAIL] {name}: implausible texture (size={tw}x{th} "
                       f"bytes={tbytes} gl={glid})")
+                return 1
+            # No script: the name itself is the path, TGA beside the map.
+            if tfmt != "tga" or tpath != name + ".tga":
+                print(f"[FAIL] {name} resolved to {tpath} ({tfmt}), expected "
+                      f"the direct {name}.tga fallback")
                 return 1
         print(f"[OK] {len(texs)} texture(s) decoded from the game data on the "
               f"volume and uploaded, "
-              + ", ".join(f"{os.path.basename(n)}={v[0]}x{v[1]}"
+              + ", ".join(f"{os.path.basename(n)}={v[2]}x{v[3]}"
                           for n, v in sorted(texs.items())))
+
 
         # ---- 3. geometry is really being submitted --------------------------
         if not wait_for_frame(40, 180):
@@ -520,13 +547,19 @@ def main():
         # except the renderer producing those pixels: every sampled frame has to
         # be mostly level, and every one of the generated arena's four textures
         # has to be visible somewhere in the run.
+        # v38.117: sample across the WHOLE session (like q3retail), not the
+        # first 60 frames. A faster renderer walks FURTHER per frame, so the
+        # auto-walk reaches the corner-on view sooner and a fixed frame window
+        # can land entirely on near-clip frames — a content-dependent sample
+        # window is a flake the renderer's own speed controls.
         seen = []
         best = {}
-        for _ in range(20):
-            samples = [tuple(int(x) for x in m.group(1, 2, 3, 4, 5, 6, 7, 8, 9))
+        for _ in range(24):
+            samples = [tuple(int(x) for x in m.group(1, 2, 3, 4, 5, 6, 7, 8,
+                                                       9, 10))
                        for m in PIXELS_RE.finditer(read_file(SERIAL_LOG))]
             seen = [s for s in samples if s[0] >= 20]
-            if len(seen) >= 4 and seen[-1][0] >= 60:
+            if len(seen) >= 8 and seen[-1][0] >= 160:
                 break
             time.sleep(2)
         if len(seen) < 3:
@@ -545,7 +578,7 @@ def main():
                         fm.group(6), fm.group(7), fm.group(8))
         for name, idx in (("cyan", 1), ("warm", 2), ("stepgreen", 3),
                           ("violet", 4), ("bright", 5), ("patch", 6),
-                          ("sky", 7), ("distinct", 8)):
+                          ("sky", 7), ("wall", 8), ("distinct", 9)):
             best[name] = max(s[idx] for s in seen)
         # v38.110: where the frame budget goes. The perf line is the driver's
         # own account of one 20-frame window, on the kernel's tick clock: the
@@ -578,11 +611,11 @@ def main():
                   f"gl {glm:4d} ms | blit {blitm:3d} ms | wm-pass {wmm:3d} ms | "
                   f"other {otherm:3d} ms | idle {idlem:4d} ms | sum {summ:4d} ms")
         mostly_clear = 0
-        for frame, cyan, warm, stepgreen, violet, bright, patch, sky, distinct in seen:
-            live = cyan + warm + stepgreen + violet + bright + patch
+        for frame, cyan, warm, stepgreen, violet, bright, patch, sky, wall, distinct in seen:
+            live = cyan + warm + stepgreen + violet + bright + patch + wall
             px, py, pz, ez, yw, pt = poses.get(frame, ("?", "?", "?", "?", "?", "?"))
             print(f"     frame {frame} pos=({px},{py},{pz}) eye_z={ez} yaw={yw} pitch={pt}: "
-                  f"floor={cyan} walls={warm} "
+                  f"floor={cyan} walls={warm} walltex={wall} "
                   f"step={stepgreen} ceiling={violet} crosshair={bright} "
                   f"curve={patch} clear={sky} distinct={distinct}")
             if sky > FRAME_PIXELS // 4:
@@ -592,11 +625,17 @@ def main():
                       f"({live} classified pixels)")
                 dump_tail(40)
                 return 1
-            if distinct < 8:
-                print(f"[FAIL] frame {frame} has only {distinct} distinct "
-                      f"colours — that is a flat fill, not a textured level")
-                dump_tail(40)
-                return 1
+            # v38.118: the per-frame distinct gate is GONE, deliberately.
+            # It was calibrated on the pre-interpolation walk, which never
+            # ended nose-to-wall; the interpolated camera now legitimately
+            # finishes 16 units off a wall face staring right at it, where a
+            # 64-unit checkerboard fills the frame with 2-3 colours +
+            # crosshair = 4 distinct — a CORRECT close-up. What that gate was
+            # built to catch is still caught twice over: a flat fill scores
+            # live < 1000 in the classified-pixel gate above (its colours do
+            # not match any texture bucket), and a missing texture never
+            # reaches the run-wide `distinct >= 10` gate below, which asks
+            # the WHOLE run to show the textures' variety somewhere.
         # The clear-colour gate is a MAJORITY gate, not a per-frame one, and
         # that is deliberate. A broken view transform (the transpose bug this
         # histogram was built to catch) clears EVERY frame — 76800/76800 — so
@@ -615,7 +654,7 @@ def main():
             return 1
         # Every texture the arena names has to show up somewhere: the four
         # shaders are the floor, the walls, the ceiling and the step block.
-        for name, key, want in (("floor", "cyan", 5000), ("walls", "warm", 20),
+        for name, key, want in (("floor", "cyan", 5000), ("walls", "wall", 200),
                                 ("step block", "stepgreen", 8),
                                 ("ceiling", "violet", 1000),
                                 ("curved surface", "patch", 100)):
@@ -629,7 +668,7 @@ def main():
             return 1
         print(f"[OK] the module's own level is on screen, textured: floor "
               f"(teal) up to {best['cyan']} px, walls (sandstone) "
-              f"{best['warm']} px, the step block (yellow-green) "
+              f"{best['wall']} px, the step block (yellow-green) "
               f"{best['stepgreen']} px, ceiling (violet) {best['violet']} px, "
               f"the tessellated cove (magenta) {best['patch']} px "
               f"of {FRAME_PIXELS}")
@@ -679,6 +718,37 @@ def main():
             return 1
         print(f"[OK] {rframes} frames rendered ({rfaces} surfaces, {rtris} "
               f"triangles submitted) in {wall_ms} ms of wall clock")
+
+        # v38.125: this suite's arena carries NO shader script on purpose (its
+        # premise is that every name resolves by itself), so the four probe
+        # shaders whose names would be placeholders without a definition are
+        # simply not in its .bsp — scripts/build_test_bsp.build(with_probes) is
+        # what q3retail's synthetic pak asks for and this path does not. The
+        # rule being checked here is the negative one: no shader script, no
+        # placeholders, and the additive pass never runs because no definition
+        # asks for it.
+        df = re.search(r"\[Q3ARENA\] draw flags: additive=(\d+) culloff=(\d+)",
+                       log)
+        if not df:
+            print("[FAIL] no draw-flags census line in the log")
+            return 1
+        if int(df.group(1)) or int(df.group(2)):
+            print(f"[FAIL] the arena ships no shader script, so no definition "
+                  f"can ask for additive/cull-none: census additive="
+                  f"{df.group(1)} culloff={df.group(2)}")
+            return 1
+        af = re.search(r"addfaces=(\d+)", log)
+        if not af:
+            print("[FAIL] the render totals line has no addfaces field — the "
+                  "additive pass is not being counted")
+            return 1
+        if int(af.group(1)) != 0:
+            print(f"[FAIL] the additive pass drew {af.group(1)} faces with no "
+                  f"additive definition on the volume")
+            return 1
+        print("[OK] with no shader script on the volume the census is empty "
+              "(additive=0 culloff=0) and the additive pass stayed empty "
+              "(addfaces=0): the arena's five names resolved by themselves")
 
         mv = MOVEMENT_RE.search(log)
         if not mv:

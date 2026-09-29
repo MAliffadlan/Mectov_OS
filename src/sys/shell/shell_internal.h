@@ -24,6 +24,7 @@
 #include "../../include/mem.h"
 #include "../../include/apps.h"
 #include "../../include/pci.h"
+#include "../../include/virtio_gpu.h"
 #include "../../include/net.h"
 #include "../../include/rtl8139.h"
 #include "../../include/timer.h"
@@ -165,6 +166,7 @@ void cmd_df(void);
 void cmd_shutdown(void);
 void cmd_reboot(void);
 void cmd_lspci(void);
+void cmd_gpustat(void);
 void cmd_ipconfig(void);
 void cmd_snake(void);
 void cmd_flappy(void);

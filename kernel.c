@@ -253,6 +253,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] virtio\n");
     extern void virtio_blk_init(void);
     virtio_blk_init();
+    // VirtIO-GPU (v38.115): a MODERN virtio-pci device — the legacy interface
+    // virtio_blk drives above does not exist for the gpu (measured: no I/O BAR
+    // at all, even with disable-modern=on). Optional device: present only when
+    // the run attaches one (MECTOV_GPU=1 ./run.sh, scripts/virtiogpu_test.py),
+    // and absent is a one-line log. Poll-only, own static rings, no IRQ.
+    extern void virtio_gpu_init(void);
+    virtio_gpu_init();
     write_serial_string("[K] sb16\n");
     extern void sb16_init(void);
     sb16_init();
@@ -564,10 +571,15 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                 // Pure mouse move with no state change: just update cursor on VRAM.
                 // This is a real presented frame — count it so the FPS HUD shows
                 // the live rate while the cursor moves instead of the HUD's own
-                // 200ms cadence.
-                wait_for_vsync();
-                swap_buffers();
-                fps_frames++;
+                // 200ms cadence. Not while a game owns the present path: the
+                // cursor is hidden then (mouse captured), and swapping would
+                // push the game's half-drawn frame.
+                extern int vga_fullscreen_active(void);
+                if (!vga_fullscreen_active()) {
+                    wait_for_vsync();
+                    swap_buffers();
+                    fps_frames++;
+                }
             }
             prev_btn = btn; prev_mx = mx; prev_my = my;
         }
@@ -827,7 +839,20 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             needs_redraw = 0;
             last_frame_tick = now;
             fps_frames++;
-            full_redraw();
+            /* v38.119: while a game owns the present path (q3arena's
+             * fullscreen mode, vga_fullscreen_enter), the desktop is not
+             * composited at all — desktop_draw + wm_draw_all + taskbar_draw
+             * for a screen nobody is looking at is pure guest CPU, and it is
+             * the same single core the game renders on. The game has already
+             * written its frame into the back buffer, so presenting it is
+             * exactly the swap the desktop would have ended with. */
+            extern int vga_fullscreen_active(void);
+            if (vga_fullscreen_active()) {
+                wait_for_vsync();
+                swap_buffers();
+            } else {
+                full_redraw();
+            }
         }
 
         // Logout: kembali ke login screen (session di-reset)

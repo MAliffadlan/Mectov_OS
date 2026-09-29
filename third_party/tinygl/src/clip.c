@@ -1,6 +1,14 @@
 #include "msghandling.h"
 #include "zgl.h"
 #include "ztriangle_variants.h"
+#include "tgl_cyc.h"
+
+/* v38.116: the raster half of the gl_ms split (tgl_cyc.h explains the pair).
+ * The counter is only ever added to, so the world renderer can drain it once
+ * per sampled frame and report the fill share — the number that decides
+ * whether the next release is a raster-loop release or a setup release. */
+unsigned long long tgl_cyc_fill;
+unsigned int tgl_n_fill;
 
 /* fill triangle profile */
 /* #define PROFILE */
@@ -497,7 +505,12 @@ void gl_draw_triangle_fill(GLVertex *p0, GLVertex *p1, GLVertex *p2)
 #endif
     }
 
-    func(zb, &p0->zp, &p1->zp, &p2->zp);
+    {
+        unsigned long long cyc = tgl_rdtsc();
+        func(zb, &p0->zp, &p1->zp, &p2->zp);
+        tgl_cyc_fill += tgl_rdtsc() - cyc;
+        tgl_n_fill++;
+    }
 }
 
 /* Render a clipped triangle in line mode */

@@ -567,8 +567,14 @@ def main():
 
         # The spawn has to be the MAP's, not a number the port chose: the old
         # hand-written world handed the module "0 0 24" and the player started
-        # at the origin. Frame 0 is the spawn instant, before the loop ticks.
-        if (int(first[2]), int(first[3])) != (BSP_SPAWN[0], BSP_SPAWN[1]):
+        # at the origin. Frame 0 is the spawn instant — after id's own spawn
+        # ClientThink, though: ClientBegin runs a deliberate 100 msec of Pmove
+        # ("run a client frame to drop exactly to the floor"), and with the
+        # suite's forward-throttle command that nudges x/y a couple of units
+        # off the spot before the first sample. A couple of units is id; only
+        # a wholesale wrong origin (the port's 0,0, or tens of units) fails.
+        if abs(int(first[2]) - BSP_SPAWN[0]) > 8 or \
+                abs(int(first[3]) - BSP_SPAWN[1]) > 8:
             print(f"[FAIL] the player spawned at ({first[2]},{first[3]}), not at "
                   f"the map's spawn point ({BSP_SPAWN[0]},{BSP_SPAWN[1]})")
             return 1

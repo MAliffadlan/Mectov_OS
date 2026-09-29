@@ -5,7 +5,7 @@ make clean_all
 # Cek apakah disk.img ada
 if [ ! -f "disk.img" ]; then
     echo "[!] Membuat disk.img baru..."
-    dd if=/dev/zero of=disk.img bs=512 count=2048 2>/dev/null
+    dd if=/dev/zero of=disk.img bs=512 count=4096 2>/dev/null
 fi
 
 # Volume size follows the staged Q3 payload (v38.107). One retail map's
@@ -151,6 +151,21 @@ VIRTIO_ARGS=""
 if [ "${MECTOV_VIRTIO:-0}" = "1" ]; then
     VIRTIO_ARGS="-drive file=virtio.img,format=raw,if=none,id=vd0 -device virtio-blk-pci,drive=vd0,disable-modern=on"
 fi
+# VirtIO-GPU (v38.115, opt-in): MECTOV_GPU=1 attaches a virtio-gpu-pci device
+# (1AF4:1050, the MODERN virtio-pci layout — this device has no legacy
+# interface at all, unlike the blk device above), which is what `gpustat` and
+# the driver's own round-trip self-test talk to. It renders nothing by itself,
+# so the OS window keeps coming from -vga std.
+#   MECTOV_GPU=1    plain device (2D scanout, no 3D capsets)
+#   MECTOV_GPU=gl   virtio-gpu-gl-pci + a GL-capable display backend, which is
+#                   what offers the virgl 3D command set. Override the backend
+#                   with MECTOV_GPU_DISPLAY if gtk,gl=on is not built in
+#                   (e.g. MECTOV_GPU_DISPLAY=sdl,gl=on).
+GPU_ARGS=""
+case "${MECTOV_GPU:-0}" in
+    1)  GPU_ARGS="-device virtio-gpu-pci,id=vgpu0" ;;
+    gl) GPU_ARGS="-device virtio-gpu-gl-pci,id=vgpu0 -display ${MECTOV_GPU_DISPLAY:-gtk,gl=on}" ;;
+esac
 run_qemu() {
     qemu-system-i386 $KVM_FLAGS \
     -vga std \
@@ -166,7 +181,8 @@ run_qemu() {
     -device qemu-xhci,id=xhci0 \
     -drive file=usb.img,format=raw,if=none,id=usbd0 \
     -device usb-storage,drive=usbd0,bus=xhci0.0 \
-    $VIRTIO_ARGS
+    $VIRTIO_ARGS \
+    $GPU_ARGS
 }
 
 if [ -n "$KVM_FLAGS" ]; then

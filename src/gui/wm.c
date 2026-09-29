@@ -6,22 +6,39 @@
 #include "../include/spinlock.h"
 #include "../include/task.h"   // get_current_task / task_get_cid
 #include "../include/mouse.h"  // mouse_x/y, cursor pin for mouse capture (v38.103)
-#include "../include/timer.h"  // get_ticks(): the perf clock, ms ticks (v38.110)
+#include "../include/timer.h"  // timer_get_us(): the perf clock (v38.119)
 
 /* Forward decls: the perf block sits above the lock's definitions (the first
  * use is inside wm_q3_times, further down). */
 void wm_lock_acquire(void);
 void wm_lock_release(void);
 
-/* v38.110: perf accounting for the game window, in kernel MILLISECONDS.
- * Deliberately not rdtsc: under QEMU TCG the virtual TSC between timer
- * interrupts advances in irregular leaps (the driver's first rdtsc build
- * reported seconds-large deltas for one-second windows and negative ones
- * after), while get_ticks is IRQ-driven and monotonic — the same clock that
- * paces the game loop. 1 ms resolution is ample against a 50 ms frame.
- * All reads happen under the WM lock the call sites already hold. */
-/* Accumulated by draw_one(); read+cleared by wm_q3_times(). */
-static uint64_t wm_q3_pass_ms, wm_q3_blit_ms, wm_q3_draw_ms;
+/* v38.110: perf accounting for the game window. Deliberately not rdtsc: under
+ * QEMU TCG the virtual TSC between timer interrupts advances in irregular
+ * leaps (the driver's first rdtsc build reported seconds-large deltas for
+ * one-second windows and negative ones after), while the PIT clock is
+ * IRQ-driven and monotonic.
+ *
+ * v38.119: MICROSECONDS, not get_ticks() milliseconds. get_ticks() quantises
+ * every sample to a 10 ms boundary, so a phase that really costs 0.4 ms
+ * measures 0 unless it happens to straddle a tick — which is why "wm_ms=0"
+ * appeared even in windows where the compositor had clearly done work, and why
+ * the whole compositor read as free. timer_get_us() adds the latched PIT count
+ * to the tick, so the phase is measured as it actually is; the fields are still
+ * REPORTED in ms (window totals, so a fraction of a millisecond per frame is
+ * still tens of ms per window). All reads happen under the WM lock the call
+ * sites already hold, and timer_get_us' own cli/popfl pair is safe there. */
+/* Accumulated by draw_one(); read+cleared by wm_q3_times(). uint32_t, and
+ * saturating: a window is drained every 20 frames (so a few hundred thousand
+ * us at most), but a wrapping accumulator would report a tiny number for a
+ * stalled compositor, which is exactly the wrong way to be wrong. The kernel
+ * link has no 64-bit divide, so the ms conversion below MUST stay 32-bit too. */
+static uint32_t wm_q3_pass_us, wm_q3_blit_us, wm_q3_draw_us;
+
+static void wm_us_add(uint32_t *acc, uint32_t d) {
+    uint32_t v = *acc + d;
+    *acc = (v < *acc) ? 0xFFFFFFFFu : v;
+}
 void wm_tag_q3_game(int id) {
     wm_lock_acquire();
     for (int i = 0; i < MAX_WINDOWS; i++) {
@@ -34,9 +51,9 @@ void wm_tag_q3_game(int id) {
 }
 void wm_q3_times(int *pass_ms, int *blit_ms, int *draw_ms) {
     wm_lock_acquire();
-    if (pass_ms) { *pass_ms = (int)wm_q3_pass_ms; wm_q3_pass_ms = 0; }
-    if (blit_ms) { *blit_ms = (int)wm_q3_blit_ms; wm_q3_blit_ms = 0; }
-    if (draw_ms) { *draw_ms = (int)wm_q3_draw_ms; wm_q3_draw_ms = 0; }
+    if (pass_ms) { *pass_ms = (int)(wm_q3_pass_us / 1000u); wm_q3_pass_us = 0; }
+    if (blit_ms) { *blit_ms = (int)(wm_q3_blit_us / 1000u); wm_q3_blit_us = 0; }
+    if (draw_ms) { *draw_ms = (int)(wm_q3_draw_us / 1000u); wm_q3_draw_us = 0; }
     wm_lock_release();
 }
 
@@ -471,6 +488,20 @@ static void wm_invalidate_unlocked(int id) {
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (wm_wins[i].visible && wm_wins[i].id == id) {
             wm_wins[i].buffer_dirty = 1;
+            /* v38.118: a dirty BUFFER is not a scheduled COMPOSITION. The
+             * kernel main loop only runs full_redraw() when needs_redraw is
+             * set, and nothing else here sets it — so a continuously
+             * animating window (the Q3 game at 53 fps) repainted its own
+             * buffer forever while the screen showed it at mouse/HUD
+             * cadence: measured in the user's session, the compositor's
+             * blit_ms and wm_ms sat at 0 in nearly every sampled window
+             * while gl_ms ran 10-25 ms per frame. The game is the only
+             * client that invalidates at frame rate, so waking the
+             * compositor here is what turns its buffer churn into visible
+             * frames. Everything else (drag, focus, menu) already pulses
+             * needs_redraw from its own event path. */
+            extern volatile int needs_redraw;
+            needs_redraw = 1;
             return;
         }
     }
@@ -733,7 +764,7 @@ static void draw_one(int idx) {
      * windows' cheap text buffers), so the perf line's blit/draw numbers are
      * exactly the game window's share of the composite pass. */
     int t_app0 = 0, t_blit0 = 0;
-    if (w->is_q3_game) t_app0 = (int)get_ticks();
+    if (w->is_q3_game) t_app0 = (int)timer_get_us();
     if (cw2 > 0 && ch2 > 0) {
         // 1. Grow-only content buffer. Reusing the capacity means live resize
         //    doesn't kmalloc/kfree a fresh cw2*ch2*4 buffer on every mouse move
@@ -810,7 +841,7 @@ static void draw_one(int idx) {
         //    During a resize drag last_cw/last_ch are stale, so blit only the
         //    old-content region and clear the exposed growth strips cleanly.
         if (w->content_buffer) {
-            if (w->is_q3_game) t_blit0 = (int)get_ticks();
+            if (w->is_q3_game) t_blit0 = (int)timer_get_us();
             int blit_w = (w->last_cw < cw2) ? w->last_cw : cw2;
             int blit_h = (w->last_ch < ch2) ? w->last_ch : ch2;
             // src_pitch = w->last_cw, NOT blit_w: the buffer keeps its last
@@ -823,9 +854,9 @@ static void draw_one(int idx) {
             if (blit_w < cw2) draw_rect(cx2 + blit_w, cy2, cw2 - blit_w, ch2, 0x001E1E2E);
             if (blit_h < ch2) draw_rect(cx2, cy2 + blit_h, cw2, ch2 - blit_h, 0x001E1E2E);
             if (w->is_q3_game) {
-                int t_blit1 = (int)get_ticks();
-                wm_q3_blit_ms += t_blit1 - t_blit0;
-                wm_q3_draw_ms += (t_blit0 - t_app0);
+                int t_blit1 = (int)timer_get_us();
+                if (t_blit1 >= t_blit0) wm_us_add(&wm_q3_blit_us, (uint32_t)(t_blit1 - t_blit0));
+                if (t_blit0 >= t_app0)  wm_us_add(&wm_q3_draw_us, (uint32_t)(t_blit0 - t_app0));
             }
         }
     }
@@ -843,12 +874,15 @@ void wm_draw_all() {
      * under the lock (the rdtsc calibration this replaces busy-waited and
      * deadlocked the compositor when done with IF=0 — see the block comment
      * above wm_q3_times). */
-    int t0 = (int)get_ticks();
+    int t0 = (int)timer_get_us();
     wm_lock_acquire();
     wm_draw_all_unlocked();
     wm_lock_release();
     wm_lock_acquire();
-    wm_q3_pass_ms += (uint64_t)((int)get_ticks() - t0);
+    {
+        int t1 = (int)timer_get_us();
+        if (t1 >= t0) wm_us_add(&wm_q3_pass_us, (uint32_t)(t1 - t0));
+    }
     wm_lock_release();
 }
 

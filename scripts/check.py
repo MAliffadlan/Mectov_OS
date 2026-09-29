@@ -88,6 +88,51 @@ SUITES = [
     # the volume — and the window's input fed back in as the usercmd id's Pmove
     # consumes. Same MECTOV_Q3=1 ISO.
     ("q3arena",          "q3arena_test.py",           600, [], "q3"),
+    # The map's own visibility data, culling (v38.112, Q3 phase 10):
+    # build_test_bsp.py writes a SECOND map beside the arena (mectovvis.bsp)
+    # whose tree has two leaves and whose visibility lump says the spawn's
+    # cluster sees only its own half, so the suite can watch the marked count
+    # change as the player walks across the split. Same MECTOV_Q3=1 ISO.
+    ("q3vis",            "q3vis_test.py",             600, [], "q3"),
+    # The retail-map path (v38.111, Q3 phase 9): a SYNTHETIC pak0 built by
+    # build_q3pak.py is staged through the real q3a_data.py (shader scripts
+    # decide which images exist — the JPEG a definition names is staged, the
+    # .tga it never references is not), seeded onto a fresh volume, and the
+    # suite runs `q3arena mectovtest` on it. Same MECTOV_Q3=1 ISO.
+    ("q3retail",         "q3retail_test.py",          600, [], "q3"),
+    # Exclusive fullscreen present + a pinned camera pose (v38.119, Q3 phase
+    # 11): `q3arena <map> fullscreen @x,y,z,yaw[,pitch]` on the generated
+    # arena. The present path is invisible to the renderer's own histogram, so
+    # this suite reads a QEMU screendump to prove the desktop is gone while
+    # fullscreen owns the screen, and takes the same dump again after ESC to
+    # prove the window came back — then asserts the pin is exact, because a
+    # camera that is "pinned" but still moves would invalidate every
+    # measurement taken with it. Same MECTOV_Q3=1 ISO.
+    ("q3heavy",          "q3heavy_test.py",           600, [], "q3"),
+    # Jump + fire through id's own playerState (v38.122): the driver now fills
+    # cmd.upmove and cmd.buttons, and scheduled `jump=n fire=n` actions make
+    # the assertions host-speed independent. The suite reads the `play` line —
+    # weapon/ammo/health/ground straight out of the module's ps — and asserts
+    # velocity.z>100 with ground=ENTITYNUM_NONE (PM_CheckJump fired), a
+    # landing, and ammo_mg below the spawn 100 (PM_Weapon's fire chain).
+    ("q3jump",           "q3jump_test.py",            600, [], "q3"),
+    # The weapon view model (v38.124, Q3 phase 13): the first-person gun is
+    # id's own .md3 geometry — body, barrel and muzzle flash, textured with the
+    # images the surfaces name through the tag chain the model carries. The
+    # demo pak0 that ships the real machinegun is not redistributable, so this
+    # suite builds a synthetic model in id's format (build_q3pak.py), stages it
+    # through the REAL q3a_data.py --with-viewmodel, and asserts the loader's
+    # parsed geometry, the triangles the draw pass submitted, the texture size
+    # and the muzzle the tags produce. Same MECTOV_Q3=1 ISO.
+    ("q3viewmodel",      "q3viewmodel_test.py",        600, [], "q3"),
+    # VirtIO-GPU (v38.115): the kernel's first MODERN virtio-pci driver — the
+    # device has no legacy interface, so the suite asserts the capability walk,
+    # the 64-bit feature negotiation and the control queue, then the 2D data
+    # path byte for byte through a screendump of THE DEVICE's own scanout, and
+    # finally that `gpustat` reads the same live state. Needs a GPU device on its
+    # own QEMU command line (which the suite builds), so like the q3 rows it only
+    # runs when asked for by name: `make check-virtiogpu`.
+    ("virtiogpu",        "virtiogpu_test.py",         360, [], "gpu"),
     ("virtio",           "virtio_test.py",            360),
     ("socktest",         "socktest.py",               300),
     ("poweroff",         "poweroff_test.py",          240),
@@ -137,8 +182,8 @@ def suite_entries(args):
             print("[check] --kvm requested but /dev/kvm is unavailable "
                   "— skipping %s" % name)
             continue
-        if need == "q3" and not (args.only and name in args.only):
-            continue  # Q3 suite needs the MECTOV_Q3=1 ISO (make check-q3)
+        if need in ("q3", "gpu") and not (args.only and name in args.only):
+            continue  # needs a dedicated ISO variant / QEMU device (see Makefile)
         out.append((name, script, timeout, extra, need))
     return out
 
@@ -167,7 +212,7 @@ def recreate_images():
     print("[check]   (use `make check CHECK_ARGS=--keep-images` to keep current images)")
     os.chdir(ROOT)
     subprocess.run(["dd", "if=/dev/zero", "of=disk.img", "bs=512",
-                    "count=2048", "status=none"], check=True)
+                    "count=4096", "status=none"], check=True)
     # v38.107: the volume is sized from the staged Q3 payload. The generated
     # test arena is ~14 KB, so CI (and every run without retail game data) gets
     # the same 16 MB image as before and the ext2-q3.img artifact stays small;

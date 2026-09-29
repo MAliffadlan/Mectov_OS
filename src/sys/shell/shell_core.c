@@ -262,7 +262,7 @@ const char* cmd_list[] = {
     "echo","beep","tone","sleep","date","color","lock","locktimeout",
     "uname","whoami","passwd","hostname","env","seq","wc","type","yes",
     "printf","sort","uniq","tee","find",
-    "run","snake","taskmgr","flappy","doom","lspci","ipconfig","man",
+    "run","snake","taskmgr","flappy","doom","lspci","gpustat","ipconfig","man",
     "ping","host","fetch","grep",
     "shutdown","reboot", NULL
 };
@@ -762,6 +762,7 @@ else if (strcmp(cmd_b, "matikan") == 0 || strcmp(cmd_b, "shutdown") == 0) cmd_sh
 else if (strcmp(cmd_b, "mulaiulang") == 0 || strcmp(cmd_b, "reboot") == 0) cmd_reboot();
 // --- LSPCI ---
 else if (strcmp(cmd_b, "lspci") == 0) { cmd_lspci(); }
+else if (strcmp(cmd_b, "gpustat") == 0) { cmd_gpustat(); }
 // --- IPCONFIG (runtime network config: DHCP or static) ---
 else if (strcmp(cmd_b, "ipconfig") == 0) { cmd_ipconfig(); }
 // --- SNAKE (ular) ---

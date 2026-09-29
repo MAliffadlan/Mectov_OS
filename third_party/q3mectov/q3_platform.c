@@ -10,6 +10,12 @@
  * assert engine liveness from serial_debug.log.
  */
 #include "../../src/include/utils.h"
+/* v38.111: Sys_ListFiles walks the kernel's own VFS node table, so it needs   */
+/* the same node types the shell's file builtins see (FS_*_DIR/FILE, the      */
+/* fs_node_t layout, S_IRUSR for the permission gate). types.h keeps the      */
+/* uint16_t/S_IRUSR typedefs vfs.h assumes. */
+#include "../../src/include/types.h"
+#include "../../src/include/vfs.h"
 
 /* ioq3 types (qcommon/q_shared.h — via relative include so the libc stub
  * headers do NOT shadow anything for this TU; only ioq3's own sources get
@@ -220,12 +226,134 @@ void * QDECL Sys_LoadDll(const char *name, char *fqpath,
 	return NULL;
 }
 void Sys_UnloadDll(void *dllHandle) { (void)dllHandle; }
+/* Case-insensitive tail compare: does `name` end with `ext` (e.g. ".shader")? */
+static qboolean q3_stricmp_tail(const char *name, const char *ext) {
+	int nl = 0, el = 0, i;
+	while (name[nl]) nl++;
+	while (ext[el]) el++;
+	if (nl < el) return qfalse;
+	for (i = 0; i < el; i++) {
+		char a = name[nl - el + i], b = ext[i];
+		if (a >= 'A' && a <= 'Z') a += 32;
+		if (b >= 'A' && b <= 'Z') b += 32;
+		if (a != b) return qfalse;
+	}
+	return qtrue;
+}
+
 char **Sys_ListFiles(const char *directory, const char *extension, char *filter, int *numfiles, qboolean wantsubs) {
-	(void)directory; (void)extension; (void)filter; (void)wantsubs;
+	/* id's FS_ListFilteredFiles calls this per search-path directory with    */
+	/* an OS path like "/ext2/baseq3/scripts" (FS_BuildOSPath of cdpath +     */
+	/* gamedir + relpath). The VFS tree mirrors that layout exactly, so the   */
+	/* job is: resolve the directory, walk fs_nodes[] children by parent,     */
+	/* keep FS_*_DIR (wantsubs) or FS_*_FILE whose name ends with `extension`, */
+	/* and Z_Malloc a list shaped exactly like FS_AddFileToList produced on   */
+	/* a real OS: one entry per name, one NULL terminator. The entries are    */
+	/* RELATIVE to the requested directory (ioquake3's unix layer stores      */
+	/* readdir's d_name), because FS_ListFilteredFiles adds dir-branch        */
+	/* entries verbatim while it strips the path prefix from pak-branch ones  */
+	/* — both branches must land on the same relative shape.                  */
+	/* filter is never non-NULL on this port's call sites (id uses it only    */
+	/* for demo listing) and is refused rather than half-implemented. */
+	char dirbuf[128];
+	int dirbufLen = 0;
+	int dirNode;
+	char **list = NULL;
+	int count = 0, cap = 0;
+	int i, extLen = 0;
+
 	if (numfiles) *numfiles = 0;
+	if (!directory || !*directory) return NULL;
+	if (filter && *filter) return NULL;
+	while (extension && extension[extLen]) extLen++;
+
+	while (directory[dirbufLen] && dirbufLen < (int)sizeof(dirbuf) - 1) {
+		char ch = directory[dirbufLen];
+		if (ch == '\\') ch = '/';
+		dirbuf[dirbufLen++] = ch;
+	}
+	dirbuf[dirbufLen] = '\0';
+	if (dirbufLen > 1 && dirbuf[dirbufLen - 1] == '/')
+		dirbuf[--dirbufLen] = '\0';
+
+	{
+		extern int vfs_get_node(const char *path);
+		extern int vfs_check_perm(int node, uint16_t want);
+		dirNode = vfs_get_node(dirbuf);
+		if (dirNode < 0) {
+			write_serial_string("[Q3PLAT] Sys_ListFiles: no such dir: ");
+			write_serial_string(dirbuf);
+			write_serial_string("\n");
+			return NULL;
+		}
+		if (!vfs_check_perm(dirNode, S_IRUSR)) {
+			write_serial_string("[Q3PLAT] Sys_ListFiles: permission denied: ");
+			write_serial_string(dirbuf);
+			write_serial_string("\n");
+			return NULL;
+		}
+	}
+
+	extern fs_node_t fs_nodes[];
+	{
+		int n_nodes = (int)(sizeof(fs_nodes) / sizeof(fs_nodes[0]));
+		for (i = 0; i < n_nodes; i++) {
+			int nl, k;
+			char *copy;
+			if (!fs_nodes[i].in_use || fs_nodes[i].parent != dirNode) continue;
+			if (wantsubs) {
+				if (fs_nodes[i].type != FS_DIR && fs_nodes[i].type != FS_EXT2_DIR &&
+					fs_nodes[i].type != FS_FAT32_DIR && fs_nodes[i].type != FS_RAM_DIR)
+					continue;
+			} else {
+				if (fs_nodes[i].type != FS_FILE && fs_nodes[i].type != FS_EXT2_FILE &&
+					fs_nodes[i].type != FS_FAT32_FILE && fs_nodes[i].type != FS_RAM_FILE)
+					continue;
+				if (extLen > 0 && !q3_stricmp_tail(fs_nodes[i].name, extension))
+					continue;
+			}
+			nl = 0;
+			while (nl < MAX_FILENAME - 1 && fs_nodes[i].name[nl]) nl++;
+			copy = (char *)Z_Malloc(nl + 1);
+			if (!copy) goto fail;
+			for (k = 0; k < nl; k++) copy[k] = fs_nodes[i].name[k];
+			copy[nl] = '\0';
+			/* Grow-by-doubling; the final layout matches FS_AddFileToList. */
+			if (count + 1 >= cap) {
+				int nc = cap ? cap * 2 : 16;
+				char **nl2 = (char **)Z_Malloc(nc * sizeof(char *));
+				if (!nl2) { Z_Free(copy); goto fail; }
+				if (list) {
+					for (k = 0; k < count; k++) nl2[k] = list[k];
+					Z_Free(list);
+				}
+				list = nl2;
+				cap = nc;
+			}
+			list[count++] = copy;
+		}
+	}
+	if (list) list[count] = NULL;
+	if (numfiles) *numfiles = count;
+	return list;
+
+fail:
+	if (list) {
+		for (i = 0; i < count; i++) Z_Free(list[i]);
+		Z_Free(list);
+	}
 	return NULL;
 }
-void Sys_FreeFileList(char **list) { (void)list; }
+/* id frees the list Sys_ListFiles handed it (FS_ListFilteredFiles: "each   */
+/* entry is a Z_Malloc'd copy, plus the array"). The Z_Malloc'd entries our  */
+/* Sys_ListFiles builds must come back, or every FS_GetFileList in a session  */
+/* leaks the names in the zone. Shape matches FS_AddFileToList: NULL-ended. */
+void Sys_FreeFileList(char **list) {
+	int i;
+	if (!list) return;
+	for (i = 0; list[i]; i++) Z_Free(list[i]);
+	Z_Free(list);
+}
 
 /* homepath: satu tempat di VFS root — config/data/state menumpuk di situ */
 char *Sys_DefaultHomePath(void) { return "/tmp/q3home"; }

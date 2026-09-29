@@ -37,6 +37,27 @@ void swap_buffers(void);        // Copy back_buffer → front buffer
 void wait_for_vsync(void);      // Wait for vertical retrace
 void mark_dirty(int x, int y, int w, int h); // Mark dirty rect
 
+// ---- v38.119: exclusive fullscreen present (q3arena) ----
+// A game can take the present path over: the desktop stops being composited
+// (the kernel main loop swaps the back buffer instead of running full_redraw)
+// and the game writes its upscaled frame straight into the back buffer. This
+// is the DOOM fullscreen idea without DOOM's cost model: DOOM writes to VRAM
+// directly, which the delta copy cannot track, so `doom_fullscreen` disables
+// swap_buffers entirely; here the pixels land in the back buffer and keep the
+// same delta copy the desktop uses, so nothing about VRAM presentation
+// changes.
+void vga_fullscreen_enter(void);   // mark everything dirty + schedule a present
+void vga_fullscreen_leave(void);   // restore the desktop on the next tick
+int  vga_fullscreen_active(void);
+// The back buffer as a [*w x *h] surface with *pitch_px stride in pixels. A
+// pure getter since v38.125: claiming the screen HERE invited the kernel's
+// swap before the caller had written anything, and a swap that lands mid-write
+// both presents a torn frame and clears the damage rect for the rows that were
+// not written yet. Claim it with vga_fullscreen_present(), after the write.
+uint32_t *vga_fullscreen_target(int *w, int *h, int *pitch_px);
+// The frame is written: damage the whole screen and ask for the present.
+void vga_fullscreen_present(void);
+
 void vga_set_clip(int x, int y, int w, int h);
 void vga_reset_clip(void);
 

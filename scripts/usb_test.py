@@ -127,7 +127,7 @@ def ensure_boot_images(disk, ext2):
     # must be an empty directory" — regenerate the boot images for a clean
     # slate every run.
     steps = [
-        ["dd", "if=/dev/zero", f"of={disk}", "bs=512", "count=2048", "status=none"],
+        ["dd", "if=/dev/zero", f"of={disk}", "bs=512", "count=4096", "status=none"],
         ["dd", "if=/dev/zero", f"of={ext2}", "bs=1M", "count=16", "status=none"],
         ["mkfs.ext2", "-F", ext2],
     ]

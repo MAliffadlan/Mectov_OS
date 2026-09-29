@@ -138,8 +138,28 @@ SHADERS = [
     # it (`if (!(patch->contents & tw->contents)) continue;`) and the collision
     # world the walking tests assert on is byte-for-byte what it was.
     ("textures/mectovtest/curve", 0, 0),
+    # v38.125: four shader names NO surface and NO brush uses. They exist to
+    # exercise the renderer's shader-script rules end to end in CI — which is
+    # the only place a real map's rules can be exercised, since pak0 is never
+    # redistributable. A real .bsp does carry such names (q3dm1's `noshader`,
+    # `textures/gothic_door/km_arena1archfinalc_mid`), and the renderer treats
+    # every name in the lump alike: it resolves an image and reads the
+    # definition's flags for it whether or not geometry uses it. Being
+    # unreferenced is the point — the arena draws exactly the pixels it drew
+    # before, so every existing pixel assertion stays calibrated while the new
+    # ones read the log. Their definitions live in scripts/mectovtest.shader
+    # (build_q3pak.shader_source) and their images in build_q3pak.build_pak:
+    #   probe_dollar    a `map $lightmap` first stage, real image second
+    #   probe_anim      an animMap-only definition (id's torches are that)
+    #   probe_extension a script that spells .tga while the pak ships .jpg
+    #   probe_flame     blendFunc GL_ONE GL_ONE + cull none (id's fire)
+    ("textures/mectovtest/probe_dollar", 0, 0),
+    ("textures/mectovtest/probe_anim", 0, 0),
+    ("textures/mectovtest/probe_extension", 0, 0),
+    ("textures/mectovtest/probe_flame", 0, 0),
 ]
 SH_FLOOR, SH_WALL, SH_CEIL, SH_STEP, SH_CURVE = 0, 1, 2, 3, 4
+SH_PROBE_DOLLAR, SH_PROBE_ANIM, SH_PROBE_EXT, SH_PROBE_FLAME = 5, 6, 7, 8
 
 # Generated textures, one per shader (v38.108). 24-bit RGB rows, top-down; the
 # TGA writer below flips them into the file's BGR order. Colours are multiples
@@ -191,6 +211,28 @@ SPAWN = (-384.0, -384.0, 120.0)
 WALL_PROBE_TO_X = -896.0
 
 MAP_NAME = "mectovtest"
+
+# --- the PVS fixture (v38.112) ---------------------------------------------
+# The second map this script writes. It is the SAME geometry as the arena above
+# (same brushes, same surfaces, same collision), with one difference: it carries
+# a real two-leaf tree and a visibility lump — the data v38.112's culling reads.
+#
+# Why a second map rather than adding vis data to mectovtest.bsp: the retail
+# suites assert pixels and face counts on the arena, and a PVS that hides half
+# the room would change what a camera there sees. So the fixture is separate, it
+# is named for what it is, and the arena stays byte-for-byte what it was.
+#
+# What the fixture says: the root node splits the room at x = VIS_SPLIT_X, the
+# faces whose centre is east of it belong to leaf 0 (cluster 0), the rest to
+# leaf 1 (cluster 1). The visibility matrix then states the thing that makes
+# culling OBSERVABLE: cluster 1 sees ONLY ITSELF, while cluster 0 sees both — so
+# a camera in the west half draws the west faces only, and the moment the player
+# walks east across the split, the cluster changes, the marked count jumps up,
+# and the log shows it. Both leaves list every brush, so collision — the traces
+# the walking tests assert on — is identical to the arena's.
+MAP_VIS_NAME = "mectovvis"
+VIS_SPLIT_X = 100.0
+VIS_PLANE_NORMAL = (1.0, 0.0, 0.0)
 
 
 def face_st(normal, corner):
@@ -375,7 +417,7 @@ def entity_string():
     ).encode("ascii")
 
 
-def build():
+def build(vis_fixture=False, with_probes=False):
     lumps = [b""] * HEADER_LUMPS
 
     # --- planes, brush sides, brushes -------------------------------------
@@ -397,11 +439,27 @@ def build():
             side_records.append((plane_num(normal, dist), shader))
         brush_records.append((first_side, 6, shader))
 
+    # The fixture's split plane is appended AFTER every brush plane, so the
+    # brushes' plane numbers (which the brush sides reference) cannot shift.
+    split_plane = None
+    if vis_fixture:
+        split_plane = plane_num(VIS_PLANE_NORMAL, VIS_SPLIT_X)
+
     lumps[LUMP_PLANES] = b"".join(f32(n[0]) + f32(n[1]) + f32(n[2]) + f32(d) for n, d in planes)
     lumps[LUMP_BRUSHSIDES] = b"".join(i32(p) + i32(s) for p, s in side_records)
     lumps[LUMP_BRUSHES] = b"".join(i32(a) + i32(b) + i32(c) for a, b, c in brush_records)
 
-    lumps[LUMP_SHADERS] = b"".join(shader_record(*s) for s in SHADERS)
+    # v38.125: the v38.125 probe names (index 5+) go into the lump only when the
+    # caller ships their definitions too — scripts/build_q3pak.py does, and the
+    # volume scripts/seed_ext2.sh builds (this repo's staged q3dm1 tree) does
+    # not. That is the difference the two suites need: q3retail asserts the
+    # RESOLUTION of those definitions, while q3arena asserts that a map with no
+    # shader script still resolves every name by itself, and a probe name
+    # reaching it without a definition would be a placeholder there by
+    # construction. build() defaults to the five-shader arena, which is exactly
+    # the lump this repo shipped before the probes existed.
+    shaders = SHADERS if with_probes else SHADERS[:SH_PROBE_DOLLAR]
+    lumps[LUMP_SHADERS] = b"".join(shader_record(*s) for s in shaders)
 
     # --- renderable planar faces (for the renderer phase) ------------------
     verts = []
@@ -460,29 +518,62 @@ def build():
              patch_w, patch_h) in surfaces
     )
 
-    # --- one leaf holding every brush and every surface --------------------
+    # --- the leaves and the tree -------------------------------------------
     world_mins = (-HALF - WALL, -HALF - WALL, WALL_BOTTOM)
     world_maxs = (HALF + WALL, HALF + WALL, CEIL_BOTTOM + 64)
-    leaf = (
-        i32(0)                                   # cluster
-        + i32(0)                                 # area
-        + b"".join(i32(int(v)) for v in world_mins)
-        + b"".join(i32(int(v)) for v in world_maxs)
-        + i32(0) + i32(len(surfaces))            # firstLeafSurface, numLeafSurfaces
-        + i32(0) + i32(len(brush_records))       # firstLeafBrush, numLeafBrushes
-    )
-    lumps[LUMP_LEAFS] = leaf
-    lumps[LUMP_LEAFSURFACES] = b"".join(i32(i) for i in range(len(surfaces)))
-    lumps[LUMP_LEAFBRUSHES] = b"".join(i32(i) for i in range(len(brush_records)))
+    wmins = b"".join(i32(int(v)) for v in world_mins)
+    wmaxs = b"".join(i32(int(v)) for v in world_maxs)
+    vis_stats = None
 
-    # --- one node: every query lands in leaf 0 (child = -(leaf + 1)) -------
-    node = (
-        i32(0)                                   # planeNum — any valid plane
-        + i32(-1) + i32(-1)                      # children: leaf 0, leaf 0
-        + b"".join(i32(int(v)) for v in world_mins)
-        + b"".join(i32(int(v)) for v in world_maxs)
-    )
-    lumps[LUMP_NODES] = node
+    if vis_fixture:
+        # Split the SURFACES by where their centre is; every brush goes in both
+        # leaves, because a brush the collision code cannot reach is a hole in
+        # the world, while a brush listed twice is merely tested twice.
+        east, west = [], []
+        for si, s in enumerate(surfaces):
+            fv, nv = s[3], s[4]
+            cx = sum(verts[fv + k][0][0] for k in range(nv)) / float(nv)
+            (east if cx >= VIS_SPLIT_X else west).append(si)
+
+        leaf_recs = []
+        leaf_surfaces = []
+        for cluster, idxs in ((0, east), (1, west)):
+            leaf_recs.append((cluster, len(leaf_surfaces), len(idxs)))
+            leaf_surfaces.extend(idxs)
+
+        lumps[LUMP_LEAFS] = b"".join(
+            i32(cluster) + i32(0) + wmins + wmaxs
+            + i32(first) + i32(count)
+            + i32(0) + i32(len(brush_records))
+            for (cluster, first, count) in leaf_recs)
+        lumps[LUMP_LEAFSURFACES] = b"".join(i32(i) for i in leaf_surfaces)
+        lumps[LUMP_LEAFBRUSHES] = b"".join(
+            i32(i % len(brush_records)) for i in range(2 * len(brush_records)))
+
+        # One node: front of the plane (x >= VIS_SPLIT_X) is leaf 0, behind it
+        # is leaf 1 — child = -(leaf + 1), so -1 and -2.
+        lumps[LUMP_NODES] = i32(split_plane) + i32(-1) + i32(-2) + wmins + wmaxs
+
+        # The visibility matrix, as cm_load.c reads it: numClusters, the row
+        # stride in bytes, then one bit-packed row per cluster (bit j = "cluster
+        # j is visible from this one").
+        lumps[LUMP_VISIBILITY] = struct.pack("<2i", 2, 1) + bytes([0x03, 0x02])
+        vis_stats = {"split": VIS_SPLIT_X, "east": len(east),
+                     "west": len(west), "plane": split_plane}
+    else:
+        # One leaf holding every brush and every surface.
+        lumps[LUMP_LEAFS] = (
+            i32(0)                               # cluster
+            + i32(0)                             # area
+            + wmins + wmaxs
+            + i32(0) + i32(len(surfaces))        # firstLeafSurface, numLeafSurfaces
+            + i32(0) + i32(len(brush_records))   # firstLeafBrush, numLeafBrushes
+        )
+        lumps[LUMP_LEAFSURFACES] = b"".join(i32(i) for i in range(len(surfaces)))
+        lumps[LUMP_LEAFBRUSHES] = b"".join(i32(i) for i in range(len(brush_records)))
+
+        # One node: every query lands in leaf 0 (child = -(leaf + 1)).
+        lumps[LUMP_NODES] = i32(0) + i32(-1) + i32(-1) + wmins + wmaxs
 
     # --- one model: the world ---------------------------------------------
     lumps[LUMP_MODELS] = (
@@ -493,9 +584,10 @@ def build():
     )
 
     lumps[LUMP_ENTITIES] = entity_string()
-    # An empty visibility lump means "no PVS": cm_load fills the cluster table
-    # with 255 and treats everything as visible.
-    lumps[LUMP_VISIBILITY] = b""
+    if not vis_fixture:
+        # An empty visibility lump means "no PVS": cm_load fills the cluster
+        # table with 255 and treats everything as visible.
+        lumps[LUMP_VISIBILITY] = b""
     lumps[LUMP_FOGS] = b""
     lumps[LUMP_LIGHTMAPS] = b""
     lumps[LUMP_LIGHTGRID] = b""
@@ -516,7 +608,7 @@ def build():
     out = struct.pack("<i", BSP_IDENT) + struct.pack("<i", BSP_VERSION)
     out += b"".join(i32(o) + i32(l) for o, l in table)
     out += b"".join(body)
-    return out, planes, brush_records, surfaces, verts, indexes
+    return out, planes, brush_records, surfaces, verts, indexes, vis_stats
 
 
 def main():
@@ -526,11 +618,16 @@ def main():
     tex_dir = os.path.join(outdir, "baseq3", "textures", "mectovtest")
     os.makedirs(target_dir, exist_ok=True)
     os.makedirs(tex_dir, exist_ok=True)
+    data, planes, brush_records, surfaces, verts, indexes, _vis = build()
     target = os.path.join(target_dir, MAP_NAME + ".bsp")
-
-    data, planes, brush_records, surfaces, verts, indexes = build()
     with open(target, "wb") as fh:
         fh.write(data)
+
+    # The PVS fixture: same geometry, a real tree and a real visibility lump.
+    vis_data, _p2, _b2, v_surfaces, _v2, _i2, vis_stats = build(vis_fixture=True)
+    vis_target = os.path.join(target_dir, MAP_VIS_NAME + ".bsp")
+    with open(vis_target, "wb") as fh:
+        fh.write(vis_data)
 
     texs = texture_files()
     tex_bytes = 0
@@ -550,6 +647,14 @@ def main():
     print("[testbsp]   curved: %dx%d control points -> quarter-round cove along "
           "the +X wall, radius %d, tangent to the floor at x=%d (non-solid)"
           % (PATCH_W, PATCH_H, int(COVE_R), int(HALF - COVE_R)))
+    if vis_stats:
+        print("[testbsp] wrote %s" % vis_target)
+        print("[testbsp]   %d bytes, 2 leaves split at x=%d (plane %d), visibility "
+              "lump: cluster 0 sees {0,1}, cluster 1 sees {1} only"
+              % (len(vis_data), vis_stats["split"], vis_stats["plane"]))
+        print("[testbsp]   surfaces east of the split = %d of %d (leaf 0 / "
+              "cluster 0), west = %d (leaf 1 / cluster 1, the spawn's side)"
+              % (vis_stats["east"], len(v_surfaces), vis_stats["west"]))
 
 
 if __name__ == "__main__":
