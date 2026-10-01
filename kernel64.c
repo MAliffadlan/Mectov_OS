@@ -360,6 +360,11 @@ void kernel64_main(u64 magic, u64 mb_info) {
      * backing stores, IPC queues) are the consumers. --- */
     heap64_init();
 
+    /* --- M11: block layer (k64/blk64.c). Legacy ATA/ATAPI on the pc machine
+     * run64.sh boots: the ISO is the ATAPI device, blkdisk.img the ATA one.
+     * Probing is pure polling, so it is safe before the IDT is even loaded. */
+    blk64_init();
+
     /* --- M5: tasks (boot context becomes task[0] idle) + embedded image
      * registry (MCT2/ELF64, parsed by the loader at spawn/exec) --- */
     extern char _binary_demos_hello64_mct_start[];
@@ -449,6 +454,7 @@ void kernel64_main(u64 magic, u64 mb_info) {
     mem64_selftest(); /* pre-STI: any bug faults into the #PF dumper */
     heap64_selftest(); /* M10: same reason, and it must run before any
                         * task can allocate (tasks themselves do not yet) */
+    blk64_selftest();  /* M11: reads into heap buffers, so it needs M10 first */
     __asm__ __volatile__("sti");
     sched_set_running(); /* from here AP TLBs matter: shootdowns live */
     if (flag_noap) {

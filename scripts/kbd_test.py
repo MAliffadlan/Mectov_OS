@@ -26,7 +26,9 @@ def has_kvm():
 
 
 def boot():
-    cmd = ["qemu-system-x86_64", "-machine", "q35"]
+    # -machine pc: same machine run64.sh boots (q35 hides every disk behind
+    # AHCI, where the M11 legacy ATA driver has nothing to talk to).
+    cmd = ["qemu-system-x86_64", "-machine", "pc"]
     if has_kvm():
         cmd += ["-cpu", "host", "-enable-kvm"]
     else:

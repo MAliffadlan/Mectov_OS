@@ -179,6 +179,32 @@ void *krealloc(void *p, u64 size);
 void *kcalloc(u64 n, u64 size);
 void heap64_stats(kmem64_t *out);
 u64 heap64_probe(u64 bytes); /* Ring-3 reachable round trip; bytes or 0 */
+
+/* M11 block layer (k64/blk64.c): legacy ATA PIO + ATAPI, read-only, polling.
+ * Slots are 0..3 = ide0 master/slave, ide1 master/slave. blk64_read() is the
+ * single entry point the layers above need; callers must consult sector_size
+ * (512 for an ATA disk, 2048 for the boot CD) instead of assuming. */
+typedef struct {
+    int present;
+    int atapi;
+    int lba48;
+    u32 sector_size;
+    u64 sectors;
+    char model[41];
+    char serial[21];
+} blk64_dev_t;
+void blk64_init(void);
+void blk64_selftest(void);
+int blk64_count(void);
+const blk64_dev_t *blk64_dev(int slot);
+int blk64_iso_slot(void);  /* first ATAPI device (the boot CD), -1 if none */
+int blk64_disk_slot(void); /* first ATA device, -1 if none */
+int blk64_read(int slot, u64 lba, u32 count, void *buf);
+int blk64_read28(int slot, u64 lba, u32 count, void *buf); /* force LBA28 */
+int blk64_read48(int slot, u64 lba, u32 count, void *buf); /* force LBA48 */
+
+/* Shared negative-errno codes: FS layer, syscalls, and anything that has to
+ * say "why" instead of just failing. */
 #define SYS64_PRINT 1
 #define SYS64_TICKS 8
 #define SYS64_YIELD 9
