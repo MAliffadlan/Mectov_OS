@@ -558,7 +558,16 @@ check-quick: iso
 CC64 = gcc
 AS64 = nasm
 LD64 = ld
-CFLAGS64 = -m64 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g -march=x86-64 -mcmodel=kernel -mno-red-zone -fno-pie -fno-pic -MMD -MP
+# -mgeneral-regs-only: the kernel must NOT touch XMM/x87. Interrupt and
+# syscall entries save GPRs only (k64/entry64.asm keeps 15 regs, à la regs64_t),
+# so the documented ABI ("the kernel preserves all registers except RAX") only
+# holds if the kernel never uses a vector register itself. It did: -O2 happily
+# emitted 16-byte XMM copies all over k64/ (heap64 alone had 225 of them), and
+# an M12 shell that kept its FS request magic in xmm1 across `int $0x80` read
+# back 0x20202020 — a console row of spaces left in XMM by the kernel. Cost is
+# a few byte-wise struct copies; the alternative is FXSAVE/FXRSTOR on every
+# entry, which the eager per-task FPU images in task64.c make unnecessary.
+CFLAGS64 = -m64 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g -march=x86-64 -mcmodel=kernel -mno-red-zone -fno-pie -fno-pic -mgeneral-regs-only -MMD -MP
 LDFLAGS64 = -m elf_x86_64 -T linker64.ld -z noexecstack
 ASFLAGS64 = -f elf64
 OBJ64_DIR = obj64
