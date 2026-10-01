@@ -12,7 +12,9 @@ again. Each `kmem` performs a real kmalloc/write/read/kfree round trip on the
 caller's CR3 (`probe=ok`) and prints the live counters.
 
 Checks: probe round trip ok every time, probes/allocs advance, nothing leaks
-(live=0 every call, mapped pages constant, bad=0, oom=0), and no FATAL.
+(live constant across calls, mapped pages constant, bad=0, oom=0), and no
+FATAL. The constant itself is not zero since M14: the desktop holds a
+screen-sized back buffer, which is a legitimate standing allocation.
 Exit 0 PASS, nonzero FAIL.
 """
 import os
@@ -157,7 +159,15 @@ def main():
             # matters is that normal use never adds to it.
             (all(p["oom"] == 1 for p in probes), "no OOM during normal use"),
             (all(p["pages"] > 0 for p in probes), "arena is frame-backed"),
-            (all(p["live"] == 0 for p in probes), "live bytes 0 (probe freed)"),
+            # M14: the desktop keeps a screen-sized back buffer (3 MB at
+            # 1024x768) alive for the whole run, so live is no longer 0. What
+            # the probe must not do is CHANGE it — every kmem round trip frees
+            # exactly what it allocated — and the standing total must stay a
+            # fraction of the 64 MB arena (a leak would show up as growth).
+            (len(probes) >= 2 and
+             all(p["live"] == probes[0]["live"] for p in probes) and
+             probes[0]["live"] < (8 << 20),
+             "live bytes constant across probes (nothing leaked)"),
             ("KMEM-DONE" in serial, "KMEM-DONE"),
             ("FATAL" not in serial, "no-FATAL"),
             ("[K64] FAIL" not in serial, "no-FAIL"),

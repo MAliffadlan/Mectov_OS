@@ -27,6 +27,8 @@ static u8 m_pkt[3];
 static int m_cycle = 0;
 static int m_seen = 0; /* packets decoded (first-motion marker for tests) */
 static void (*m_move)(int dx, int dy);
+static void (*m_btn_hook)(int x, int y, int btn, int changed);
+static int m_btn_prev; /* button mask of the previous packet */
 
 static inline u8 inb64(u16 port) {
     u8 v;
@@ -93,6 +95,14 @@ void mouse64_feed(u8 data) {
         m_seen = 1;
         s_printf("[K64] mouse: first packet (%u, %u)\n", (u64)m_x, (u64)m_y);
     }
+    /* M14: a button edge is reported BEFORE the move hook, so a press that
+     * starts a drag is already recorded when the movement of the same packet
+     * is processed — one decision, one repaint. */
+    if (m_btn != m_btn_prev) {
+        int changed = m_btn ^ m_btn_prev;
+        m_btn_prev = m_btn;
+        if (m_btn_hook) m_btn_hook(m_x, m_y, m_btn, changed);
+    }
     if (m_move && (dx || dy)) m_move(dx, dy);
 }
 
@@ -112,6 +122,9 @@ int mouse64_x(void) { return m_x; }
 int mouse64_y(void) { return m_y; }
 int mouse64_buttons(void) { return m_btn; }
 void mouse64_set_move_hook(void (*fn)(int dx, int dy)) { m_move = fn; }
+void mouse64_set_button_hook(void (*fn)(int x, int y, int btn, int changed)) {
+    m_btn_hook = fn;
+}
 
 void mouse64_init(void) {
     u64 flags;

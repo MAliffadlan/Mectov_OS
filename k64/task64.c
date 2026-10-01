@@ -793,6 +793,10 @@ u64 task64_on_tick(regs64_t *r) {
         s_puts("[K64] tick ");
         s_dec64(ticks);
         s_puts("\n");
+        /* M14: the desktop's 1 Hz housekeeping — taskbar status text and the
+         * live windows' counters. No-op until the desktop is up, and it must
+         * not print: this is IRQ context with the console lock just released. */
+        gui64_tick();
     }
     u64 f = SCHED_LOCK();
     for (int i = 1; i < NTASK; i++) {

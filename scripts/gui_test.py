@@ -53,7 +53,8 @@ DESKTOP_RE = re.compile(
 
 
 def boot():
-    cmd = ["qemu-system-x86_64", "-machine", "q35"]
+    # -machine pc: same machine run64.sh boots (q35 has no legacy ATA channel).
+    cmd = ["qemu-system-x86_64", "-machine", "pc"]
     if os.path.exists("/dev/kvm"):
         cmd += ["-cpu", "host", "-enable-kvm"]
     else:
@@ -245,6 +246,178 @@ def main():
         print(f"  [{'PASS' if stream_ok else 'FAIL'}] live text in the window "
               f"({matched} glyph-exact rows)")
         rc = rc or (not stream_ok)
+
+        # ----------------------------------------------------------------
+        # 6. M14: the desktop is a window manager now, so the gate drives it.
+        #    A window is dragged over the terminal, minimized and restored
+        #    from its taskbar button, and closed — and every step is checked in
+        #    pixels, not just in markers: what the moving window uncovers must
+        #    be the terminal's own text again (that is the whole point of the
+        #    compositor), and the cursor must stay a single arrow throughout.
+        # ----------------------------------------------------------------
+        with open(SERIAL, errors="replace") as f:
+            serial3 = f.read()
+        m2 = re.search(r"wm: win id=(\d+) z=(\d+) \"system[^\"]*\" "
+                       r"(\d+),(\d+) (\d+)x(\d+)", serial3)
+        mo = re.search(r"wm: open id=(\d+) \"system[^\"]*\"[^\n]*slot=(\d+)",
+                       serial3)
+        checks = [
+            ("wm: windows=2" in serial3, "wm: two windows registered"),
+            ("console - mectov64" in serial3 and "system - mectov64" in serial3,
+             "wm: terminal + system windows"),
+            (bool(m2) and bool(mo), "wm: system window geometry + slot"),
+            ("focus=1" in serial3, "wm: terminal focused at startup"),
+        ]
+        for ok, name in checks:
+            print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
+            rc = rc or (not ok)
+        if not (m2 and mo):
+            q.close()
+            return rc or 1
+        sid = int(m2.group(1))
+        sx, sy, sw, sh = (int(m2.group(i)) for i in (3, 4, 5, 6))
+        slot = int(mo.group(2))
+        print(f"        system window id={sid} {sx},{sy} {sw}x{sh} "
+              f"taskbar slot={slot}")
+
+        # Cursor moves are relative (QEMU's mouse_move), so the test tracks it
+        # itself, continuing from the motion check above.
+        cur = [cur0x + dx, cur0y + dy]
+
+        def move_to(x, y):
+            q.hmp(f"mouse_move {x - cur[0]} {y - cur[1]}")
+            cur[0], cur[1] = x, y
+            time.sleep(0.5)
+
+        def click(x, y):
+            move_to(x, y)
+            q.hmp("mouse_button 1")
+            time.sleep(0.35)
+            q.hmp("mouse_button 0")
+            time.sleep(0.7)
+
+        def serial_tail():
+            with open(SERIAL, errors="replace") as f:
+                return f.read()
+
+        def rows_match(pix, w, r0, r1):
+            """How many console rows in [r0, r1) are glyph-exact renderings of
+            a line in the serial log (the same comparison the checks above make
+            for the whole window)."""
+            with open(SERIAL, errors="replace") as f:
+                lines = [ln.rstrip("\r") for ln in f.read().split("\n")
+                         if ln.strip()]
+            rendered = []
+            for ln in lines:
+                mk = ct.render_line(font, ln[:cols])
+                if mk and sum(bin(b).count("1") for b in mk) >= 8:
+                    rendered.append(mk)
+            n = 0
+            for r in range(r0, r1):
+                mask = ct.row_mask(pix, w, cols, cy + r * ct.CELL_H, cx, PANEL)
+                if sum(bin(b).count("1") for b in mask) < 8:
+                    continue
+                for mk in rendered:
+                    if len(mk) <= len(mask) and mask[:len(mk)] == mk \
+                            and not any(mask[len(mk):]):
+                        n += 1
+                        break
+            return n
+
+        def console_rows_over(y0, y1):
+            """Console text rows whose cell band lies inside [y0, y1)."""
+            r0 = max(0, -(-(y0 - cy) // ct.CELL_H))
+            r1 = min(rows, (y1 - cy) // ct.CELL_H)
+            return r0, max(r0, r1)
+
+        # ---- raise it by clicking the sliver the terminal does not cover ----
+        # (the system window opens behind the focused terminal, exactly like a
+        # second app would; clicking its visible corner brings it forward)
+        click(sx + sw - 8, sy + sh - 8)
+        tail = serial_tail()
+        raise_ok = f"wm: focus id={sid}" in tail
+        print(f"  [{'PASS' if raise_ok else 'FAIL'}] wm: click on the visible "
+              f"corner raises the window")
+        rc = rc or (not raise_ok)
+
+        # ---- drag it up and to the left, over the terminal ----
+        grab_x, grab_y = sx + 40, sy + 10       # title bar, clear of buttons
+        q.hmp(f"mouse_move {grab_x - cur[0]} {grab_y - cur[1]}")
+        cur[0], cur[1] = grab_x, grab_y
+        time.sleep(0.5)
+        q.hmp("mouse_button 1")                 # hold, then move: that is a drag
+        time.sleep(0.3)
+        ddx, ddy = -150, -120
+        q.hmp(f"mouse_move {ddx} {ddy}")
+        cur[0] += ddx
+        cur[1] += ddy
+        time.sleep(0.6)
+        q.hmp("mouse_button 0")
+        time.sleep(0.8)
+        tail = serial_tail()
+        md = re.search(r"wm: drag id=(\d+) to (\d+),(\d+)", tail)
+        want = (sx + ddx, sy + ddy)
+        drag_ok = bool(md) and md.group(1) == str(sid) and \
+            (int(md.group(2)), int(md.group(3))) == want
+        print(f"  [{'PASS' if drag_ok else 'FAIL'}] wm: drag moves the window "
+              f"to {want} (marker: {md.group(0) if md else 'none'})")
+        rc = rc or (not drag_ok)
+
+        # ---- the vacated rectangle shows the terminal again ----
+        d3 = os.path.join(".check", "gui_dragged.ppm")
+        if not dump(q, d3):
+            print("gui_test FAIL: no screendump after the drag")
+            return 1
+        w3, h3, pix3 = _load_ppm(d3)
+        vr0, vr1 = console_rows_over(sy + 30, sy + sh)
+        uncovered = rows_match(pix3, w3, vr0, vr1)
+        unc_ok = uncovered >= 3
+        print(f"  [{'PASS' if unc_ok else 'FAIL'}] wm: uncovered area is the "
+              f"terminal again ({uncovered} glyph-exact rows)")
+        rc = rc or (not unc_ok)
+
+        # ---- taskbar button: minimize, then restore ----
+        tb_x = 96 + slot * 136 + 60
+        tb_y = h3 - 28 + 9
+        click(tb_x, tb_y)
+        tail = serial_tail()
+        min_ok = f"wm: minimize id={sid}" in tail
+        print(f"  [{'PASS' if min_ok else 'FAIL'}] wm: taskbar button minimizes")
+        rc = rc or (not min_ok)
+        click(tb_x, tb_y)
+        tail = serial_tail()
+        res_ok = f"wm: restore id={sid}" in tail
+        print(f"  [{'PASS' if res_ok else 'FAIL'}] wm: taskbar button restores")
+        rc = rc or (not res_ok)
+
+        # ---- close button: the window goes, the terminal is uncovered ----
+        close_x = sx + ddx + sw - 11            # after the drag
+        close_y = sy + ddy + 10
+        click(close_x, close_y)
+        time.sleep(0.5)
+        tail = serial_tail()
+        cl_ok = f"wm: close id={sid}" in tail and "windows left=1" in tail
+        print(f"  [{'PASS' if cl_ok else 'FAIL'}] wm: close button removes the "
+              f"window")
+        rc = rc or (not cl_ok)
+
+        d4 = os.path.join(".check", "gui_closed.ppm")
+        if dump(q, d4):
+            w4, h4, pix4 = _load_ppm(d4)
+            wr0, wr1 = console_rows_over(sy + ddy + 30, sy + ddy + sh)
+            after = rows_match(pix4, w4, wr0, wr1)
+            rest_ok = after >= 3
+            print(f"  [{'PASS' if rest_ok else 'FAIL'}] wm: terminal is back "
+                  f"where the window closed ({after} glyph-exact rows)")
+            rc = rc or (not rest_ok)
+            arrows3 = find_arrows(d4)
+            one_ok = len(arrows3) == 1
+            print(f"  [{'PASS' if one_ok else 'FAIL'}] wm: still exactly one "
+                  f"cursor after 5 clicks (arrows: {arrows3})")
+            rc = rc or (not one_ok)
+        else:
+            print("gui_test FAIL: no screendump after the close")
+            rc = 1
 
         q.close()
         print(f"gui_test: dumps = {d1}, {d2}")

@@ -109,10 +109,16 @@ u64 isr64_handler(regs64_t *r) {
          * kernel/BSS/MMIO/PMM. Report the saved fault_cr3, halt after. */
         u64 fault_cr3 = cpu_read_cr3() & ~0xFFFULL;
         extern u64 pml4_boot[];
+        /* M14 order matters here, and the reason is worth stating: the
+         * desktop's console dirty hook composites on every printed character,
+         * so a dump printed while it is still attached re-runs the very code
+         * that is faulting — the log fills with the dump's first character
+         * instead of the dump. Freeze the console first, THEN park on the
+         * immortal boot tables, then freeze the other CPUs (NMI ignores IF). */
+        cons_set_dirty_hook(0);
+        cons_set_hide_hook(0);
+        cons_freeze();
         if (fault_cr3 != (u64)pml4_boot) cpu_load_cr3((u64)pml4_boot);
-        /* Freeze the machine first (NMI ignores IF): a concurrent cascade
-         * on another CPU would otherwise reset us mid-dump. Then report
-         * with lock-free output (a halted CPU may own serial_lock). */
         smp_halt_others();
         s_raws("[K64] FATAL PF err=");
         s_rawx(r->err);
@@ -126,6 +132,14 @@ u64 isr64_handler(regs64_t *r) {
         s_rawx(r->rsp);
         s_raws(" cpu~");
         s_rawu((u64)smp_cpu_by_stack(r->rsp));
+        /* M14: walk BOTH roots for the faulting address. One walk says "not
+         * present" equally at every level; two walks say whether the page is
+         * missing from this address space only (a sharing/clone bug) or from
+         * boot's tables as well (a bad pointer). */
+        s_raws(" walk(fault):");
+        vmm_dump_walk(fault_cr3, cr2);
+        s_raws("\n walk(boot) :");
+        vmm_dump_walk((u64)pml4_boot, cr2);
         s_raws("\n");
         trace_cr3_dump();
         s_printf("[K64] PFCTX cpu~%u cr3=%x rsp=%x\n",
@@ -137,6 +151,9 @@ u64 isr64_handler(regs64_t *r) {
         u64 fault_cr3 = cpu_read_cr3() & ~0xFFFULL;
         extern u64 pml4_boot[];
         if (fault_cr3 != (u64)pml4_boot) cpu_load_cr3((u64)pml4_boot);
+        cons_set_dirty_hook(0); /* M14: see the PF path above */
+        cons_set_hide_hook(0);
+        cons_freeze();
         smp_halt_others();
         s_raws("[K64] FATAL EXC vec=");
         s_rawu(v);

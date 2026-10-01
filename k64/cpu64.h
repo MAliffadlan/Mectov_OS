@@ -31,6 +31,7 @@ int cons_init(u64 addr, u32 pitch, u32 w, u32 h, u32 bpp);
 int cons_init_at(u64 addr, u32 pitch, u32 ox, u32 oy, u32 w, u32 h, u32 bpp);
 int cons_rehome(u32 ox, u32 oy, u32 w, u32 h);
 void cons_view_cells(int *cols, int *rows);
+int cons_view_rect(int *x, int *y, int *w, int *h); /* live view rect, 0 if none */
 void cons_set_colors(u32 fg, u32 bg);
 void cons_set_dirty_hook(void (*fn)(int x0, int y0, int x1, int y1));
 /* Called BEFORE a bulk mutation (scroll/wipe) so a composited cursor can be
@@ -38,6 +39,15 @@ void cons_set_dirty_hook(void (*fn)(int x0, int y0, int x1, int y1));
  * leave a ghost behind. */
 void cons_set_hide_hook(void (*fn)(void));
 void cons_putc(char c);
+/* M14: repaint the whole view from the shadow grid. The window manager calls
+ * this whenever the console window's client is uncovered (a window moved away
+ * or was closed), because a live console draws into the compositor's surface
+ * and its pixels do not survive being overlapped. */
+void cons_repaint(void);
+void cons_repaint_rect(int x0, int y0, int x1, int y1);
+/* Stop all console drawing for good (fatal fault paths: no GUI from there). */
+void cons_freeze(void);
+void cons_move_view(int ox, int oy);
 /* Framebuffer geometry from the Multiboot2 tag: kernel64.c fills these in
  * while walking the tags (before mem64_init maps the FB in pass 5). */
 extern u64 g_fb_addr;
@@ -61,6 +71,20 @@ void gfx_cell(int x, int y, unsigned char ch, u32 fg, int bg);
 void gfx_cell_scale(int x, int y, unsigned char ch, u32 fg, int bg, int scale);
 void gfx_text(int x, int y, const char *s, u32 fg, int bg);
 void gfx_text_scale(int x, int y, const char *s, u32 fg, int bg, int scale);
+/* M14: the screen back buffer. While it is live every primitive draws into it
+ * and gfx_present() copies damaged rects to the panel — which is what lets the
+ * WM composite overlapping windows instead of relying on save-under tricks.
+ * gfx_vgrad_color() exposes one row of a ramp so a partial repaint lands on
+ * exactly the colour the full-height gradient would have produced. */
+int gfx_backbuf_alloc(void);
+int gfx_backbuf_live(void);
+/* Rejected out-of-range pixel stores (a caller bug gfx_cell cannot clip away),
+ * plus the first offender's coordinates for the report in wm64_tick(). */
+u64 gfx_oob_count(void);
+int gfx_oob_last(int *x, int *y);
+void gfx_oob_clear(void);
+void gfx_present(int x0, int y0, int x1, int y1);
+u32 gfx_vgrad_color(u32 top, u32 bot, int y, int h);
 
 /* M9 GUI-1 PS/2 mouse (k64/mouse64.c): IRQ12 + 3-byte packets. ps2_drain64()
  * is called by both the keyboard and the mouse IRQ (shared 8042 buffer) and
@@ -72,11 +96,74 @@ int mouse64_x(void);
 int mouse64_y(void);
 int mouse64_buttons(void);
 void mouse64_set_move_hook(void (*fn)(int dx, int dy));
+/* M14: called once per button-state CHANGE from the IRQ12 path, with the
+ * position at the moment of the change (x, y, new mask, changed bits). The
+ * window manager uses it for click/raise/drag; move packets keep coming
+ * through the move hook, so a drag is "button held + moves". */
+void mouse64_set_button_hook(void (*fn)(int x, int y, int btn, int changed));
 
-/* M9 GUI-1 desktop (k64/gui64.c): wallpaper + bars + window, with the console
- * re-homed into the window's client rect and a composited mouse cursor. */
+/* ---------------------------------------------------------------------------
+ * M14: kernel window manager (k64/wm64.c).
+ *
+ * A window is a rectangle plus a repaint callback: the compositor calls
+ * draw() whenever the client area falls inside a damaged rect, so any window
+ * must be able to render itself from its own state at any time (the console
+ * does it from its shadow grid, the system window from live counters). That
+ * single contract replaces per-window backing stores until Ring-3 clients need
+ * one (M15).
+ *
+ * Everything is composited into the M14 back buffer: wallpaper, top bar,
+ * taskbar (one button per window), the windows in z-order, and the mouse
+ * cursor last — so the cursor can never leave a ghost or be overwritten by
+ * text, the failure mode the M9 save-under approach had to work around.
+ * ------------------------------------------------------------------------- */
+#define WM64_MAX_WIN 6
+#define WM64_BTN_NONE 0
+#define WM64_BTN_CLOSE 1
+#define WM64_BTN_MAX 2
+#define WM64_BTN_MIN 3
+
+typedef struct {
+    int used;
+    int x, y, w, h; /* outer rect, title bar included */
+    char title[40];
+    void (*draw)(int id, int cx, int cy, int cw, int ch);
+    int minimized, maximized, dragging;
+    int dx, dy;         /* grab offset while dragging */
+    int sx, sy, sw, sh; /* geometry saved by maximize */
+    int hover;          /* WM64_BTN_* under the cursor, for button feedback */
+    int console;        /* 1 = this window's client IS the text console */
+    int live;           /* 1 = repaint this client once a second (M14 tick) */
+    int id;
+} win64_t;
+
+int wm64_init(void); /* back buffer + chrome; 0 = no framebuffer */
+int wm64_open(int x, int y, int w, int h, const char *title,
+              void (*draw)(int id, int cx, int cy, int cw, int ch),
+              int is_console);
+void wm64_close(int id);
+int wm64_count(void);      /* open (non-minimized) windows */
+int wm64_console_id(void); /* the console window's id, -1 if closed */
+int wm64_client_rect(int id, int *x, int *y, int *w, int *h);
+int wm64_win_rect(int id, int *x, int *y, int *w, int *h);
+int wm64_cursor_x(void);
+int wm64_cursor_y(void);
+void wm64_set_live(int id, int live);
+void wm64_focus(int id); /* raise + focus (the shell hands focus back) */
+void wm64_marker(void);    /* one serial line per window: geometry + z */
+void wm64_set_status(const char *s); /* taskbar right-hand text */
+void wm64_invalidate(int x0, int y0, int x1, int y1);
+void wm64_flush(void);
+void wm64_tick(void); /* 1 Hz: taskbar status + live window refresh */
+void wm64_on_mouse_move(int dx, int dy);
+void wm64_on_mouse_button(int x, int y, int buttons, int changed);
+
+/* M9 GUI-1 desktop shell (k64/gui64.c) on top of the M14 window manager: it
+ * opens the console window and the live system window, wires the console's
+ * dirty hook to the compositor and drives mouse/tick updates. */
 int gui64_init(void);
 void gui64_dirty(int x0, int y0, int x1, int y1);
+void gui64_tick(void); /* called from the BSP tick (1 Hz) */
 void s_hex64(u64 v);
 void s_hex32(u32 v);
 void s_dec64(u64 v);
@@ -407,6 +494,9 @@ int __frame_ref_put(u64 pa); /* mem_lock held by caller */
 void pmm_free_raw(u64 pa); /* page-table frames: bitmap only, no refcount */
 void frame_ref_inc(u64 pa);
 int frame_ref_put(u64 pa); /* -1 ref, bitmap-free at 0, returns remainder */
+/* M14: print the L4..L1 entries a VA walks through in an explicit root (the
+ * faulting CR3 in the fatal dump). */
+void vmm_dump_walk(u64 cr3, u64 va);
 u64 pmm_free_frames(void);
 u64 pmm_total_frames(void);
 void vmm_set_root(u64 *root); /* mapping root for vmm_map/unmap */

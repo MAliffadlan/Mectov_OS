@@ -34,7 +34,10 @@ static u32 pack(u32 rgb) {
     return rgb & 0xFFFFFFu;
 }
 
-static void store_u32(int x, int y, u32 rgb) {
+/* Raw framebuffer write: packs to the panel's format. Only gfx_present()
+ * (and the no-back-buffer fallback) may call this — everything else goes
+ * through store_u32() so the compositor's surface stays consistent. */
+static void fb_store(int x, int y, u32 rgb) {
     volatile u8 *p = fb + (u64)y * fb_pitch + (u64)x * (u64)fb_px;
     u32 v = pack(rgb);
     if (fb_bpp == 32) {
@@ -48,8 +51,101 @@ static void store_u32(int x, int y, u32 rgb) {
     }
 }
 
+/* --- M14: the screen back buffer -----------------------------------------
+ * When a buffer is live (gfx_backbuf_alloc), every primitive below draws into
+ * it instead of the panel, and gfx_present() copies damaged rects out. That is
+ * what makes k64/wm64.c's compositor possible: overlapping windows, a window
+ * drag that uncovers what was behind, and a cursor that is simply drawn last
+ * rather than saved-and-restored.
+ *
+ * The buffer holds UNPACKED 24-bit RGB words, so it is panel-format agnostic:
+ * packing happens once, on the copy out (fb_store). Coordinates stay in screen
+ * pixels, so none of the callers above this file had to change. */
+static u32 *bb; /* fb_w * fb_h u32 words, or NULL (draw straight to panel) */
+static int bb_on;
+
+/* M14 hardening: gfx_cell() is the one primitive that trusts its caller (the
+ * rest clip themselves), so one bad text coordinate used to write at
+ * y*fb_w+x of a wild offset — and since the back buffer is heap VA, running
+ * off its end is an unmapped page, i.e. a #PF inside the compositor. Every
+ * store is range-checked now, and the first offender is remembered so the
+ * desktop can report it (see gfx_oob_last) instead of dying silently. */
+static volatile int oob_x = -1, oob_y = -1;
+static volatile u64 oob_count;
+
+u64 gfx_oob_count(void) { return oob_count; }
+int gfx_oob_last(int *x, int *y) {
+    if (oob_x < 0) return 0;
+    if (x) *x = oob_x;
+    if (y) *y = oob_y;
+    return 1;
+}
+void gfx_oob_clear(void) { oob_x = oob_y = -1; }
+
+static void store_u32(int x, int y, u32 rgb) {
+    if (x < 0 || y < 0 || x >= fb_w || y >= fb_h) {
+        if (oob_x < 0) { oob_x = x; oob_y = y; }
+        oob_count++;
+        return;
+    }
+    if (bb_on) {
+        bb[(u64)y * (u64)fb_w + (u64)x] = rgb & 0xFFFFFFu;
+        return;
+    }
+    fb_store(x, y, rgb);
+}
+
+int gfx_backbuf_live(void) { return bb_on; }
+
+/* Allocate the screen buffer from the kernel heap (M10). Returns 0 when there
+ * is no framebuffer or the heap is out of room: the desktop then falls back to
+ * drawing straight to the panel, i.e. M9 behaviour without overlap support. */
+int gfx_backbuf_alloc(void) {
+    if (bb_on) return 1;
+    if (!fb_on) return 0;
+    u64 px = (u64)fb_w * (u64)fb_h;
+    u32 *p = (u32 *)kmalloc(px * sizeof(u32));
+    if (!p) return 0;
+    /* Zero it: the buffer is presented before every part of it has been
+     * painted by the compositor, and panel-visible heap garbage is not an
+     * acceptable frame. */
+    for (u64 i = 0; i < px; i++) p[i] = 0;
+    bb = p;
+    bb_on = 1;
+    return 1;
+}
+
+/* Copy one damaged rect (INCLUSIVE bounds) from the buffer to the panel.
+ * 32bpp takes 8-byte stores; every other format packs per pixel. */
+void gfx_present(int x0, int y0, int x1, int y1) {
+    if (!fb_on || !bb_on) return;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > fb_w - 1) x1 = fb_w - 1;
+    if (y1 > fb_h - 1) y1 = fb_h - 1;
+    if (x1 < x0 || y1 < y0) return;
+    int w = x1 - x0 + 1;
+    if (fb_bpp == 32 && fb_px == 4) {
+        u64 bytes = (u64)w * 4;
+        for (int y = y0; y <= y1; y++) {
+            volatile u8 *d = fb + (u64)y * fb_pitch + (u64)x0 * 4;
+            const u8 *s = (const u8 *)(bb + (u64)y * (u64)fb_w + (u64)x0);
+            u64 i = 0;
+            for (; i + 8 <= bytes; i += 8)
+                *(volatile u64 *)(d + i) = *(const u64 *)(s + i);
+            for (; i < bytes; i += 4)
+                *(volatile u32 *)(d + i) = *(const u32 *)(s + i);
+        }
+        return;
+    }
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++)
+            fb_store(x, y, bb[(u64)y * (u64)fb_w + (u64)x]);
+}
+
 u64 gfx_read(int x, int y) {
     if (!fb_on || x < 0 || y < 0 || x >= fb_w || y >= fb_h) return 0;
+    if (bb_on) return bb[(u64)y * (u64)fb_w + (u64)x] & 0xFFFFFFu;
     volatile u8 *p = fb + (u64)y * fb_pitch + (u64)x * (u64)fb_px;
     if (fb_bpp == 32) return *(volatile u32 *)p & 0xFFFFFFu;
     if (fb_bpp == 24) return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16);
@@ -95,6 +191,21 @@ void gfx_px(int x, int y, u32 rgb) {
 /* Row fill on the fast path: 32bpp writes two pixels per store, 24bpp one
  * pixel per 3-byte group, 16bpp one u16 (the console's scroll pays this). */
 static void fill_row(int x, int y, int w, u32 rgb) {
+    if (x < 0 || y < 0 || y >= fb_h || x >= fb_w || w <= 0) { /* see store_u32 */
+        if (oob_x < 0) { oob_x = x; oob_y = y; }
+        oob_count++;
+        return;
+    }
+    if (x + w > fb_w) w = fb_w - x;
+    if (bb_on) { /* buffer rows are always 4 bytes: same trick as 32bpp below */
+        u32 v = rgb & 0xFFFFFFu;
+        u32 *p = bb + (u64)y * (u64)fb_w + (u64)x;
+        u64 pair = ((u64)v << 32) | v;
+        int i = 0;
+        for (; i + 2 <= w; i += 2) *(u64 *)(p + i) = pair;
+        if (i < w) p[i] = v;
+        return;
+    }
     volatile u8 *p = fb + (u64)y * fb_pitch + (u64)x * (u64)fb_px;
     if (fb_bpp == 32) {
         u32 v = pack(rgb);
@@ -128,19 +239,27 @@ void gfx_frame(int x, int y, int w, int h, u32 rgb) {
 
 /* Vertical gradient: one flat row per scanline, integer lerp (no FPU use —
  * the kernel keeps FPU state untouched outside the task layer). */
+/* The gradient's colour at row y of an h-row ramp. Exposed (M14) because the
+ * compositor repaints the wallpaper one damaged rect at a time and must land
+ * on exactly the same colour the full-height ramp would have produced. */
+u32 gfx_vgrad_color(u32 top, u32 bot, int y, int h) {
+    int t = (h > 1) ? (y * 256) / (h - 1) : 0;
+    u32 r = (u32)((((top >> 16) & 0xFF) * (256 - t) + ((bot >> 16) & 0xFF) * t) >> 8);
+    u32 g = (u32)((((top >> 8) & 0xFF) * (256 - t) + ((bot >> 8) & 0xFF) * t) >> 8);
+    u32 b = (u32)(((top & 0xFF) * (256 - t) + (bot & 0xFF) * t) >> 8);
+    return (r << 16) | (g << 8) | b;
+}
+
 void gfx_vgrad(int x, int y, int w, int h, u32 top, u32 bot) {
     if (!fb_on || h <= 0) return;
     for (int j = 0; j < h; j++) {
-        int t = (h > 1) ? (j * 256) / (h - 1) : 0;
-        u32 r = (u32)((((top >> 16) & 0xFF) * (256 - t) + ((bot >> 16) & 0xFF) * t) >> 8);
-        u32 g = (u32)((((top >> 8) & 0xFF) * (256 - t) + ((bot >> 8) & 0xFF) * t) >> 8);
-        u32 b = (u32)(((top & 0xFF) * (256 - t) + (bot & 0xFF) * t) >> 8);
+        u32 row = gfx_vgrad_color(top, bot, j, h);
         int yy = y + j;
         if (yy < 0 || yy >= fb_h) continue;
         fill_row(x < 0 ? 0 : x,
                  yy,
                  (x + w > fb_w ? fb_w : x + w) - (x < 0 ? 0 : x),
-                 (r << 16) | (g << 8) | b);
+                 row);
     }
 }
 
@@ -150,6 +269,19 @@ void gfx_vgrad(int x, int y, int w, int h, u32 top, u32 bot) {
 void gfx_shift_up(int x, int y, int w, int h, int dy) {
     if (!fb_on || dy <= 0 || dy >= h) return;
     clip(&x, &y, &w, &h);
+    if (bb_on) { /* same copy, 4-byte rows, and it must not cross the rect */
+        u64 row_bytes = (u64)w * 4;
+        for (int j = 0; j + dy < h; j++) {
+            u8 *d = (u8 *)(bb + (u64)(y + j) * (u64)fb_w + (u64)x);
+            const u8 *s = (const u8 *)(bb + (u64)(y + j + dy) * (u64)fb_w + (u64)x);
+            u64 i = 0;
+            for (; i + 8 <= row_bytes; i += 8)
+                *(u64 *)(d + i) = *(const u64 *)(s + i);
+            for (; i < row_bytes; i += 4)
+                *(u32 *)(d + i) = *(const u32 *)(s + i);
+        }
+        return;
+    }
     u64 row_bytes = (u64)w * (u64)fb_px;
     for (int j = 0; j + dy < h; j++) {
         volatile u8 *d = fb + (u64)(y + j) * fb_pitch + (u64)x * (u64)fb_px;

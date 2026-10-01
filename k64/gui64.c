@@ -1,82 +1,55 @@
-/* M9 GUI-1: the desktop shell — wallpaper, bars, a window, a mouse cursor.
+/* M14: the desktop shell — what the kernel puts on screen, on top of wm64.
  *
- * Scope: the 64-bit port has run headless since M1. M8 gave it a text console
- * on the framebuffer; this file gives it a desktop: a wallpaper, a title bar,
- * a taskbar, one window whose client area IS the M8 console (re-homed, so the
- * boot log and the live tick output keep streaming inside the window), and a
- * software mouse cursor composited over all of it. No window manager, no
- * widgets, no Ring-3 clients yet — those need a framebuffer syscall and a WM,
- * which is the next milestone.
+ * M9's gui64.c WAS the desktop: it drew the wallpaper, both bars, one window
+ * and the composited cursor itself, straight into the framebuffer. All of that
+ * moved into the window manager (k64/wm64.c) when the desktop grew a second
+ * window, because a fixed layout cannot answer "what was behind this window?".
+ * What is left here is the shell's own policy:
  *
- * Look: the palette is the 32-bit kernel's instrument-console theme
- * (src/gui/login.c: charcoal + phosphor amber), the glyphs are the shared
- * 8x16 table, and the cursor sprite is the 32-bit desktop's 16x24 arrow with
- * its 0x111111 outline / white fill — so the two kernels look like the same
- * machine. Strings stay ASCII: the font covers CP437, but the kernel writes
- * UTF-8 bytes for anything above 0x7F, which would land on the wrong glyphs.
+ *   - open the terminal window: the M8 text console re-homed into a client
+ *     area, so the boot log's tail and everything printed afterwards streams
+ *     inside it (cons_rehome carries the grid, the dirty hook reports each
+ *     changed rect to the compositor);
+ *   - open the live system window (SMP/tick/heap/frames counters);
+ *   - wire the mouse into the WM: move packets drive hover + drag, button
+ *     edges drive click/raise/minimize/close;
+ *   - print the geometry markers the screenshot gates grep for.
  *
- * Compositing rule (the only non-obvious part): everything else draws
- * directly into the framebuffer, so the cursor keeps a save-under buffer of
- * its 17x25 footprint. It is restored on every move, and console64 notifies
- * us (cons_set_dirty_hook) whenever text lands under it — then the backdrop
- * is RE-READ from the new pixels before the arrow is repainted. Re-reading
- * (instead of restoring first) is what keeps a freshly drawn glyph from being
- * wiped by a stale save. Draw order at boot: chrome, then the console
- * re-home, then the cursor.
+ * The console hook is the only hot path: every kernel byte reaches
+ * cons_putc() -> gui64_dirty() -> wm64_invalidate(), which composites and
+ * presents just that rect. A cell is 8x16, so a boot log costs a few hundred
+ * pixels per line.
  *
- * Cost: the wallpaper is ~786K pixels of UC writes at 1024x768x32 (one-time,
- * a few tens of ms) and the cursor costs 425 pixels per repaint, so motion
- * stays cheap. The desktop is static otherwise: nothing redraws per frame.
- */
+ * Note what is NOT here any more: the console lock around the desktop draw.
+ * M9 needed it because the console's view was still full-screen while the
+ * chrome was being painted, so an AP printing mid-draw would scroll the
+ * half-built desktop away. Drawing now lands in the compositor's surface, and
+ * a print that races the transition is erased by the very damage it reports
+ * (the rect it damaged is not inside the terminal window's client). */
 #include "cpu64.h"
 
-/* ---- instrument-console palette (src/gui/login.c) ---- */
-#define IC_BG_PANEL 0x0016130Fu /* panel fill (warm charcoal) */
-#define IC_LINE 0x002C2821u     /* hairline borders */
-#define IC_INK 0x00EDE6D9u      /* primary text */
-#define IC_DIM 0x008A8172u      /* secondary text */
-#define IC_AMBER 0x00E0A94Fu    /* phosphor amber (accent) */
-#define IC_AMBER_BRT 0x00F5C566u
-#define IC_GRID 0x001B1712u     /* wallpaper grid hairlines */
-
-/* Wallpaper gradient (top -> bottom, darker than the panels so the chrome
- * reads as raised). */
-#define WP_TOP 0x001E1A14u
-#define WP_BOT 0x000C0A08u
-
+/* M9 geometry, kept verbatim: the screenshot gates sample these margins. */
+#define WIN_MARGIN_X 72
+#define WIN_MARGIN_Y 56
 #define TOPBAR_H 24
 #define TASKBAR_H 28
-#define WIN_TITLE_H 20
-#define WIN_BORDER 1
-#define GRID_STEP 64
 
-/* ---- mouse cursor sprite (mirror of src/drivers/vga.c cursor_mask/inner) */
-#define CUR_W 16
-#define CUR_H 24
-#define CUR_SHADOW 1 /* arrow is drawn with a 1px offset shadow */
+static int gui_on;
+static int con_id = -1;
+static int sys_id = -1;
 
-static const u16 cursor_mask[CUR_H] = {
-    0x8000, 0xC000, 0xE000, 0xF000, 0xF800, 0xFC00, 0xFE00, 0xFF00,
-    0xFF80, 0xFFC0, 0xFFE0, 0xFFF0, 0xFFF8, 0xFFC0, 0xFF80, 0xE3C0,
-    0xC3C0, 0x83C0, 0x01E0, 0x01E0, 0x00E0, 0x0000, 0x0000, 0x0000,
-};
-static const u16 cursor_inner[CUR_H] = {
-    0x0000, 0x4000, 0x6000, 0x7000, 0x7800, 0x7C00, 0x7E00, 0x7F00,
-    0x7F80, 0x7FC0, 0x7FE0, 0x7FF0, 0x7FF8, 0x7FC0, 0x7F80, 0x6380,
-    0x4380, 0x0380, 0x01C0, 0x01C0, 0x00C0, 0x0000, 0x0000, 0x0000,
-};
-
-static u32 cur_save[(CUR_W + CUR_SHADOW) * (CUR_H + CUR_SHADOW)];
-static int cur_x = 400, cur_y = 300; /* 32-bit boot position */
-static int cur_visible = 0;
-/* Enabled only once the chrome is fully drawn: before that, console redraws
- * during gui64_init would composite the arrow over a half-built desktop. */
-static int cur_enabled = 0;
-static int cur_moved_reported = 0;
-
-/* ---- tiny string builder (gfx_text takes strings; the kernel has no
- * snprintf). Both helpers append FORWARD and return the new end, so calls
- * chain: p = put_u64(v, p). ---- */
+/* Text with a clip, for a window client: the WM hands us the damaged rect and
+ * a callback must not paint outside it (a stray pixel would land on top of a
+ * window the running composite pass is not repainting). */
+static void text_clip(int cx, int cy, int cw, int ch, int x, int y,
+                      const char *s, u32 fg) {
+    int x1 = cx + cw - 1, y1 = cy + ch - 1;
+    for (; s && *s; s++, x += 8) {
+        if (x + 8 <= cx || x > x1) continue;
+        if (y + 16 <= cy || y > y1) continue;
+        gfx_cell(x, y, (unsigned char)*s, fg, -1);
+    }
+}
 static char *put_u64(u64 v, char *out) {
     char tmp[21];
     int n = 0;
@@ -89,194 +62,129 @@ static char *put_str(char *out, const char *s) {
     while (*s) *out++ = *s++;
     return out;
 }
-
-/* ---- mouse cursor compositing ---- */
-static void cursor_hide(void) {
-    if (!cur_visible) return;
-    int n = 0;
-    for (int j = 0; j < CUR_H + CUR_SHADOW; j++)
-        for (int i = 0; i < CUR_W + CUR_SHADOW; i++, n++) {
-            u32 c = cur_save[n];
-            gfx_px(cur_x + i, cur_y + j, c);
-        }
-    cur_visible = 0;
+/* "label   value unit" row helper: pads the label to 8 characters. */
+static int row(int cx, int cy, int cw, int ch, int x, int y, const char *label,
+               u64 v, const char *unit, u32 fg) {
+    char buf[64];
+    char *p = put_str(buf, label);
+    while ((int)(p - buf) < 8) *p++ = ' ';
+    p = put_u64(v, p);
+    if (unit) p = put_str(p, unit);
+    *p = 0;
+    text_clip(cx, cy, cw, ch, x, y, buf, fg);
+    return y + 16;
 }
 
-static void cursor_draw(void) {
-    int n = 0;
-    for (int j = 0; j < CUR_H + CUR_SHADOW; j++)
-        for (int i = 0; i < CUR_W + CUR_SHADOW; i++, n++)
-            cur_save[n] = gfx_read(cur_x + i, cur_y + j);
-    /* shadow first (built from the saved backdrop), then the arrow on top */
-    for (int j = 0; j < CUR_H; j++)
-        for (int i = 0; i < CUR_W; i++)
-            if (cursor_mask[j] & (u16)(0x8000 >> i)) {
-                u32 bg = cur_save[(j + CUR_SHADOW) * (CUR_W + CUR_SHADOW) +
-                                  i + CUR_SHADOW];
-                u32 sh = (((bg >> 16) & 0xFF) * 140 >> 8) << 16 |
-                         (((bg >> 8) & 0xFF) * 140 >> 8) << 8 |
-                         ((bg & 0xFF) * 140 >> 8);
-                gfx_px(cur_x + i + CUR_SHADOW, cur_y + j + CUR_SHADOW, sh);
-            }
-    for (int j = 0; j < CUR_H; j++)
-        for (int i = 0; i < CUR_W; i++)
-            if (cursor_mask[j] & (u16)(0x8000 >> i)) {
-                int fill = cursor_inner[j] & (u16)(0x8000 >> i);
-                gfx_px(cur_x + i, cur_y + j, fill ? 0x00FFFFFFu : 0x00111111u);
-            }
-    cur_visible = 1;
-}
-
-static void cursor_clamp(void) {
-    int maxx = gfx_width() - (CUR_W + CUR_SHADOW);
-    int maxy = gfx_height() - (CUR_H + CUR_SHADOW);
-    if (maxx < 0) maxx = 0;
-    if (maxy < 0) maxy = 0;
-    if (cur_x < 0) cur_x = 0;
-    if (cur_y < 0) cur_y = 0;
-    if (cur_x > maxx) cur_x = maxx;
-    if (cur_y > maxy) cur_y = maxy;
-}
-
-/* console64 calls this for every changed rectangle: keep the sprite on top
- * of text that landed under it (see the file header for why we re-read).
- * Note this must repaint even when the sprite is currently lifted: the
- * console's pre-hide hook takes it down before a scroll, and this post-hook
- * is what puts it back. */
-void gui64_dirty(int x0, int y0, int x1, int y1) {
-    if (!cur_enabled) return;
-    if (x1 < cur_x || x0 > cur_x + CUR_W + CUR_SHADOW) return;
-    if (y1 < cur_y || y0 > cur_y + CUR_H + CUR_SHADOW) return;
-    cursor_hide(); /* no-op when already lifted */
-    cursor_draw();
-}
-
-/* IRQ12 calls this after the driver updated its position. */
-static void gui64_on_move(int dx, int dy) {
-    (void)dx;
-    (void)dy;
-    if (!gfx_ready()) return;
-    cursor_hide();
-    cur_x = mouse64_x();
-    cur_y = mouse64_y();
-    cursor_clamp();
-    cursor_draw();
-    if (!cur_moved_reported) {
-        cur_moved_reported = 1;
-        s_printf("[K64] gui: cursor moved to %u,%u\n", (u64)cur_x, (u64)cur_y);
+/* The live system window: re-rendered from live counters whenever the
+ * compositor needs its pixels (and once a second via wm64_set_live). */
+static void sysmon_draw(int id, int cx, int cy, int cw, int ch) {
+    (void)id;
+    kmem64_t km;
+    heap64_stats(&km);
+    int x = cx + 8;
+    int y = cy + 6;
+    y = row(cx, cy, cw, ch, x, y, "cpu", (u64)smp_cpu_count(), " online", 0x00EDE6D9u);
+    y = row(cx, cy, cw, ch, x, y, "tick", k64_ticks(), "", 0x008A8172u);
+    y = row(cx, cy, cw, ch, x, y, "secs", k64_ticks() / 100, "", 0x008A8172u);
+    y = row(cx, cy, cw, ch, x, y, "heap", km.arena_used / 1024, " KB", 0x008A8172u);
+    y = row(cx, cy, cw, ch, x, y, "fs", (u64)fs64_mounts(), " mounts", 0x008A8172u);
+    y = row(cx, cy, cw, ch, x, y, "free", pmm_free_frames(), " frames", 0x00E0A94Fu);
+    /* A bar so a covered/uncovered repaint is obvious in a screenshot. */
+    int bw = cw - 16;
+    if (bw > 0) {
+        u64 t = k64_ticks() % 100;
+        int fill = (int)((t * (u64)bw) / 100);
+        if (fill > 0) gfx_fill(x, y, fill, 6, 0x00E0A94Fu);
+        if (fill < bw) gfx_fill(x + fill, y, bw - fill, 6, 0x002C2821u);
     }
 }
 
-/* ---- chrome ---- */
-static void draw_wallpaper(int w, int h) {
-    gfx_vgrad(0, 0, w, h, WP_TOP, WP_BOT);
-    for (int x = GRID_STEP; x < w; x += GRID_STEP) gfx_vline(x, 0, h, IC_GRID);
-    for (int y = GRID_STEP; y < h; y += GRID_STEP) gfx_hline(0, y, w, IC_GRID);
-}
-
-static void draw_topbar(int w) {
-    gfx_fill(0, 0, w, TOPBAR_H, IC_BG_PANEL);
-    gfx_hline(0, TOPBAR_H - 1, w, IC_LINE);
-    gfx_text(12, 4, "MECTOV OS 64", IC_AMBER, -1);
-    gfx_text(12 + 13 * 8, 4, "M9 GUI-1", IC_DIM, -1);
-
-    char buf[64];
-    char *p = put_u64((u64)gfx_width(), buf);
-    p = put_str(p, "x");
-    p = put_u64((u64)gfx_height(), p);
-    p = put_str(p, " framebuffer");
-    *p = 0;
-    gfx_text(w - 12 - (int)(p - buf) * 8, 4, buf, IC_DIM, -1);
-}
-
-static void draw_taskbar(int w, int h) {
-    int y = h - TASKBAR_H;
-    gfx_fill(0, y, w, TASKBAR_H, IC_BG_PANEL);
-    gfx_hline(0, y, w, IC_LINE);
-    gfx_fill(10, y + 7, 14, 14, IC_AMBER);
-    gfx_text(34, y + 6, "START", IC_AMBER_BRT, -1);
-    gfx_vline(34 + 6 * 8 + 6, y + 6, 16, IC_LINE);
-
-    char buf[64];
-    char *p = put_str(buf, "SMP ");
-    p = put_u64((u64)smp_cpu_count(), p);
-    p = put_str(p, " cpu   uptime ");
-    p = put_u64((u64)k64_ticks() / 100, p); /* PIT is 100 Hz */
-    p = put_str(p, "s");
-    *p = 0;
-    gfx_text(w - 12 - (int)(p - buf) * 8, y + 6, buf, IC_DIM, -1);
-}
-
-static void draw_window(int wx, int wy, int ww, int wh) {
-    /* drop shadow, then the frame: charcoal title bar over a darker client */
-    gfx_fill(wx + 5, wy + 5, ww, wh, 0x00080604u);
-    gfx_fill(wx, wy, ww, wh, IC_BG_PANEL);
-    gfx_frame(wx, wy, ww, wh, IC_LINE);
-    gfx_fill(wx + WIN_BORDER, wy + WIN_BORDER, ww - 2 * WIN_BORDER,
-             WIN_TITLE_H, 0x001F1B15u);
-    gfx_hline(wx, wy + WIN_TITLE_H, ww, IC_LINE);
-    static const char title[] = "console - mectov64";
-    gfx_text(wx + 8, wy + 2, title, IC_INK, -1);
-    gfx_text(wx + 8 + (int)(sizeof(title) - 1) * 8 + 8, wy + 2,
-             "(M8 text, windowed)", IC_DIM, -1);
-    gfx_text(wx + ww - 14, wy + 2, "x", IC_DIM, -1);
-}
+/* The terminal window's client is the text console: the compositor repaints it
+ * from the shadow grid (see cons_repaint_rect), so this window has no callback
+ * of its own. It exists as a window so it can be dragged, covered, minimized
+ * and closed like any other. */
 
 int gui64_init(void) {
     if (!gfx_ready()) {
         s_puts("[K64] gui: no framebuffer, desktop skipped\n");
         return 0;
     }
+    if (!wm64_init()) return 0;
+
     int w = gfx_width(), h = gfx_height();
-    int ww = w - 2 * 72;
-    int wh = h - TOPBAR_H - TASKBAR_H - 2 * 56;
-    int wx = 72, wy = TOPBAR_H + 56;
+    int ww = w - 2 * WIN_MARGIN_X;
+    int wh = h - TOPBAR_H - TASKBAR_H - 2 * WIN_MARGIN_Y;
+    int wx = WIN_MARGIN_X, wy = TOPBAR_H + WIN_MARGIN_Y;
     if (ww < 160 || wh < 80) { /* absurdly small panel: shrink the margins */
         wx = 8;
         wy = TOPBAR_H + 8;
         ww = w - 16;
         wh = h - TOPBAR_H - TASKBAR_H - 16;
     }
-    int cx = wx + WIN_BORDER;
-    int cy = wy + WIN_TITLE_H + WIN_BORDER;
-    int cw = ww - 2 * WIN_BORDER;
-    int ch = wh - WIN_TITLE_H - 2 * WIN_BORDER;
+    /* Terminal window, then the console moved into it. cons_rehome carries the
+     * boot log's tail so the window opens showing where the boot got to. */
+    con_id = wm64_open(wx, wy, ww, wh, "console - mectov64", 0, 1);
+    if (con_id < 0) return 0;
+    int cx = 0, cy = 0, cw = 0, ch = 0;
+    wm64_client_rect(con_id, &cx, &cy, &cw, &ch);
 
-    /* ONE critical section for the whole transition. APs are already running
-     * the demos and print through the same console, and a print landing
-     * mid-draw would scroll the half-built desktop away (the console's view
-     * is still the full screen until the re-home below). Nothing in here may
-     * print: the lock is a plain spinlock and the log lines come after. */
+    /* The console transition (recolour + re-home) runs under the console lock,
+     * and NOTHING in it may print. This is M9's lesson narrowed to what needs
+     * it: cons_rehome writes c_ox/c_oy and c_cols/c_rows as separate stores
+     * while another CPU's kernel print walks the same fields, so a print that
+     * lands between them draws with the NEW origin and the OLD row count —
+     * cells at row 47 of a 36-row view, i.e. below the screen, which in M14 is
+     * an unmapped heap page (the back buffer) and a #PF inside the compositor.
+     * Seen under KVM at 4 vCPUs, never under TCG, which is what made it look
+     * like a scheduler bug at first. */
+    int rehomed, vcols = 0, vrows = 0;
     u64 lock = console_lock();
-    draw_wallpaper(w, h);
-    draw_topbar(w);
-    draw_taskbar(w, h);
-    draw_window(wx, wy, ww, wh);
-    /* The terminal window's client area becomes the console's view; it keeps
-     * the tail of the boot log and keeps streaming into the window. */
-    cons_set_colors(IC_INK, IC_BG_PANEL);
+    cons_set_colors(0x00EDE6D9u, 0x0016130Fu); /* IC_INK on IC_BG_PANEL */
     cons_set_dirty_hook(gui64_dirty);
-    cons_set_hide_hook(cursor_hide); /* lift the arrow before scrolls/wipes */
-    int rehomed = cons_rehome((u32)cx, (u32)cy, (u32)cw, (u32)ch);
-    int vcols = 0, vrows = 0;
+    rehomed = cons_rehome((u32)cx, (u32)cy, (u32)cw, (u32)ch);
     cons_view_cells(&vcols, &vrows);
-    /* cursor last: it must sit on top of everything drawn above. */
-    cur_x = mouse64_x();
-    cur_y = mouse64_y();
-    cursor_clamp();
-    cur_enabled = 1;
-    cursor_draw();
-    mouse64_set_move_hook(gui64_on_move);
     console_unlock(lock);
 
+    /* Live system window, bottom right: it overlaps the terminal's client on
+     * purpose — that overlap is what proves z-order, drag and repaint. */
+    int sw = 300, sh = 200;
+    if (w < 700 || h < 500) { sw = w / 3; sh = h / 4; }
+    sys_id = wm64_open(w - sw - 20, h - TASKBAR_H - sh - 16, sw, sh,
+                       "system - mectov64", sysmon_draw, 0);
+    wm64_set_live(sys_id, 1);
+    /* Opening the second window focused it; the shell wants the terminal
+     * focused (and on top) as the default, which also exercises raise. */
+    wm64_focus(con_id);
+
+    mouse64_set_move_hook(wm64_on_mouse_move);
+    mouse64_set_button_hook(wm64_on_mouse_button);
+    gui_on = 1;
+
     if (!rehomed)
-        s_puts("[K64] gui: console rehome failed (M9 continues without it)\n");
+        s_puts("[K64] gui: console rehome failed (M14 continues without it)\n");
     else
         s_printf("[K64] cons: rehomed %ux%u cells at %u,%u (window %ux%u)\n",
                  (u64)vcols, (u64)vrows, (u64)cx, (u64)cy, (u64)cw, (u64)ch);
     s_printf("[K64] gui: desktop up win=%u,%u,%u,%u client=%u,%u,%u,%u "
              "topbar=%u taskbar=%u cursor=%u,%u\n",
              (u64)wx, (u64)wy, (u64)ww, (u64)wh, (u64)cx, (u64)cy, (u64)cw,
-             (u64)ch, (u64)TOPBAR_H, (u64)TASKBAR_H, (u64)cur_x, (u64)cur_y);
+             (u64)ch, (u64)TOPBAR_H, (u64)TASKBAR_H, (u64)wm64_cursor_x(),
+             (u64)wm64_cursor_y());
+    wm64_marker();
     return 1;
+}
+
+/* Console output -> compositor damage. Runs under the console lock (the caller
+ * has just written a cell), so it must not print or take another lock: it does
+ * exactly one thing, hand the rect to the WM. */
+void gui64_dirty(int x0, int y0, int x1, int y1) {
+    if (!gui_on) return;
+    wm64_invalidate(x0, y0, x1, y1);
+}
+
+/* BSP tick (1 Hz, see task64.c): refresh the taskbar status text and the live
+ * windows. No serial output here: this runs inside the timer IRQ. */
+void gui64_tick(void) {
+    if (!gui_on) return;
+    wm64_tick();
 }

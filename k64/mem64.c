@@ -117,6 +117,34 @@ void trace_cr3_dump(void) {
 #define PTE_ADDR 0x000FFFFFFFFFF000ULL
 #define PTE_COW  0x200ULL /* M5: copy-on-write user page (avail bit 9) */
 
+/* M14 forensics: print the four table entries a VA walks through in an
+ * EXPLICIT root (normally the faulting task's CR3). Without it a mapping bug
+ * reads as "this address is not present", which is equally true whether the
+ * PML4, the PDPT, the PD or the PT is the one missing it. The tables are read
+ * by physical address, which the boot map identity-covers, so this is safe
+ * from the fatal path once we have parked on pml4_boot. */
+void vmm_dump_walk(u64 cr3, u64 va) {
+    u64 *tab = (u64 *)(cr3 & PTE_ADDR);
+    u64 e = tab[(va >> 39) & 511];
+    s_raws(" walk L4=");
+    s_rawx(e);
+    if (!(e & PTE_P) || (e & PTE_PS)) return;
+    tab = (u64 *)(e & PTE_ADDR);
+    e = tab[(va >> 30) & 511];
+    s_raws(" L3=");
+    s_rawx(e);
+    if (!(e & PTE_P) || (e & PTE_PS)) return;
+    tab = (u64 *)(e & PTE_ADDR);
+    e = tab[(va >> 21) & 511];
+    s_raws(" L2=");
+    s_rawx(e);
+    if (!(e & PTE_P) || (e & PTE_PS)) return;
+    tab = (u64 *)(e & PTE_ADDR);
+    e = tab[(va >> 12) & 511];
+    s_raws(" L1=");
+    s_rawx(e);
+}
+
 #define PAGE4K 4096ULL
 #define PAGE2M (512ULL * PAGE4K)
 #define PMM_MAX_FRAMES (1024ULL * 1024)  /* 4GB worth of 4KB frames */

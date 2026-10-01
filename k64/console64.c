@@ -57,6 +57,13 @@ static int c_cols, c_rows;
 static int c_cx, c_cy;  /* cursor cell */
 static int c_ready;
 static int c_cur_x = -1, c_cur_y = -1; /* cell carrying the underline (-1 none) */
+/* M14: whether the underline is part of the current cell's pixels. The
+ * compositor repaints console cells on demand, so "is there an underline here"
+ * has to be state and not just a side effect of the last draw: a repaint of
+ * the cursor's cell must put the underline back (it is drawn AFTER the glyph
+ * below, exactly like cursor_paint does), or a scrolling console would lose
+ * its cursor entirely the first time the desktop repainted that cell. */
+static int c_cur_on;
 static u32 c_fg = CONS_FG, c_bg = CONS_BG;
 static void (*c_dirty)(int x0, int y0, int x1, int y1);
 static void (*c_hide)(void);
@@ -78,31 +85,44 @@ static void notify_view(void) {
  * the post-notify, because they never move existing pixels. */
 static void hide_cursor_for_bulk(void) {
     if (c_hide) c_hide();
-    c_cur_x = c_cur_y = -1; /* the desktop removed the underline's pixels too */
+    c_cur_on = 0;
+    c_cur_x = c_cur_y = -1; /* a bulk move wipes the underline's pixels too */
 }
 
-/* Draw cell (cx,cy) and tell the desktop (mouse cursor lives on top). */
+/* Draw cell (cx,cy) and tell the desktop (mouse cursor lives on top).
+ * The bounds check is belt-and-braces for the one case the console lock cannot
+ * cover: a print on this CPU with c_ox/c_oy already moved by a re-home whose
+ * c_rows has not landed yet would compute a cell below the screen, and M14's
+ * back buffer makes "below the screen" an unmapped page. Grid coordinates are
+ * also clamped so the shadow write cannot escape either. */
 static void draw_cell(int cx, int cy, unsigned char ch) {
+    if (cx < 0 || cy < 0 || cx >= c_cols || cy >= c_rows) return;
     gfx_cell(c_ox + cx * CONS_CELL_W, c_oy + cy * CONS_CELL_H, ch, c_fg,
              (int)c_bg);
     notify(cx * CONS_CELL_W, cy * CONS_CELL_H, CONS_CELL_W, CONS_CELL_H);
 }
 
 static void cursor_erase(void) {
-    if (c_cur_x < 0) return;
-    draw_cell(c_cur_x, c_cur_y, (unsigned char)c_grid[c_cur_y][c_cur_x]);
+    if (!c_cur_on) return;
+    int ox = c_cur_x, oy = c_cur_y;
+    c_cur_on = 0;
     c_cur_x = c_cur_y = -1;
+    draw_cell(ox, oy, (unsigned char)c_grid[oy][ox]);
 }
 
 static void cursor_paint(void) {
     if (!c_ready) return;
-    if (c_cur_x == c_cx && c_cur_y == c_cy) return;
+    if (c_cur_on && c_cur_x == c_cx && c_cur_y == c_cy) return;
     int px = c_cx * CONS_CELL_W;
     int py = c_cy * CONS_CELL_H + (CONS_CELL_H - 2);
-    gfx_fill(c_ox + px, c_oy + py, CONS_CELL_W, 2, CONS_CURSOR);
-    notify(px, py, CONS_CELL_W, 2);
+    /* State BEFORE the notify: that notify goes straight into the desktop
+     * compositor, which may repaint this very cell — and a repaint that does
+     * not know the underline belongs here would erase what we are drawing. */
+    c_cur_on = 1;
     c_cur_x = c_cx;
     c_cur_y = c_cy;
+    gfx_fill(c_ox + px, c_oy + py, CONS_CELL_W, 2, CONS_CURSOR);
+    notify(px, py, CONS_CELL_W, 2);
 }
 
 /* Shift both the pixels and the shadow grid up by one text row. */
@@ -128,8 +148,10 @@ static void cursor_newline(void) {
 }
 
 static void put_cell(unsigned char ch) {
-    if (c_cx == c_cur_x && c_cy == c_cur_y) {
-        c_cur_x = c_cur_y = -1; /* the cell draw below paints over the underline */
+    if (c_cx < 0 || c_cx >= c_cols || c_cy < 0 || c_cy >= c_rows) return;
+    if (c_cur_on && c_cx == c_cur_x && c_cy == c_cur_y) {
+        c_cur_on = 0; /* the cell draw below paints over the underline */
+        c_cur_x = c_cur_y = -1;
     } else {
         cursor_erase();
     }
@@ -192,6 +214,7 @@ static int view_from(int ox, int oy, u32 w, u32 h, int wipe_all) {
     for (int y = 0; y < rows; y++)
         for (int x = 0; x < cols; x++) c_grid[y][x] = ' ';
     c_cx = c_cy = 0;
+    c_cur_on = 0;
     c_cur_x = c_cur_y = -1;
     c_ready = 1;
     hide_cursor_for_bulk();
@@ -292,4 +315,82 @@ int cons_rehome(u32 ox, u32 oy, u32 w, u32 h) {
 void cons_view_cells(int *cols, int *rows) {
     if (cols) *cols = c_cols;
     if (rows) *rows = c_rows;
+}
+
+/* M14: repaint the part of the view inside an absolute screen rect, from the
+ * shadow grid. This is what makes a console WINDOW possible without a per-
+ * window canvas: the grid is the canvas, so the compositor can ask for exactly
+ * the pixels a damaged rect needs and get them back — spaces included, which
+ * is what erases a line that has scrolled away or a window that moved off.
+ * No damage is reported here: the caller (k64/wm64.c) is already resolving the
+ * rect it asked about, and a notify from inside a composite would loop. */
+void cons_repaint_rect(int x0, int y0, int x1, int y1) {
+    if (!c_ready) return;
+    int vx1 = c_ox + c_cols * CONS_CELL_W - 1;
+    int vy1 = c_oy + c_rows * CONS_CELL_H - 1;
+    if (x1 < c_ox || y1 < c_oy || x0 > vx1 || y0 > vy1) return;
+    int cx0 = (x0 - c_ox) / CONS_CELL_W;
+    int cy0 = (y0 - c_oy) / CONS_CELL_H;
+    int cx1 = (x1 - c_ox) / CONS_CELL_W;
+    int cy1 = (y1 - c_oy) / CONS_CELL_H;
+    if (cx0 < 0) cx0 = 0;
+    if (cy0 < 0) cy0 = 0;
+    if (cx1 > c_cols - 1) cx1 = c_cols - 1;
+    if (cy1 > c_rows - 1) cy1 = c_rows - 1;
+    for (int y = cy0; y <= cy1; y++)
+        for (int x = cx0; x <= cx1; x++)
+            gfx_cell(c_ox + x * CONS_CELL_W, c_oy + y * CONS_CELL_H,
+                     (unsigned char)c_grid[y][x], c_fg, (int)c_bg);
+    if (c_cur_on) { /* the underline is not part of the grid, so put it back */
+        int ux = c_ox + c_cx * CONS_CELL_W;
+        int uy = c_oy + c_cy * CONS_CELL_H + (CONS_CELL_H - 2);
+        if (!(ux > x1 || ux + CONS_CELL_W - 1 < x0 || uy > y1 || uy + 1 < y0))
+            gfx_fill(ux, uy, CONS_CELL_W, 2, CONS_CURSOR);
+    }
+}
+
+/* Whole-view repaint: cons_rehome() after a resize, and any caller that wants
+ * the view re-established unconditionally. */
+void cons_repaint(void) {
+    if (!c_ready) return;
+    cons_repaint_rect(c_ox, c_oy, c_ox + c_cols * CONS_CELL_W - 1,
+                      c_oy + c_rows * CONS_CELL_H - 1);
+    c_cur_x = c_cur_y = -1; /* force the underline back in */
+    cursor_paint();
+    notify_view();
+}
+
+/* M14: stop drawing altogether, permanently. Called first by the fatal fault
+ * paths: they run with interrupts off, possibly on a CR3 whose mappings are
+ * the reason we are dying, and every console cell they draw would now go
+ * through the desktop compositor — one more fault per printed character, which
+ * buries the dump instead of showing it. Frozen, s_rawc/s_raws still reach the
+ * serial log, which is where a post-mortem is read from. */
+void cons_freeze(void) { c_ready = 0; }
+
+/* M14: the live view's rect in screen pixels. The window manager uses it to
+ * tell whether the console actually lives in the client rect it is about to
+ * repaint: during bring-up the console is still full-screen while its window
+ * already exists, and repainting that client from a full-screen grid draws
+ * cells at the wrong origin (the columns that straddle the client's edge land
+ * one pixel over the window frame). */
+int cons_view_rect(int *x, int *y, int *w, int *h) {
+    if (!c_ready) return 0;
+    if (x) *x = c_ox;
+    if (y) *y = c_oy;
+    if (w) *w = c_cols * CONS_CELL_W;
+    if (h) *h = c_rows * CONS_CELL_H;
+    return 1;
+}
+
+/* M14: move a live view without changing its size — a window being dragged.
+ * The grid is untouched (cons_rehome is for resizes, where it has to re-wrap),
+ * so this is origin + repaint. The old pixels are the window manager's
+ * business: it damaged the old footprint before calling. */
+void cons_move_view(int ox, int oy) {
+    if (!c_ready) return;
+    if (c_ox == ox && c_oy == oy) return;
+    c_ox = ox;
+    c_oy = oy;
+    cons_repaint();
 }

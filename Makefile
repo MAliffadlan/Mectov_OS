@@ -579,7 +579,7 @@ OBJS64 = $(OBJ64_DIR)/boot64.o $(OBJ64_DIR)/kernel64.o \
          $(OBJ64_DIR)/k64_kbd64.o $(OBJ64_DIR)/k64_console64.o \
          $(OBJ64_DIR)/k64_gfx64.o $(OBJ64_DIR)/k64_gui64.o \
          $(OBJ64_DIR)/k64_mouse64.o \
-         $(OBJ64_DIR)/k64_heap64.o \
+         $(OBJ64_DIR)/k64_heap64.o $(OBJ64_DIR)/k64_wm64.o \
          $(OBJ64_DIR)/k64_blk64.o \
          $(OBJ64_DIR)/k64_fs64.o $(OBJ64_DIR)/k64_ext64.o \
          $(OBJ64_DIR)/font8x16.o \
