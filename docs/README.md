@@ -17,7 +17,7 @@ Two lines live in this repository:
 * **[Memory Management](architecture/memory.md)** — Physical page allocation (PMM), Virtual Memory (VMM/Paging), heap isolation, and process tear-down safety.
 * **[Preemptive Scheduler](architecture/scheduler.md)** — Priority Round-Robin scheduler, context switching, interrupt gates, and deadlock prevention.
 * **[Syscall Subsystem](architecture/syscalls.md)** — `int 0x80` Ring 3 interface, register passing, and modular syscall dispatching (`syscall_gui`, `syscall_vfs`, `syscall_net`, etc.).
-* **[x86_64 Port](architecture/x86_64_port.md)** — 64-bit kernel (`kernel64.c`, `k64/`) milestone status, measured `-m64` reusability of `src/`, the dependency map of the 32-bit desktop, and the M10→M16 porting order.
+* **[x86_64 Port](architecture/x86_64_port.md)** — 64-bit kernel (`kernel64.c`, `k64/`) milestone status, measured `-m64` reusability of `src/`, the dependency map of the 32-bit desktop, the M10→M16 delivery order, and per-milestone design notes (M10 heap, M11 block layer, M12 filesystems).
 
 ### 2. Device Drivers (`docs/drivers/`)
 * **[VGA / VBE Video Driver](drivers/vga_vbe.md)** — 1024x768 VESA VBE linear framebuffer, triple-buffer rendering, dirty region tracking, and hardware mouse cursor.
