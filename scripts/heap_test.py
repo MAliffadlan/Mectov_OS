@@ -108,7 +108,16 @@ FIELDS = ("allocs", "frees", "live", "freeblk", "largest", "pages", "oom",
 
 
 def parse(line):
-    """'KMEM probe=ok allocs=6 frees=6 live=0 ...' -> (probe, {field: int})."""
+    """'KMEM probe=ok allocs=6 frees=6 live=0 ...' -> (probe, {field: int}).
+
+    The serial log is shared with the other boot-time tasks (CPU-WORKER, the
+    tick counter), and a kernel line can land in the MIDDLE of the shell's:
+    '...tick 300KMEM probe=ok ...' is two tasks writing the same line. So the
+    marker is searched for anywhere in the line, not only at its start --
+    anchoring at ^ misses a perfectly good reading whenever an unrelated task
+    printed first, which showed up as this test failing ~1 run in 12 with
+    "kmem answered (1 calls)" even though both readings were in the log.
+    """
     m = re.search(r"KMEM probe=(\w+)\s+(.*)", line)
     if not m:
         return None, {}
@@ -141,7 +150,9 @@ def main():
         serial = open(SERIAL, errors="replace").read()
         boots = re.findall(r"^\[K64\] M10 HEAP SELFTEST OK.*$", serial,
                            re.MULTILINE)
-        lines = [l for l in serial.splitlines() if l.startswith("KMEM ")]
+        # Search anywhere in the line, for the interleaving reason documented
+        # on parse() above; `in` rather than startswith on purpose.
+        lines = [l for l in serial.splitlines() if "KMEM probe=" in l]
         reads = [parse(l) for l in lines]
         probes = [v for p, v in reads if v]
         oks = [p == "ok" for p, v in reads]

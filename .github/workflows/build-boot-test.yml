@@ -21,6 +21,14 @@ on:
 #   selftest       -> watchdogs, TLB shootdown, multi-core panic (if: always())
 #   kvm            -> KVM 4-core fork/FPU (skips itself when /dev/kvm is absent)
 #   config-matrix  -> unchanged 12-combo boot+fork matrix on the artifacts
+#   ram-sweep      -> 6-combo guest-RAM sweep on the artifacts
+#   kernel64       -> the 64-bit mainline kernel: build + its own gate battery
+#
+# kernel64 is independent of `build` on purpose: it needs none of the 32-bit
+# artifacts, and it builds its own ISO and its own disk fixtures from scratch.
+# Depending on `build` would serialise the two lines behind each other for no
+# gain, and the 32-bit jobs would then fail whenever a 64-bit-only change
+# broke something.
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -746,3 +754,67 @@ jobs:
             --mem-mb ${{ matrix.mem }} \
             --smp ${{ matrix.smp }} \
             --timeout 240
+
+  # ---------------------------------------------------------------- 64-bit
+  # The 64-bit kernel is the mainline line (bare `make` builds it). Until this
+  # job existed it had no CI coverage at all: every step above builds all32 and
+  # gates the 32-bit kernel, so a regression in k64/ could only be caught
+  # locally. `make check64` runs run64.sh --headless (the boot-marker battery)
+  # and then the six host-side gates, each of which reboots the ISO and, for
+  # the hash assertions, recomputes the expected value from the same bytes on
+  # the host.
+  #
+  # Toolchain notes, all verified rather than assumed:
+  #  - python3-pil is NOT needed. gui/cons/fs tests read QEMU's P6 PPM
+  #    screendumps through scripts/terminal_launch.py's own pure-Python
+  #    _load_ppm; terminal_launch imports nothing but `time`.
+  #  - mtools/dosfstools are NOT needed: FAT32 belongs to the `storage` job.
+  #  - e2fsprogs IS needed: scripts/mk_ext2disk.py calls mkfs.ext2 + debugfs
+  #    to build the ext2 fixture the M12 gates hash.
+  #  - grub-pc-bin + xorriso are needed for `make iso64` (grub-mkrescue).
+  kernel64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            nasm \
+            grub-pc-bin \
+            xorriso \
+            qemu-system-x86 \
+            e2fsprogs
+
+      - name: Build + gate the 64-bit kernel
+        run: make check64
+
+      - name: Serial log tail (always, for post-mortem reading)
+        if: always()
+        run: |
+          echo "--- serial64.log ---"
+          cat serial64.log 2>/dev/null | tail -120 || echo "(no serial output)"
+          for f in serial_blktest.log serial_fstest.log serial_kbdtest.log \
+                   serial_heaptest.log serial_gui.log serial_cons.log; do
+            [ -f "$f" ] && echo "--- $f ---" && tail -40 "$f"
+          done
+
+      - name: Upload serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel64-serial
+          path: |
+            serial64.log
+            serial_blktest.log
+            serial_fstest.log
+            serial_kbdtest.log
+            serial_heaptest.log
+            serial_gui.log
+            serial_cons.log
+            .check/*.ppm
+          if-no-files-found: ignore
+          retention-days: 7
