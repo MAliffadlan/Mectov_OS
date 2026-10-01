@@ -24,11 +24,17 @@ make iso64 MECTOV64_CMDLINE="${MECTOV64_CMDLINE:-}" || { echo "[-] iso64 failed"
 # hash against this host's own computation of the same file).
 python3 scripts/mk_blkdisk.py blkdisk.img >/dev/null || \
     { echo "[-] blkdisk.img fixture failed"; exit 1; }
+# M12 fixture: a real ext2 filesystem (1K blocks, deterministic contents) on
+# ide1 slave, so the FS layer mounts two different filesystems in one boot:
+# ISO9660 off the boot CD and ext2 off this disk.
+python3 scripts/mk_ext2disk.py ext2test.img >/dev/null || \
+    { echo "[-] ext2test.img fixture failed (needs e2fsprogs)"; exit 1; }
 rm -f serial64.log
 
 QEMU_ARGS=(-machine "$MACHINE" -cpu qemu64,+nx -m "$MEM" -smp "$SMP"
     -cdrom mectov64.iso
     -drive file=blkdisk.img,format=raw,if=ide,index=1,media=disk
+    -drive file=ext2test.img,format=raw,if=ide,index=3,media=disk
     -serial file:serial64.log
     -no-reboot)
 
@@ -56,6 +62,10 @@ if [ "$HEADLESS" = "1" ]; then
     grep -q "blk: iso PVD lba16 type=1 id=CD001" serial64.log 2>/dev/null && \
     grep -qE "blk: disk sector0 magic=ok .*lba28 fnv=0x[0-9A-F]{16} lba48 fnv=0x[0-9A-F]{16} same=1" serial64.log 2>/dev/null && \
     grep -qE "blk: iso reread rc=0 stable=1" serial64.log 2>/dev/null && \
+    grep -qE "fs: mount0 iso9660 blk=[0-9]+ root=[0-9]+ block_size=2048 label=\"ISOIMAGE" serial64.log 2>/dev/null && \
+    grep -qE "fs: mount1 ext2 blk=[0-9]+ blocks=[0-9]+ block_size=[0-9]+ inodes=[0-9]+ label=\"MECTOV64\"" serial64.log 2>/dev/null && \
+    grep -qE "fs: iso root entries=[0-9]+ /boot/myos64.bin size=[0-9]+ fnv=0x[0-9A-F]{16}" serial64.log 2>/dev/null && \
+    grep -qE "M12 FS SELFTEST OK .* mounts=2" serial64.log 2>/dev/null && \
     grep -q "cons: framebuffer console live" serial64.log 2>/dev/null && \
     grep -qE "cons: [0-9]+x[0-9]+ cells \([0-9]+x[0-9]+ fb" serial64.log 2>/dev/null && \
     grep -q "mouse: PS/2 aux on" serial64.log 2>/dev/null && \
@@ -100,10 +110,10 @@ if [ "$HEADLESS" = "1" ]; then
     ! grep -q "FAIL" serial64.log 2>/dev/null && \
     grep -q "tick 500" serial64.log 2>/dev/null && PASS=1
     if [ "$PASS" = "1" ]; then
-        echo "[+] M11 BOOT OK: SMP + fork/exec + shell + brk/demand + W^X + ASLR + GUI desktop + heap + ATA/ATAPI"
+        echo "[+] M12 BOOT OK: SMP + fork/exec + shell + brk/demand + W^X + ASLR + GUI desktop + heap + ATA/ATAPI + ISO9660/ext2"
         exit 0
     else
-        echo "[-] M11 BOOT FAIL: markers missing (see serial64.log above)"
+        echo "[-] M12 BOOT FAIL: markers missing (see serial64.log above)"
         exit 1
     fi
 else

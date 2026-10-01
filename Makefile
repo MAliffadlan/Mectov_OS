@@ -581,6 +581,7 @@ OBJS64 = $(OBJ64_DIR)/boot64.o $(OBJ64_DIR)/kernel64.o \
          $(OBJ64_DIR)/k64_mouse64.o \
          $(OBJ64_DIR)/k64_heap64.o \
          $(OBJ64_DIR)/k64_blk64.o \
+         $(OBJ64_DIR)/k64_fs64.o $(OBJ64_DIR)/k64_ext64.o \
          $(OBJ64_DIR)/font8x16.o \
          $(OBJ64_DIR)/entry64.o $(OBJ64_DIR)/tramp64_bin.o \
          $(OBJ64_DIR)/hello64_mct.o $(OBJ64_DIR)/fpu64_mct.o \
@@ -684,11 +685,17 @@ clean64:
 	rm -f demos/*64.o demos/*64.elf demos/*64.bin demos/*64.mct demos/entry64.o
 	rm -f k64/tramp64.bin
 
-check64: iso64 blkdisk.img
+check64: iso64 blkdisk.img ext2test.img
 	./run64.sh --headless && python3 scripts/kbd_test.py && \
 	python3 scripts/heap_test.py && python3 scripts/blk_test.py && \
+	python3 scripts/fs_test.py && \
 	python3 scripts/cons_test.py && python3 scripts/gui_test.py
 
 # M11 fixture: deterministic ATA disk (scripts/mk_blkdisk.py is idempotent).
 blkdisk.img:
 	python3 scripts/mk_blkdisk.py $@
+
+# M12 fixture: a real ext2 filesystem built with e2fsprogs (needs mkfs.ext2 +
+# debugfs); the script's own content functions are what fs_test.py hashes.
+ext2test.img:
+	python3 scripts/mk_ext2disk.py $@

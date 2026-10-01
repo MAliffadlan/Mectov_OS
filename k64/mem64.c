@@ -119,8 +119,18 @@ void trace_cr3_dump(void) {
 
 #define PAGE4K 4096ULL
 #define PAGE2M (512ULL * PAGE4K)
-#define RESERVE_TOP (2ULL * 1024 * 1024) /* [0,2MB) never handed out */
 #define PMM_MAX_FRAMES (1024ULL * 1024)  /* 4GB worth of 4KB frames */
+
+/* Frames below the end of the kernel image stay reserved, rounded up to a 2MB
+ * boundary. This is NOT a constant: the image links in the embedded demo
+ * images, the 8x16 font and the GUI/console buffers, so it is several MB — with
+ * the old hardcoded 2MB top, the free-frame pool started *inside* the kernel's
+ * own .bss. M12 found it: a task stack landed on the console's shadow grid and
+ * the shell read spaces where its request struct should have been (the failure
+ * moved when the shell's stack frame changed, which is the tell for this class
+ * of bug). */
+extern char _kernel_start[], _kernel_end[];
+static u64 reserve_top; /* [0, reserve_top) never handed out */
 
 /* Boot tables (boot64.asm .bss, identity-mapped). */
 extern u64 pml4_boot[];
@@ -720,6 +730,24 @@ void mem64_init(u64 mb_info) {
     u64 end = mb_info + total;
     vmm_root = pml4_boot;
 
+    /* Reserve the whole kernel image before anything can be handed out. The
+     * 2MB floor keeps the region the boot map/BIOS/GRUB structures live in
+     * reserved even for a tiny image; the round-up leaves the GRUB-provided
+     * boot information room above the image. */
+    reserve_top = ((u64)_kernel_end + PAGE2M - 1) & ~(PAGE2M - 1);
+    if (reserve_top < 2 * 1024 * 1024) reserve_top = 2 * 1024 * 1024;
+    if ((u64)_kernel_end > reserve_top) {
+        s_puts("[K64] FAIL: kernel image ends above the frame reservation\n");
+        for (;;) __asm__ __volatile__("cli; hlt");
+    }
+    s_puts("[K64] mem: image [");
+    s_hex64((u64)_kernel_start);
+    s_puts(",");
+    s_hex64((u64)_kernel_end);
+    s_puts(") reserved to ");
+    s_hex64(reserve_top);
+    s_puts("\n");
+
     /* Pass 1: collect usable ranges + FB info from Multiboot2 tags. */
     u64 p = mb_info + 8;
     while (p + 8 <= end) {
@@ -762,8 +790,8 @@ void mem64_init(u64 mb_info) {
         u64 base = ranges[r].base, len = ranges[r].len;
         u64 first = (base + PAGE4K - 1) / PAGE4K;
         u64 last = (base + len) / PAGE4K; /* exclusive */
-        if (first * PAGE4K < RESERVE_TOP)
-            first = RESERVE_TOP / PAGE4K;
+        if (first * PAGE4K < reserve_top)
+            first = reserve_top / PAGE4K;
         for (u64 f = first; f < last; f++) pmm_mark(f, 0);
     }
     /* Re-reserve a low framebuffer sitting inside RAM (mirrors the 32-bit
@@ -884,7 +912,7 @@ void mem64_init(u64 mb_info) {
 void mem64_selftest(void) {
     u64 f0 = pmm_alloc(), f1 = pmm_alloc(), f2 = pmm_alloc();
     if (!f0 || !f1 || !f2 || f0 == f1 || f0 == f2 || f1 == f2 ||
-        f0 < RESERVE_TOP || f1 < RESERVE_TOP || f2 < RESERVE_TOP) {
+        f0 < reserve_top || f1 < reserve_top || f2 < reserve_top) {
         s_puts("[K64] FAIL: PMM alloc broke\n");
         for (;;) __asm__ __volatile__("cli; hlt");
     }

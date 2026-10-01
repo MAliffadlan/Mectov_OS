@@ -76,6 +76,24 @@ static void fx_init(task64_t *t) {
     __asm__ __volatile__("fxsave %0" : "=m"(t->fx));
 }
 
+/* Save OUR OWN FPU/vector image into our TCB.
+ *
+ * The scheduler's switch-out save cannot cover a task that has already
+ * demoted itself: it only trusts a cur_cpu[] entry whose state is still
+ * T_RUNNING (that guard is what keeps a recycled slot from being clobbered
+ * by another CPU's stale regs). So a *blocking* syscall — sleep, waitpid —
+ * must save here, while `self` is provably the live state on this CPU: we
+ * are inside the int $0x80 gate (IF=0, no preemption) and `self` is this
+ * CPU's current task. Without this, a task that blocks loses any value the
+ * compiler kept in xmm/x87 across the call, and the next fxrstor restores
+ * the stale image left by exec (zeros) — M12 hit exactly that: the shell's
+ * hoisted {magic, op} constant came back as 0 and the fs op failed with
+ * EINVAL. fpu64 did not catch it because d_yield() reschedules without
+ * demoting (state stays T_RUNNING, so the scheduler saves it). */
+static void fx_save_self(task64_t *t) {
+    if (t) __asm__ __volatile__("fxsave %0" : "=m"(t->fx));
+}
+
 static int namecpy(char *d, const char *s) {
     int i = 0;
     for (; i < 15 && s[i]; i++) d[i] = s[i];
@@ -539,6 +557,7 @@ u64 task64_waitpid(int pid, u64 status_ptr, int wnohang, regs64_t *r) {
     self->wakeup_tick = 0;
     self->state = T_BLOCKED;
     SCHED_UNLOCK(f);
+    fx_save_self(self); /* demoted: the scheduler will no longer save for us */
     r->rip -= 2;
     return task64_schedule(r);
 }
@@ -654,6 +673,7 @@ u64 task64_sleep(u64 delta, regs64_t *r) {
     self->rsp = (u64)r; /* blocking frame (same M7.1 fix as waitpid) */
     self->state = T_BLOCKED;
     SCHED_UNLOCK(f);
+    fx_save_self(self); /* demoted: the scheduler will no longer save for us */
     r->rip -= 2;
     return task64_schedule(r);
 }
@@ -712,7 +732,10 @@ u64 task64_schedule(regs64_t *r) {
     cur_cpu[me] = next;
     /* Save prev's FPU HERE (under lock): after unlock another CPU could
      * pick prev and run it, and our late fxsave would clobber its live
-     * image with this CPU's stale regs (rare FPU corruption). */
+     * image with this CPU's stale regs (rare FPU corruption).
+     * This only covers a prev that was still T_RUNNING when we arrived;
+     * a task that blocked itself already saved its image in fx_save_self()
+     * before calling us (see there for why the guard cannot do it). */
     if (prev && (prev->state == T_READY || prev->state == T_BLOCKED))
         __asm__ __volatile__("fxsave %0" : "=m"(prev->fx));
     SCHED_UNLOCK(f);

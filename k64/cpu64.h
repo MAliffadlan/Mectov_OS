@@ -153,6 +153,10 @@ u64 k64_ticks(void);
 #define SYS64_KMEMSTATS 137 /* M10: RBX=kmem64_t* -> 0 (kernel heap snapshot) */
 #define SYS64_KMEMPROBE 138 /* M10: RBX=bytes (<=1MB, in one go) -> bytes/0 */
 
+/* M12: one filesystem syscall, op-selected, request struct in user memory
+ * (fs64_req_t is defined with the rest of the FS types below). */
+#define SYS64_FSOP 139
+
 /* ps/meminfo shared layouts (kernel + demos/libc, fixed sizes). */
 typedef struct {
     int id, state, parent, cpu;
@@ -205,6 +209,95 @@ int blk64_read48(int slot, u64 lba, u32 count, void *buf); /* force LBA48 */
 
 /* Shared negative-errno codes: FS layer, syscalls, and anything that has to
  * say "why" instead of just failing. */
+#define E64_EPERM 1
+#define E64_ENOENT 2
+#define E64_EIO 5
+#define E64_ENOMEM 12
+#define E64_EFAULT 14
+#define E64_ENOTDIR 20
+#define E64_EISDIR 21
+#define E64_EINVAL 22
+#define E64_EFBIG 27
+
+/* M12 read-only filesystem layer (k64/fs64.c + k64/ext64.c).
+ * Mount ids are 0..n-1 in mount order; ISO9660 mounts first (the boot CD is
+ * always there), then the first ATA device that really carries ext2. Paths are
+ * absolute and resolved per call; there is no open-file table yet. */
+#define FS64_ISO9660 1
+#define FS64_EXT2 2
+#define FS64_MAX_MOUNTS 4
+
+typedef struct {
+    int type;
+    int blk; /* blk64 slot */
+    u32 block_size;
+    u64 blocks;
+    char label[33];
+    u32 root_lba, root_size; /* ISO9660: root directory extent + size */
+    u32 ex_ipg, ex_bpg, ex_first_block, ex_inode_size, ex_inodes; /* ext2 */
+} fs64_mount_t;
+
+/* One resolved path. `id` is type-specific (ISO: extent LBA, ext2: inode). */
+typedef struct {
+    u64 size;
+    u32 id;
+    int is_dir;
+    u32 dir_bytes;
+} fs64_node_t;
+typedef struct {
+    char name[64];
+    u64 size;
+    u32 id;
+    int is_dir;
+} fs64_dirent_t;
+
+typedef struct {
+    int (*lookup)(fs64_mount_t *m, const char *path, fs64_node_t *out);
+    int (*readdir)(fs64_mount_t *m, const fs64_node_t *dir, u32 index,
+                   fs64_dirent_t *out);
+    long (*read)(fs64_mount_t *m, const fs64_node_t *n, u64 off, void *buf,
+                 u32 len);
+} fs64_ops_t;
+extern const fs64_ops_t fs64_iso_ops, fs64_ext_ops;
+
+void fs64_init(void);
+void fs64_selftest(void);
+int fs64_mounts(void);
+const fs64_mount_t *fs64_mount(int mnt);
+fs64_mount_t *fs64_new_mount(void); /* reserve a zeroed slot (backends only) */
+int fs64_commit_mount(void);        /* publish it -> mount id, <0 if full */
+int fs64_mount_iso(int blk);
+int fs64_mount_ext2(int blk);
+int fs64_lookup(int mnt, const char *path, fs64_node_t *out);
+int fs64_readdir(int mnt, const char *path, u32 index, fs64_dirent_t *out);
+long fs64_read(int mnt, const char *path, u64 off, void *buf, u32 len);
+u64 fs64_hash(int mnt, const char *path, u64 max_len, long *rc_out);
+int fs64_dev_read(fs64_mount_t *m, u64 block, void *buf, u32 bytes);
+int fs64_dev_sector_size(int blk);
+
+/* Request struct for SYS64_FSOP (mirrored in demos/sys64.h — the magic field
+ * is what catches a layout drift between the two headers). */
+#define FS64_OP_LS 1    /* fills ent for `index` in `path` */
+#define FS64_OP_CAT 2   /* copies up to len bytes at off into buf */
+#define FS64_OP_STAT 3  /* fills ent with size/is_dir/id */
+#define FS64_OP_HASH 4  /* rc = FNV-1a 64 of the first len bytes (0 = all) */
+#define FS64_OP_MOUNT 5 /* index = mount id: ent.id=type, ent.size=blocks,
+                         * ent.name=label (the `fs` builtin's only input) */
+#define FS64_REQ_MAGIC 0x5346C0DEu
+typedef struct {
+    u32 magic;
+    u32 op;
+    u32 mnt;
+    u32 index;
+    u64 off;
+    u64 len;
+    u64 buf; /* user pointer (OP_CAT) */
+    char path[128];
+    long rc;
+    u64 hash; /* OP_HASH result (rc would be ambiguous: a hash's top bit
+               * can be set, which would read as a negative errno) */
+    fs64_dirent_t ent;
+} fs64_req_t;
 #define SYS64_PRINT 1
 #define SYS64_TICKS 8
 #define SYS64_YIELD 9
@@ -341,6 +434,60 @@ void paging_enable_nxe_ap(void); /* M7: APs need NXE for user NX pages */
 #define VMM_US  (1ULL << 1)  /* user-accessible (default supervisor) */
 #define VMM_NX  (1ULL << 2)  /* no-execute (needs EFER.NXE) */
 #define VMM_UC  (1ULL << 3)  /* uncacheable MMIO (PCD|PWT) */
+
+/* Shared freestanding string/memory helpers (no libc in k64/). */
+static inline u64 k64_strlen(const char *s) {
+    u64 n = 0;
+    while (s[n]) n++;
+    return n;
+}
+static inline int k64_streq(const char *a, const char *b) {
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+/* ASCII case-insensitive compare: ISO9660 level 1 names are uppercase while
+ * callers type lowercase, and the FS layer is the right place to hide that. */
+static inline int k64_streq_ci(const char *a, const char *b) {
+    for (;; a++, b++) {
+        int ca = (unsigned char)*a, cb = (unsigned char)*b;
+        if (ca >= 'a' && ca <= 'z') ca -= 32;
+        if (cb >= 'a' && cb <= 'z') cb -= 32;
+        if (ca != cb) return 0;
+        if (!ca) return 1;
+    }
+}
+static inline void k64_memcpy(void *d, const void *s, u64 n) {
+    u8 *dd = (u8 *)d;
+    const u8 *ss = (const u8 *)s;
+    for (u64 i = 0; i < n; i++) dd[i] = ss[i];
+}
+static inline void k64_memzero(void *d, u64 n) {
+    u8 *dd = (u8 *)d;
+    for (u64 i = 0; i < n; i++) dd[i] = 0;
+}
+static inline int k64_memeq(const void *a, const void *b, u64 n) {
+    const u8 *aa = (const u8 *)a, *bb = (const u8 *)b;
+    for (u64 i = 0; i < n; i++)
+        if (aa[i] != bb[i]) return 0;
+    return 1;
+}
+
+/* FNV-1a 64: the port's one hash. Used by the M11/M12 gates, where the host
+ * reproduces the same value from the same bytes (see scripts, the *_test.py
+ * files next to this tree). */
+#define K64_FNV_OFFSET 0xCBF29CE484222325ULL
+#define K64_FNV_PRIME 0x100000001B3ULL
+static inline u64 k64_fnv1a64_update(u64 h, const void *p, u64 len) {
+    const u8 *b = (const u8 *)p;
+    for (u64 i = 0; i < len; i++) h = (h ^ b[i]) * K64_FNV_PRIME;
+    return h;
+}
+static inline u64 k64_fnv1a64(const void *p, u64 len) {
+    return k64_fnv1a64_update(K64_FNV_OFFSET, p, len);
+}
 
 /* Small CPU readers shared by k64 C files. */
 static inline u64 cpu_read_efer(void) {

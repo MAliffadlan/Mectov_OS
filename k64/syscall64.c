@@ -17,6 +17,144 @@ static u64 sys_print(u64 ptr, u64 len) {
     return len;
 }
 
+/* M12: one op-selected filesystem call (see FS64_OP_* in cpu64.h). The request
+ * struct lives in user memory and is read field by field through a volatile
+ * pointer after a single range check. OP_CAT is the only op that writes through
+ * the request (via req.buf): fs64_read() copies straight into the caller's
+ * buffer, which is safe for the same reason sys_print() is — the syscall runs
+ * on the caller's CR3, so a validated user VA is a real address.
+ *
+ * Note for callers: this runs with IF=0 like every int $0x80 handler, and the
+ * FS layer holds a lock across its device reads, so a large cat() stalls this
+ * CPU for the duration of the transfer. Chunked reads (the shell uses 2 KiB)
+ * keep that bounded; a future async path is M13 territory. */
+static u64 sys_fsop(u64 ptr) {
+    if (!vmm_user_ok(ptr, sizeof(fs64_req_t))) return (u64)(long)-EFAULT;
+    volatile fs64_req_t *rq = (volatile fs64_req_t *)ptr;
+    if (rq->magic != FS64_REQ_MAGIC) {
+        /* The magic exists precisely to catch a layout drift between the two
+         * mirrored headers (cpu64.h vs demos/sys64.h), so say what arrived and
+         * what was expected rather than reinterpreting fields. */
+        s_puts("[K64] fsop: bad magic=");
+        s_hex32(rq->magic);
+        s_puts(" want=");
+        s_hex32(FS64_REQ_MAGIC);
+        s_puts(" size=");
+        s_dec64(sizeof(fs64_req_t));
+        s_puts(" pid=");
+        s_dec64((u64)(long)task64_current_id());
+        s_puts("\n");
+        return (u64)(long)-22; /* EINVAL */
+    }
+    u32 op = rq->op;
+    int mnt = (int)rq->mnt;
+
+    /* Bounded copy of the path: 128 bytes, must be NUL-terminated inside the
+     * field (an unterminated one would read past the struct). */
+    char path[129];
+    int n = 0;
+    for (; n < 128; n++) {
+        path[n] = rq->path[n];
+        if (!path[n]) break;
+    }
+    path[128] = '\0';
+    if (n == 128) {
+        s_puts("[K64] fsop: unterminated path field\n");
+        return (u64)(long)-22;
+    }
+
+    long ret;
+    switch (op) {
+    case FS64_OP_LS: {
+        fs64_dirent_t e;
+        ret = fs64_readdir(mnt, path, rq->index, &e);
+        if (ret > 0) {
+            for (u64 i = 0; i < sizeof(e.name); i++) rq->ent.name[i] = e.name[i];
+            rq->ent.size = e.size;
+            rq->ent.id = e.id;
+            rq->ent.is_dir = e.is_dir;
+        }
+        break;
+    }
+    case FS64_OP_STAT: {
+        fs64_node_t nd;
+        ret = fs64_lookup(mnt, path, &nd);
+        if (ret == 0) {
+            const char *base = path;
+            for (const char *p = path; *p; p++)
+                if (*p == '/') base = p + 1;
+            int i = 0;
+            if (!base[0]) rq->ent.name[i++] = '/'; /* stat of the root itself */
+            for (; base[i] && i < (int)sizeof(rq->ent.name) - 1; i++)
+                rq->ent.name[i] = base[i];
+            rq->ent.name[i] = '\0';
+            rq->ent.size = nd.size;
+            rq->ent.id = nd.id;
+            rq->ent.is_dir = nd.is_dir;
+        }
+        break;
+    }
+    case FS64_OP_CAT: {
+        u64 ubuf = rq->buf, len = rq->len;
+        if (!len || len > 65536) {
+            ret = -E64_EINVAL;
+            break;
+        }
+        if (!vmm_user_ok(ubuf, len)) {
+            ret = -EFAULT;
+            break;
+        }
+        ret = fs64_read(mnt, path, rq->off, (void *)ubuf, (u32)len);
+        break;
+    }
+    case FS64_OP_MOUNT: {
+        /* Enumerate the mount table without a second ABI for it: the request
+         * fields carry what a `fs` builtin needs (type, block count, label). */
+        const fs64_mount_t *mt = fs64_mount((int)rq->index);
+        if (!mt) {
+            ret = -E64_ENOENT;
+            break;
+        }
+        int i = 0;
+        for (; mt->label[i] && i < (int)sizeof(rq->ent.name) - 1; i++)
+            rq->ent.name[i] = mt->label[i];
+        rq->ent.name[i] = '\0';
+        rq->ent.id = (u32)mt->type;
+        rq->ent.size = mt->blocks;
+        rq->ent.is_dir = 1; /* a mount point is always traversable */
+        ret = 0;
+        break;
+    }
+    case FS64_OP_HASH: {
+        /* FNV-1a 64 of the first `len` bytes (0 = whole file) into req.hash,
+         * and rc stays a plain success/error: a hash is a u64 someone can
+         * compute honestly with the top bit set. */
+        long hrc = 0;
+        u64 h = fs64_hash(mnt, path, rq->len, &hrc);
+        if (hrc) {
+            ret = hrc;
+            break;
+        }
+        rq->hash = h;
+        ret = 0;
+        break;
+    }
+    default:
+        /* An unknown op is an ABI drift between the two headers, and it is
+         * worth a log line: the first symptom otherwise is a command that
+         * silently reports "invalid" for no visible reason. */
+        s_puts("[K64] fsop: bad op=");
+        s_dec64((u64)op);
+        s_puts(" mnt=");
+        s_dec64((u64)(long)mnt);
+        s_puts("\n");
+        ret = -E64_EINVAL;
+        break;
+    }
+    rq->rc = ret;
+    return (u64)ret;
+}
+
 u64 syscall64_dispatch(regs64_t *r) {
     u32 n = (u32)r->rax;
     u64 a = r->rbx, b = r->rcx, c = r->rdx;
@@ -147,6 +285,9 @@ u64 syscall64_dispatch(regs64_t *r) {
         return task64_waitpid((int)a, b, (int)c, r);
     case SYS64_CLONE:
         ret = (u64)(long)task64_clone(a);
+        break;
+    case SYS64_FSOP:
+        ret = sys_fsop(a);
         break;
     default:
         break;

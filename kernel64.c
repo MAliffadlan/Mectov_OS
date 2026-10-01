@@ -365,6 +365,14 @@ void kernel64_main(u64 magic, u64 mb_info) {
      * Probing is pure polling, so it is safe before the IDT is even loaded. */
     blk64_init();
 
+    /* --- M12: read-only filesystems on top of it (k64/fs64.c + k64/ext64.c):
+     * the boot CD as ISO9660, the first ATA device that really carries ext2.
+     * Mounting is deliberately done in the pre-STI selftest block below
+     * instead of here: it allocates from the M10 heap, and the heap's own
+     * selftest proves things about a *pristine* arena (first block zeroed,
+     * fresh blocks packed back to back), so it has to run before any other
+     * consumer. Mounts still land long before the first task exists. */
+
     /* --- M5: tasks (boot context becomes task[0] idle) + embedded image
      * registry (MCT2/ELF64, parsed by the loader at spawn/exec) --- */
     extern char _binary_demos_hello64_mct_start[];
@@ -455,6 +463,11 @@ void kernel64_main(u64 magic, u64 mb_info) {
     heap64_selftest(); /* M10: same reason, and it must run before any
                         * task can allocate (tasks themselves do not yet) */
     blk64_selftest();  /* M11: reads into heap buffers, so it needs M10 first */
+    fs64_init();       /* M12: mount ISO9660 from the boot CD + ext2 from the
+                        * first ATA device. Last in this block on purpose: the
+                        * heap selftest above needs an untouched arena, and the
+                        * blk selftest already proved the device reads work. */
+    fs64_selftest();   /* M12: list/read both filesystems through the FS layer */
     __asm__ __volatile__("sti");
     sched_set_running(); /* from here AP TLBs matter: shootdowns live */
     if (flag_noap) {
