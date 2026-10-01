@@ -16,7 +16,15 @@ typedef short int16_t;
 typedef int   int32_t;
 typedef long long int64_t;
 
-typedef unsigned int uintptr_t;
+/* uintptr_t must match the pointer width on BOTH targets. Naming a concrete
+ * type is a trap: `unsigned int` truncates pointers once 64-bit code includes
+ * this header, and `unsigned long` is not 32-bit on i386 either — it collides
+ * with the `typedef uint32_t uintptr_t` in doom/doom_libc.h and breaks the
+ * 32-bit build. __UINTPTR_TYPE__ is the compiler's exact answer (GCC/Clang), so
+ * the 32-bit line keeps the type it always had (unsigned int) and the 64-bit
+ * kernel gets a wide one. Do NOT pin this to uint32_t — the remaining 32-bit
+ * address fields in src/ get widened as they are ported. */
+typedef __UINTPTR_TYPE__ uintptr_t;
 
 #define NULL ((void*)0)
 

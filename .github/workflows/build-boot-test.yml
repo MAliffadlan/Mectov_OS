@@ -50,8 +50,9 @@ jobs:
 
       - name: Build kernel
         run: |
+          # all32 is explicit: bare `make` builds the 64-bit kernel now.
           make clean_all
-          make
+          make all32
           test -f myos.bin && echo "myos.bin built OK"
 
       - name: Build boot ISO

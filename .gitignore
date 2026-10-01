@@ -17,6 +17,12 @@ obj/
 # Generated boot artifacts (v38.105: the QVM bytecode built from id's official
 # source by id's lcc + q3asm — see scripts/build_qvm.sh)
 build/
+# 64-bit bring-up artifacts (M1+)
+obj64/
+iso64/
+myos64.bin
+mectov64.iso
+serial64.log
 
 # Temporary/Scratch files
 offset
