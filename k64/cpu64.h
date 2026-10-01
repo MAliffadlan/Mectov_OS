@@ -47,6 +47,10 @@ void cons_repaint(void);
 void cons_repaint_rect(int x0, int y0, int x1, int y1);
 /* Stop all console drawing for good (fatal fault paths: no GUI from there). */
 void cons_freeze(void);
+/* M14: suppress console PIXELS but keep the shadow grid filling — the window
+ * between the compositor's back buffer going live and cons_rehome() moving the
+ * view into the terminal window's client. */
+void cons_set_quiet(int quiet);
 void cons_move_view(int ox, int oy);
 /* Framebuffer geometry from the Multiboot2 tag: kernel64.c fills these in
  * while walking the tags (before mem64_init maps the FB in pass 5). */

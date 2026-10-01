@@ -111,6 +111,14 @@ int gui64_init(void) {
     }
     if (!wm64_init()) return 0;
 
+    /* From here the pixels on screen belong to the compositor, but the console
+     * still has a full-screen view and the M8 grey palette — see c_quiet in
+     * console64.c. Quieting it for the length of the transition keeps stray
+     * grey glyphs out of the back buffer; the re-home at the end of it clears
+     * the flag again and repaints from the grid, so the terminal window opens
+     * on the boot log's tail exactly as before. */
+    cons_set_quiet(1);
+
     int w = gfx_width(), h = gfx_height();
     int ww = w - 2 * WIN_MARGIN_X;
     int wh = h - TOPBAR_H - TASKBAR_H - 2 * WIN_MARGIN_Y;
@@ -124,7 +132,13 @@ int gui64_init(void) {
     /* Terminal window, then the console moved into it. cons_rehome carries the
      * boot log's tail so the window opens showing where the boot got to. */
     con_id = wm64_open(wx, wy, ww, wh, "console - mectov64", 0, 1);
-    if (con_id < 0) return 0;
+    if (con_id < 0) {
+        /* No window to move the console into: it stays full-screen, which is
+         * what it already is, so stop quieting it rather than leave the boot
+         * log invisible for the rest of the run. */
+        cons_set_quiet(0);
+        return 0;
+    }
     int cx = 0, cy = 0, cw = 0, ch = 0;
     wm64_client_rect(con_id, &cx, &cy, &cw, &ch);
 
@@ -141,6 +155,7 @@ int gui64_init(void) {
     u64 lock = console_lock();
     cons_set_colors(0x00EDE6D9u, 0x0016130Fu); /* IC_INK on IC_BG_PANEL */
     cons_set_dirty_hook(gui64_dirty);
+    cons_set_quiet(0); /* the recolour above landed; pixels are welcome again */
     rehomed = cons_rehome((u32)cx, (u32)cy, (u32)cw, (u32)ch);
     cons_view_cells(&vcols, &vrows);
     console_unlock(lock);

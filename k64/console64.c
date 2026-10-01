@@ -65,6 +65,23 @@ static int c_cur_x = -1, c_cur_y = -1; /* cell carrying the underline (-1 none) 
  * its cursor entirely the first time the desktop repainted that cell. */
 static int c_cur_on;
 static u32 c_fg = CONS_FG, c_bg = CONS_BG;
+/* M14: emit no console pixels, but KEEP filling the shadow grid.
+ *
+ * The desktop's back buffer is live from gfx_backbuf_alloc() (inside
+ * wm64_init) until cons_rehome() moves the view into the terminal window's
+ * client. In that window the console still believes it owns the whole screen:
+ * c_ox/c_oy are still 0,0 and c_fg is still the M8 default grey. A print in
+ * that window therefore paints grey text into the compositor's surface at the
+ * old origin, and nothing clears or reports it as damage -- so it survives in
+ * the back buffer and shows up on the panel whenever some later, unrelated
+ * damage rect happens to cover those pixels. That was cons_test's "M8 grey
+ * leftovers" gate failing on a couple of runs out of four, always on the last
+ * text row, which is exactly where a print between the two points lands.
+ *
+ * Distinct from cons_freeze(), which stops the grid too: the grid is what
+ * cons_rehome() carries the boot log's tail from, so freezing here would drop
+ * those lines out of the terminal window. */
+static int c_quiet;
 static void (*c_dirty)(int x0, int y0, int x1, int y1);
 static void (*c_hide)(void);
 static char c_grid[CONS_MAX_ROWS][CONS_MAX_COLS];
@@ -97,6 +114,7 @@ static void hide_cursor_for_bulk(void) {
  * also clamped so the shadow write cannot escape either. */
 static void draw_cell(int cx, int cy, unsigned char ch) {
     if (cx < 0 || cy < 0 || cx >= c_cols || cy >= c_rows) return;
+    if (c_quiet) return; /* the grid store in put_cell() already happened */
     gfx_cell(c_ox + cx * CONS_CELL_W, c_oy + cy * CONS_CELL_H, ch, c_fg,
              (int)c_bg);
     notify(cx * CONS_CELL_W, cy * CONS_CELL_H, CONS_CELL_W, CONS_CELL_H);
@@ -111,7 +129,7 @@ static void cursor_erase(void) {
 }
 
 static void cursor_paint(void) {
-    if (!c_ready) return;
+    if (!c_ready || c_quiet) return;
     if (c_cur_on && c_cur_x == c_cx && c_cur_y == c_cy) return;
     int px = c_cx * CONS_CELL_W;
     int py = c_cy * CONS_CELL_H + (CONS_CELL_H - 2);
@@ -129,8 +147,10 @@ static void cursor_paint(void) {
 static void scroll(void) {
     int vw = c_cols * CONS_CELL_W, vh = c_rows * CONS_CELL_H;
     hide_cursor_for_bulk();
-    gfx_shift_up(c_ox, c_oy, vw, vh, CONS_CELL_H);
-    gfx_fill(c_ox, c_oy + vh - CONS_CELL_H, vw, CONS_CELL_H, c_bg);
+    if (!c_quiet) {
+        gfx_shift_up(c_ox, c_oy, vw, vh, CONS_CELL_H);
+        gfx_fill(c_ox, c_oy + vh - CONS_CELL_H, vw, CONS_CELL_H, c_bg);
+    }
     for (int y = 1; y < c_rows; y++)
         for (int x = 0; x < c_cols; x++) c_grid[y - 1][x] = c_grid[y][x];
     for (int x = 0; x < c_cols; x++) c_grid[c_rows - 1][x] = ' ';
@@ -197,6 +217,11 @@ void cons_set_dirty_hook(void (*fn)(int x0, int y0, int x1, int y1)) {
     c_dirty = fn;
 }
 void cons_set_hide_hook(void (*fn)(void)) { c_hide = fn; }
+
+/* M14: stop/start emitting console pixels. The grid keeps filling either way,
+ * so the re-home that ends the quiet period still carries the boot log's tail
+ * into the terminal window. See c_quiet for why the quiet window exists. */
+void cons_set_quiet(int q) { c_quiet = q; }
 
 /* Size the view from a rect, clamp to the shadow grid, wipe it and put the
  * cursor at home. `wipe_all` also clears the rest of the framebuffer: only
