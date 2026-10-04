@@ -96,11 +96,13 @@ if [ "${MECTOV_SKIP_BUILD:-0}" = "1" ]; then
         echo "    Build dulu sekali tanpa flag itu:  MECTOV_Q3=1 ./run.sh"
         exit 1
     fi
-    echo "[*] MECTOV_SKIP_BUILD=1: lewati make clean_all + make + grub-mkrescue."
+    echo "[*] MECTOV_SKIP_BUILD=1: lewati make clean_all + make all32 + grub-mkrescue."
     echo "[*]    ISO: mectov.iso ($(stat -c%s mectov.iso) bytes, $(date -r mectov.iso '+%Y-%m-%d %H:%M'))"
 else
-    # Rebuild kernel (akan mengompilasi semua MCT dinamis secara bersih)
-    make
+    # Rebuild kernel (akan mengompilasi semua MCT dinamis secara bersih).
+    # `all32` eksplisit: bare `make` sekarang membangun kernel 64-bit
+    # (mainline x86_64, 1 Okt); skrip ini membangun ISO 32-bit.
+    make all32
 
     # Setup ISO directory
     mkdir -p iso/boot/grub
