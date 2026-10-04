@@ -22,7 +22,22 @@ SOCK = "/tmp/qmp_kbdtest"
 
 
 def has_kvm():
-    return os.path.exists("/dev/kvm")
+    """KVM only if the node can actually be OPENED read/write.
+
+    Existence is not permission, and guessing "it exists" is how this gate
+    first failed in CI (run 37196204200, 4 Oct): the job reported "no shell
+    prompt" about a guest that never booted — QEMU with -enable-kvm died at
+    startup, before it had created serial_kbdtest.log, so the artifact carried
+    no kbd log at all. run.sh already preflights with -r/-w and falls back to
+    TCG; this is the same rule for the Python gates. TCG is fully supported
+    (every other CI job runs it), so a silent software-emulation run is the
+    correct answer here, not a failed test.
+    """
+    try:
+        os.close(os.open("/dev/kvm", os.O_RDWR))
+        return True
+    except OSError:
+        return False
 
 
 def boot():
@@ -112,7 +127,13 @@ def main():
     try:
         # wait for shell prompt (boot can take a while on TCG)
         if not wait_for(SERIAL, "mct> ", 180):
-            print("kbd_test FAIL: no shell prompt")
+            # Name the cause instead of the symptom: `kvm=no` means TCG (slow
+            # but supported), a dead qemu with an absent/empty serial file means
+            # it never booted at all, and rc=0 with bytes in it means the
+            # kernel booted but never reached the shell.
+            print("kbd_test FAIL: no shell prompt "
+                  "(kvm=%s, qemu rc=%s, serial bytes=%d)"
+                  % ("yes" if has_kvm() else "no", qemu.poll(), fsize(SERIAL)))
             return 1
         q = QMP(SOCK)
         ok = type_line(q, SERIAL, list("run argdemo foo bar") + ["ret"])

@@ -48,7 +48,18 @@ CLIENT_RE = re.compile(
 
 
 def has_kvm():
-    return os.path.exists("/dev/kvm")
+    """KVM only if the node can be OPENED read/write, not merely present.
+
+    See kbd_test.py's has_kvm() for the evidence: a runner whose /dev/kvm
+    exists but cannot be opened kills QEMU at startup, and this gate would then
+    report the symptom (no prompt / no marker) about a guest that never booted.
+    TCG is fully supported, so falling back is the honest answer.
+    """
+    try:
+        os.close(os.open("/dev/kvm", os.O_RDWR))
+        return True
+    except OSError:
+        return False
 
 
 def boot():

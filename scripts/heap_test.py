@@ -32,7 +32,18 @@ SOCK = "/tmp/qmp_heaptest"
 
 
 def has_kvm():
-    return os.path.exists("/dev/kvm")
+    """KVM only if the node can be OPENED read/write, not merely present.
+
+    See kbd_test.py's has_kvm() for why: a runner whose /dev/kvm exists but
+    cannot be opened kills QEMU at startup, and the gate then reports the
+    symptom (no prompt) about a guest that never booted. run.sh preflights the
+    same way; TCG is fully supported.
+    """
+    try:
+        os.close(os.open("/dev/kvm", os.O_RDWR))
+        return True
+    except OSError:
+        return False
 
 
 def boot():

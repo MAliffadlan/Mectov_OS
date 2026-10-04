@@ -52,10 +52,25 @@ DESKTOP_RE = re.compile(
     r"cursor=(\d+),(\d+)")
 
 
+def has_kvm():
+    """KVM only if the node can be OPENED read/write, not merely present.
+
+    See kbd_test.py's has_kvm() for the evidence (run 37196204200): a runner
+    whose /dev/kvm exists but cannot be opened kills QEMU at startup, and the
+    gate then blames the kernel for a guest that never booted. TCG is fully
+    supported — every other CI job already runs it.
+    """
+    try:
+        os.close(os.open("/dev/kvm", os.O_RDWR))
+        return True
+    except OSError:
+        return False
+
+
 def boot():
     # -machine pc: same machine run64.sh boots (q35 has no legacy ATA channel).
     cmd = ["qemu-system-x86_64", "-machine", "pc"]
-    if os.path.exists("/dev/kvm"):
+    if has_kvm():
         cmd += ["-cpu", "host", "-enable-kvm"]
     else:
         cmd += ["-cpu", "qemu64,+nx"]
