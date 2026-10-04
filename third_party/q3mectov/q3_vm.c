@@ -2928,10 +2928,27 @@ static void q3arena_frame(vm_t *vm, int frame) {
              * machine, not the port's bookkeeping. ammo indexes by weapon:
              * ps->ammo[WP_MACHINEGUN] starts at 100 (FFA spawn, g_client.c)
              * and PM_Weapon takes one per shot. */
-            /* v38.145: the whole play/hud/sky/viewmodel block below is behind
-             * Q3_DEEP_DIAG — no suite parses any of it, and together the four
-             * lines are ~600 bytes of reportf every 100 frames. */
-#ifdef Q3_DEEP_DIAG
+            /* v38.158: this block is SUITE EVIDENCE, not dev chatter, and it
+             * is compiled into every MECTOV_Q3=1 build.
+             *
+             * v38.145 folded the whole play/hud/sky/viewmodel block into
+             * `#ifdef Q3_DEEP_DIAG` on the belief that no suite parsed it.
+             * That belief was wrong: q3hud_test.py parses the `hud` line into
+             * every one of its assertions, q3sky_test.py the `sky` line, and
+             * q3jump/q3viewmodel/q3cull the `play`/`viewmodel` pair. No build
+             * anywhere defines Q3_DEEP_DIAG, so the lines existed in NO
+             * binary at all — and CI's quake3 job died at `[FAIL] the status
+             * bar was never sampled` (run 37189377311, 4 Oct) with the game
+             * plainly running behind it. A gate that removes the evidence a
+             * test asserts on is not an optimization; it is a broken test.
+             *
+             * The serial cost that motivated v38.145 (~600 bytes per 100
+             * frames) is also gone as a concern: since v38.157 the writer
+             * only appends to a 16 KB ring that the per-core timer tick
+             * drains, so no frame blocks on the UART for these lines.
+             * The lines NOTHING parses (f2b/glsplit up top, glcyc/glms in
+             * the middle, ps below) stay behind the macro — those are how
+             * the raster split was diagnosed, and the measurement is done. */
             if ((frame % 100) == 0 && ps) {
                 /* bg_public.h's enums are not in this unit's include path
                  * (g_public.h does not pull it), and the values are stable
@@ -3060,7 +3077,6 @@ static void q3arena_frame(vm_t *vm, int frame) {
                             q3ref_viewmodel_flash(), vm_bright, vm_dark);
                 }
             }
-#endif /* Q3_DEEP_DIAG (play/hud/sky/viewmodel) */
             a_us_gl_begin = a_us_gl_draw = a_us_gl_end = 0;
             a_srv_ticks = 0;
             a_srv_ticks_win = 0;

@@ -379,9 +379,28 @@ def main():
             return 1
 
         # ---- 4. the loader's own verdict ----------------------------------
-        if not wait_for_in_file(SERIAL_LOG, VMLOAD_MARKER, 120):
-            print("[FAIL] the view model loader never reported anything — "
-                  "the [Q3VIEWMODEL] line is missing entirely")
+        # The COMPLETE line, not its head. v38.157's serial writer appends to
+        # a 16 KB ring that the timer tick drains, so a poller can grab the
+        # file while the tail of a line is still queued — the head arrives
+        # first, and a parser that fires on the marker alone reads a half-line
+        # and fails on its own timing. Seen exactly that on this suite (4 Oct
+        # run): the log ended at `base=models` and this parser reported "not
+        # in the documented shape" about a line the guest had written whole.
+        # The writer emits the line in ONE call with the newline last, so the
+        # terminating newline is the completeness test.
+        complete = re.compile(re.escape(VMLOAD_MARKER) + r"[^\n]*\n")
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            if complete.search(read_file(SERIAL_LOG)):
+                break
+            time.sleep(1)
+        if not complete.search(read_file(SERIAL_LOG)):
+            if VMLOAD_MARKER in read_file(SERIAL_LOG):
+                print("[FAIL] the [Q3VIEWMODEL] line never finished arriving "
+                      "(the log has its head but no newline after it)")
+            else:
+                print("[FAIL] the view model loader never reported anything "
+                      "— the [Q3VIEWMODEL] line is missing entirely")
             dump_tail()
             return 1
         ld = [m.groupdict() for m in

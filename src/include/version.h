@@ -51,6 +51,37 @@
 //     burst after each clump). Every byte still reaches the log, panic paths
 //     flush the ring first.
 // 150-156 are spoken for (see above); 157 is the next free number.
-#define OS_VERSION "38.157"
+//
+// v38.158: a CI repair release; the kernel itself is unchanged except that the
+// Q3 diagnostics the suites assert on exist in the binary again. The GitHub
+// Actions run on the merge commit (37189377311, 4 Oct) was red in two jobs:
+//  1. kernel64: `make iso64` died at `grub-mkrescue: error: `mformat`
+//     invocation failed` because that job never installed mtools — it landed
+//     with a comment claiming mtools was not needed while the 32-bit build job
+//     installs it and proves the opposite. It had been red since 1 Oct.
+//  2. quake3: the HUD step failed at "[FAIL] the status bar was never
+//     sampled" — v38.145 folded the play/hud/sky/viewmodel lines behind
+//     `#ifdef Q3_DEEP_DIAG` on the belief that no suite parsed them, while
+//     q3hud/q3sky/q3jump/q3viewmodel/q3cull all do, and no build anywhere
+//     defines that macro: the evidence existed in no binary at all. The block
+//     is compiled again; the lines nothing parses stay gated.
+// Two harness repairs rode along: the stale `Q3 sounds` CI step and the
+// `check-q3snd` target (the script was retired in v38.142), and two suite
+// races (q3viewmodel waiting for a line's head under v38.157's asynchronous
+// serial ring, and q3hud's unpinned frame-20 histogram A/B).
+//
+// The q3hud flake turned out to be an OPEN renderer defect, not a HUD leak,
+// and the suite now measures it instead of tripping over it: at the same
+// pinned eye one boot in two draws 12 extra faces — `drawn=38 tris=76
+// back=34 untrusted=32` where a healthy boot reads `drawn=26 tris=52 back=46
+// untrusted=8`, constant from frame 20 to frame 100 — the backface
+// reject's "the file's normals disagree" escape hatch firing on 24 extra
+// triangles — and those pixels are exactly the ones that move between the
+// `patch` and `wall` histogram buckets while cyan/stepgreen/violet/bright do
+// not move at all. That defect is named here and in the README row, not
+// hidden: the check asserts the level's palette exactly and its covered area
+// to within 1%, and reports the warm-bucket split it sees.
+// 150-157 are spoken for (see above); 158 is the next free number.
+#define OS_VERSION "38.158"
 
 #endif

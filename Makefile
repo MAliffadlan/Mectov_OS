@@ -934,24 +934,11 @@ check-q3sky:
 	MECTOV_Q3=1 $(MAKE) iso
 	python3 scripts/check.py --keep-images --only q3sky $(CHECK_ARGS)
 
-# The sounds (v38.129, Q3 phase 24): id's own sounds through the SB16 — the
-# event tap maps id's own client events to the names id's client spells, and
-# q3sound.c loads the WAVs and plays them through the kernel's SB16 driver.
-# Three boots: on (QEMU's SB16 on the `none` audio backend — a present, silent
-# card, so the counters are real), `nosound` (loaded and tapped, counted, not
-# played), and no card (everything still loads, plays are skipped, no crash).
-check-q3snd:
-	MECTOV_Q3=1 $(MAKE) iso
-	python3 scripts/check.py --keep-images --only q3snd $(CHECK_ARGS)
-
-# VirtIO-GPU (v38.115, GPU phase 1): the kernel's first MODERN virtio-pci
-# driver — the device has no legacy interface to drive, so the transport itself
-# (capability walk, 64-bit features, control queue, notify) is half the work.
-# The suite attaches its own virtio-gpu-pci, asserts the bring-up from the
-# device's own numbers, byte-compares a screendump of THE DEVICE's console
-# against the pattern the driver handed it, and runs `gpustat` to prove the
-# command reads live state. No GL and no MECTOV_Q3 variant needed; the script's
-# `--gl` flag covers the 3D-capable device when the host has EGL.
+# The sounds (v38.129, Q3 phase 24) target is GONE with the feature: v38.142
+# retired the sound bridge (the game runs silent) and q3snd_test.py with it.
+# The target stayed behind and pointed at a script that no longer exists, so
+# `make check-q3snd` could only fail at "can't open file" — checked and
+# removed in v38.158 rather than left as a trap.
 check-virtiogpu:
 	$(MAKE) iso
 	python3 scripts/check.py --keep-images --only virtiogpu $(CHECK_ARGS)
@@ -1109,4 +1096,4 @@ ext2test.img:
         myos64 iso64 check64 \
         check-q3 check-q3tgl check-q3play check-q3vm check-q3arena check-q3retail \
         check-q3vis check-q3heavy check-q3jump check-q3viewmodel check-q3hud \
-        check-q3sky check-q3snd check-q3cull check-virtiogpu
+        check-q3sky check-q3cull check-virtiogpu

@@ -585,21 +585,12 @@ jobs:
           # moves and no additive layer is drawn.
           python3 scripts/q3sky_test.py --iso mectov-q3.iso --timeout 600
 
-      - name: Q3 sounds (v38.129)
-        run: |
-          # v38.129 (Q3 phase 24): id's own sounds through the SB16. The event
-          # tap in q3_vm.c reads the SAME events id's client reads (footsteps,
-          # the four-shot machgf fire cycle, falls, jump pads, the
-          # configstring-driven general sounds), maps them by name exactly as
-          # cg_event.c/cg_weapons.c spell them, and plays them through the
-          # WAV loader + 8-channel mixer in q3sound.c, which pours into the
-          # kernel's SB16 driver. CI has no speakers and needs none: QEMU's
-          # SB16 attached to the `none` audio backend is a REAL device with a
-          # silent wire, so every counted play is a real hand-off. Three
-          # boots: on (16 fixture WAVs load, played>0, skip=drop=0), `nosound`
-          # (loaded and tapped, played=0, skips counted), and NO card (grace:
-          # everything still loads, plays are skipped not dropped).
-          python3 scripts/q3snd_test.py --iso mectov-q3.iso --timeout 600
+      # v38.142 retired the sound bridge (the game runs silent), and
+      # q3snd_test.py went with it — the step that used to sit here called a
+      # script that no longer exists, so it could only ever fail with
+      # "can't open file". It was masked until the HUD step above it started
+      # passing, which is exactly the kind of dead CI step this workflow is
+      # supposed to never carry. q3hud and q3sky are the Q3 evidence now.
 
   storage:
     needs: build
@@ -901,7 +892,12 @@ jobs:
   #  - python3-pil is NOT needed. gui/cons/fs tests read QEMU's P6 PPM
   #    screendumps through scripts/terminal_launch.py's own pure-Python
   #    _load_ppm; terminal_launch imports nothing but `time`.
-  #  - mtools/dosfstools are NOT needed: FAT32 belongs to the `storage` job.
+  #  - mtools IS needed, and assuming otherwise is how this job failed from
+  #    the day it landed: `grub-mkrescue` builds the ISO's EFI System
+  #    Partition image with `mformat`, and without mtools `make iso64` dies
+  #    at `grub-mkrescue: error: `mformat` invocation failed` (see runs
+  #    36861807858 and 37189377311). dosfstools is NOT needed — FAT32
+  #    belongs to the `storage` job.
   #  - e2fsprogs IS needed: scripts/mk_ext2disk.py calls mkfs.ext2 + debugfs
   #    to build the ext2 fixture the M12 gates hash.
   #  - grub-pc-bin + xorriso are needed for `make iso64` (grub-mkrescue).
@@ -919,6 +915,7 @@ jobs:
             nasm \
             grub-pc-bin \
             xorriso \
+            mtools \
             qemu-system-x86 \
             e2fsprogs
 
