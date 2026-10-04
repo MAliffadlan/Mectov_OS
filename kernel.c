@@ -33,6 +33,27 @@ volatile int pending_logout = 0;
 volatile int needs_redraw = 1;
 static int fps_val = 0;
 static int fps_frames = 0;
+/* v38.146: present-rate readout for the render task (taskbar HUD value =
+ * full_redraw+swap completions per second). Logged in the perf line as
+ * pres_fps; ~10 bytes per 100 frames, kept permanently for tuning. */
+int kernel_present_fps(void) { return fps_val; }
+
+/* v38.139: composite accounting while a window owns the mouse capture.
+ *
+ * The game task is the one paying for these composites, so it is the one that
+ * reads the number, and it is read+cleared like wm_q3_times() — the perf line
+ * reports a window, not a run. Counted only while a capture is active: that is
+ * the share of the desktop's work that exists *because* the game is on screen.
+ * Until this existed, "the desktop is charging me 19% of my frame" was an
+ * inference from `other_ms`, a bucket that also holds serial writes and the
+ * scheduler's own stolen time. */
+static int cap_comp_calls, cap_comp_us;
+void kernel_capture_comp_stats(int *calls, int *us) {
+    if (calls) *calls = cap_comp_calls;
+    if (us)    *us    = cap_comp_us;
+    cap_comp_calls = 0;
+    cap_comp_us = 0;
+}
 static uint32_t fps_last_tick = 0;
 static uint32_t last_render_us = 0;
 
@@ -98,6 +119,186 @@ void full_redraw() {
 
     uint32_t end_us = timer_get_us();
     last_render_us = end_us - start_us;
+}
+
+/* v38.150: ONE window owns the back buffer at a time.
+ *
+ * Why this exists, measured. The Q3 frame loop renders at an even 40 Hz
+ * (fps=40, idle_ms=1696 per 100 frames = 17 ms of the 25 ms frame spent
+ * waiting, so ~9 ms of real work per frame). The swap, however, happened in
+ * the DESKTOP loop's capture branch (wm_draw_window + wait_for_vsync +
+ * swap_buffers), and that loop only reaches the swap ~29-34 times a second
+ * (pres_fps=29..34, comp_s=28..30, comp_ms~320 per 100 frames). So roughly
+ * ten rendered frames a second never reached the glass, and the picture
+ * advanced in one-or-two-rendered-frame steps: "fps stays 40 but the camera
+ * goes patah-patah". Nothing is wrong with the renderer or the input path —
+ * wait_for_vsync() is a no-op in this port (0x3DA polling is disabled under
+ * QEMU, and it measured 10 us), so there is no vblank beat either. Frames were
+ * simply being dropped between render and present.
+ *
+ * So the game task presents its own frame (see desktop_present_window below),
+ * which is what v38.139's comment already said should happen; the swap just
+ * never moved out of the desktop loop. Both presenters draw into the SAME
+ * back buffer, so they take this lock: whoever holds it owns the back buffer
+ * for the duration of draw+swap, and the loser skips (its invalidate still
+ * stands, so the desktop loop presents the window a moment later). */
+static volatile int present_busy;
+
+/* v38.150: when the game last put its own frame on the glass (µs clock).
+ * The desktop loop's capture branch consults this to avoid re-presenting a
+ * frame the game task just presented: same pixels, full composite cost
+ * (~3 ms here, more on a slow host), twice per frame at worst. A stale
+ * timestamp means the game stopped presenting (loading, pause, quit) and the
+ * desktop resumes — self-healing, nothing to reset. */
+static volatile uint32_t last_game_present_us;
+
+int desktop_present_window(int id) {
+    int drew;
+    if (id < 0) return 0;
+    if (!vga_fullscreen_active() && id != wm_capture_owner()) {
+        /* Only the window that owns the screen may be presented alone: without
+         * the capture the desktop behind it has to be composed too, or the
+         * swap would push a hole in the picture. */
+        return 0;
+    }
+    if (__sync_lock_test_and_set(&present_busy, 1)) return 0;  /* other presenter */
+    drew = wm_draw_window(id);
+    if (drew) {
+        wait_for_vsync();
+        swap_buffers();
+        fps_frames++;   /* the present counter in this file counts every swap
+                         * (the 200 ms window below divides by it), so the
+                         * game's own presents must count too — without this
+                         * the on-glass FPS number read 4 while the game was
+                         * swapping 40 frames a second itself. */
+        last_game_present_us = timer_get_us();
+    }
+    __sync_lock_release(&present_busy);
+    return drew;
+}
+
+/* v38.137: present the whole screen from the caller's own task, damage
+ * included.
+ *
+ * Why this exists: mark_dirty() only RECORDS damage while the back buffer is
+ * the active render target (see vga.c), and swap_buffers() resets the damaged
+ * rect every time it runs. So a composite that happens while some window's
+ * content buffer is installed, or a swap that lands between a draw and its
+ * damage marking, can leave a rectangle unmarked — and "unmarked" means the
+ * swap never copies it, so that rectangle keeps whatever was on the glass
+ * before. That is the loading screen that stayed on screen for minutes while
+ * the game ran behind it (the user's screenshot: `loading 8s` on the glass,
+ * `frame 380 drawn=799` in the serial log).
+ *
+ * Damaging the whole screen first makes the swap unconditional, which is what
+ * a caller who is about to be looked at wants. It is the same trick the
+ * login/logout/lock paths already use. */
+void desktop_present_now(void) {
+    mark_dirty(0, 0, (int)fb_width, (int)fb_height);
+    needs_redraw = 0;
+    full_redraw();
+}
+
+/* v38.150: a full compose requested FOR LATER, not now. The game task used to
+ * call desktop_present_now() directly once a second, which put a whole
+ * full-screen composite (tens of ms on a slow, cluttered desktop) inside its
+ * own frame — a metronome hitch folded into "kadang patah". Now it sets this
+ * flag and the desktop loop spends its own time on it below. Single writer
+ * (the game task, 1 Hz), single reader (the loop); the only race leaves the
+ * flag set, which just means one more compose. If the loop never gets around
+ * to it, the next tick sets it again — nothing is lost, the chrome is only
+ * ever late, never wrong. */
+volatile int want_full_present = 0;
+
+/* v38.139: take one mouse packet out of the PS/2 accumulator and hand it to
+ * whichever window owns the relative-motion capture.
+ *
+ * Why this is a function and no longer three lines inside the main loop: the
+ * rate this runs at IS the look rate. The game's view angle is
+ * `delta_angles + q3vm_cmd_yaw`, and the camera reads it live (v38.143), so the
+ * aim only moves when this runs — and until now the only caller was the
+ * desktop's idle loop. That tied aiming to the compositor's schedule instead of
+ * to the picture: on the player's host (28 fps, frame times 27-44 ms, the 40 Hz
+ * pacer permanently late) a slow mouse turn arrived in clumps, which is the
+ * "nengok pelan pake mouse patah patah" report. The Q3 frame loop now calls
+ * this once per rendered frame, before it builds its usercmd, so the aim is
+ * never older than the frame it is drawn into.
+ *
+ * Two callers cannot lose or double-count a packet: mouse_take_delta() drains
+ * with an atomic exchange (xchg, v38.150 — the old cli/read/clear was only
+ * atomic on one core, and SMP delivery measured 4x motion), and the wire edge
+ * below is a single shared static, so whoever runs first takes the packet and
+ * the other one sees zero.
+ *
+ * Returns the button state it saw — the main loop keeps its own prev_* edge
+ * detector in sync with it — or -1 when no window is capturing. */
+int desktop_capture_pump(void) {
+    extern int wm_capture_owner(void);
+    extern int mouse_take_delta(int *dx, int *dy);
+    extern int wm_capture_event(int dx, int dy, int btn);
+    static int cap_prev_btn = -1;
+    uint32_t eflags;
+    int btn, cdx = 0, cdy = 0, pinx = 0, piny = 0;
+
+    if (wm_capture_owner() < 0) { cap_prev_btn = -1; return -1; }
+
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    btn = (int)(uint32_t)mouse_btn;
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+
+    if (mouse_take_delta(&cdx, &cdy) || btn != cap_prev_btn) {
+        cap_prev_btn = btn;
+        wm_capture_event(cdx, cdy, btn);
+    }
+    /* The arrow is pinned inside the capturing window and hidden, so this is
+     * bookkeeping — but it must happen for whichever task drained last, or a
+     * later non-capture hover would resolve from a stale position. */
+    if (wm_capture_center(&pinx, &piny)) {
+        extern int cursor_draw_x, cursor_draw_y;
+        mouse_x = pinx;
+        mouse_y = piny;
+        cursor_draw_x = pinx;
+        cursor_draw_y = piny;
+    }
+    return btn;
+}
+
+/* v38.134: let a long-running kernel task hand the screen a frame.
+ *
+ * The desktop is composited in the idle loop, and a kernel task that never
+ * blocks outranks it for as long as it stays runnable. The Q3 loader is
+ * exactly that: ~10 s of Com_Init, and the whole VM/GAME_INIT phase (40 s on
+ * the busy host whose session started this release), so the loading screen sat
+ * on ONE image for the length of the phase and the wait read as a hang.
+ * Measured with monitor screendumps: three shots four seconds apart with ZERO
+ * changed pixels, then the texture bar moving, then zero again until the game
+ * appeared. wm_invalidate() cannot fix that — the invalidate is what the
+ * desktop loop reacts to, and the desktop loop is the thing that is not
+ * running. So the loader pumps the composite itself, from the points it owns
+ * (one texture, one engine file read), and the screen keeps moving.
+ *
+ * Same 60 fps ceiling the idle loop uses, and never while the game owns the
+ * screen (its fullscreen path presents the frame itself). */
+void desktop_pump(void) {
+    static uint32_t pump_last_tick;
+    extern volatile uint32_t ticks_per_sec;
+    extern int vga_fullscreen_active(void);
+    uint32_t now, interval;
+
+    if (vga_fullscreen_active()) return;
+
+    now = get_ticks();
+    interval = (ticks_per_sec * 16) / 1000;
+    if (interval < 1) interval = 1;
+    if (now - pump_last_tick < interval) return;
+    pump_last_tick = now;
+
+    wm_tick_all();
+    /* v38.137: the composite AND the swap come from here now, with the whole
+     * screen damaged first (see desktop_present_now above). The old shape
+     * cleared the idle loop's flag and drew without it, which is how the
+     * loading screen ended up on the glass while the game ran. */
+    desktop_present_now();
 }
 
 void kernel_main(uint32_t magic, uint32_t addr) {
@@ -470,27 +671,16 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         // the cursor is pinned inside it (and hidden by vga.c). Without this
         // branch a crosshair would stop at the screen edge and hovering would
         // never generate a single mouse event.
+        //
+        // v38.139: the drain itself moved into desktop_capture_pump() (above)
+        // because the Q3 frame loop is now a second caller — it must be, or the
+        // aim only moves as often as this loop happens to run.
         extern int wm_capture_owner(void);
         int cap_id = wm_capture_owner();
-        if (cap_id >= 0) {
-            int cdx = 0, cdy = 0;
-            extern int mouse_take_delta(int *dx, int *dy);
-            int moved = mouse_take_delta(&cdx, &cdy);
-            if (moved || btn != prev_btn) {
-                extern int wm_capture_event(int dx, int dy, int btn);
-                wm_capture_event(cdx, cdy, btn);
-            }
-            int pinx = 0, piny = 0;
-            extern int wm_capture_center(int *x, int *y);
-            if (wm_capture_center(&pinx, &piny)) {
-                mouse_x = pinx;
-                mouse_y = piny;
-                extern int cursor_draw_x, cursor_draw_y;
-                cursor_draw_x = pinx;
-                cursor_draw_y = piny;
-            }
+        int cap_btn = desktop_capture_pump();
+        if (cap_btn >= 0) {
             mouse_scroll = 0;   // wheel is not routed while captured
-            prev_btn = btn; prev_mx = mx; prev_my = my;
+            prev_btn = cap_btn; prev_mx = mx; prev_my = my;
         } else if (mx != prev_mx || my != prev_my || btn != prev_btn) {
             // Idle auto-lock (v38.51): any mouse activity restarts the
             // `locktimeout` countdown.
@@ -574,8 +764,19 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                 // 200ms cadence. Not while a game owns the present path: the
                 // cursor is hidden then (mouse captured), and swapping would
                 // push the game's half-drawn frame.
+                //
+                // v38.150: ...and that "not while" was only a comment. The code
+                // below it checked vga_fullscreen_active() but never the
+                // capture, so every pure-motion event swapped while a game held
+                // the mouse: up to ~100 wasted swaps/s (each counted in
+                // pres_fps, which is how a 32 fps game reported pres_fps=92),
+                // each one racing the game task's own present and capable of
+                // landing mid-frame — judder exactly while the mouse moves.
+                // Skip it whenever any window holds the capture; the capturer
+                // presents for itself, and there is no cursor to draw anyway.
                 extern int vga_fullscreen_active(void);
-                if (!vga_fullscreen_active()) {
+                extern int wm_capture_owner(void);
+                if (!vga_fullscreen_active() && wm_capture_owner() < 0) {
                     wait_for_vsync();
                     swap_buffers();
                     fps_frames++;
@@ -835,9 +1036,49 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         extern volatile uint32_t ticks_per_sec;
         uint32_t frame_interval = (ticks_per_sec * 16) / 1000;
         if (frame_interval < 1) frame_interval = 1;
+        /* v38.131: per-window tick callbacks. Nothing called this before —
+         * tick_fn existed in the WM since v38.103 but had no driver — and the
+         * q3arena boot window uses it to animate its loading progress while
+         * the world builds (its draw fn runs only when needs_redraw fires,
+         * and nothing else invalidates a window that has no frames yet). */
+        wm_tick_all();
+        /* v38.150: deferred full compose (see want_full_present). The game
+         * task asks for it once a second instead of paying for it inside its
+         * own frame; doing it here spends desktop time, not frame time. Runs
+         * even when the freshness skip below would otherwise skip everything,
+         * because chrome (taskbar clock, corner readout, terminal text) has
+         * no other refresh path while a game presents for itself. */
+        if (want_full_present) {
+            want_full_present = 0;
+            desktop_present_now();
+        }
         if (needs_redraw && (now - last_frame_tick >= frame_interval)) {
+            /* v38.150: while a capturing game presents for itself, this whole
+             * composite is redundant — the glass already shows this content
+             * (see last_game_present_us, stamped on every present). Skipping
+             * it here (not just in the capture branch below) is what stops the
+             * ~2x present inflation (pres_fps reading 68-110 for a 38 fps
+             * game) and hands the saved milliseconds back to the frame that
+             * is actually rendering. Stale timestamp (>100 ms) or no capture
+             * resumes normal compositing, so a stalled game, a closed window
+             * or plain desktop use never notice this branch exists. Chrome
+             * (taskbar clock, corner readout) refreshes through the game's
+             * own 1 Hz desktop_present_now. */
+            extern uint32_t timer_get_us(void);
+            extern volatile uint32_t last_game_present_us;
+            extern int wm_capture_owner(void);
+            if (last_game_present_us != 0 &&
+                timer_get_us() - last_game_present_us < 100000u &&
+                wm_capture_owner() >= 0) {
+                /* fresh — the glass is current. Do NOT consume needs_redraw:
+                 * other windows may have dirtied it meanwhile, and dropping
+                 * their request would lose (not delay) their update. It stays
+                 * set until a real composite consumes it. */
+                last_frame_tick = now;
+            } else {
             needs_redraw = 0;
             last_frame_tick = now;
+
             fps_frames++;
             /* v38.119: while a game owns the present path (q3arena's
              * fullscreen mode, vga_fullscreen_enter), the desktop is not
@@ -850,9 +1091,46 @@ void kernel_main(uint32_t magic, uint32_t addr) {
             if (vga_fullscreen_active()) {
                 wait_for_vsync();
                 swap_buffers();
+            } else if (cap_id >= 0) {
+                /* v38.139: a window owns the capture, so the only thing on this
+                 * screen that has to move is that window — and it is the window
+                 * the game is rendering into, so stealing less of the frame
+                 * here goes straight back to the game's frames.
+                 *
+                 * Measured on the player's own 11:20 session: other_ms med 665
+                 * per 100 frames (6.7 ms of a 35 ms frame, ~19%) with the
+                 * desktop compositing the whole screen ~30x a second — the
+                 * background fill, every other window and the taskbar — none of
+                 * which is moving while a game holds the capture. draw_one()
+                 * blits the game's content buffer into the back buffer and
+                 * damages its own rectangle, and the swap below then copies
+                 * exactly that rectangle.
+                 *
+                 * Nothing is lost: the game's own 1 Hz desktop_present_now()
+                 * still does a full compose, which is what keeps the taskbar
+                 * clock and the corner readout live, and the fallback below
+                 * covers the window disappearing mid-frame. */
+                int t_c0 = (int)timer_get_us();
+                /* v38.150: the game task presents its own frame now (see
+                 * desktop_present_window), and it draws into the same back
+                 * buffer, so this path goes through the one lock inside that
+                 * function. Returns 0 in two cases: the window vanished (then
+                 * the desktop needs a full compose), or the game task is inside
+                 * the back buffer right now (then it is already presenting this
+                 * very window and a full compose would only steal its frame).
+                 * (The outer freshness check above already skipped the case
+                 * where the glass is current, so reaching here means a real
+                 * composite is due.) */
+                if (!desktop_present_window(cap_id)) {
+                    extern int wm_is_open(int id);
+                    if (!wm_is_open(cap_id)) full_redraw();
+                }
+                cap_comp_calls++;
+                cap_comp_us += (int)timer_get_us() - t_c0;
             } else {
                 full_redraw();
             }
+            } /* !game_fresh */
         }
 
         // Logout: kembali ke login screen (session di-reset)

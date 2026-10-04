@@ -109,6 +109,13 @@ static void timer_handler(registers_t* regs) {
     // detector dies with it, but the APs keep ticking and declare it HUNG.
     watchdog_check();
 
+    // v38.157: drain the serial transmit ring here, on EVERY core. Writers
+    // only append to the ring now (see serial.c); this tick is what moves the
+    // bytes to the UART, one non-blocking burst per core per tick. 4 cores x
+    // 100 Hz x up to 14 bytes >= 5.6 KB/s of capacity against the ~1.4 KB/s
+    // the Q3 diagnostics produce, and no frame ever pays a UART stall again.
+    serial_poll();
+
     // BSP only: the wall clock, heartbeat and GUI updates must not run four
     // times per tick just because IRQ0 is now broadcast to every core.
     if (cid != 0) return;

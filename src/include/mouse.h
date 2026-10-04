@@ -19,6 +19,10 @@ void init_mouse();
 // the accumulator. Lock-free on the writer side (IRQ context) by design; the
 // reader does the pair atomically under cli.
 int mouse_take_delta(int *dx, int *dy);
+// v38.149: total pointer packets the guest has received (both paths), for the
+// perf line's pkts_s field. It separates "the host stopped sending" from "the
+// guest stopped consuming" — see the definition in mouse.c.
+unsigned mouse_pkt_count(void);
 // Feeds one AUX byte into the packet state machine. Call only from ps2_drain().
 void mouse_feed_byte(uint8_t data);
 // Apply one USB HID boot-protocol pointer report (buttons, signed deltas,

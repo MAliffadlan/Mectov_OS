@@ -9,6 +9,10 @@
  * whether the next release is a raster-loop release or a setup release. */
 unsigned long long tgl_cyc_fill;
 unsigned int tgl_n_fill;
+/* v38.126: shaded fragments (see tgl_cyc.h) — pixels that passed the depth test
+ * in the textured raster variants, i.e. the pixels the frame actually shaded
+ * as opposed to the pixels the depth buffer rejected. */
+unsigned int tgl_n_frag;
 
 /* fill triangle profile */
 /* #define PROFILE */

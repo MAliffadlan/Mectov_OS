@@ -14,6 +14,13 @@
 #                  the portable bytecode interpreter, vm_interpreted.c)
 #   code/game      q_shared.c/q_math.c (the engine core needs them) and the
 #                  whole module — it is what id's lcc compiles into qagame.qvm
+#   code/q3_ui     id's CLASSIC Quake III Arena 1.32 user interface — the
+#                  hardcoded main menu (code/q3_ui) — which scripts/build_qvm_ui.sh
+#                  compiles into q3ui.qvm (v38.150). Its sibling code/ui is the
+#                  Team Arena rewrite, which is script-driven (ui/*.menu) and
+#                  needs menu data the GPL drop does not carry; only the two
+#                  headers the modules include by path, plus ui_syscalls.asm
+#                  (the QVM's trap stubs), are taken from there.
 #   code/null      the platform stubs id ships for headless builds
 #   q3asm          id's bytecode assembler (builds the .qvm)
 #   lcc            id's C compiler with the bytecode backend (builds the .asm
@@ -63,6 +70,7 @@ copy_tree() { # $1 = source dir, $2 = dest dir — copies the tree, structure in
 
 copy_tree "$SRC/code/qcommon" "$DEST/code/qcommon"
 copy_tree "$SRC/code/game"    "$DEST/code/game"
+copy_tree "$SRC/code/q3_ui"   "$DEST/code/q3_ui"
 copy_tree "$SRC/code/null"    "$DEST/code/null"
 
 # Header-only cross-module dependencies of the files above. id's modules
@@ -78,6 +86,10 @@ copy_file "$SRC/code/client/snd_public.h"  "$DEST/code/client/snd_public.h"
 copy_file "$SRC/code/renderer/tr_public.h" "$DEST/code/renderer/tr_public.h"
 copy_file "$SRC/code/ui/ui_public.h"       "$DEST/code/ui/ui_public.h"
 copy_file "$SRC/code/ui/keycodes.h"        "$DEST/code/ui/keycodes.h"
+# v38.150: the QVM trap stubs. code/q3_ui's own build (q3_ui.sh + q3_ui.q3asm)
+# assembles them from code/ui, and code/ui/ui_syscalls.c refuses to compile
+# under -DQ3_VM ("Do not use in VM build") — this .asm is the QVM's half.
+copy_file "$SRC/code/ui/ui_syscalls.asm"   "$DEST/code/ui/ui_syscalls.asm"
 copy_file "$SRC/code/cgame/cg_public.h"    "$DEST/code/cgame/cg_public.h"
 copy_file "$SRC/code/cgame/tr_types.h"    "$DEST/code/cgame/tr_types.h"
 copy_tree "$SRC/q3asm"        "$DEST/q3asm"
@@ -110,6 +122,7 @@ kernel build compiles its engine core from — not a fork.
 |---------------|------------------------------------------------------------|
 | \`code/qcommon\` | engine core: cmd, cvar, common, files, msg, huffman, md4, net_chan, the QVM loader (\`vm.c\`) and the portable bytecode interpreter (\`vm_interpreted.c\`) |
 | \`code/game\`    | \`q_shared.c\` / \`q_math.c\` (the core needs them) plus the full game module that id's lcc compiles into \`qagame.qvm\` |
+| \`code/q3_ui\`   | id's classic Quake III Arena 1.32 user interface — the hardcoded main menu, compiled by \`scripts/build_qvm_ui.sh\` into \`q3ui.qvm\` (v38.150) |
 | \`code/null\`    | id's headless platform stubs                               |
 | \`q3asm\`        | id's QVM assembler                                         |
 | \`lcc\`          | id's C compiler with the bytecode backend                  |
@@ -117,9 +130,15 @@ kernel build compiles its engine core from — not a fork.
 A handful of headers are vendored on their own because the files above include
 them across module boundaries by relative path: \`ui/menudef.h\` (the game
 module's menu constants), \`code/client/{client,keys,snd_public}.h\`,
-\`code/renderer/tr_public.h\`, \`code/ui/{ui_public,keycodes}.h\` and
-\`code/cgame/{cg_public,tr_types}.h\` (pulled in by \`code/qcommon/unzip.c\`
-and \`code/null/*.c\`).
+\`code/renderer/tr_public.h\`, \`code/ui/{ui_public,keycodes}.h\`,
+\`code/ui/ui_syscalls.asm\` (the QVM trap stubs the UI module assembles) and
+\`code/cgame/{cg_public,tr_types}.h\` (pulled in by \`code/qcommon/unzip.c\`,
+\`code/null/*.c\` and \`code/q3_ui/*.h\`).
+
+\`code/ui\`'s .c files are NOT vendored: that is Team Arena's script-driven UI
+rewrite, which builds its menu tree out of \`ui/*.menu\` data files that ship
+with the retail game and are not in the GPL drop. \`code/q3_ui\` is the classic
+1.32 interface, whose menus are code, and is what this port runs.
 
 \`lcc\` is trimmed to the bytecode toolchain (\`src\`, \`cpp\`, \`etc\`, \`lburg\`,
 \`include\`, \`lib\`). The prebuilt win32 binaries in \`bin/\` and the native

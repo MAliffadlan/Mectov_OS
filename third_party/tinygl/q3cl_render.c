@@ -26,6 +26,8 @@
 #include "q3cl_render.h"
 #include "q3world_render.h"   /* phase 8: the .bsp world and its textures */
 #include "q3viewmodel.h"      /* v38.124: id's own weapon view model (.md3) */
+#include "q3hud.h"            /* v38.127: id's own status bar (gfx/2d, icons) */
+#include "q3sky.h"            /* v38.128: the sky's cloud box (nosky / stats) */
 /* v38.126: the fps readout's face. A pure data header (unsigned char tables,
  * no other includes, no kernel types) — the same anti-aliased DejaVu Sans Mono
  * 8x16 the kernel's own draw_char_px() blends with, so the readout cannot
@@ -57,8 +59,23 @@ static ZBuffer *fb;
  * deadlocks a TCG guest, whose compositor never runs outside the frame), the
  * finished frame is SNAPSHOT to this buffer at end_frame, and the compositor
  * always scales from it: tear impossible, the window always shows a complete
- * frame, one extra 320x240 copy per frame. */
-static GLuint *present_buf;
+ * frame, one extra 320x240 copy per frame.
+ *
+ * v38.146: TWO buffers, not one. The single snapshot had a race the comment
+ * above denied: q3ref_present_frame (game task) WRITES present_buf while
+ * q3ref_blit (kernel main loop) READS it, with no lock — and locks are out
+ * (see r_in_frame: they deadlock a TCG guest). When the blit overlaps the
+ * snapshot the window shows the top half of one frame and the bottom half
+ * of the next: invisible while still (consecutive frames match), a visible
+ * horizontal tear while turning (consecutive frames differ most) — exactly
+ * the "flicker pas nengok". The fix is a pointer flip: the game always
+ * writes the BACK buffer, the compositor always reads the FRONT, and the
+ * flip itself is one int store (atomic on x86, no lock, no wait). Cost: one
+ * more 300 KB buffer, allocated once. Readers must copy present_front to a
+ * local FIRST and index with that (a second flip mid-blit must not redirect
+ * the read halfway — that would reintroduce the same tear). */
+static GLuint *present_buf[2];
+static volatile int present_front;
 /* 1 while a 3D frame is being rastered; blit ignores it (see present_buf). */
 static int r_in_frame = 0;
 static GLuint  *fb_pbuf;
@@ -90,13 +107,17 @@ static const q3bsp_mesh_t *r_bsp;
  * against the SAME view cone the rasterizer uses instead of a copy of the
  * numbers. Set every frame; the defaults are the 90-degree square view. */
 static float proj_tan_x = 1.0f, proj_tan_y = 1.0f;
+/* v38.128: the far plane the same glFrustum installed. The sky sizes its cloud
+ * box from it (zFar/1.75, id's MakeSkyVec), so the two must be one number rather
+ * than a 4096 written twice. */
+static float proj_z_far = 4096.0f;
 
 int  q3ref_ready(void)   { return r_inited; }
 int  q3ref_width(void)   { return rw; }
 int  q3ref_height(void)  { return rh; }
 
 static void crosshair(void);
-static void arena(void);
+static void arena(double time_sec);
 
 /* --- helpers ---------------------------------------------------------- */
 
@@ -315,7 +336,7 @@ static void crosshair(void) {
     glEnd();
 }
 
-static void arena(void) {
+static void arena(double time_sec) {
     static double t0 = -1.0;
     extern uint32_t get_ticks(void);
     double t = get_ticks() / 1000.0;
@@ -344,7 +365,11 @@ static void arena(void) {
      * and the MCTBSP1 map stay reachable as fallbacks, because a build with no
      * game data on the volume must still render something assertable. */
     if (r_bsp && r_bsp->valid) {
-        q3w_draw(r_bsp, cam_org, cam_fwd, cam_right, proj_tan_x, proj_tan_y);
+        /* v38.128: time_sec is the game clock the sky's tcMods scroll against
+         * (id's refdef.floatTime) and proj_z_far the far plane the box is sized
+         * from — both ignored by a level with no sky. */
+        q3w_draw(r_bsp, cam_org, cam_fwd, cam_right, proj_tan_x, proj_tan_y,
+                 (float)time_sec, proj_z_far);
         return;
     }
 
@@ -381,9 +406,16 @@ int q3ref_init(int w, int h) {
         fb_pbuf = NULL;
         return -1;
     }
-    /* Presentation snapshot: same size as the render buffer. Failing to
-     * allocate it is not fatal — blit falls back to the live buffer. */
-    present_buf = (GLuint *)kmalloc((uint32_t)(rw * rh) * (uint32_t)sizeof(GLuint));
+    /* Presentation snapshot: same size as the render buffer, x2 for the
+     * flip (v38.146). Failing to allocate is not fatal — blit falls back
+     * to the live buffer; a half allocation frees its half. */
+    present_buf[0] = (GLuint *)kmalloc((uint32_t)(rw * rh) * (uint32_t)sizeof(GLuint));
+    present_buf[1] = (GLuint *)kmalloc((uint32_t)(rw * rh) * (uint32_t)sizeof(GLuint));
+    if (!present_buf[0] || !present_buf[1]) {
+        if (present_buf[0]) { kfree(present_buf[0]); present_buf[0] = NULL; }
+        if (present_buf[1]) { kfree(present_buf[1]); present_buf[1] = NULL; }
+    }
+    present_front = 0;
     glInit(fb);
     glClearColor(0.10f, 0.18f, 0.45f, 1.0f);   /* sky */
     glEnable(GL_DEPTH_TEST);
@@ -397,10 +429,12 @@ int q3ref_init(int w, int h) {
 void q3ref_shutdown(void) {
     q3w_unload();
     q3vm_unload();   /* v38.124: the view model owns its own textures */
+    q3hud_unload();  /* v38.127: the status bar owns its own decoded pictures */
     r_bsp = NULL;
     if (fb) { ZB_close(fb); fb = NULL; }
     if (fb_pbuf) { kfree(fb_pbuf); fb_pbuf = NULL; }
-    if (present_buf) { kfree(present_buf); present_buf = NULL; }
+    if (present_buf[0]) { kfree(present_buf[0]); present_buf[0] = NULL; }
+    if (present_buf[1]) { kfree(present_buf[1]); present_buf[1] = NULL; }
     if (r_inited) { glClose(); r_inited = 0; }
 }
 
@@ -500,6 +534,12 @@ void q3ref_draw_flag_stats(int *addShaders, int *cullShaders, int *addFaces,
  * at the end of the sampled window still zeroes the live counters. */
 static unsigned long long gls_vert, gls_fill;
 static unsigned int       gls_tri;
+/* v38.126: the same treatment for the two v38.126 counters — the world's shaded
+ * fragments (the overdraw numerator) and its non-raster CPU split. Snapshotted
+ * with the cycles so the view model drawn afterwards cannot land in the world's
+ * numbers, exactly like vert/fill above. */
+static unsigned int       gls_frag;
+static unsigned long long gls_prep, gls_total;
 
 /* v38.124: the view model pass's OWN share of the same cycles, drained here
  * too. The world's numbers above deliberately exclude it (a pass drawn after
@@ -508,6 +548,7 @@ static unsigned int       gls_tri;
  * one way a new per-frame pass can hide a frame regression. */
 static unsigned long long vm_cyc_vert, vm_cyc_fill;
 static unsigned int       vm_cyc_tri;
+static unsigned int       vm_cyc_frag;      /* v38.126: the gun's own fragments */
 
 void q3ref_glsplit_stats(unsigned long long *vert, unsigned long long *fill,
                          unsigned int *tri) {
@@ -523,6 +564,23 @@ void q3ref_glsplit_reset(void) {
     gls_tri = 0;
     vm_cyc_vert = vm_cyc_fill = 0;
     vm_cyc_tri = 0;
+    gls_frag = vm_cyc_frag = 0;
+    gls_prep = gls_total = 0;
+}
+
+/* v38.126: the world pass's shaded fragments and its non-raster CPU split. */
+void q3ref_world_split(unsigned int *frag, unsigned long long *prep,
+                       unsigned long long *total) {
+    if (frag)  *frag  = gls_frag;
+    if (prep)  *prep  = gls_prep;
+    if (total) *total = gls_total;
+}
+
+/* v38.126: the view model's own shaded fragments (the gun is 267 triangles into
+ * a ~143x110 box, so its overdraw ratio is a different question from the
+ * world's). */
+void q3ref_viewmodel_frag(unsigned int *frag) {
+    if (frag) *frag = vm_cyc_frag;
 }
 
 
@@ -537,6 +595,28 @@ void q3ref_cull_stats(int *byVis, int *byFrustum, int *planes, int *byBack) {
 /* v38.114: whether the level's lightmaps are what the frames are lit by. */
 void q3ref_light_stats(int *litFacesLast, int *litFacesTotal) {
     q3w_light_stats(litFacesLast, litFacesTotal);
+}
+
+/* v38.128: the sky. `on` is the pass's effective state (the `nosky` knob), the
+ * rest is what the box builder did on the last frame — the cloud height it
+ * projected for, the sides and layers it filled, and the triangles it submitted
+ * — so "a sky shader was found" and "a cloud box was drawn" stay two different
+ * numbers. See q3sky_stats. */
+void q3ref_sky_stats(int *on, int *registered, int *cloud, int *stages,
+                     int *sides, int *tris, int *trisRun) {
+    if (on) *on = q3sky_enabled();
+    q3sky_stats(registered, cloud, stages, sides, tris, trisRun);
+}
+
+/* The faces the world draw handed to the box (and those it had to keep), which
+ * is the world module's accounting rather than the box's. */
+void q3ref_sky_face_stats(int *boxFaces, int *boxFacesRun, int *fallbackFaces,
+                          int *fallbackRun) {
+    q3w_sky_stats(boxFaces, boxFacesRun, fallbackFaces, fallbackRun);
+}
+
+void q3ref_set_sky(int on) {
+    q3sky_set_enabled(on);
 }
 
 /* What is actually in the finished frame, straight out of the ZBuffer: the
@@ -562,19 +642,30 @@ void q3ref_begin_frame(void) {
         float hh = (float)rh / (float)rw;
         /* fov from Q3REF_FOV_DEG (horizontal); tan(45) = 1 for the default */
         float sx = (float)tan(Q3REF_FOV_DEG * 0.5 * M_PI / 180.0);
+        /* v38.144: near 4.0 was tried here for depth precision (16-bit
+         * z-buffer) and REVERTED the same hour: the fixture map's camera
+         * sits under 4 units from its floor, and nose-against-wall views
+         * do the same — near geometry vanishes instead of shimmering.
+         * Distant-trim shimmer stays a minification-aliasing job
+         * (nearest-only sampler), not a depth job. */
         glFrustum(-1.0f * sx, 1.0f * sx, -hh * sx, hh * sx, 1.0f, 4096.0f);
         /* the world renderer culls against these exact planes */
         proj_tan_x = sx;
         proj_tan_y = hh * sx;
+        proj_z_far = 4096.0f;                 /* v38.128: the sky's box size */
     }
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
 void q3ref_draw_world(double time_sec) {
-    (void)time_sec;
-    arena();
-    /* The world pass is over: freeze its GL split (see q3ref_glsplit_stats). */
+    arena(time_sec);
+    /* The world pass is over: freeze its GL split (see q3ref_glsplit_stats).
+     * v38.126: the fragment and non-raster-CPU counters are frozen here too,
+     * for the same reason — the view model's pass runs through the same
+     * rasterizer afterwards. */
     q3w_glsplit_stats(&gls_vert, &gls_fill, &gls_tri);
+    q3w_frag_stats(&gls_frag);
+    q3w_cpu_stats(&gls_prep, &gls_total);
 }
 
 void q3ref_end_frame(void) {
@@ -590,11 +681,26 @@ void q3ref_end_frame(void) {
  * 320x240 copy, taken before the next frame's clear overwrites it; r_in_frame
  * stays set until this call so the compositor cannot copy a half-painted HUD. */
 void q3ref_present_frame(void) {
-    if (present_buf && fb && fb->pbuf) {
+    /* v38.146: write the BACK buffer, then flip. The compositor reads only
+     * the front (see q3ref_blit), so a snapshot can never land mid-blit. */
+    int back = 1 - present_front;
+    if (present_buf[back] && fb && fb->pbuf) {
         const GLuint *s = (const GLuint *)fb->pbuf;
-        GLuint *d = present_buf;
+        GLuint *d = present_buf[back];
         int n = rw * rh;
-        for (int i = 0; i < n; i++) d[i] = s[i];
+        /* v38.152: was a per-pixel GLuint loop. At SCALE=2 (1280x960) that is
+         * 1.23 million iterations every frame, and TGL_CFLAGS (-O1,
+         * -mno-sse -mno-mmx -march=i686) leaves GCC no way to widen it —
+         * measured ~34 ms/frame of gl-end time that tracked resolution and
+         * not the scene. memcpy here is the wide `rep movsl` from q3_kernel.c
+         * (stubs/string.h aliases it to q3_memcpy), so this becomes one string
+         * op instead. */
+        memcpy(d, s, (size_t)n * sizeof(GLuint));
+        /* The copy must land before the flip becomes visible (a compiler
+         * reordering the loop past the store would reintroduce the tear
+         * on paper; x86 itself orders store-store). */
+        __asm__ __volatile__("" ::: "memory");
+        present_front = back;
     }
     r_in_frame = 0;
 }
@@ -629,6 +735,28 @@ void q3ref_set_perf_overlay(int fps, int vm_ms, int gl_ms, int blit_ms,
 }
 
 void q3ref_set_perf_detail(int on) { ov_detail = on ? 1 : 0; }
+
+/* ---- v38.127: id's own status bar --------------------------------------
+ * The HUD is not a GL client. Every picture id's status bar draws is 32-bit
+ * RGBA blended with GL_SRC_ALPHA, and this rasterizer's only blend mode is
+ * additive (src/misc.c's TGL_BLEND_FUNC), so q3hud.c composites the bar into
+ * the finished 0x00RRGGBB ZBuffer by hand — the same buffer the perf panel
+ * writes into, and the same one q3ref_present_frame() snapshots for the
+ * compositor. The driver reads the values out of the game module's
+ * playerState; nothing here talks to the VM. */
+void q3ref_set_hud(int health, int armor, int ammo, int weapon, int score,
+                   int firing, int now_ms) {
+    q3hud_set(health, armor, ammo, weapon, score, firing, now_ms);
+}
+
+void q3ref_draw_hud(void) {
+    if (!fb || !fb->pbuf) return;
+    q3hud_draw((uint32_t *)fb->pbuf, fb->linesize / 4, rw, rh);
+}
+
+void q3ref_hud_stats(int *images, int *missing, int *draws, int *digits) {
+    q3hud_stats(images, missing, draws, digits);
+}
 
 static void ov_px(int x, int y, uint32_t c) {
     if (x < 0 || y < 0 || x >= rw || y >= rh) return;
@@ -819,6 +947,11 @@ void q3ref_draw_perf_overlay(void) {
 #define OV_MIX(bg, fg, ia, a) \
     ((unsigned)(((((bg) * (ia) + (fg) * (a)) + 128u) * 257u) >> 16))
 
+/* v38.148 pitch override, defined with the other blit state below; declared
+ * here because the raw writers (glyphs, readout, blit loops) all live above
+ * that point in this file. 0 = tightly packed rows (stride == cw). */
+static int blit_pitch;
+
 static void ov_aa_px(uint32_t *dst, int cw, int ch, int x, int y,
                      uint32_t fg, unsigned cov, int sc) {
     unsigned a = cov * 17u;                 /* 4-bit coverage -> 0..255 */
@@ -829,7 +962,10 @@ static void ov_aa_px(uint32_t *dst, int cw, int ch, int x, int y,
     for (int j = 0; j < sc; j++) {
         int yy = y + j;
         if (yy < 0 || yy >= ch) continue;
-        uint32_t *row = dst + (size_t)yy * (size_t)cw;
+        /* v38.148: stride honors the pitch override (direct-present into a
+         * back-buffer region); bounds stay on the logical cw/ch. */
+        int st = blit_pitch > 0 ? blit_pitch : cw;
+        uint32_t *row = dst + (size_t)yy * (size_t)st;
         for (int i = 0; i < sc; i++) {
             int xx = x + i;
             if (xx < 0 || xx >= cw) continue;
@@ -1037,14 +1173,17 @@ void q3ref_draw_viewmodel(void) {
     if (q3vm_loaded()) {
         int box[4];
         unsigned long long c0v = 0, c0f = 0, c1v = 0, c1f = 0;
-        unsigned int c0t = 0, c1t = 0;
+        unsigned int c0t = 0, c1t = 0, c0g = 0, c1g = 0;
         box[0] = box[1] = box[2] = box[3] = 0;
         q3w_glsplit_stats(&c0v, &c0f, &c0t);
+        q3w_frag_stats(&c0g);
         if (q3vm_draw(proj_tan_x, proj_tan_y, rw, rh, box)) {
             q3w_glsplit_stats(&c1v, &c1f, &c1t);
+            q3w_frag_stats(&c1g);
             vm_cyc_vert += c1v - c0v;
             vm_cyc_fill += c1f - c0f;
             vm_cyc_tri += c1t - c0t;
+            vm_cyc_frag += c1g - c0g;
             vm_gl_box[0] = box[0];
             vm_gl_box[1] = box[1];
             vm_gl_box[2] = box[2];
@@ -1145,13 +1284,27 @@ void q3ref_draw_viewmodel(void) {
  * (17,17,27) in a screendump). Phase 2 shipped this blit with an R/B swizzle
  * copied from an older assumption; the gears demo's blue gear really was
  * drawn red. Fixed here and in q3gl_window.c. */
-/* Integer upscale at blit time, DOOM-style (v38.113): the 3D pass keeps its
- * cheap resolution; the compositor's copy to the window is where the pixels
- * get repeated. 0 = off (1:1, the pre-38.113 behaviour). */
+/* v38.146: max blit scale to cap present-pixel work. Default 2× (640×480
+ * content) — the game renders 320×240, upscaling 2× is still sharp enough
+ * for 320×240 assets, and it caps the per-frame blit/composite/QEMU-upload
+ * cost at 4× native regardless of how big the user drags the window.
+ * Override at runtime with Q3REF_MAX_BLIT_SCALE env / future console var. */
+#ifndef Q3REF_MAX_BLIT_SCALE
+#define Q3REF_MAX_BLIT_SCALE 2
+#endif
+
 static int blit_scale = 1;
+static int blit_max_scale = Q3REF_MAX_BLIT_SCALE;
+/* v38.148: destination pitch override (pixels/row); the storage lives here
+ * (tentatively declared above the glyph writers), 0 = tightly packed.
+ * Read by every raw writer (blit loops, fps readout, AA glyphs): bounds
+ * checks stay on cw/ch (logical size), only the row stride changes. */
+void q3ref_set_blit_pitch(int p) { blit_pitch = (p > 0) ? p : 0; }
 
 void q3ref_set_blit_scale(int s) { blit_scale = (s > 0) ? s : 1; }
 int  q3ref_blit_scale(void)      { return blit_scale; }
+void q3ref_set_blit_max_scale(int s) { blit_max_scale = (s > 0) ? s : 1; }
+int  q3ref_blit_max_scale(void)      { return blit_max_scale; }
 
 /* --- v38.119: fullscreen present -------------------------------------------
  *
@@ -1188,7 +1341,10 @@ void q3ref_present_fullscreen(void) {
     bb = vga_fullscreen_target(&w, &h, &pitch);
     if (!bb || w <= 0 || h <= 0 || pitch <= 0) return;
 
-    src = present_buf ? present_buf : (const GLuint *)fb->pbuf;
+    /* v38.146: pin the front index for the whole scale — a flip mid-loop
+     * must not redirect the source halfway (same tear, new address). */
+    { int front = present_front;
+      src = present_buf[front] ? present_buf[front] : (const GLuint *)fb->pbuf; }
     spitch = fb->linesize / 4;
     stepx = (unsigned)(((unsigned)rw << 16) / (unsigned)w);
     stepy = (unsigned)(((unsigned)rh << 16) / (unsigned)h);
@@ -1224,10 +1380,13 @@ void q3ref_present_fullscreen(void) {
 void q3ref_blit(uint32_t *dst, int cw, int ch) {
     if (!fb || !fb->pbuf || !dst || cw <= 0 || ch <= 0) return;
     /* Always the last COMPLETE frame: the snapshot end_frame took, or — if
-     * its allocation failed — the live buffer (pre-38.113 behaviour). */
-    const GLuint *src = present_buf ? present_buf : (const GLuint *)fb->pbuf;
+     * its allocation failed — the live buffer (pre-38.113 behaviour).
+     * v38.146: read the pinned front buffer (see present_fullscreen). */
+    int front = present_front;
+    const GLuint *src = present_buf[front] ? present_buf[front] : (const GLuint *)fb->pbuf;
     int pitch = fb->linesize / 4;   /* pixels per row */
     int sc = blit_scale;
+    if (sc > blit_max_scale) sc = blit_max_scale;   /* v38.146 cap */
     /* Source pixels actually shown: the whole buffer, times the scale that
      * still fits the window's content area (falls back to 1:1 letterboxed). */
     if (rw * sc > cw || rh * sc > ch) sc = 1;
@@ -1238,7 +1397,11 @@ void q3ref_blit(uint32_t *dst, int cw, int ch) {
 
     for (int y = 0; y < dh; y++) {
         const GLuint *s = src + (long)(y / sc) * pitch;
-        uint32_t *d = dst + (size_t)(oy + y) * cw + ox;
+        /* v38.148: destination stride honors the pitch override (direct
+         * present into a back-buffer region whose rows are fb_width wide);
+         * the drawn rect (ox/oy/dw/dh) is unchanged. */
+        int dst_st = blit_pitch > 0 ? blit_pitch : cw;
+        uint32_t *d = dst + (size_t)(oy + y) * (size_t)dst_st + ox;
         if (sc == 1) {
             for (int x = 0; x < dw; x++) d[x] = s[x];
         } else {

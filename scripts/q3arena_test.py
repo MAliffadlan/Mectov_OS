@@ -115,9 +115,17 @@ TOTALS_RE = re.compile(
     r"wall_ms=(\d+)")
 MOVEMENT_RE = re.compile(r"\[Q3VM\] movement x0=(-?\d+) x1=(-?\d+) delta=(-?\d+)")
 
-# Window geometry as q3arena_open() computes it: 322x262 centred in the
-# framebuffer, above the taskbar; content = 320x240 inside border+titlebar.
-WIN_W, WIN_H = 322, 262
+# Window geometry as q3arena_open() computes it:
+#     ww = CONTENT_W * Q3ARENA_SCALE + 2      (2 px of border)
+#     wh = CONTENT_H * Q3ARENA_SCALE + TITLEBAR_H + 2
+# so the size is NOT a constant — it is 322x262 at scale 1 and 642x502 at
+# scale 2. There used to be a hardcoded `WIN_W, WIN_H = 322, 262` here and an
+# equality assert against it, which made this suite permanently red on every
+# Q3ARENA_SCALE=2 ISO — i.e. the build the player actually runs. A known-failing
+# assertion is a blind spot: it swallows the next real geometry regression.
+# The assertion below is therefore the RELATIONSHIP the driver promises plus
+# the content size it reports, not a magic pair. CONTENT_W/CONTENT_H stay
+# literal on purpose: 320x240 is the one thing that must never change.
 CONTENT_W, CONTENT_H = 320, 240
 TITLEBAR_H, TASKBAR_H = 20, 28
 
@@ -299,6 +307,12 @@ def main():
         print(f"[FAIL] {err}")
         return 1
 
+    # v38.145: KVM was tried here and REVERTED the same night — with
+    # -enable-kvm the guest hangs in the ELF loader ([LOAD] c0=0x00000000
+    # forever, login never completes). TCG is slow (~2fps under load) but
+    # boots reliably; the gates are frame-count based with generous
+    # timeouts, so a slow run still verifies the same asserts. KVM speed
+    # is measured with the interactive harness, not this suite.
     qemu = subprocess.Popen([
         "qemu-system-i386",
         "-cpu", "qemu32,+nx",
@@ -321,6 +335,28 @@ def main():
             dump_tail()
             return 1
         print("[OK] booted to login screen")
+
+        # v38.156: ACPI/SMP gate. This suite is the harness that boots the real
+        # `-m 512` configuration, and that configuration spent weeks coming up
+        # on ONE CPU: acpi.c validated table pointers against a stale 256MB
+        # bound, SeaBIOS puts the RSDT in the reserved strip at the top of RAM
+        # (0x1FFE1D6F), so the MADT was never parsed and `[SMP] Only 1 CPU
+        # detected. SMP disabled.` put the game task, the compositor, the shell
+        # and the busy-wait serial writes on the same core. The ACPI lines are
+        # printed by the BSP before any AP starts, so they cannot be split by
+        # the AP bring-up output — which is why the gate reads these instead of
+        # the (interleaved) `[SMP] AP startup complete` line.
+        boot = read_file(SERIAL_LOG)
+        cores = boot.count("[ACPI] Found CPU Core")
+        smp_off = "Only 1 CPU detected" in boot
+        rsdt_bad = "[ACPI] RSDT checksum failed" in boot
+        if smp_off or rsdt_bad or "[ACPI] Found MADT" not in boot or cores < 2:
+            print(f"[FAIL] ACPI/SMP: cores={cores} madt="
+                  f"{'[ACPI] Found MADT' in boot} smp_disabled={smp_off} "
+                  f"rsdt_checksum_failed={rsdt_bad} — the 512MB guest must "
+                  f"bring its CPUs up")
+            return 1
+        print(f"[OK] ACPI/SMP: {cores} CPU cores online")
 
         for k in LOGIN_KEYS:
             sendkey(k)
@@ -519,9 +555,23 @@ def main():
             return 1
         win_x, win_y, win_w, win_h = (int(rc.group(2)), int(rc.group(3)),
                                       int(rc.group(4)), int(rc.group(5)))
-        if (win_w, win_h) != (WIN_W, WIN_H):
-            print(f"[FAIL] the driver opened a {win_w}x{win_h} window, "
-                  f"expected {WIN_W}x{WIN_H}")
+        con_w, con_h = int(rc.group(6)), int(rc.group(7))
+        # The content buffer is the render surface: 320x240 is the standing
+        # rule and the number the whole port is built around. Check it first,
+        # because every geometry claim below is derived from it.
+        if (con_w, con_h) != (CONTENT_W, CONTENT_H):
+            print(f"[FAIL] the driver is rendering {con_w}x{con_h}, not "
+                  f"{CONTENT_W}x{CONTENT_H} — the content size is not the "
+                  f"render scale's to change")
+            return 1
+        scale = (win_w - 2) // CONTENT_W if win_w >= CONTENT_W else 0
+        want_w = CONTENT_W * scale + 2
+        want_h = CONTENT_H * scale + TITLEBAR_H + 2
+        if scale < 1 or (win_w, win_h) != (want_w, want_h):
+            print(f"[FAIL] the driver opened a {win_w}x{win_h} window for "
+                  f"{con_w}x{con_h} content; that is not "
+                  f"CONTENT*scale+2 x CONTENT*scale+TITLEBAR_H+2 for any "
+                  f"integer scale (scale {scale} would want {want_w}x{want_h})")
             return 1
         if not screendump(SHOT_A):
             print("[FAIL] screendump failed")
@@ -534,12 +584,13 @@ def main():
         want_r = win_x + win_w - 1
         want_b = win_y + win_h - 1
         if abs(bbox[2] - want_r) > 8 or abs(bbox[3] - want_b) > 8:
-            print(f"[FAIL] the window was asked for {WIN_W}x{WIN_H} at "
+            print(f"[FAIL] the window was asked for {win_w}x{win_h} at "
                   f"({win_x},{win_y}) (bottom-right {want_r},{want_b}) but the "
                   f"desktop changed over {bbox} — that is not the same window")
             return 1
         print(f"[OK] the game window is on the desktop where the driver asked: "
-              f"{WIN_W}x{WIN_H} at ({win_x},{win_y}) (changed region {bbox})")
+              f"{win_w}x{win_h} at ({win_x},{win_y}) for {con_w}x{con_h} "
+              f"content (scale {scale}) (changed region {bbox})")
         print(f"     screendump for humans: {SHOT_A}")
 
         # ---- 5. what the renderer actually drew ------------------------------

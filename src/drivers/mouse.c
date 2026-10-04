@@ -15,14 +15,36 @@ volatile int8_t mouse_scroll = 0;  // scroll wheel delta (positive = up, negativ
 // mouse; the absolute cursor below is clamped and useless for aiming.
 volatile int mouse_raw_dx = 0, mouse_raw_dy = 0;
 
+// v38.149: every pointer packet the guest actually received, cumulatively —
+// both paths (PS/2 IRQ12 and xHCI HID) count, because the question it answers
+// is "did the host deliver anything at all".
+//
+// The window layer already counts events delivered to a game window
+// (look_s/key_s in q3_vm.c's perf line). The two numbers differ in exactly one
+// situation and it is the one the player's 12:46 session was in: the game held
+// the mouse capture (comp_s ~27/s) and received ZERO events for 375 s, with
+// look_s=0 in 103 of 108 windows. If this counter is also still, the loss is
+// upstream of the guest (a QEMU window without input focus, or a frontend that
+// never grabbed the pointer so it stopped at the window edge) — host side, and
+// no amount of guest code can fix it. If this counter is MOVING while look_s is
+// 0, the packets arrive and the fault is in the guest's own drain path.
+static volatile unsigned mouse_pkt_total;
+unsigned mouse_pkt_count(void) { return mouse_pkt_total; }
+
 // Returns the accumulated relative motion (screen space: +x right, +y down)
 // and clears it. 1 = there was motion, 0 = idle.
 int mouse_take_delta(int *dx, int *dy) {
-    uint32_t eflags;
-    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
-    int rx = mouse_raw_dx, ry = mouse_raw_dy;
-    mouse_raw_dx = 0; mouse_raw_dy = 0;
-    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+    /* v38.150: this was cli/read/clear/sti, which is atomic only on a
+     * uniprocessor. The desktop loop and the game task drain from DIFFERENT
+     * cores, so two overlapping drains both read the same counts before
+     * either cleared them — measured as exactly 4x motion on 4 cores
+     * (0.20 deg/px for a 0.05 setting) and exactly 1x on 1 core, which is
+     * why every harness (single-core-ish timing) looked smooth while a real
+     * hand did not. xchg reads and clears in one indivisible step, on every
+     * core at once; the IRQ-side adds below are lock-prefixed for the same
+     * reason, so a count can neither be delivered twice nor lost. */
+    int rx = __sync_lock_test_and_set(&mouse_raw_dx, 0);
+    int ry = __sync_lock_test_and_set(&mouse_raw_dy, 0);
     if (dx) *dx = rx;
     if (dy) *dy = ry;
     return (rx != 0 || ry != 0);
@@ -91,8 +113,11 @@ void mouse_feed_byte(uint8_t data) {
                 if (mouse_bytes[0] & 0x10) dx |= (int)0xFFFFFF00;
                 if (mouse_bytes[0] & 0x20) dy |= (int)0xFFFFFF00;
 
-                mouse_raw_dx += dx;
-                mouse_raw_dy -= dy;   // PS/2 +y is up; screen space is +y down
+                /* v38.150: lock-prefixed add — the drain side xchg's these from
+                 * another core, so a plain += can interleave with it and
+                 * resurrect (double-deliver) or drop counts. */
+                __sync_fetch_and_add(&mouse_raw_dx, dx);
+                __sync_fetch_and_add(&mouse_raw_dy, -dy);   // PS/2 +y is up; screen space is +y down
                 mouse_x += dx;
                 mouse_y -= dy;
 
@@ -114,6 +139,7 @@ void mouse_feed_byte(uint8_t data) {
             }
 
             mouse_updated = 1;
+            mouse_pkt_total++;   // v38.149: see mouse_pkt_count()
             break;
     }
 }
@@ -183,8 +209,10 @@ void mouse_hid_report(uint8_t btn, int8_t dx, int8_t dy, int8_t wheel) {
     entropy_add((uint32_t)(uint8_t)dx);
     entropy_add((uint32_t)(uint8_t)dy);
     mouse_btn = btn & 0x07;
-    mouse_raw_dx += dx;
-    mouse_raw_dy += dy;   // HID +y is already screen space (down)
+    /* v38.150: same SMP rule as the PS/2 path above — the drain xchg's from
+     * another core. */
+    __sync_fetch_and_add(&mouse_raw_dx, dx);
+    __sync_fetch_and_add(&mouse_raw_dy, dy);   // HID +y is already screen space (down)
     mouse_x += dx;
     mouse_y += dy;
     if (mouse_x < 0)               mouse_x = 0;
@@ -193,5 +221,6 @@ void mouse_hid_report(uint8_t btn, int8_t dx, int8_t dy, int8_t wheel) {
     if (mouse_y >= (int)fb_height) mouse_y = (int)fb_height - 1;
     if (wheel) mouse_scroll = wheel;
     mouse_updated = 1;
+    mouse_pkt_total++;   // v38.149: see mouse_pkt_count()
 }
 

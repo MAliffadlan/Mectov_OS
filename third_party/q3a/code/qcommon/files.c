@@ -358,6 +358,16 @@ int FS_LoadStack()
 {
 	return fs_loadStack;
 }
+
+/* v38.130: the reset accessor the relaunch path (q3_vm.c/q3_kernel.c's
+ * engine-state shim) needs. id never resets this counter anywhere except by
+ * pairing every FS_ReadFile with an FS_FreeFile, and the quit path of the
+ * port leaves one allocated, which made every later Com_Init fatal on
+ * "File system load stack not zero". third_party/q3a stays verbatim apart
+ * from this one appended accessor — no existing line is touched. */
+void FS_ResetLoadStack( void ) {
+	fs_loadStack = 0;
+}
                       
 /*
 ================

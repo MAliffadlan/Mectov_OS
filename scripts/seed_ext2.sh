@@ -70,6 +70,13 @@ seed_dir /baseq3
 seed_dir /baseq3/vm
 seed_into "$ROOT/build/vm/qagame.qvm" /baseq3/vm/qagame.qvm
 seed_into "$ROOT/build/vm/qagame.map" /baseq3/vm/qagame.map
+# v38.150: id's classic Quake III Arena 1.32 UI module, built by id's own
+# lcc + q3asm (scripts/build_qvm_ui.sh) and executed by the same interpreter.
+# It is named q3ui.qvm, NOT ui.qvm: pak0's vm/ui.qvm is Team Arena's
+# script-driven menu engine, whose menus live in ui/*.menu data files this
+# port has no licence to ship, and both files are kept on the volume.
+seed_into "$ROOT/build/vm/q3ui.qvm" /baseq3/vm/q3ui.qvm
+seed_into "$ROOT/build/vm/q3ui.map" /baseq3/vm/q3ui.map
 
 # productid.txt: what id's own FS check (FS_SetRestrictions in files.c) reads to
 # decide whether the install is the full game. Without it the engine drops into

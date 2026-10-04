@@ -73,6 +73,23 @@ void q3ref_cull_stats(int *byVis, int *byFrustum, int *planes, int *byBack);
  * generated fixture arena — so "the level is lit from the file" is a number a
  * test can read rather than a look a human has to judge. */
 void q3ref_light_stats(int *litFacesLast, int *litFacesTotal);
+/* v38.128: the sky. `on` is the pass's effective state (the driver's `nosky`
+ * knob turns it off), and the rest is what the cloud box did on the last frame:
+ * `registered` sky shaders found at load, the cloud `height` it projected for,
+ * `stages` layers drawn, `sides` box sides filled, and the `tris`/`trisRun` it
+ * submitted. All zero on a map with no cloud-layer sky — every generated fixture
+ * arena. */
+void q3ref_sky_stats(int *on, int *registered, int *cloud, int *stages,
+                     int *sides, int *tris, int *trisRun);
+/* The other half of the sky's accounting, and the world draw's: how many faces
+ * the last frame handed to the cloud box (the run's total second) and how many
+ * carried a sky shader the box could not take, i.e. were drawn as geometry. */
+void q3ref_sky_face_stats(int *boxFaces, int *boxFacesRun, int *fallbackFaces,
+                          int *fallbackRun);
+/* `nosky`: off means the sky faces are drawn as ordinary textured geometry
+ * again, which is the A/B this release is measured against. */
+void q3ref_set_sky(int on);
+
 /* Classify the finished frame straight out of the ZBuffer: the renderer's own
  * account of what it drew, independent of the WM and the compositor. Returns
  * the number of pixels examined; any output pointer may be NULL. */
@@ -133,6 +150,21 @@ void q3ref_viewmodel_box(int *distinct, int *bright, int *dark);
 
 void q3ref_draw_viewmodel(void);
 
+/* v38.127: id's own status bar — ammo, health, armor and the FFA score boxes,
+ * composited into the ZBuffer out of the game's own pictures (gfx/2d/numbers,
+ * gfx/2d/bigchars, gfx/2d/select, icons/icona_*, icons/iconr_yellow).
+ *
+ * The values are the game module's playerState, read by the driver; `firing` is
+ * id's own `weaponstate == WEAPON_FIRING && weaponTime > 100` (the ammo field
+ * greys while the gun is mid-shot) and `now_ms` is the frame clock the
+ * low-health flash reads. Called after the view model and after the frame
+ * histogram has been taken — so the suites' pixel evidence stays the 3D pass —
+ * and before q3ref_present_frame(), which is what the compositor blits. */
+void q3ref_set_hud(int health, int armor, int ammo, int weapon, int score,
+                   int firing, int now_ms);
+void q3ref_draw_hud(void);
+void q3ref_hud_stats(int *images, int *missing, int *draws, int *digits);
+
 /* v38.116: snapshot the finished frame for the compositor. Call it LAST in a
  * frame — after the HUD, which is painted into the same ZBuffer — because the
  * compositor blits this snapshot and nothing else. */
@@ -150,6 +182,18 @@ void q3ref_glsplit_reset(void);
 void q3ref_viewmodel_cycles(unsigned long long *vert, unsigned long long *fill,
                             unsigned int *tri);
 
+/* v38.126: the world pass's shaded fragments (pixels that passed the depth
+ * test — divided by the frame it is the overdraw ratio) and its NON-raster CPU
+ * split in TSC cycles: `prep` is PVS marking + the per-face cull tests + the
+ * sort, `total` is the whole world draw, so `total - prep - vert` is what the
+ * emit loops spend outside the transform. The fork executes GL ops immediately
+ * (no op queue), which is why "the GL phase is slower than its vertex path"
+ * had to be measured here rather than blamed on marshalling. */
+void q3ref_world_split(unsigned int *frag, unsigned long long *prep,
+                       unsigned long long *total);
+/* v38.126: the view model's own shaded fragments, same units and window. */
+void q3ref_viewmodel_frag(unsigned int *frag);
+
 /* Swizzle the finished 0x00RRGGBB ZBuffer into the WM's 0x00BBGGRR content
  * buffer, centred. Runs in the compositor's draw pass, never in the render
  * task. */
@@ -159,6 +203,13 @@ void q3ref_blit(uint32_t *dst, int cw, int ch);
  * pass keeps its resolution; only the compositor's copy is scaled. */
 void q3ref_set_blit_scale(int s);
 int  q3ref_blit_scale(void);
+/* v38.148: destination row pitch (pixels) for q3ref_blit. 0 = tightly packed
+ * (dst rows are cw wide — the content-buffer case). The WM's direct-present
+ * path sets this to the back-buffer stride while the game draws into a
+ * back-buffer region (whose rows are fb_width wide, not cw wide); without it
+ * every row lands cw short and the picture skews diagonally. Reset to 0
+ * afterwards. */
+void q3ref_set_blit_pitch(int p);
 
 /* v38.119: fullscreen present — snapshot the frame (like q3ref_present_frame)
  * and upscale it straight into the back buffer. Only valid while the VGA driver

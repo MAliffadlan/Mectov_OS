@@ -14,6 +14,11 @@ memdisk.tar
 
 # Object directory
 obj/
+# Dependency files (-MMD -MP). The Makefile writes them beside each object in
+# obj/, but a one-off manual compile from the repo root drops `<name>.d` at the
+# top level, and those showed up in `git status` as `a-q3_kernel.d`/`a-q3_vm.d`
+# until v38.139. No .d file is ever a source, so the pattern is unconditional.
+*.d
 # Generated boot artifacts (v38.105: the QVM bytecode built from id's official
 # source by id's lcc + q3asm — see scripts/build_qvm.sh)
 build/
@@ -76,6 +81,7 @@ QODER.md
 .qoder/
 .kiro/
 .zcode/
+.continue/
 .code-review-graph/
 .opencode.json
 .mcp.json

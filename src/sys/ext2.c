@@ -36,6 +36,80 @@ static void ext2_read_block(uint32_t block, unsigned char* buf) {
     }
 }
 
+// Defined further down (line ~570); the run reader below needs it, and its
+// callers (the file readers) sit above that definition.
+static uint32_t ext2_get_block(ext2_inode_t* inode, uint32_t lb, int alloc);
+
+// Read `count` consecutive ON-DISK blocks starting at `block` into `buf`
+// (which must hold count * block_size bytes). This is the coalescing primitive
+// introduced for v38.133's load work: ext2_read_file_range and
+// ext2_read_file_data used to call ext2_read_block once per 4 KB block, i.e.
+// one ATA command per block, and on a staged q3dm1 (3.2 MB of textures) that
+// is ~800 command latencies — each ~1 ms on a quiet host but 10-20 ms on a
+// busy one, which is exactly how a 3.7 s texture phase becomes 23-47 s while
+// nothing about the work changed. ata_read_sectors_drive already accepts up to
+// ATA_BATCH_MAX (128) sectors per command, so a run of up to 16 blocks fits in
+// ONE command.
+//
+// Out-of-range blocks keep ext2_read_block's contract: they read as zeros
+// rather than hitting the wrong area (a corrupt inode must not walk off the
+// image).
+#define EXT2_RUN_BLOCKS 16          // 16 * 4 KB = 64 KB = 128 sectors
+
+static void ext2_read_blocks_run(uint32_t block, uint32_t count,
+                                 unsigned char* buf) {
+    if (count == 0) return;
+    uint32_t sectors_per_block = block_size / 512;
+    if (sectors_per_block == 0 ||
+        block > 0xFFFFFFFFu / sectors_per_block) {
+        memset(buf, 0, count * block_size);
+        return;
+    }
+    uint32_t usable = count;
+    if (block >= sb.s_blocks_count) {
+        usable = 0;
+    } else if (usable > sb.s_blocks_count - block) {
+        usable = sb.s_blocks_count - block;
+    }
+    if (usable > 0) {
+        uint32_t start_sector = block * sectors_per_block;
+        uint32_t total = usable * sectors_per_block;
+        uint32_t done = 0;
+        while (done < total) {
+            int batch = ata_batch_limit(start_sector + done, (int)(total - done));
+            ata_read_sectors_drive(ext2_drive, start_sector + done, batch,
+                                   buf + done * 512);
+            done += (uint32_t)batch;
+        }
+    }
+    if (usable < count)
+        memset(buf + usable * block_size, 0, (count - usable) * block_size);
+}
+
+// Read `count` logical blocks of a file (LBN first_lb / count) into buf
+// (count * block_size bytes). Consecutive logical blocks that map to
+// consecutive ON-DISK blocks — the normal layout of a file the staging script
+// wrote sequentially — go out as one ext2_read_blocks_run, so the ATA layer
+// sees ~1 command per 64 KB instead of 1 per 4 KB. Sparse holes read as zeros.
+//
+// ext2_get_block is still called once per block to find the runs; that walk is
+// cached (blkcache) and costs no ATA command of its own, which is the whole
+// point: the command count is what the host's load multiplies.
+static void ext2_read_lbn_run(ext2_inode_t* inode, uint32_t first_lb,
+                              uint32_t count, unsigned char* buf) {
+    uint32_t lb = first_lb, end = first_lb + count;
+    while (lb < end) {
+        uint32_t blk = ext2_get_block(inode, lb, 0);
+        uint32_t off = (lb - first_lb) * block_size;
+        if (blk == 0) { memset(buf + off, 0, block_size); lb++; continue; }
+        uint32_t n = 1, maxn = end - lb;
+        if (maxn > EXT2_RUN_BLOCKS) maxn = EXT2_RUN_BLOCKS;
+        while (n < maxn && ext2_get_block(inode, lb + n, 0) == blk + n) n++;
+        ext2_read_blocks_run(blk, n, buf + off);
+        lb += n;
+    }
+}
+
 int ext2_init(int drive) {
     extern void write_serial_string(const char*);
     write_serial_string("[EXT2] ext2_init start\n");
@@ -225,71 +299,31 @@ int ext2_read_file_data(uint32_t inode_num, char* buf, int max_size) {
     
     uint32_t size = inode.i_size;
     if (size > (uint32_t)max_size) size = max_size;
-    
-    uint32_t bytes_read = 0;
-    unsigned char block_buf[4096];
-    
-    // Read direct blocks
-    for (int i = 0; i < 12 && bytes_read < size; i++) {
-        uint32_t block = inode.i_block[i];
-        if (!block) break;
-        
-        ext2_read_block(block, block_buf);
-        uint32_t chunk = (size - bytes_read > block_size) ? block_size : (size - bytes_read);
-        memcpy(buf + bytes_read, block_buf, chunk);
-        bytes_read += chunk;
+    if (size == 0) return 0;
+
+    /* v38.133: whole blocks go out as coalesced runs (see ext2_read_lbn_run) —
+     * this is the boot path (kernel blobs, the game bytecode, staged data), and
+     * it used to pay one ATA command per 4 KB block. Only the last, partial
+     * block is handled singly, into a stack buffer, so nothing is written past
+     * the caller's `size` (the old per-block loop's contract). */
+    uint32_t total_blocks = (size + block_size - 1) / block_size;
+    uint32_t full_blocks = size / block_size;
+    uint32_t lb = 0;
+    while (lb < full_blocks) {
+        uint32_t n = full_blocks - lb;
+        if (n > 64) n = 64;                 /* bound one helper call */
+        ext2_read_lbn_run(&inode, lb, n, (unsigned char*)buf + lb * block_size);
+        lb += n;
     }
-    
-    // 2. Read singly indirect block (12)
-    if (bytes_read < size && inode.i_block[12]) {
-        uint32_t* indirect_buf = (uint32_t*)kmalloc(block_size);
-        if (indirect_buf) {
-            ext2_read_block(inode.i_block[12], (unsigned char*)indirect_buf);
-            uint32_t num_ptrs = block_size / 4;
-            
-            for (uint32_t i = 0; i < num_ptrs && bytes_read < size; i++) {
-                uint32_t block = indirect_buf[i];
-                if (!block) break;
-                
-                ext2_read_block(block, block_buf);
-                uint32_t chunk = (size - bytes_read > block_size) ? block_size : (size - bytes_read);
-                memcpy(buf + bytes_read, block_buf, chunk);
-                bytes_read += chunk;
-            }
-            kfree(indirect_buf);
-        }
+    if (full_blocks < total_blocks) {
+        unsigned char tail[4096];
+        uint32_t blk = ext2_get_block(&inode, full_blocks, 0);
+        if (blk == 0) memset(tail, 0, block_size);
+        else ext2_read_block(blk, tail);
+        memcpy(buf + full_blocks * block_size, tail,
+               size - full_blocks * block_size);
     }
-    
-    // 3. Read doubly indirect block (13)
-    if (bytes_read < size && inode.i_block[13]) {
-        uint32_t* doubly_buf = (uint32_t*)kmalloc(block_size);
-        uint32_t* indirect_buf = (uint32_t*)kmalloc(block_size);
-        
-        if (doubly_buf && indirect_buf) {
-            ext2_read_block(inode.i_block[13], (unsigned char*)doubly_buf);
-            uint32_t num_ptrs = block_size / 4;
-            
-            for (uint32_t i = 0; i < num_ptrs && bytes_read < size; i++) {
-                uint32_t indirect_block = doubly_buf[i];
-                if (!indirect_block) break;
-                
-                ext2_read_block(indirect_block, (unsigned char*)indirect_buf);
-                for (uint32_t j = 0; j < num_ptrs && bytes_read < size; j++) {
-                    uint32_t block = indirect_buf[j];
-                    if (!block) break;
-                    
-                    ext2_read_block(block, block_buf);
-                    uint32_t chunk = (size - bytes_read > block_size) ? block_size : (size - bytes_read);
-                    memcpy(buf + bytes_read, block_buf, chunk);
-                    bytes_read += chunk;
-                }
-            }
-        }
-        if (doubly_buf) kfree(doubly_buf);
-        if (indirect_buf) kfree(indirect_buf);
-    }
-    
-    return bytes_read;
+    return (int)size;
 }
 
 // ============================================================
@@ -526,7 +560,62 @@ static uint32_t ext2_get_block(ext2_inode_t* inode, uint32_t lb, int alloc) {
         kfree(ind);
         return blk;
     }
-    return 0; // doubly indirect unsupported for writes
+    /* v38.142: doubly indirect (i_block[13]). Without this, any logical
+     * block past single-indirect range reads back as zeros: on a 4 KB-block
+     * volume that is past ~4 MB, which is exactly where q3dm7.bsp keeps its
+     * entity lump (offset 4.95 MB) — the map loaded with no entities, no
+     * spawns and no collision-world brushes past that point, and the player
+     * fell through the void on frame one while smaller maps (fully inside
+     * direct+single-indirect range) played fine. Triple indirect stays
+     * unsupported: it starts past 4 GB, unreachable on this volume. */
+    {
+        uint64_t start = 12u + per;
+        uint64_t count = (uint64_t)per * (uint64_t)per;
+        if ((uint64_t)lb < start + count) {
+            uint32_t rel = (uint32_t)((uint64_t)lb - start);
+            uint32_t i1 = rel / per, i2 = rel % per;
+            uint32_t *dind, *sind, blk = 0;
+            if (inode->i_block[13] == 0) {
+                if (!alloc) return 0;
+                inode->i_block[13] = ext2_alloc_block();
+                if (inode->i_block[13] == 0) return 0;
+                {
+                    unsigned char zb[4096];
+                    memset(zb, 0, sizeof(zb));
+                    ext2_write_block(inode->i_block[13], zb);
+                }
+            }
+            dind = (uint32_t *)kmalloc(block_size);
+            if (!dind) return 0;
+            ext2_read_block(inode->i_block[13], (unsigned char *)dind);
+            if (dind[i1] == 0) {
+                if (!alloc) { kfree(dind); return 0; }
+                dind[i1] = ext2_alloc_block();
+                if (dind[i1] == 0) { kfree(dind); return 0; }
+                {
+                    unsigned char zb[4096];
+                    memset(zb, 0, sizeof(zb));
+                    ext2_write_block(dind[i1], zb);
+                }
+                ext2_write_block(inode->i_block[13], (unsigned char *)dind);
+            }
+            sind = (uint32_t *)kmalloc(block_size);
+            if (!sind) { kfree(dind); return 0; }
+            ext2_read_block(dind[i1], (unsigned char *)sind);
+            blk = sind[i2];
+            if (blk == 0 && alloc) {
+                blk = ext2_alloc_block();
+                if (blk) {
+                    sind[i2] = blk;
+                    ext2_write_block(dind[i1], (unsigned char *)sind);
+                }
+            }
+            kfree(sind);
+            kfree(dind);
+            return blk;
+        }
+    }
+    return 0; // triple indirect and beyond: past volume capacity
 }
 
 // Clear the pointer for logical block lb (used when truncating). Frees the
@@ -555,6 +644,56 @@ static void ext2_clear_block_ptr(ext2_inode_t* inode, uint32_t lb) {
         }
         kfree(ind);
     }
+    /* v38.142: doubly indirect (matches ext2_get_block). Without this,
+     * truncating a file past single-indirect range leaked its tables. */
+    {
+        uint64_t start = 12u + per;
+        uint64_t count = (uint64_t)per * (uint64_t)per;
+        if ((uint64_t)lb >= start && (uint64_t)lb < start + count &&
+            inode->i_block[13]) {
+            uint32_t rel = (uint32_t)((uint64_t)lb - start);
+            uint32_t i1 = rel / per, i2 = rel % per;
+            uint32_t *dind = (uint32_t *)kmalloc(block_size);
+            if (!dind) return;
+            ext2_read_block(inode->i_block[13], (unsigned char *)dind);
+            if (dind[i1]) {
+                uint32_t *sind = (uint32_t *)kmalloc(block_size);
+                if (!sind) { kfree(dind); return; }
+                ext2_read_block(dind[i1], (unsigned char *)sind);
+                sind[i2] = 0;
+                {
+                    int empty = 1;
+                    uint32_t i;
+                    for (i = 0; i < per; i++) {
+                        if (sind[i]) { empty = 0; break; }
+                    }
+                    if (empty) {
+                        uint32_t sblk = dind[i1];
+                        dind[i1] = 0;
+                        ext2_write_block(inode->i_block[13],
+                                         (unsigned char *)dind);
+                        ext2_free_block(sblk);
+                    } else {
+                        ext2_write_block(dind[i1], (unsigned char *)sind);
+                    }
+                }
+                kfree(sind);
+                {
+                    int empty = 1;
+                    uint32_t i;
+                    for (i = 0; i < per; i++) {
+                        if (dind[i]) { empty = 0; break; }
+                    }
+                    if (empty) {
+                        uint32_t dblk = inode->i_block[13];
+                        inode->i_block[13] = 0;
+                        ext2_free_block(dblk);
+                    }
+                }
+            }
+            kfree(dind);
+        }
+    }
 }
 
 // Count allocated blocks (data + indirect tables) in 512-byte units.
@@ -568,6 +707,28 @@ static uint32_t ext2_count_blocks(ext2_inode_t* inode) {
             ext2_read_block(inode->i_block[12], (unsigned char*)ind);
             for (uint32_t i = 0; i < block_size / 4; i++) if (ind[i]) n++;
             kfree(ind);
+        }
+    }
+    /* v38.142: doubly indirect (matches ext2_get_block). */
+    if (inode->i_block[13]) {
+        uint32_t per = block_size / 4;
+        uint32_t* dind = (uint32_t*)kmalloc(block_size);
+        if (dind) {
+            uint32_t i, j;
+            n++;
+            ext2_read_block(inode->i_block[13], (unsigned char*)dind);
+            for (i = 0; i < per; i++) {
+                if (!dind[i]) continue;
+                n++;
+                {
+                    uint32_t* sind = (uint32_t*)kmalloc(block_size);
+                    if (!sind) break;
+                    ext2_read_block(dind[i], (unsigned char*)sind);
+                    for (j = 0; j < per; j++) if (sind[j]) n++;
+                    kfree(sind);
+                }
+            }
+            kfree(dind);
         }
     }
     return n * (block_size / 512);
@@ -671,6 +832,19 @@ int ext2_read_file_range(uint32_t inode_num, uint32_t offset, char* buf, int len
         uint32_t pos = offset + done;
         uint32_t lb = pos / block_size;
         uint32_t inb = pos % block_size;
+        uint32_t remain = (uint32_t)len - done;
+        /* v38.133: an aligned whole-block span goes out as ONE coalesced run
+         * (up to 64 KB per ATA command) instead of one command per 4 KB block.
+         * This is the q3dm1 texture load's path: the port asks for a file in
+         * 1 KB steps, so without this every block was fetched — and every
+         * repeat inside the same block re-walked it — one command at a time. */
+        if (inb == 0 && remain >= block_size) {
+            uint32_t n = remain / block_size;
+            if (n > 64) n = 64;
+            ext2_read_lbn_run(&inode, lb, n, (unsigned char*)buf + done);
+            done += n * block_size;
+            continue;
+        }
         uint32_t blk = ext2_get_block(&inode, lb, 0);
         uint32_t chunk = block_size - inb;
         if (chunk > (uint32_t)len - done) chunk = (uint32_t)len - done;

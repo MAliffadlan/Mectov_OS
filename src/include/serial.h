@@ -19,5 +19,9 @@ void write_serial_hex(uint32_t val);
 // (deadlock-free). Only for the #PF/#DF/exception paths.
 void write_serial_try(const char* buf, int size);
 int  write_serial_if_free(const char* buf, int size);
+// v38.157: non-blocking transmit-ring drain, called from every core's timer
+// tick (see serial.c). Pushes queued log bytes into the UART FIFO without
+// waiting, so a writer never stalls the frame it is logging from.
+void serial_poll(void);
 
 #endif

@@ -214,6 +214,18 @@ static const int cl_scmap[0x80] = {
     [0x52] = K_INS, [0x53] = K_DEL,
 };
 
+/* v38.150: the same table, for the official menu's window driver (q3_uiwin.c).
+ * id's UI speaks key numbers, not scancodes, so anything that feeds it keyboard
+ * input needs this translation — and a second copy of a 0x80-entry scancode
+ * table is a second thing to get subtly wrong. Returns -1 when the scancode
+ * has no physical key (the caller then falls back to the ASCII character the
+ * kernel resolved, which is what id's client does too). */
+int q3client_sc_to_key(int sc) {
+    if (sc < 0 || sc >= (int)(sizeof(cl_scmap) / sizeof(cl_scmap[0])))
+        return -1;
+    return cl_scmap[sc];
+}
+
 /* --- client state ----------------------------------------------------- */
 #define Q3CL_W 320
 #define Q3CL_H 240

@@ -157,9 +157,19 @@ SHADERS = [
     ("textures/mectovtest/probe_anim", 0, 0),
     ("textures/mectovtest/probe_extension", 0, 0),
     ("textures/mectovtest/probe_flame", 0, 0),
+    # v38.128: the cloud-layer sky (scripts/mectovtest.shader +
+    # build_q3pak.build_pak's two cloud TGAs). Like the probes it is defined in
+    # the PAK's scripts rather than in this file, but unlike them it IS on a
+    # surface — the ceiling of the sky fixture map (build(sky_ceiling=True)) —
+    # because the renderer only builds a sky box for directions some surface
+    # exposes, so nothing else can exercise the pass at all. Appended LAST on
+    # purpose: the arena's own shader lump is SHADERS[:SH_PROBE_DOLLAR], so the
+    # levels every other suite asserts on keep exactly the names they had.
+    ("textures/mectovtest/sky", 0, CONTENTS_SOLID),
 ]
 SH_FLOOR, SH_WALL, SH_CEIL, SH_STEP, SH_CURVE = 0, 1, 2, 3, 4
 SH_PROBE_DOLLAR, SH_PROBE_ANIM, SH_PROBE_EXT, SH_PROBE_FLAME = 5, 6, 7, 8
+SH_SKY = 9
 
 # Generated textures, one per shader (v38.108). 24-bit RGB rows, top-down; the
 # TGA writer below flips them into the file's BGR order. Colours are multiples
@@ -233,6 +243,22 @@ MAP_NAME = "mectovtest"
 MAP_VIS_NAME = "mectovvis"
 VIS_SPLIT_X = 100.0
 VIS_PLANE_NORMAL = (1.0, 0.0, 0.0)
+
+# --- the sky fixture (v38.128) ---------------------------------------------
+# The third map this script can build, and the only one whose geometry makes the
+# renderer draw a SKY rather than a surface: the arena's own room with its
+# CEILING painted `textures/mectovtest/sky`, an id-style cloud shader
+# (`skyParms - 512 -` + an opaque base layer + an additive layer, both with
+# `tcMod scroll`). Stand inside it, look up, and the top of the screen is the
+# cloud box; walk and the box follows the camera. The walls and floor stay
+# ordinary geometry, which is what makes a screendump's SKY band separable from
+# its world band — the assertion q3sky_test.py is built on.
+#
+# It is built by scripts/build_q3pak.py into the synthetic pak (never by main(),
+# because the shader definition it relies on lives in the pak's own
+# scripts/mectovtest.shader, not in the tree seed_ext2.sh mirrors onto the
+# volume — a map seeded without its definition would be a trap, not a fixture).
+MAP_SKY_NAME = "mectovsky"
 
 
 def face_st(normal, corner):
@@ -417,7 +443,16 @@ def entity_string():
     ).encode("ascii")
 
 
-def build(vis_fixture=False, with_probes=False):
+def build(vis_fixture=False, with_probes=False, sky_ceiling=False):
+    """One .bsp for the generated arena.
+
+    vis_fixture  add the two-leaf tree + visibility lump (mectovvis.bsp).
+    with_probes  carry the v38.125 probe names (see SHADERS).
+    sky_ceiling  paint the ceiling with the sky shader (mectovsky.bsp, v38.128)
+                 — the room, the collision and every other surface are
+                 byte-for-byte the arena's, because a fixture that also moved
+                 its walls would be measuring two things at once.
+    """
     lumps = [b""] * HEADER_LUMPS
 
     # --- planes, brush sides, brushes -------------------------------------
@@ -431,9 +466,14 @@ def build(vis_fixture=False, with_probes=False):
             planes.append((normal, dist))
         return plane_index[key]
 
+    brushes = BRUSHES
+    if sky_ceiling:
+        brushes = [(mn, mx, SH_SKY if s == SH_CEIL else s)
+                   for mn, mx, s in BRUSHES]
+
     brush_records = []
     side_records = []
-    for mins, maxs, shader in BRUSHES:
+    for mins, maxs, shader in brushes:
         first_side = len(side_records)
         for normal, dist, _corners in box_faces(mins, maxs):
             side_records.append((plane_num(normal, dist), shader))
@@ -465,7 +505,7 @@ def build(vis_fixture=False, with_probes=False):
     verts = []
     indexes = []
     surfaces = []
-    for mins, maxs, shader in BRUSHES:
+    for mins, maxs, shader in brushes:
         for normal, _dist, corners in box_faces(mins, maxs):
             first_vert = len(verts)
             first_index = len(indexes)

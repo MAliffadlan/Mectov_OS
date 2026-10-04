@@ -3,7 +3,7 @@
 
 #include "types.h"
 
-#define MAX_NODES     1024
+#define MAX_NODES     2048
 #define MAX_PATH      256
 #define MAX_FILENAME  32
 
@@ -19,11 +19,11 @@
 // and Sys_ListFiles needs the table, not just the mount roots. vfs_load()
 // rejects an old image so the node table is rebuilt from the embedded
 // apps instead of reading garbage into nodes 256..1023. Kept here (not
-// vfs.c) so shell's `df` reports the same numbers. RAM cost: 1024 × 512B
-// = 512 KB of BSS against a ~136 MB kernel heap budget.
+// vfs.c) so shell's `df` reports the same numbers. RAM cost: 2048 × 512B
+// = 1 MB of BSS against a ~136 MB kernel heap budget.
 #define VFS_MAGIC_SECTOR  0
 #define VFS_NODE_START    1
-#define VFS_NODE_SECTORS  1024  // 1024 nodes * 512 bytes = 512KB on disk
+#define VFS_NODE_SECTORS  2048  // 2048 nodes * 512 bytes = 1MB on disk
 
 // v38.96: tmpfs budget. Global cap on RAM committed to FS_RAM_FILE buffers
 // (kernel heap); per-file cap lives in vfs.c and matches the fd write path.
@@ -38,7 +38,11 @@
 // the new fields instead of reading garbage ownership into every node.
 // v4 (v38.111): node table widened to 1024 entries (512 KB on disk) — same
 // rejection-and-rebuild rule applies to images written by v38.110 and older.
-#define VFS_LAYOUT_VERSION 4
+// v5 (v38.141): node table widened to 2048 entries (1 MB on disk) — the full
+// demo staging (1011 files + dirs shadowed as VFS nodes) needs ~1200, past
+// the 1024 cap. The 2 MB image is unchanged (data area shrinks 1.5 MB to
+// 1 MB); v4 and older images hit the rejection-and-rebuild rule.
+#define VFS_LAYOUT_VERSION 5
 
 typedef enum { FS_FILE, FS_DIR, FS_DEV, FS_EXT2_FILE, FS_EXT2_DIR, FS_FAT32_FILE, FS_FAT32_DIR, FS_PROC, FS_SYMLINK,
                // v38.96: tmpfs — RAM-backed nodes (buffers in the kernel heap,

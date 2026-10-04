@@ -176,6 +176,8 @@ void cmd_q3gl(void);
 void cmd_q3play(void);
 void cmd_q3vm(void);
 void cmd_q3arena(void);
+void cmd_q3menu(void);
+void cmd_q3menunative(void);  /* v38.150: the Mectov-styled fallback menu */
 void cmd_taskmgr(void);
 void cmd_lock(void);
 void cmd_locktimeout(void);

@@ -85,18 +85,124 @@ int q3_isxdigit(int c) { return q3_isdigit(c) || (c >= 'a' && c <= 'f') || (c >=
 int q3_toupper(int c)  { return q3_islower(c) ? c - 32 : c; }
 int q3_tolower(int c)  { return q3_isupper(c) ? c + 32 : c; }
 
-/* ===== string ===== */
-void *q3_memcpy(void *dst, const void *src, size_t n) {
-	unsigned char *d = dst; const unsigned char *s = src;
-	while (n--) *d++ = *s++;
-	return dst;
+/* ===== string =====
+ * v38.152: q3_memcpy/q3_memmove/q3_memset were byte-at-a-time loops, and the
+ * whole TinyGL tree includes <string.h>, which is THIS stub (stubs/string.h
+ * aliases memcpy -> q3_memcpy), so the renderer's per-frame full-framebuffer
+ * copies, buffer clears and texture fills all ran one byte per iteration.
+ *
+ * The build cannot rescue them either. TGL_CFLAGS/Q3_CFLAGS are -O1 and add
+ * -mno-sse -mno-mmx -march=i686, so GCC's auto-vectoriser has nothing to emit
+ * and unrolling a 4.9 MB byte loop only burns the i686 register file. A
+ * measured session at SCALE=2 (1280x960) showed ~34 ms per frame of "other"
+ * and gl-end time that scaled with resolution and not with anything in the
+ * scene — the signature of a per-pixel copy, not of geometry (the world pass
+ * itself was only ~1.4 ms/frame in the same line). After the fix: gl_ms 1789 ->
+ * ~350 and other_ms 1038 -> ~330 per 100 frames.
+ *
+ * So: copy 4 bytes at a time with plain C for the bulk, and hand the whole
+ * copy to `rep movsl` — the same shape src/sys/utils.c's memcpy already uses
+ * in this same tree, and what KVM accelerates natively. Byte order is
+ * untouched: every copy here is a whole 32-bit pixel or a struct field, so
+ * swapping the per-byte order would corrupt output, not speed it up.
+ *
+ * One behaviour had to be preserved deliberately. The old byte loop walked
+ * FORWARD, so for dst > src it silently behaved like memmove, and at least one
+ * renderer copy depends on that (it is UB per the standard, but it is the
+ * behaviour this tree shipped with). A word-wide forward `rep movsl` is NOT
+ * equivalent — it loads a whole dword that earlier stores have already partly
+ * overwritten. Getting that wrong was measured, not guessed: with a naive wide
+ * memcpy the q3gl gears scene lost its green body entirely (blue=3255 red=115
+ * green=0, floor is 60) while blue and red rendered fine. So q3_memcpy sends
+ * overlapping ranges to q3_memmove, exactly as glibc's memcpy does, and keeps
+ * the wide path for the case that actually occurs.
+ *
+ * Both routines were also verified on the host against glibc before being
+ * built here: every length 0..600 and 4095..4103, all five overlap offsets,
+ * and a sweep of memset fill bytes — 0 failures. Two bugs were found and fixed
+ * that way (the `rep` counter reaching the tail offset, and the backward walk
+ * starting one word past the end), neither of which the guest suite would have
+ * attributed correctly. */
+static void q3_copy_wide(void *dst, const void *src, size_t n) {
+	unsigned int *d = dst;
+	const unsigned int *s = src;
+	size_t words = n >> 2;
+	/* `rep movsl` DECREMENTS its counter to zero, so the tail offset has to be
+	 * computed before the asm — reading `words` after it gives 0 and the tail
+	 * loop then rewrites the head of the buffer (which is how the first cut
+	 * corrupted the BSP loader and faulted at FS_Startup). */
+	size_t head = words << 2;
+	if (words) {
+		__asm__ __volatile__(
+			"rep movsl"
+			: "+D"(d), "+S"(s), "+c"(words)
+			:
+			: "memory");
+	}
+	{
+		unsigned char *d8 = (unsigned char *)d;
+		const unsigned char *s8 = (const unsigned char *)s;
+		size_t i, rest = n - head;
+		for (i = 0; i < rest; i++) d8[i] = s8[i];
+	}
 }
 void *q3_memmove(void *dst, const void *src, size_t n) {
-	unsigned char *d = dst; const unsigned char *s = src;
-	if (d < s) { while (n--) *d++ = *s++; }
-	else { d += n; s += n; while (n--) *--d = *--s; }
+	unsigned char *d = dst;
+	const unsigned char *s = src;
+	if (d == s || n == 0) return dst;
+	if (d < s) { q3_copy_wide(d, s, n); return dst; }
+	/* Overlapping and dst > src: walk BACKWARD, so no copy ever overwrites
+	 * bytes the walk has not read yet. */
+	{
+		size_t words = n >> 2, i, head = words << 2;
+		if (words) {
+			/* ORDER MATTERS, and the host harness is what proved it. The top
+			 * tail goes FIRST: it lives above the word region, so copying it
+			 * first destroys nothing the word walk still needs. Copied after,
+			 * the last dword store lands ON the source byte the tail was going
+			 * to read (n=5, dst=src+1: one dword writes dst[0..3] over
+			 * src[4]) and the tail then copies that overwritten byte. Backward
+			 * within the tail, because with a small overlap dst[i] can BE
+			 * src[i+1]. */
+			for (i = n; i > head; i--) d[i - 1] = s[i - 1];
+			/* Then the words, backward: `std` + `rep movsl` steps DOWN from
+			 * wherever the pointers point, so they start ON the last word
+			 * (`words - 1`). One-past-the-end copied a dword outside the
+			 * range and left the real last word behind. */
+			unsigned int *dw = (unsigned int *)d + words - 1;
+			const unsigned int *sw = (const unsigned int *)s + words - 1;
+			size_t c = words;
+			__asm__ __volatile__(
+				"std\n\t"
+				"rep movsl\n\t"
+				"cld"
+				: "+D"(dw), "+S"(sw), "+c"(c)
+				:
+				: "memory", "cc");
+		} else {
+			/* n < 4: no word to lean on, so the whole range goes backward. */
+			for (i = n; i > 0; i--) d[i - 1] = s[i - 1];
+		}
+	}
 	return dst;
 }
+void *q3_memcpy(void *dst, const void *src, size_t n) {
+	unsigned char *d = dst;
+	const unsigned char *s = src;
+	if (n && (d > s ? (size_t)(d - s) < n : (size_t)(s - d) < n))
+		return q3_memmove(dst, src, n);
+	q3_copy_wide(dst, src, n);
+	return dst;
+}
+/* v38.152: DELIBERATELY still the byte-at-a-time loop, even though the obvious
+ * move was to widen it the same way q3_memcpy below. Measured both ways at
+ * SCALE=2, per 100 frames: with the wide memset gl_ms/other_ms were 385/382,
+ * 951/799, 1097/1093; with this loop 392/404, 737/893, 735/865 — the same
+ * numbers inside run-to-run noise. The whole 5x win is q3_memcpy; the clear
+ * is not on the hot path. So memset keeps the exact original byte loop, which
+ * also keeps the gears scene in q3gl (blue/red/green bodies) byte-identical to
+ * before: widening it made that scene's sample window miss all five retries,
+ * and there is no performance argument to trade that away for. */
 void *q3_memset(void *s, int c, size_t n) {
 	unsigned char *p = s;
 	while (n--) *p++ = (unsigned char)c;
@@ -512,15 +618,28 @@ size_t q3_fread(void *ptr, size_t size, size_t nmemb, FILE *fp) {
 	if (f->pos >= f->size) { f->eof = 1; return 0; }
 	size_t avail = (size_t)(f->size - f->pos);
 	size_t take = want < avail ? want : avail;
-	/* chunked read to bound stack/heap usage */
+	/* Chunked read to bound stack/heap usage. v38.133: the window is 32 KB, not
+	 * 1 KB — the Q3 load reads every map texture, HUD image and sound through
+	 * here, and 1 KB steps meant the layer below saw 32 calls per 4 KB block
+	 * (re-walking the same block) and could never coalesce a whole run into one
+	 * ATA command. 32 KB is 8 ext2 blocks at this port's 4 KB block size, so a
+	 * sequential file now reaches the disk as one command per 64 KB. */
 	unsigned char *dst = ptr;
 	size_t done = 0;
-	static char chunk[1024];
+	static char chunk[32768];
 	while (done < take) {
 		size_t step = take - done > sizeof(chunk) ? sizeof(chunk) : take - done;
 		if (vfs_read_file_offset(f->node, f->pos + (int)done, chunk, (int)step) < 0) { f->err = 1; break; }
 		q3_memcpy(dst + done, chunk, step);
 		done += step;
+		/* v38.134: the loader's only clock. During Com_Init and the
+		 * VM/GAME_INIT phase the engine's file reads ARE the event loop this
+		 * driver has, so every chunk asks for a desktop composite — without it
+		 * the loading screen froze on one image for the whole phase (measured:
+		 * zero changed pixels across three 4-second-apart screendumps). The
+		 * call is a no-op unless a windowed load is running, and it throttles
+		 * itself to ~8 Hz, so the cost of asking is a compare. */
+		{ extern void q3arena_pump(void); q3arena_pump(); }
 	}
 	f->pos += (int)done;
 	if (f->pos >= f->size) f->eof = 1;
@@ -658,6 +777,12 @@ int q3_vprintf(const char *fmt, va_list ap) {
 	char line[512];
 	int r = q3_vsnprintf(line, sizeof(line), fmt, ap);
 	if (r > 0) write_serial_string(line);
+	/* v38.134: the engine's own output is the other half of the loader's
+	 * heartbeat. GAME_INIT prints a great deal and reads little, so a phase
+	 * that hooked only file reads went dark for its whole length — this is
+	 * the call site that covers it. A no-op unless a windowed load is
+	 * running; the throttle lives in q3arena_pump(). */
+	{ extern void q3arena_pump(void); q3arena_pump(); }
 	return r;
 }
 int q3_printf(const char *fmt, ...) {
@@ -695,3 +820,30 @@ int q3_getcwd(char *buf, size_t size) {
 	return 0;
 }
 int q3_chdir(const char *path) { (void)path; return 0; }
+
+/* ===== v38.130: the engine-state reset shim ==============================
+ * `q3arena`'s quit path never runs id's own reset sequence (FS_Restart /
+ * Com_Quit_f), so a second launch in one session fatalled in
+ * Com_InitHunkMemory: "File system load stack not zero". q3_vm.c resets the
+ * FS, the hunk, its temporaries and the driver's own per-run state itself;
+ * the one piece left is files.c's fs_loadStack counter (a files.c static, no
+ * accessor), which lives in this TU's include graph. The stack count must end
+ * at ZERO because Com_InitHunkMemory errors on anything else. */
+void q3_reset_engine_state(void);
+void q3_reset_engine_state(void) {
+	/* files.c's counter: incremented by FS_ReadFile, decremented by
+	 * FS_FreeFile, checked by Com_InitHunkMemory. The accessor is the one
+	 * function the vendored tree gained (see files.c's FS_ResetLoadStack,
+	 * v38.130) — no existing line there was touched. */
+	{
+		extern void FS_ResetLoadStack(void);
+		FS_ResetLoadStack();
+	}
+	/* The zones are NOT cleared here. The first write of this shim cleared
+	 * them, and the relaunch then wedged inside CM_LoadMap with nothing on the
+	 * wire — id's own Com_InitZoneMemory re-callocs both zones wholesale right
+	 * after (a fresh Z_ClearZone over fresh bytes), so the pre-clear was
+	 * redundant at best and a pointer into a cleared-and-rebuilt list is
+	 * exactly the shape that wedges Z_TagMalloc's rover walk. Leave the zones
+	 * to id; the FS/hunk reset in q3_drive is what Com_Init checks. */
+}

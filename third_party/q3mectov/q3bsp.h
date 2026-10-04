@@ -164,6 +164,23 @@ typedef struct {
      * what backface culling reads, exactly the data id's R_CullDotTri culls
      * with; `normal` above keeps serving the baked-sun fallback. */
     float frontNormal[3];
+    /* v38.132: is `frontNormal` trustworthy enough to REJECT this face with?
+     *
+     * Set at load from the agreement of the file's own per-vertex normals (see
+     * bsp_face_finish). 1 = they all point the same way, so the mean describes
+     * a real front side. 0 = they disagree or cancel, which is what q3map
+     * emits for a brush-derived face where the normals run along the BRUSH
+     * rather than at the visible surface — the case this port's own comment
+     * recorded ("walls and the curved cove vanished under either sign").
+     *
+     * A 0 face is NEVER rejected: a face drawn that need not have been is a
+     * wasted triangle, a face wrongly rejected is a hole in the level. This is
+     * what makes the cull fail-safe on retail maps while keeping it where it is
+     * measured to be correct.
+     *
+     * Purely derived at load from data already in the file — never persisted,
+     * so adding it changes nothing on disk. */
+    int   cullTrusted;
     float light;            /* baked face light 0..1 against the sun */
     int   lightmapNum;      /* page in q3bsp_mesh_t.lightmaps, -1 = sun-lit */
 } q3bsp_face_t;
@@ -225,6 +242,32 @@ typedef struct q3bsp_mesh_s {
  * The caller frees buffers, not names, via q3bsp_free_decls(). Returns 0 on
  * success (any number of decls, including none); -1 on a bad pointer, -5 on
  * an allocation failure. */
+/* v38.128: what one STAGE of a definition asks for. Until this release the
+ * parser kept only the first image of the first stage, which is all the world
+ * draw needed — but the sky is not one image: `textures/skies/tim_hell` is a
+ * base layer plus an ADDITIVE cloud layer, each with its own `tcMod`, and id
+ * animates both with the game clock. A stage is therefore image + how it is
+ * blended + the tcMods in the order the file wrote them (id applies them in
+ * that order, in place — see RB_CalcScrollTexCoords/RB_CalcScaleTexCoords). */
+#define Q3BSP_MAX_STAGES  4
+#define Q3BSP_MAX_TCMODS  2
+#define Q3BSP_TCMOD_SCROLL 0        /* tcMod scroll <s> <t>, texture units per SECOND */
+#define Q3BSP_TCMOD_SCALE  1        /* tcMod scale  <s> <t>, a multiplier          */
+
+typedef struct {
+    unsigned char type;             /* Q3BSP_TCMOD_* */
+    float         a, b;
+} q3bsp_tcmod_t;
+
+typedef struct {
+    const char   *image;            /* the stage's first real image, or NULL */
+    int           imageLen;
+    int           additive;         /* this stage's blendFunc is GL_ONE GL_ONE */
+    int           depthWrite;       /* the stage says depthWrite */
+    int           numTcMods;
+    q3bsp_tcmod_t tcmod[Q3BSP_MAX_TCMODS];
+} q3bsp_shader_stage_t;
+
 typedef struct q3bsp_shader_decl_s {
     const char *name;               /* into the file buffer, NOT NUL-terminated */
     int         nameLen;
@@ -237,6 +280,20 @@ typedef struct q3bsp_shader_decl_s {
      * definition-level `cull none|disable` (fire and lava are two-sided). */
     int         additive;           /* that stage blends GL_ONE GL_ONE */
     int         cullNone;           /* the definition turns culling off */
+    /* v38.128: the sky. `sky` is the definition-level `surfaceparm sky` — the
+     * faces it names are the ones id's renderer does NOT draw as geometry (it
+     * uses their directions to pick which sides of the sky box to fill), and
+     * `cloudHeight` is `skyparms`' middle operand (0 = no cloud layer). The
+     * stages above carry the layers those faces are drawn with. */
+    int         sky;
+    /* v38.128: `skyparms`' FIRST operand, as a flag: 1 when the definition
+     * names a six-image far box. The renderer keeps it for the log only — the
+     * box itself is not built (see third_party/tinygl/q3sky.h), and a map that
+     * asks for one is otherwise indistinguishable from one that does not. */
+    int         skyFarBox;
+    int         cloudHeight;
+    int         numStages;
+    q3bsp_shader_stage_t stages[Q3BSP_MAX_STAGES];
 } q3bsp_shader_decl_t;
 
 typedef struct q3bsp_shader_decls_s {

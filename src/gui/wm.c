@@ -765,6 +765,21 @@ static void draw_one(int idx) {
      * exactly the game window's share of the composite pass. */
     int t_app0 = 0, t_blit0 = 0;
     if (w->is_q3_game) t_app0 = (int)timer_get_us();
+    /* v38.148 direct-present: TRIED AND REVERTED the same night. The idea
+     * (point content_buffer at the back-buffer region, skip the composite
+     * copy) worked and metered blit~0/wm~0 at 40fps — but it died twice:
+     * first a stride skew in the blit's raw writers (fixed via the
+     * q3ref_set_blit_pitch override, which stays as dormant machinery),
+     * then a HEAP CORRUPTION panic (kfree of a non-allocated pointer from
+     * draw_one) on the first session that raised another window over the
+     * game. Root cause of the bad pointer was never isolated to certainty
+     * (stale boot buffer vs slot recycle vs an overrun elsewhere), and an
+     * unexplained heap fault next to new code is a revert, not a debate.
+     * The classic copy below is battle-tested; the 40fps came mostly from
+     * the pacer precision + logging cuts anyway. If this is ever retried:
+     * (1) never kfree inside draw paths — retire stale buffers via
+     * wm_defer_free, (2) re-verify with the crosshair-coherence metric,
+     * not just the renderer histogram (the suite is blind past present). */
     if (cw2 > 0 && ch2 > 0) {
         // 1. Grow-only content buffer. Reusing the capacity means live resize
         //    doesn't kmalloc/kfree a fresh cw2*ch2*4 buffer on every mouse move
@@ -867,6 +882,32 @@ static void wm_draw_all_unlocked() {
     for (int z = 0; z < wm_zcount; z++) draw_one(wm_zorder[z]);
     wm_draw_alt_tab_hud();
 }
+/* v38.139: composite a single window — see the declaration in wm.h for why.
+ *
+ * The rectangle is claimed before draw_one() reads it, for the same reason
+ * desktop_present_now() claims the whole screen: mark_dirty() only records
+ * damage while the back buffer is the active render target, so a window whose
+ * blit lands while its content buffer is installed can miss its mark, and a
+ * missed mark means swap_buffers() never copies it. That race is what left the
+ * loading screen on the glass in v38.138; this is the same guard, one window
+ * wide. */
+int wm_draw_window(int id) {
+    extern void mark_dirty(int, int, int, int);
+    int found = 0;
+    wm_lock_acquire();
+    wm_flush_frees();
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        WmWin* w = &wm_wins[i];
+        if (!w->visible || w->id != id) continue;
+        mark_dirty(w->x, w->y, w->w, w->h);
+        draw_one(i);
+        found = 1;
+        break;
+    }
+    wm_lock_release();
+    return found;
+}
+
 void wm_draw_all() {
     /* v38.110: the whole pass is metered even without a game window, so the
      * perf line can compare "everything the compositor did this pass" against

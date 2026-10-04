@@ -16,6 +16,7 @@
 #include "msghandling.h"
 #include "zbuffer.h"
 #include "ztriangle_variants.h"
+#include "tgl_cyc.h"      /* v38.126: tgl_n_frag, the shaded-fragment counter */
 
 #if (TGL_FEATURE_RENDER_BITS != 32) && (TGL_FEATURE_RENDER_BITS != 16)
 #error "Incorrect render bits"
@@ -932,6 +933,7 @@ void ZB_fillTriangleMappingPerspective_DT1_DW0(ZBuffer *zb,
     {                                                                         \
         register GLuint zz = z >> ZB_POINT_Z_FRAC_BITS;                       \
         if ((zz >= pz[_a]) STIPTEST(_a)) {                                    \
+            tgl_n_frag++;                                                     \
             TGL_BLEND_FUNC(                                                   \
                 RGB_MIX_FUNC(or1, og1, ob1, (TEXTURE_SAMPLE(texture, s, t))), \
                 (pp[_a]));                                                    \
@@ -986,6 +988,7 @@ void ZB_fillTriangleMappingPerspective_DT1_DW1(ZBuffer *zb,
     {                                                                         \
         register GLuint zz = z >> ZB_POINT_Z_FRAC_BITS;                       \
         if ((zz >= pz[_a]) STIPTEST(_a)) {                                    \
+            tgl_n_frag++;                                                     \
             TGL_BLEND_FUNC(                                                   \
                 RGB_MIX_FUNC(or1, og1, ob1, (TEXTURE_SAMPLE(texture, s, t))), \
                 (pp[_a]));                                                    \
@@ -1151,6 +1154,7 @@ void ZB_fillTriangleMappingPerspectiveNOBLEND_DT1_DW0(ZBuffer *zb,
     {                                                                       \
         register GLuint zz = z >> ZB_POINT_Z_FRAC_BITS;                     \
         if ((zz >= pz[_a]) STIPTEST(_a)) {                                  \
+            tgl_n_frag++;                                                   \
             pp[_a] =                                                        \
                 RGB_MIX_FUNC(or1, og1, ob1, TEXTURE_SAMPLE(texture, s, t)); \
         }                                                                   \
@@ -1203,6 +1207,7 @@ void ZB_fillTriangleMappingPerspectiveNOBLEND_DT1_DW1(ZBuffer *zb,
     {                                                                       \
         register GLuint zz = z >> ZB_POINT_Z_FRAC_BITS;                     \
         if ((zz >= pz[_a]) STIPTEST(_a)) {                                  \
+            tgl_n_frag++;                                                   \
             pp[_a] =                                                        \
                 RGB_MIX_FUNC(or1, og1, ob1, TEXTURE_SAMPLE(texture, s, t)); \
             pz[_a] = zz;                                                    \

@@ -31,6 +31,15 @@ static inline unsigned long long tgl_rdtsc(void) {
 /* Defined in clip.c. */
 extern unsigned long long tgl_cyc_fill;   /* raster only */
 extern unsigned int tgl_n_fill;           /* triangles that reached the raster */
+/* v38.126: SHADED FRAGMENTS — pixels that passed the depth test and were
+ * actually texture-mapped (defined in clip.c, incremented in the four DT1
+ * textured raster variants in ztriangle.c). Divided by the 320x240 frame it is
+ * the overdraw ratio, which is the number that decides whether reordering the
+ * draw can still save fill: a ratio near 1 means every shaded pixel was
+ * visible anyway and only real fill work is left. Like the cycle counters it
+ * is drained per sampled window, so it is a 20-frame total and the world's
+ * share has to be snapshotted before the view model draws (q3ref_draw_world). */
+extern unsigned int tgl_n_frag;
 /* Defined in vertex.c. */
 extern unsigned long long tgl_cyc_vert;   /* the whole glVertex3f path */
 

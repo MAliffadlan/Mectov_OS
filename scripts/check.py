@@ -100,6 +100,14 @@ SUITES = [
     # .tga it never references is not), seeded onto a fresh volume, and the
     # suite runs `q3arena mectovtest` on it. Same MECTOV_Q3=1 ISO.
     ("q3retail",         "q3retail_test.py",          600, [], "q3"),
+    # q3dm1 — the RETAIL map from the demo's pak0 (v38.132). Every other Q3
+    # suite plays a GENERATED fixture, which is exactly why a failure that ate
+    # 1927 of 1930 visible faces and froze every counter went unnoticed. This
+    # one pins nothing and lets the demo walk: it asserts the map renders, the
+    # camera moves, the view changes, and the walk steers off a wall instead of
+    # pressing into one. Skips itself when q3dm1 is not staged, since pak0 is
+    # id's data and is not in the repo. `make check-q3cull` to run it.
+    ("q3cull",           "q3cull_test.py",            600, [], "q3"),
     # Exclusive fullscreen present + a pinned camera pose (v38.119, Q3 phase
     # 11): `q3arena <map> fullscreen @x,y,z,yaw[,pitch]` on the generated
     # arena. The present path is invisible to the renderer's own histogram, so
@@ -125,6 +133,27 @@ SUITES = [
     # parsed geometry, the triangles the draw pass submitted, the texture size
     # and the muzzle the tags produce. Same MECTOV_Q3=1 ISO.
     ("q3viewmodel",      "q3viewmodel_test.py",        600, [], "q3"),
+    # id's own status bar (v38.127, Q3 phase 14): ammo/health/armor fields and
+    # the FFA score boxes, composited into the frame out of the game's own
+    # gfx/2d + icons pictures and the module's own playerState. The suite's
+    # synthetic picture set encodes each digit in a colour, so the numbers can
+    # be read back off a screendump; a second boot with `nohud` shows the bar is
+    # what put them there and that the frame histogram never saw it. Same
+    # MECTOV_Q3=1 ISO.
+    ("q3hud",            "q3hud_test.py",              600, [], "q3"),
+    # id's own sky (v38.128, Q3 phase 23): the level's `surfaceparm sky`
+    # surfaces are clipped into the six sides of a camera-centred box that the
+    # shader's own layers fill at `skyparms`' height, animating on the game
+    # clock through their `tcMod scroll`/`scale`. The suite's fixture is a
+    # second generated map whose CEILING is a cloud-layer sky (an opaque base
+    # plus an ADDITIVE layer), so a screendump's sky band can be compared
+    # against its world band: with the camera pinned the world band must be
+    # identical between two dumps minutes apart while the sky band changes, and
+    # a second boot with `nosky` is the control where neither does. Same
+    # MECTOV_Q3=1 ISO.
+    ("q3sky",           "q3sky_test.py",              600, [], "q3"),
+    # v38.142: the sound bridge is gone (game runs silent) — q3snd_test.py
+    # retired with it.
     # VirtIO-GPU (v38.115): the kernel's first MODERN virtio-pci driver — the
     # device has no legacy interface, so the suite asserts the capability walk,
     # the 64-bit feature negotiation and the control queue, then the 2D data

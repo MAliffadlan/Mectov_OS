@@ -41,12 +41,18 @@ Usage:
     scripts/q3a_data.py --pak ~/q3/pak0.pk3 --map q3dm17
     scripts/q3a_data.py --pak ~/q3/pak0.pk3 --list           # plan only
     scripts/q3a_data.py --pak ... --with-viewmodel
+    scripts/q3a_data.py --pak ... --with-hud
     scripts/q3a_data.py --pak ... --with-models --with-sounds
 
 v38.124: --with-viewmodel stages models/weapons2/machinegun/* — the three .md3
 parts and the two JPEGs the port's own view model draws (q3viewmodel.c). The
 Quake III Arena DEMO pak0 ships it, so `--with-viewmodel` on a demo install is
 the whole first-person weapon.
+
+v38.127: --with-hud stages the pictures id's own status bar is drawn from — the
+11 number fields, the bigchars atlas, the score box's select overlay and the
+armor/ammo icons (q3hud.c). They are listed by name because nothing in the .bsp
+refers to them; the engine's cgame registers them itself.
 
 Honesty note: this script's job is to be *verifiable*. `--verify` re-reads the
 staged .bsp and reports any shader name that resolved to no file at all, so a
@@ -225,7 +231,45 @@ class Pak(object):
         return [n for n in self.by_name if n.startswith(prefix) and n.endswith(suffix)]
 
 
-def plan(pak, mapname, with_models, with_sounds, with_viewmodel=False):
+# v38.127: every picture id's own status bar draws, by the name cg_main.c and
+# cg_weapons.c register them under (no extension — resolve_image() probes the
+# extension id actually shipped, which is .tga for all of these). The number
+# fields are sb_nums[] (cg_main.c:826-838), the charset is CG_DrawChar's 16x16
+# atlas, select is the score box's "this one is yours" overlay, and the icons
+# are CG_DrawStatusBar's armor icon and one ammo icon per weapon.
+HUD_IMAGES = [
+    "gfx/2d/numbers/zero_32b",
+    "gfx/2d/numbers/one_32b",
+    "gfx/2d/numbers/two_32b",
+    "gfx/2d/numbers/three_32b",
+    "gfx/2d/numbers/four_32b",
+    "gfx/2d/numbers/five_32b",
+    "gfx/2d/numbers/six_32b",
+    "gfx/2d/numbers/seven_32b",
+    "gfx/2d/numbers/eight_32b",
+    "gfx/2d/numbers/nine_32b",
+    "gfx/2d/numbers/minus_32b",
+    "gfx/2d/bigchars",
+    "gfx/2d/select",
+    "icons/iconr_yellow",
+    "icons/icona_machinegun",
+    "icons/icona_shotgun",
+    "icons/icona_grenade",
+    "icons/icona_rocket",
+    "icons/icona_lightning",
+    "icons/icona_railgun",
+    "icons/icona_plasma",
+    "icons/icona_bfg",
+]
+
+
+# v38.141: the demo's full map list (scripts/arenas.txt). --all stages all of
+# these; the default stays one map so CI keeps its fast path.
+ALL_MAPS = ("q3dm1", "q3dm17", "q3dm7", "q3tourney2")
+
+
+def plan(pak, mapname, with_models, with_sounds, with_viewmodel=False,
+         with_hud=False):
     """Everything to extract, as (source entry, staged relative path)."""
     wanted = {}
 
@@ -302,11 +346,75 @@ def plan(pak, mapname, with_models, with_sounds, with_viewmodel=False):
                 pak.glob("models/weapons2/", ".tga") + \
                 pak.glob("models/weapons2/", ".jpg"):
             want(entry)
+        # v38.141: a player model is only usable with its animation config.
+        for entry in pak.glob("models/players/", ".cfg"):
+            want(entry)
+    if with_hud:
+        # v38.127: id's own status bar (third_party/tinygl/q3hud.c). 22 pictures,
+        # ~330 KB against this pak's 46 MB — and unlike the world's textures
+        # these are NOT reachable from the .bsp: nothing in the level names
+        # them, so they have to be listed. The eleven number fields are what a
+        # health/ammo/armor readout is drawn from, so a status bar without them
+        # is not a smaller status bar, it is no status bar.
+        for base in HUD_IMAGES:
+            src = pak.resolve_image(base)
+            if src:
+                want(src)
+
     if with_sounds:
         for entry in pak.glob("sound/", ".wav"):
             want(entry)
 
     return wanted, unresolved, shader_names
+
+
+def plan_full(pak):
+    """Non-map extras for --all, as (source entry, staged relative path).
+
+    Data only: nothing here needs engine code, and nothing here changes what
+    the default single-map path stages. Small text/config plus id's prebuilt
+    cgame/ui bytecode (runs in the VM interpreter the port already has — the
+    game logic itself stays built from source as qagame.qvm)."""
+    wanted = {}
+
+    def want(src, dst=None):
+        wanted.setdefault(norm(dst or src), norm(src))
+
+    def files(prefix):
+        # glob("") matches directories too; those are not extractable.
+        return [e for e in pak.glob(prefix, "") if not e.endswith("/")]
+
+    # Match-end stingers (no CD audio in the demo; these two wavs are it).
+    for entry in pak.glob("music/", ".wav"):
+        want(entry)
+    # Map preview art (for a future map picker).
+    for entry in pak.glob("levelshots/", ".jpg") + \
+            pak.glob("levelshots/", ".tga"):
+        want(entry)
+    # Menu art + data (menu/*, full gfx/icons, every shader). Data only.
+    for entry in files("menu/"):
+        want(entry)
+    for entry in pak.glob("gfx/", ".jpg") + pak.glob("gfx/", ".tga") + \
+            pak.glob("icons/", ".jpg") + pak.glob("icons/", ".tga"):
+        want(entry)
+    for entry in pak.glob("scripts/", ".shader"):
+        want(entry)
+    for name in ("scripts/arenas.txt", "scripts/bots.txt"):
+        if pak.exists(name):
+            want(name)
+    # Bot personalities (runtime definitions; the .c framework is engine
+    # sources and stays out of the data tree).
+    for entry in files("botfiles/bots/"):
+        want(entry)
+    # Recorded demos + id's own intro movies (future player/playback work).
+    for entry in pak.glob("video/", ".roq") + pak.glob("demos/", ".dm3"):
+        want(entry)
+    # id's prebuilt client/menu bytecode (runs in the existing VM
+    # interpreter; qagame stays built from source).
+    for entry in ("vm/cgame.qvm", "vm/ui.qvm"):
+        if pak.exists(entry):
+            want(entry)
+    return wanted
 
 
 def human(n):
@@ -329,7 +437,16 @@ def main():
     ap.add_argument("--with-viewmodel", action="store_true",
                     help="also stage the machinegun view model (v38.124: the .md3 "
                          "parts and textures the first-person gun is drawn from)")
+    ap.add_argument("--with-hud", action="store_true",
+                    help="also stage id's status bar art (v38.127: the number "
+                         "fields, charset, armor/ammo icons and the score-box "
+                         "overlay q3hud.c draws health/armor/ammo/score from)")
     ap.add_argument("--with-sounds", action="store_true", help="also stage every sound")
+    ap.add_argument("--all", action="store_true",
+                    help="stage everything the demo ships (v38.141: all 4 maps, "
+                         "player models, sounds, HUD, menu art, bot data, "
+                         "movies, prebuilt cgame/ui). The default stays one "
+                         "map so CI keeps its fast path.")
     args = ap.parse_args()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -346,12 +463,33 @@ def main():
     baseq3 = os.path.join(outdir, "baseq3")
 
     pak = Pak(args.pak)
-    wanted, unresolved, shader_names = plan(pak, args.map, args.with_models,
-                                           args.with_sounds, args.with_viewmodel)
+    if args.all:
+        args.with_models = args.with_sounds = True
+        args.with_viewmodel = args.with_hud = True
+        maps = [m for m in ALL_MAPS if pak.exists("maps/%s.bsp" % m)]
+        if not maps:
+            die("no demo maps in this pak (tried %s)" % ", ".join(ALL_MAPS))
+    else:
+        maps = [args.map]
+    wanted = {}
+    unresolved = []
+    shader_names = []
+    for mapname in maps:
+        w, u, s = plan(pak, mapname, args.with_models, args.with_sounds,
+                       args.with_viewmodel, args.with_hud)
+        wanted.update(w)
+        unresolved += u
+        shader_names += s
+    n_full = 0
+    if args.all:
+        full = plan_full(pak)
+        n_full = len(full)
+        wanted.update(full)
 
     print("[q3data] pak      : %s (%s)" % (args.pak, human(os.path.getsize(args.pak))))
-    print("[q3data] map      : %s" % args.map)
-    print("[q3data] shaders  : %d referenced by the map, %d file(s) to stage"
+    print("[q3data] map      : %s" % (", ".join(maps) +
+          (" + full demo data (%d extra files)" % n_full if args.all else "")))
+    print("[q3data] shaders  : %d referenced by the map(s), %d file(s) to stage"
           % (len(shader_names), len(wanted)))
     if unresolved:
         print("[q3data] unresolved (%d) — textures with no file under any "
@@ -391,22 +529,22 @@ def main():
           "(or ./run.sh, which sizes the volume from this payload)")
 
     if args.verify:
-        bsp_path = os.path.join(baseq3, "maps", args.map + ".bsp")
-        with open(bsp_path, "rb") as fh:
-            staged_bsp = fh.read()
-        missing = []
-        for name in bsp_shader_names(staged_bsp):
-            base = os.path.join(baseq3, *norm(name).split("/"))
-            if not any(os.path.exists(base + e) for e in ("",) + IMAGE_EXTS):
-                missing.append(name)
-        if missing:
-            print("[q3data] VERIFY: %d shader name(s) have no file staged — the "
-                  "renderer will draw those faces untextured:" % len(missing))
-            for m in missing[:20]:
-                print("[q3data]    %s" % m)
-        else:
-            print("[q3data] VERIFY: every shader name in %s resolved to a file"
-                  % os.path.basename(bsp_path))
+        for vmap in maps:
+            bsp_path = os.path.join(baseq3, "maps", vmap + ".bsp")
+            with open(bsp_path, "rb") as fh:
+                staged_bsp = fh.read()
+            missing = []
+            for name in bsp_shader_names(staged_bsp):
+                base = os.path.join(baseq3, *norm(name).split("/"))
+                if not any(os.path.exists(base + e) for e in ("",) + IMAGE_EXTS):
+                    missing.append(name)
+            if missing:
+                print("[q3data] VERIFY %s: %d shader name(s) have no file staged — the "
+                      "renderer will draw those faces untextured:" % (vmap, len(missing)))
+                for m in missing[:20]:
+                    print("[q3data]    %s" % m)
+            else:
+                print("[q3data] VERIFY %s: every shader name resolved to a file" % vmap)
 
 
 if __name__ == "__main__":

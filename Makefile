@@ -98,8 +98,11 @@ Q3_SRCS = $(Q3_DIR)/game/q_math.c $(Q3_DIR)/game/q_shared.c \
           $(Q3_DIR)/null/null_input.c $(Q3_DIR)/null/null_snddma.c \
           $(Q3_OUR)/q3_kernel.c $(Q3_OUR)/q3_printf.c \
           $(Q3_OUR)/q3_platform.c $(Q3_OUR)/q3_client.c \
-          $(Q3_OUR)/q3_map.c $(Q3_OUR)/q3_vm.c \
-          $(Q3_OUR)/q3bsp.c
+$(Q3_OUR)/q3_map.c $(Q3_OUR)/q3_vm.c \
+            $(Q3_OUR)/q3_uivm.c $(Q3_OUR)/q3_uiwin.c \
+            $(Q3_OUR)/q3bsp.c
+# v38.142: q3sound.c (the SB16 mixer bridge) is gone — the game runs silent.
+# The kernel SB16 driver itself stays (DOOM, shell beeps, music player).
 # null/null_client.c is deliberately NOT built any more (v38.103): q3_client.c
 # replaces the upstream null client with the Mectov client layer — CL_Init,
 # CL_Frame, CL_KeyEvent/CL_CharEvent/CL_MouseEvent, the bind commands and the
@@ -120,7 +123,9 @@ TGL_SRCS = $(TGL_DIR)/src/api.c $(TGL_DIR)/src/arrays.c $(TGL_DIR)/src/clear.c \
            $(TGL_DIR)/src/ztriangle.c \
            $(TGL_DIR)/kernel_shim.c $(TGL_DIR)/q3gl_window.c \
            $(TGL_DIR)/q3cl_render.c $(TGL_DIR)/q3world_render.c \
-           $(TGL_DIR)/q3viewmodel.c $(TGL_DIR)/q3jpeg.c
+           $(TGL_DIR)/q3viewmodel.c $(TGL_DIR)/q3hud.c $(TGL_DIR)/q3jpeg.c \
+           $(TGL_DIR)/q3tga.c $(TGL_DIR)/q3ui2d.c \
+           $(TGL_DIR)/q3sky.c
 ifeq ($(Q3_ENABLED),1)
 Q3_OBJS = $(patsubst $(Q3_DIR)/%,$(OBJ_DIR)/q3/%,$(Q3_SRCS:.c=.o))
 Q3_OBJS := $(patsubst $(Q3_OUR)/%,$(OBJ_DIR)/q3plat/%,$(Q3_OBJS))
@@ -702,10 +707,39 @@ $(OBJ_DIR)/tgl/q3viewmodel.o: $(TGL_DIR)/q3viewmodel.c $(TGL_DIR)/q3viewmodel.h 
 	@mkdir -p $(dir $@)
 	$(CC) $(TGL_CFLAGS) -c $< -o $@
 
+# q3hud.c (v38.127): id's own status bar, composited into the finished ZBuffer
+# out of the game's own gfx/2d and icons/ pictures (the rasterizer cannot blend
+# a 32-bit RGBA picture — its only blend mode is additive), so it needs the
+# frame buffer's pixel format and the engine's file reader, and nothing else.
+$(OBJ_DIR)/tgl/q3hud.o: $(TGL_DIR)/q3hud.c $(TGL_DIR)/q3hud.h $(Q3_OUR)/q3bsp.h | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(TGL_CFLAGS) -c $< -o $@
+
 # q3jpeg.c (v38.111): baseline JPEG decoder for the world texture path — the
 # same freestanding rules as the renderer (no libc, fixed point, no 64-bit
 # divide), so it compiles under TGL_CFLAGS too.
 $(OBJ_DIR)/tgl/q3jpeg.o: $(TGL_DIR)/q3jpeg.c $(TGL_DIR)/q3jpeg.h | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(TGL_CFLAGS) -c $< -o $@
+
+# q3sky.c (v38.128): id's own sky — the clip that picks the box sides, the
+# camera-centred cloud box and its layers' tcMod animation. Its data interface
+# is q3bsp.h's shader stages (hence -I$(Q3_OUR), like q3world_render.c) and its
+# GL half is TinyGL's own header.
+$(OBJ_DIR)/tgl/q3sky.o: $(TGL_DIR)/q3sky.c $(TGL_DIR)/q3sky.h $(Q3_OUR)/q3bsp.h | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(TGL_CFLAGS) -c $< -o $@
+
+# q3tga.c (v38.150): the Targa decoder, shared by the world texture path and
+# the 2D UI path. Same freestanding rules as q3jpeg.c.
+$(OBJ_DIR)/tgl/q3tga.o: $(TGL_DIR)/q3tga.c $(TGL_DIR)/q3tga.h | $(OBJ_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(TGL_CFLAGS) -c $< -o $@
+
+# q3ui2d.c (v38.150): the 640x480 software 2D surface the official UI draws
+# into. It reads pictures through the engine's own FS (q3bsp.h's reader, hence
+# -I$(Q3_OUR) like q3world_render.c) and decodes them with q3jpeg/q3tga.
+$(OBJ_DIR)/tgl/q3ui2d.o: $(TGL_DIR)/q3ui2d.c $(TGL_DIR)/q3ui2d.h $(TGL_DIR)/q3jpeg.h $(TGL_DIR)/q3tga.h | $(OBJ_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(TGL_CFLAGS) -c $< -o $@
 
@@ -748,7 +782,9 @@ clean_all: clean
 ifeq ($(Q3_ENABLED),1)
 # v38.105: the Q3 ISO ships real Quake III Arena bytecode, so building it
 # implies building qagame.qvm from third_party/q3a with id's own lcc + q3asm.
-QVM_PREREQ = qvm
+# v38.150 adds q3ui.qvm next to it — id's classic 1.32 UI module, the official
+# main menu (scripts/build_qvm_ui.sh).
+QVM_PREREQ = qvm qvm-ui
 endif
 
 iso: myos.bin $(QVM_PREREQ)
@@ -788,6 +824,12 @@ check-q3play:
 qvm:
 	@bash scripts/build_qvm.sh
 
+# v38.150: id's CLASSIC Quake III Arena 1.32 UI module -> build/vm/q3ui.qvm,
+# the official main menu as bytecode, built by id's own lcc + q3asm exactly
+# like the game module. Standalone and a no-op when it is already current.
+qvm-ui:
+	@bash scripts/build_qvm_ui.sh
+
 # The phase-5 suite: the same MECTOV_Q3=1 ISO, running the official game
 # module as Quake VM bytecode through id's own interpreter.
 check-q3vm:
@@ -808,6 +850,14 @@ check-q3arena:
 check-q3retail:
 	MECTOV_Q3=1 $(MAKE) iso
 	python3 scripts/check.py --keep-images --only q3retail $(CHECK_ARGS)
+
+# q3dm1, the retail map from the demo's pak0 (v38.132). Not part of `make
+# check`: it needs pak0.pk3, which is id Software's data and is not in the
+# repo, so the suite skips itself when the map is not staged. Stage it first
+# with scripts/q3a_data.py (the README's "Game data" section has the path).
+check-q3cull:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3cull $(CHECK_ARGS)
 
 # PVS culling (v38.112, Q3 phase 10): the renderer locates the camera in the
 # map's own tree and draws what the map's visibility lump says that leaf can
@@ -848,6 +898,40 @@ check-q3viewmodel:
 	MECTOV_Q3=1 $(MAKE) iso
 	python3 scripts/check.py --keep-images --only q3viewmodel $(CHECK_ARGS)
 
+# The status bar (v38.127, Q3 phase 14): the ammo/health/armor fields and the
+# FFA score boxes are id's own pictures out of gfx/2d and icons/, composited
+# into the 320x240 frame from the module's own playerState. The suite builds a
+# synthetic picture set (build_q3pak.py) whose every number field encodes its
+# digit in a colour, stages it through the REAL q3a_data.py --with-hud, and
+# then DECODES the numbers back off a screendump — so "the HUD shows 100" is a
+# pixel assertion about the game's own state, in a no-pak0 CI, and the same
+# run with `nohud` proves the frame histogram never saw it.
+check-q3hud:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3hud $(CHECK_ARGS)
+
+# The sky (v38.128, Q3 phase 23): the level's sky surfaces choose the sides of
+# a camera-centred cloud box, and the shader's own layers (an opaque base plus
+# an ADDITIVE one) fill it at `skyparms`' height with their `tcMod`s running.
+# The suite builds a second fixture map whose ceiling is that sky, pins the
+# camera, and compares two screendumps a minute apart: the world band has to be
+# pixel-identical (the level is a function of the pose) while the sky band
+# moves (the tcMods read the game clock) — and a `nosky` boot is the control
+# where nothing in either band changes.
+check-q3sky:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3sky $(CHECK_ARGS)
+
+# The sounds (v38.129, Q3 phase 24): id's own sounds through the SB16 — the
+# event tap maps id's own client events to the names id's client spells, and
+# q3sound.c loads the WAVs and plays them through the kernel's SB16 driver.
+# Three boots: on (QEMU's SB16 on the `none` audio backend — a present, silent
+# card, so the counters are real), `nosound` (loaded and tapped, counted, not
+# played), and no card (everything still loads, plays are skipped, no crash).
+check-q3snd:
+	MECTOV_Q3=1 $(MAKE) iso
+	python3 scripts/check.py --keep-images --only q3snd $(CHECK_ARGS)
+
 # VirtIO-GPU (v38.115, GPU phase 1): the kernel's first MODERN virtio-pci
 # driver — the device has no legacy interface to drive, so the transport itself
 # (capability walk, 64-bit features, control queue, notify) is half the work.
@@ -862,4 +946,5 @@ check-virtiogpu:
 
 .PHONY: all clean clean_all check check-quick qvm iso \
         check-q3 check-q3tgl check-q3play check-q3vm check-q3arena check-q3retail \
-        check-q3vis check-q3heavy check-q3jump check-q3viewmodel check-virtiogpu
+        check-q3vis check-q3heavy check-q3jump check-q3viewmodel check-q3hud \
+        check-q3sky check-q3snd check-q3cull check-virtiogpu

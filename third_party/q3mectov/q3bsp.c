@@ -181,6 +181,43 @@ static int decl_is(const char *t, int n, const char *lit) {
     return lit[i] == '\0';
 }
 
+/* v38.128: numbers out of a shader script. `.1`, `0.05`, `-2` and `3` all
+ * occur in id's own scripts, and this file links no libc, so there is no
+ * strtod to lean on. Returns 1 when the token held a number. */
+static int decl_float(const char *t, int n, float *out) {
+    int i = 0, neg = 0, any = 0;
+    float v = 0.0f, f = 0.1f;
+    if (n <= 0 || !out) return 0;
+    if (t[i] == '-' || t[i] == '+') { neg = (t[i] == '-'); i++; }
+    while (i < n && t[i] >= '0' && t[i] <= '9') {
+        v = v * 10.0f + (float)(t[i] - '0');
+        i++;
+        any = 1;
+    }
+    if (i < n && t[i] == '.') {
+        i++;
+        while (i < n && t[i] >= '0' && t[i] <= '9') {
+            v += (float)(t[i] - '0') * f;
+            f *= 0.1f;
+            i++;
+            any = 1;
+        }
+    }
+    if (!any) return 0;
+    *out = neg ? -v : v;
+    return 1;
+}
+
+static int decl_atoi(const char *t, int n) {
+    int i = 0, neg = 0, v = 0;
+    if (n > 0 && (t[0] == '-' || t[0] == '+')) { neg = (t[0] == '-'); i = 1; }
+    for (; i < n; i++) {
+        if (t[i] < '0' || t[i] > '9') break;
+        v = v * 10 + (t[i] - '0');
+    }
+    return neg ? -v : v;
+}
+
 int q3bsp_read_shader_decls(q3bsp_shader_decls_t *out) {
     /* id's FS_GetFileList is buffer-shaped: NUL-separated names, count      */
     /* returned. One call lists every shader script on the search path —    */
@@ -280,15 +317,41 @@ int q3bsp_read_shader_decls(q3bsp_shader_decls_t *out) {
                 int pairAdd = 0;            /* last blendFunc was GL_ONE GL_ONE */
                 int pairDepth = -1;         /* the depth that blendFunc sat at */
                 const char *blA = NULL; int blALen = 0;
+                /* v38.128: the definition's stages, accumulated LOCALLY and
+                 * copied onto the decl at the end. Local, because the decl
+                 * itself is only created when the first real image turns up —
+                 * and a stage's `{` (and even its `map` line) can be read
+                 * before that. `skyparms`/`surfaceparm sky` are definition
+                 * level and are staged the same way. */
+                int stageIdx = -1;          /* the stage being read, -1 = none */
+                int lnstages = 0;
+                int lsky = 0, lcloud = 0, lfarbox = 0;
+                q3bsp_shader_stage_t lstages[Q3BSP_MAX_STAGES];
+                memset(lstages, 0, sizeof(lstages));
 
                 while (p < end && depth > 0) {
                     const char *t; int tl;
                     p = decl_token(p, end, &t, &tl);
                     if (tl <= 0) break;
-                    if (tl == 1 && t[0] == '{') { depth++; continue; }
+                    if (tl == 1 && t[0] == '{') {
+                        depth++;
+                        /* A brace at depth 2 opens a STAGE (depth 1 is the
+                         * definition's own body). */
+                        if (depth == 2) {
+                            stageIdx = (lnstages < Q3BSP_MAX_STAGES) ? lnstages
+                                                                     : -1;
+                            if (stageIdx >= 0) {
+                                memset(&lstages[stageIdx], 0,
+                                       sizeof(lstages[stageIdx]));
+                                lnstages++;
+                            }
+                        }
+                        continue;
+                    }
                     if (tl == 1 && t[0] == '}') {
                         depth--;
                         if (capDepth >= 0 && depth < capDepth) capDepth = -1;
+                        if (depth < 2) stageIdx = -1;
                         continue;
                     }
                     if (blendWant == 1) { blA = t; blALen = tl; blendWant = 2; continue; }
@@ -301,10 +364,69 @@ int q3bsp_read_shader_decls(q3bsp_shader_decls_t *out) {
                         /* to additive: a glow stage further down (or further  */
                         /* up) describes a different layer.                    */
                         if (capDepth >= 0 && depth == capDepth && pairAdd) add = 1;
+                        if (stageIdx >= 0 && pairAdd) lstages[stageIdx].additive = 1;
                         continue;
                     }
                     if (decl_is(t, tl, "blendfunc")) {
                         blendWant = 1;
+                        continue;
+                    }
+                    /* v38.128: the definition says it is a sky. */
+                    if (depth == 1 && decl_is(t, tl, "surfaceparm")) {
+                        const char *sp; int spl;
+                        p = decl_token(p, end, &sp, &spl);
+                        if (decl_is(sp, spl, "sky")) lsky = 1;
+                        continue;
+                    }
+                    /* v38.128: skyparms <farbox> <cloudheight> <nearbox>.
+                     * `-` in the middle is "no cloud layer"; q3dm1's own
+                     * sky.shader asks for 384. The far box (`env/space1/
+                     * space1` in the maps that use one) is recorded as a FLAG,
+                     * not a name: id draws it as six separate images, this
+                     * renderer builds only the cloud layer, and a map that asks
+                     * for one should say so in the log rather than quietly come
+                     * out with half its sky (see q3sky.h). */
+                    if (depth == 1 && decl_is(t, tl, "skyparms")) {
+                        const char *f1, *f2, *f3; int l1, l2, l3;
+                        p = decl_token(p, end, &f1, &l1);
+                        p = decl_token(p, end, &f2, &l2);
+                        p = decl_token(p, end, &f3, &l3);
+                        if (!(l1 == 1 && f1[0] == '-')) lfarbox = 1;
+                        if (!(l2 == 1 && f2[0] == '-')) lcloud = decl_atoi(f2, l2);
+                        continue;
+                    }
+                    /* v38.128: a stage's own texcoordinate animation. id
+                     * applies these IN FILE ORDER, in place (ioquake3's
+                     * RB_CalcScrollTexCoords / RB_CalcScaleTexCoords), which
+                     * is why the order is preserved rather than folded into
+                     * one scale/offset pair. Types this renderer does not
+                     * implement (turb/stretch/rotate) are skipped, not
+                     * mis-recorded. */
+                    if (depth == 2 && stageIdx >= 0 && decl_is(t, tl, "tcmod")) {
+                        const char *ty, *va; int tyl, val;
+                        float a = 0.0f, b = 0.0f;
+                        int isScroll, okA, okB;
+                        p = decl_token(p, end, &ty, &tyl);
+                        isScroll = decl_is(ty, tyl, "scroll");
+                        if (!isScroll && !decl_is(ty, tyl, "scale")) continue;
+                        p = decl_token(p, end, &va, &val);
+                        okA = decl_float(va, val, &a);
+                        p = decl_token(p, end, &va, &val);
+                        okB = decl_float(va, val, &b);
+                        if (okA && okB &&
+                            lstages[stageIdx].numTcMods < Q3BSP_MAX_TCMODS) {
+                            q3bsp_tcmod_t *tm = &lstages[stageIdx].tcmod[
+                                lstages[stageIdx].numTcMods++];
+                            tm->type = isScroll ? Q3BSP_TCMOD_SCROLL
+                                                : Q3BSP_TCMOD_SCALE;
+                            tm->a = a;
+                            tm->b = b;
+                        }
+                        continue;
+                    }
+                    if (depth == 2 && stageIdx >= 0 &&
+                        decl_is(t, tl, "depthwrite")) {
+                        lstages[stageIdx].depthWrite = 1;
                         continue;
                     }
                     if (decl_is(t, tl, "cull")) {
@@ -314,9 +436,13 @@ int q3bsp_read_shader_decls(q3bsp_shader_decls_t *out) {
                             culloff = 1;
                         continue;
                     }
-                    if (!captured && (decl_is(t, tl, "map") ||
-                                      decl_is(t, tl, "clampmap") ||
-                                      decl_is(t, tl, "animmap"))) {
+                    /* EVERY `map` line is consumed, whether or not the
+                     * definition already has an image: the operand is what a
+                     * stage draws, and leaving it in the token stream both
+                     * loses the stage's own image (v38.128's cloud layer) and
+                     * lets a filename be mistaken for a keyword. */
+                    if (decl_is(t, tl, "map") || decl_is(t, tl, "clampmap") ||
+                        decl_is(t, tl, "animmap")) {
                         const char *im; int iml;
                         p = decl_token(p, end, &im, &iml);
                         if (decl_is(t, tl, "animmap")) {
@@ -327,6 +453,19 @@ int q3bsp_read_shader_decls(q3bsp_shader_decls_t *out) {
                         /* $lightmap and friends are engine-provided, not    */
                         /* files: keep walking to the stage that names one.  */
                         if (iml > 0 && im[0] != '$') {
+                            /* The stage's own first image (v38.128). A
+                             * definition binds one name to one image here,
+                             * because that is what the level's slots need;
+                             * the stages are kept beside it because a SKY
+                             * draws its second stage as its own layer (id's
+                             * clouds), which is a different question from
+                             * "which image is this shader". */
+                            if (stageIdx >= 0 && !lstages[stageIdx].image) {
+                                lstages[stageIdx].image = im;
+                                lstages[stageIdx].imageLen = iml;
+                            }
+                            if (captured)
+                                continue;       /* stage image: done      */
                             if (num >= cap) {
                                 int nc = cap * 2;
                                 q3bsp_shader_decl_t *nd =
@@ -345,6 +484,11 @@ int q3bsp_read_shader_decls(q3bsp_shader_decls_t *out) {
                             decls[num].imageLen = iml;
                             decls[num].additive = 0;
                             decls[num].cullNone = 0;
+                            decls[num].sky = 0;
+                            decls[num].skyFarBox = 0;
+                            decls[num].cloudHeight = 0;
+                            decls[num].numStages = 0;
+                            memset(decls[num].stages, 0, sizeof(decls[num].stages));
                             num++;
                             captured = 1;
                             /* Keep watching the rest of this stage for the  */
@@ -357,8 +501,15 @@ int q3bsp_read_shader_decls(q3bsp_shader_decls_t *out) {
                 }
                 /* The flags are only known once the stage has closed. */
                 if (curDecl >= 0) {
+                    int k;
                     decls[curDecl].additive = add;
                     decls[curDecl].cullNone = culloff;
+                    decls[curDecl].sky = lsky;
+                    decls[curDecl].skyFarBox = lfarbox;
+                    decls[curDecl].cloudHeight = lcloud;
+                    decls[curDecl].numStages = lnstages;
+                    for (k = 0; k < lnstages; k++)
+                        decls[curDecl].stages[k] = lstages[k];
                 }
             }
         }
@@ -693,6 +844,45 @@ static void bsp_face_finish(q3bsp_mesh_t *m, q3bsp_face_t *f) {
     f->center[0] /= (float)f->numVerts;
     f->center[1] /= (float)f->numVerts;
     f->center[2] /= (float)f->numVerts;
+    {
+        /* v38.132: measure whether that mean is MEANINGFUL before letting
+         * anything reject a face with it.
+         *
+         * Two ways it fails, and both are real on retail q3dm1:
+         *
+         *  (a) the file's per-vertex normals disagree — dot < 0 for some pair.
+         *      That is a brush-derived face whose normals run along the brush,
+         *      not at the visible side, so their mean points at neither. This
+         *      is the case the renderer's own comment recorded: the whole view
+         *      went black at the park pose, 1927 of 1930 PVS-visible faces
+         *      rejected, 3 drawn.
+         *
+         *  (b) they cancel — the pre-normalize magnitude is ~0, and
+         *      bsp_normalize then hands back a fixed (0,0,1), a confident
+         *      answer to a question nobody could answer.
+         *
+         * A gentle tessellated curve legitimately has normals that differ by
+         * tens of degrees; dot stays well above 0 there, so real curvature is
+         * NOT mistaken for (a). Only genuinely opposed normals trip it.
+         *
+         * Measured once, at load, from bytes already in the file. */
+        const q3bsp_vert_t *p0 = &m->verts[f->firstVert];
+        float minpair = 1.0f;
+        float mag2;
+        for (j = 0; j < f->numVerts; j++) {
+            const q3bsp_vert_t *pj = &m->verts[f->firstVert + j];
+            float d = p0->normal[0] * pj->normal[0] +
+                      p0->normal[1] * pj->normal[1] +
+                      p0->normal[2] * pj->normal[2];
+            if (d < minpair) minpair = d;
+        }
+        mag2 = f->frontNormal[0] * f->frontNormal[0] +
+               f->frontNormal[1] * f->frontNormal[1] +
+               f->frontNormal[2] * f->frontNormal[2];
+        /* numVerts < 2 cannot disagree with itself; one vertex is taken at its
+         * word (that is the tessellator's degenerate case, not a brush). */
+        f->cullTrusted = (f->numVerts < 2 || minpair > 0.0f) && mag2 > 1e-6f;
+    }
     bsp_normalize(f->frontNormal);
 
     /* The normal from the winding (id's own normal[] on a planar face is just
@@ -1395,9 +1585,20 @@ int q3bsp_load(const char *qpath, q3bsp_mesh_t *out) {
             b.surfCount[i] = 0;
         }
 
+        /* v38.142: the size accumulators MUST restart for the emit pass.
+         * They still hold the count pass totals here (b.verts = 71747 on
+         * q3dm7), so without this the emit truncation checks fire against
+         * stale totals and the pass silently stops mid-map (q3dm7 emitted
+         * 11852 of 16840 faces, the rest uninitialized heap, first-frame
+         * page fault in face_outside_frustum). faceCount/vertCount above
+         * already saved the count pass sizes for the allocations. */
+        b.faces = b.verts = 0;
+        b.planarFaces = b.patchesDrawn = b.patchQuads = b.patchVerts = 0;
+        b.truncated = 0;
         bsp_build(&b, 1);                    /* fill them */
         out->numFaces = faceCount;
         out->numVerts = vertCount;
+        out->truncated |= b.truncated;       /* an emit truncation must show */
 
         bsp_load_vis(out, buf, hdr, b.surfFirst, b.surfCount);
         bsp_vis_check_against_cm(out);

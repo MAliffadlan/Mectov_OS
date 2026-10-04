@@ -39,6 +39,8 @@
 
 #include "q3world_render.h"
 #include "q3jpeg.h"
+#include "q3tga.h"           /* v38.150: the TGA decoder, shared with the 2D UI path */
+#include "q3sky.h"           /* v38.128: the sky's cloud box (its own pass) */
 #include "src/tgl_cyc.h"     /* v38.116: setup-vs-fill cycle split */
 
 extern void  write_serial_string(const char *s);
@@ -64,6 +66,15 @@ typedef struct {
      * flag has to defeat that test or half of a two-sided flame vanishes. */
     int  additive;
     int  cullNone;
+    /* v38.128: what the definition says about the sky. `skyDecl` is the
+     * definition-level `surfaceparm sky` (the faces it names are the ones the
+     * renderer may not draw as geometry), `skyCloud` is the narrower "and it has
+     * a cloud layer, so q3sky has a box to build for it". The difference is what
+     * the frame's sky line reports as the fallback: a map whose sky has no cloud
+     * height keeps the v38.127 look (its sky faces are drawn like any other
+     * surface), and that is a number a test can read. */
+    int  skyDecl;
+    int  skyCloud;
     char path[Q3BSP_MAX_NAME + 8];
 } q3w_slot_t;
 
@@ -109,6 +120,34 @@ static int  t_lit_faces;                 /* run total, for the closing line */
 static int  add_shaders, cull_shaders;
 static int  v_add_faces, t_add_faces;
 
+/* v38.128: the sky census, load-time and per frame. `skyShaders` counts the
+ * definitions registered as drawable skies; `v_sky_faces` the faces the last
+ * frame handed to the cloud box (they are NOT emitted as geometry — the box
+ * replaces them — but they are counted as drawn, so the frame line's
+ * `drawn + culled == numFaces` contract still holds); `v_sky_fallback` the faces
+ * whose shader declares a sky this module cannot build (no cloud layer), which
+ * keep the ordinary geometry path. */
+static int  sky_shaders;
+static int  v_sky_faces, t_sky_faces;
+static int  v_sky_fallback, t_sky_fallback;
+static int  sky_stage_disk, sky_stage_missing;
+
+/* The sky-face pool. Deliberately NOT the sort pool: `nosort` leaves that one
+ * unallocated, and the sky pass is not an ordering feature. Sized once per mesh
+ * at load (see sky_grow), so a frame with sky faces never allocates. */
+static int   *sky_idx;
+static int    sky_cap;
+
+static void sky_grow(int need) {
+    int cap;
+    if (sky_cap >= need || need <= 0) return;
+    cap = sky_cap ? sky_cap * 2 : 1024;
+    while (cap < need) cap *= 2;
+    kfree(sky_idx);
+    sky_idx = (int *)kmalloc((uint32_t)cap * sizeof(int));
+    sky_cap = sky_idx ? cap : 0;
+}
+
 /* --- v38.112: culling -----------------------------------------------------
  *
  * Two stages, both driven by data the map already carries:
@@ -134,6 +173,9 @@ static int            v_cluster = -2, v_leaf = -2, v_vis_leafs;
 static int            v_total_faces;       /* the mesh the last frame drew */
 static int            v_culled_vis, v_culled_frustum;   /* per stage, last frame */
 static int            v_culled_back;        /* v38.117: faces facing away */
+static int            v_cull_untrusted;     /* v38.132: rejected-as-backface SKIPPED
+                                             * because frontNormal is untrusted */
+static int            q3w_cull_on = 1;      /* v38.132: `nocull` sets this to 0 */
 static int            v_planes_logged;     /* one plane dump per run */
 static float          v_planes[6][4];      /* (normal, offset), see below */
 static int            v_planes_n;
@@ -298,6 +340,30 @@ static int frustum_planes(const float cam[3], const float fwd[3],
  * near plane already handles it. */
 #define Q3W_BACKFACE_EPS 4.0f
 
+/* v38.132: the reject is now fail-safe, and switchable.
+ *
+ * Two things changed after the retail session proved the rule wrong on real
+ * map data (q3dm1 at the park pose: 1927 of 1930 PVS-visible faces rejected,
+ * 3 drawn, screen ~91% black, every counter frozen for 2000 frames).
+ *
+ * 1. A face is only rejected if `cullTrusted` says the file's own vertex
+ *    normals AGREE (measured once at load, see bsp_face_finish). Where they
+ *    disagree or cancel, the mean frontNormal describes no real front side and
+ *    the face is drawn instead. The asymmetry is deliberate and is the whole
+ *    point: a face drawn that need not have been costs one wasted triangle,
+ *    while a face wrongly rejected is a hole in the level. The cull stays on
+ *    for the faces where it is measured correct — which is most of them, and
+ *    is where the fill saving lives.
+ *
+ * 2. `nocull` on the q3arena command line turns the reject off entirely, so an
+ *    A/B on the same build is one keystroke rather than a rebuild — the same
+ *    knob shape as nosort/nohud/nosky/nosound.
+ *
+ * `v_cull_untrusted` counts the faces the test declined to reject, so the log
+ * says how much of the cull was actually available. A silent cull that eats the
+ * level is precisely the failure this port spent two releases learning. */
+static int v_cull_untrusted;
+
 /* v38.117, second convention: id's own rule, not a winding rule.
  *
  * The first attempt read the winding-derived normal — and the user's own
@@ -323,6 +389,14 @@ static int face_is_backface(const q3bsp_face_t *f, const float cam[3]) {
     float dz = f->center[2] - cam[2];
     float side;
 
+    if (!q3w_cull_on) {
+        v_cull_untrusted++;
+        return 0;
+    }
+    if (!f->cullTrusted) {         /* v38.132: the file's normals disagree */
+        v_cull_untrusted++;
+        return 0;                   /* draw it — see the note above */
+    }
     if (dx * dx + dy * dy + dz * dz < 4.0f)
         return 0;               /* eye essentially on the surface: draw it */
     side = f->frontNormal[0] * dx + f->frontNormal[1] * dy +
@@ -355,11 +429,19 @@ static int face_is_backface(const q3bsp_face_t *f, const float cam[3]) {
  * plane out of the argument entirely. */
 #define Q3W_CULL_SLACK 2.0f
 
+/* v38.142: never trust a face index blindly. q3dm7's loader once emitted
+ * 11852 of 16840 faces (stale emit-pass accumulators stopped the pass
+ * silently) and the cull walked the uninitialized tail straight into a
+ * page fault on the first frame. A face that cannot be read cannot be
+ * culled either — draw it (fail-open, like the untrusted-normal rule)
+ * instead of dying on it. With the loader fixed this never fires. */
 static int face_outside_frustum(const q3bsp_mesh_t *m, const q3bsp_face_t *f) {
     const int first = f->firstVert;
     int nv = f->numVerts;
     int i, v;
 
+    if (!m || !m->verts || first < 0 || nv < 0 || first + nv > m->numVerts)
+        return 0;
     if (!v_planes_n || nv <= 0) return 0;
     for (i = 0; i < v_planes_n; i++) {
         const float *p = v_planes[i];
@@ -411,83 +493,13 @@ static int wr_shader_flags(char *dst, const q3w_slot_t *slot) {
 }
 
 /* --- TGA --------------------------------------------------------------- */
-/* id's own tools write TGA, and this decodes what they write: uncompressed or
- * RLE colour-mapped-off images, 24 or 32 bits per pixel, either origin (the
- * image descriptor's bit 5 says which). Returns 0 and a malloc'd RGB buffer
- * (3 bytes per pixel, top-down) on success. */
+/* v38.150: this decoder moved out to q3tga.c, because the 2D UI path needs it
+ * too and needs the alpha channel this copy dropped. Identical behaviour for
+ * the world texture path (uncompressed or RLE true-color, 24/32bpp, either
+ * origin) — it is a move, not a rewrite; q3tga.h documents the scope. */
 static int tga_decode(const unsigned char *raw, int len, unsigned char **rgb_out,
                       int *w_out, int *h_out) {
-    int id_len, cmap, type, w, h, bpp, desc, bytes;
-    const unsigned char *src;
-    unsigned char *rgb;
-    int x, y;
-
-    if (len < 18) return -1;
-    id_len = raw[0];
-    cmap   = raw[1];
-    type   = raw[2];
-    w      = raw[12] | (raw[13] << 8);
-    h      = raw[14] | (raw[15] << 8);
-    bpp    = raw[16];
-    desc   = raw[17];
-
-    if (cmap != 0 || (type != 2 && type != 10) || w <= 0 || h <= 0 ||
-        w > 1024 || h > 1024 || (bpp != 24 && bpp != 32)) {
-        return -2;
-    }
-    bytes = bpp / 8;
-    src = raw + 18 + id_len;
-    if ((int)(src - raw) > len) return -3;
-
-    rgb = (unsigned char *)kmalloc((uint32_t)(w * h * 3));
-    if (!rgb) return -4;
-
-    if (type == 2) {                       /* uncompressed */
-        if ((int)(src - raw) + w * h * bytes > len) { kfree(rgb); return -5; }
-        for (y = 0; y < h; y++) {
-            int row = (desc & 0x20) ? y : (h - 1 - y);
-            for (x = 0; x < w; x++) {
-                const unsigned char *p = src + ((size_t)y * w + x) * bytes;
-                unsigned char *d = rgb + ((size_t)row * w + x) * 3;
-                d[0] = p[2]; d[1] = p[1]; d[2] = p[0];
-            }
-        }
-    } else {                               /* RLE */
-        int total = w * h, done = 0;
-        const unsigned char *p = src;
-        while (done < total) {
-            int count, rep;
-            unsigned char px[4];
-            if ((int)(p - raw) >= len) { kfree(rgb); return -6; }
-            count = *p++;
-            rep = count & 0x80;
-            count = (count & 0x7F) + 1;
-            if (done + count > total) { kfree(rgb); return -7; }
-            if (rep) {
-                if ((int)(p - raw) + bytes > len) { kfree(rgb); return -6; }
-                px[0] = p[0]; px[1] = p[1]; px[2] = p[2];
-                p += bytes;
-                for (int i = 0; i < count; i++, done++) {
-                    int row = (desc & 0x20) ? done / w : (h - 1 - done / w);
-                    unsigned char *d = rgb + ((size_t)row * w + (done % w)) * 3;
-                    d[0] = px[2]; d[1] = px[1]; d[2] = px[0];
-                }
-            } else {
-                for (int i = 0; i < count; i++, done++) {
-                    int row = (desc & 0x20) ? done / w : (h - 1 - done / w);
-                    unsigned char *d = rgb + ((size_t)row * w + (done % w)) * 3;
-                    d[0] = p[2]; d[1] = p[1]; d[2] = p[0];
-                    p += bytes;
-                }
-                if ((int)(p - raw) > len) { kfree(rgb); return -6; }
-            }
-        }
-    }
-
-    *rgb_out = rgb;
-    *w_out = w;
-    *h_out = h;
-    return 0;
+    return q3tga_decode(raw, len, rgb_out, w_out, h_out, 3);
 }
 
 /* A shader with no image on the volume still has to be drawable, and the
@@ -773,14 +785,59 @@ int q3w_resolve_image(const char *name, char *resolved, int rsize,
     return q3w_resolve_shader_image(base, resolved, rsize, rgb, w, h, &bytes);
 }
 
+/* v38.128: the same resolution for ONE STAGE of a definition — the sky's layers.
+ *
+ * A stage's `map` operand is spelled the way the script spells it, extension and
+ * all (`map textures/skies/killsky_1.tga` while the pak ships killsky_1.jpg),
+ * which is exactly the rule q3w_resolve_shader_image applies to a definition's
+ * first image. The difference is only where the operand comes from: a caller
+ * that has already walked the definition's stages hands in the stage's own
+ * image, and the two rules (the spelling itself, then the extension stripped and
+ * probed in id's order) run again on it. A stage with no image gets -1 and the
+ * layer is left undrawn, never a placeholder: a cloud layer of checkerboard
+ * would look like a sky whose art is missing, which is a different bug from one
+ * whose art is absent. */
+static int q3w_resolve_stage_image(const char *image, int imageLen,
+                                   char *resolved, int rsize,
+                                   unsigned char **rgb, int *w, int *h,
+                                   int *bytes) {
+    static const char *const exts[] = { ".jpg", ".jpeg", ".tga", ".png" };
+    char sbase[128];
+    int blen, e, rc;
+
+    if (!image || imageLen <= 0) return -1;
+    rc = q3w_try_image(image, imageLen, "", resolved, rsize, rgb, w, h, bytes);
+    if (rc == 0 || rc == -8) return rc;
+    blen = q3w_strip_image_ext(image, imageLen, sbase, (int)sizeof(sbase));
+    if (blen <= 0) return -1;
+    for (e = 0; e < 4; e++) {
+        rc = q3w_try_image(sbase, blen, exts[e], resolved, rsize, rgb, w, h, bytes);
+        if (rc == 0 || rc == -8) return rc;
+    }
+    return -1;
+}
+
 /* Upload an already-decoded image. The world's own cache is slot-indexed by
  * shader (above) and is wiped by every q3w_load, so a caller with a different
- * lifetime — the view model's three surfaces — must own its ids and upload
- * through here instead of borrowing a slot. */
+ * lifetime — the view model's three surfaces, and the sky's stage layers — must
+ * own its ids and upload through here instead of borrowing a slot. */
 GLuint q3w_upload_image(const unsigned char *rgb, int w, int h) {
     if (!rgb || w <= 0 || h <= 0) return 0;
     return upload_rgb(rgb, w, h);
 }
+
+/* v38.131: the boot window's progress counters, written here (the texture
+ * loop below) and read by the game window's draw fn in q3_vm.c. Volatile is
+ * enough: ints, single-writer, consumers only render. */
+volatile int q3w_progress_stage = 0;
+volatile int q3w_progress_done = 0;
+volatile int q3w_progress_total = 0;
+
+/* v38.132: see q3world_render.h. The counters above were already updating; this
+ * is what lets the driver turn that into pixels while the decode runs. */
+static q3w_progress_fn_t q3w_progress_hook;
+
+void q3w_set_progress_hook(q3w_progress_fn_t fn) { q3w_progress_hook = fn; }
 
 void q3w_release_image(unsigned char *rgb) {
     if (rgb) kfree(rgb);
@@ -797,14 +854,26 @@ void q3w_unload(void) {
         tex_slot[i].fromDisk = 0;
         tex_slot[i].additive = 0;
         tex_slot[i].cullNone = 0;
+        tex_slot[i].skyDecl = 0;
+        tex_slot[i].skyCloud = 0;
         tex_slot[i].path[0] = '\0';
     }
+    /* v38.128: the sky's own textures and registration die with the mesh — the
+     * sky draws through ids it allocated, so this is the only place they can be
+     * released (same ownership rule the view model's textures follow). */
+    q3sky_reset();
+    kfree(sky_idx);
+    sky_idx = 0;
+    sky_cap = 0;
     tex_shaders = tex_from_disk = tex_placeholders = 0;
     add_shaders = cull_shaders = 0;
+    sky_shaders = 0;
+    sky_stage_disk = sky_stage_missing = 0;
     tex_inited = 0;
     v_faces = v_tris = v_culled = 0;
     v_add_faces = t_add_faces = 0;
-
+    v_sky_faces = t_sky_faces = 0;
+    v_sky_fallback = t_sky_fallback = 0;
 }
 
 int q3w_load(const q3bsp_mesh_t *m) {
@@ -870,6 +939,11 @@ int q3w_load(const q3bsp_mesh_t *m) {
     ph = (unsigned char *)kmalloc((uint32_t)(Q3W_PH_SIZE * Q3W_PH_SIZE * 3));
     if (!ph) return 0;
 
+    /* v38.131: publish the texture-count stage for the boot window. */
+    q3w_progress_stage = 2;
+    q3w_progress_total = tex_shaders;
+    q3w_progress_done = 0;
+
     for (int i = 0; i < tex_shaders && i < Q3W_MAX_TEX; i++) {
         unsigned char *rgb = NULL;
         int w = 0, h = 0, bytes = 0;
@@ -878,6 +952,32 @@ int q3w_load(const q3bsp_mesh_t *m) {
         q3w_slot_t *slot = &tex_slot[i];
 
         slot->used = 1;
+        q3w_progress_done = i;
+        /* v38.132: let the window repaint as the bar fills.
+         * v38.133: every texture, and the return value is a stop request.
+         * The hook carried the paint alone, so it was gated to keep a
+         * 94-texture map at ~12 calls; it now also carries the driver's
+         * ESC-cancel answer, and a gate would delay that by STEP decodes
+         * (seconds per texture on a real map) — see q3world_render.h. The
+         * remaining slots stay untouched, tex_inited is still set below, and
+         * the caller tears the renderer down exactly as after a full load. */
+        if (q3w_progress_hook && q3w_progress_hook(i, tex_shaders)) {
+            write_serial_string("[Q3ARENA] texture decode stopped early ("
+                                "cancel requested) at texture ");
+            {
+                static char ab[32];
+                int q = 0, v = i;
+                char tmp[12];
+                int t = 0;
+                if (v == 0) tmp[t++] = '0';
+                while (v > 0 && t < 12) { tmp[t++] = (char)('0' + v % 10); v /= 10; }
+                while (t > 0) ab[q++] = tmp[--t];
+                ab[q++] = '\n';
+                ab[q] = '\0';
+                write_serial_string(ab);
+            }
+            break;
+        }
         {
             int sl = 0;
             while (m->shaderNames[i][sl] && sl < Q3BSP_MAX_NAME - 1) sl++;
@@ -891,6 +991,9 @@ int q3w_load(const q3bsp_mesh_t *m) {
                     q3w_decl_for(m->shaderNames[i], sl);
                 slot->additive = (dd && dd->additive) ? 1 : 0;
                 slot->cullNone = (dd && dd->cullNone) ? 1 : 0;
+                slot->skyDecl = (dd && dd->sky) ? 1 : 0;
+                slot->skyCloud = (dd && dd->sky && dd->cloudHeight > 0 &&
+                                  dd->numStages > 0) ? 1 : 0;
                 if (slot->additive) add_shaders++;
                 if (slot->cullNone) cull_shaders++;
             }
@@ -959,10 +1062,137 @@ int q3w_load(const q3bsp_mesh_t *m) {
             }
         }
         tex_id[i] = id;
+
+        /* v38.128: a sky's LAYERS. The slot above carries the definition's first
+         * image, which is what the geometry fallback draws (a sky with no cloud
+         * height, or the `nosky` A/B). The cloud box draws from each stage's own
+         * image instead, so those are resolved and uploaded here, into the sky
+         * module's own ids — and one line reports what the definition asked for
+         * against what the volume had, exactly the way the tex lines above do it
+         * for the level's shaders. */
+        if (slot->skyCloud) {
+            int sl = 0;
+            const q3bsp_shader_decl_t *dd;
+            q3sky_shader_t sk;
+            int st, ldisk = 0, lmiss = 0;
+            /* The resolved path of each layer, for the load line: which file
+             * the stage's spelling actually found is the thing a wrong
+             * resolution rule gets wrong, and a path in the log is what makes
+             * `layers=2/2` mean something. */
+            char lpath[Q3SKY_MAX_STAGES][96];
+            lpath[0][0] = lpath[1][0] = lpath[2][0] = lpath[3][0] = '\0';
+
+            while (m->shaderNames[i][sl] && sl < Q3BSP_MAX_NAME - 1) sl++;
+            dd = q3w_decl_for(m->shaderNames[i], sl);
+            memset(&sk, 0, sizeof(sk));
+            sk.cloudHeight = dd->cloudHeight;
+            for (int k = 0; k < sl; k++) sk.name[k] = m->shaderNames[i][k];
+            sk.name[sl] = '\0';
+            for (st = 0; st < dd->numStages && st < Q3SKY_MAX_STAGES; st++) {
+                const q3bsp_shader_stage_t *src = &dd->stages[st];
+                q3sky_stage_t *dst = &sk.stages[st];
+                dst->additive = src->additive ? 1 : 0;
+                dst->numTcMods = src->numTcMods;
+                for (int t = 0; t < src->numTcMods && t < Q3BSP_MAX_TCMODS; t++) {
+                    dst->tcType[t] = src->tcmod[t].type;
+                    dst->tcA[t] = src->tcmod[t].a;
+                    dst->tcB[t] = src->tcmod[t].b;
+                }
+                if (src->image && src->imageLen > 0) {
+                    unsigned char *s_rgb = NULL;
+                    int sw = 0, shh = 0, sbytes = 0;
+                    char spath[128];
+                    if (q3w_resolve_stage_image(src->image, src->imageLen, spath,
+                                                (int)sizeof(spath), &s_rgb,
+                                                &sw, &shh, &sbytes) == 0 && s_rgb) {
+                        dst->tex = q3w_upload_image(s_rgb, sw, shh);
+                        kfree(s_rgb);
+                        ldisk++;
+                        if (st < Q3SKY_MAX_STAGES) {
+                            int q = 0;
+                            while (spath[q] && q < (int)sizeof(lpath[st]) - 1) {
+                                lpath[st][q] = spath[q];
+                                q++;
+                            }
+                            lpath[st][q] = '\0';
+                        }
+                    } else {
+                        lmiss++;
+                    }
+                }
+                if (dst->tex) sk.numStages = st + 1;
+            }
+            q3sky_register_shader(i, &sk);
+            sky_stage_disk += ldisk;
+            sky_stage_missing += lmiss;
+            if (q3sky_is_sky(i)) {
+                sky_shaders++;
+                sky_grow(m->numFaces);
+            }
+            /* One line, load-time, for the suite to parse — the stage images it
+             * names are the ones the box draws, so a placeholder here is a sky
+             * of checkerboard.
+             * v38.128 also reports `farbox`: id would draw the skyparms' six-image
+             * far box as well, and this port builds only the cloud layer (see
+             * q3sky.h), so a map that asks for one is a fact the log states
+             * instead of a silent omission. */
+            {
+                /* Room for the name, the numbers, and one tex/img pair per
+                 * stage (the path is the long part; Q3SKY_MAX_STAGES of them). */
+                static char kbuf[Q3BSP_MAX_NAME + 640];
+                int p = 0;
+                for (const char *s = "[Q3ARENA] sky: shader="; *s; s++) kbuf[p++] = *s;
+                for (int k = 0; k < sl; k++) kbuf[p++] = m->shaderNames[i][k];
+                for (const char *s = " cloud="; *s; s++) kbuf[p++] = *s;
+                p += wr_int(kbuf + p, dd->cloudHeight);
+                for (const char *s = " stages="; *s; s++) kbuf[p++] = *s;
+                p += wr_int(kbuf + p, sk.numStages);
+                for (const char *s = " farbox="; *s; s++) kbuf[p++] = *s;
+                p += wr_int(kbuf + p, dd->skyFarBox ? 1 : 0);
+                for (st = 0; st < sk.numStages; st++) {
+                    for (const char *s = " tex"; *s; s++) kbuf[p++] = *s;
+                    p += wr_int(kbuf + p, st);
+                    kbuf[p++] = '=';
+                    p += wr_int(kbuf + p, (int)sk.stages[st].tex);
+                    for (const char *s = (sk.stages[st].additive ? ",add" : "");
+                         *s; s++) kbuf[p++] = *s;
+                    for (const char *s = " img"; *s; s++) kbuf[p++] = *s;
+                    p += wr_int(kbuf + p, st);
+                    kbuf[p++] = '=';
+                    for (const char *s = (lpath[st][0] ? lpath[st] : "-"); *s; s++)
+                        kbuf[p++] = *s;
+                }
+                for (const char *s = " layers="; *s; s++) kbuf[p++] = *s;
+                p += wr_int(kbuf + p, ldisk);
+                kbuf[p++] = '/';
+                p += wr_int(kbuf + p, ldisk + lmiss);
+                kbuf[p++] = '\n';
+                kbuf[p] = '\0';
+                write_serial_string(kbuf);
+            }
+        }
     }
 
     kfree(ph);
     tex_inited = 1;
+    /* The run's sky summary, in the shape the texture lines' own summary takes:
+     * what the map ASKED for against what the volume HAD. Zero on every map with
+     * no cloud-layer sky — which is the fixture arena, and why the suites that
+     * assert its pixels are unaffected by this release. */
+    if (sky_shaders > 0) {
+        static char sbuf[160];
+        int p = 0;
+        const char *s;
+        s = "[Q3ARENA] sky: "; while (*s) sbuf[p++] = *s++;
+        p += wr_int(sbuf + p, sky_shaders);
+        s = " shader(s), "; while (*s) sbuf[p++] = *s++;
+        p += wr_int(sbuf + p, sky_stage_disk);
+        s = " layer image(s) from disk, "; while (*s) sbuf[p++] = *s++;
+        p += wr_int(sbuf + p, sky_stage_missing);
+        s = " missing (id's own cloud layers)\n"; while (*s) sbuf[p++] = *s++;
+        sbuf[p] = '\0';
+        write_serial_string(sbuf);
+    }
     return tex_from_disk + tex_placeholders;
 }
 
@@ -981,6 +1211,22 @@ void q3w_flag_stats(int *addShaders, int *cullShaders, int *addFaces,
     if (cullShaders) *cullShaders = cull_shaders;
     if (addFaces) *addFaces = v_add_faces;
     if (addFacesRun) *addFacesRun = t_add_faces;
+}
+
+/* v38.128: the sky's two every-frame numbers, kept HERE rather than in q3sky
+ * because they are about faces, and the faces are this module's. `boxFaces` is
+ * how many the last frame handed to the cloud box (drawn by it, counted in
+ * `drawn`, and deliberately absent from the geometry pass), `fallbackFaces` how
+ * many carried a sky shader the box could not take — a definition with no cloud
+ * height, the `nosky` A/B, or a pool that could not be allocated — and were
+ * therefore drawn as ordinary surfaces. The run totals make a session's evidence
+ * independent of the frame a dump happens to catch. */
+void q3w_sky_stats(int *boxFaces, int *boxFacesRun, int *fallbackFaces,
+                   int *fallbackRun) {
+    if (boxFaces) *boxFaces = v_sky_faces;
+    if (boxFacesRun) *boxFacesRun = t_sky_faces;
+    if (fallbackFaces) *fallbackFaces = v_sky_fallback;
+    if (fallbackRun) *fallbackRun = t_sky_fallback;
 }
 
 /* How many of the last frame's faces came out of a lightmap page, and how many
@@ -1095,10 +1341,53 @@ void q3w_glsplit_stats(unsigned long long *vert, unsigned long long *fill,
     if (tri) *tri = tgl_n_fill;
 }
 
+/* v38.126: the pass's own CPU split — see q3w_cpu_stats for what each one is.
+ * Declared here, above the reset that clears them, because C has no forward
+ * reference for a file-scope object inside the same file. */
+static unsigned long long w_cyc_prep, w_cyc_total;
+
 void q3w_glsplit_reset(void) {
     tgl_cyc_vert = 0;
     tgl_cyc_fill = 0;
     tgl_n_fill = 0;
+    tgl_n_frag = 0;
+    w_cyc_prep = 0;
+    w_cyc_total = 0;
+}
+
+/* v38.126: the world pass's own split, in TSC cycles, for the question the
+ * existing counters could not answer.
+ *
+ * `vert` (tgl_cyc_vert) is every glVertex3f: transform, clip cascade and the
+ * raster nested in it. This fork executes ops IMMEDIATELY (api.c's gl_add_op
+ * calls the handler when exec_flag is set, and glNewList is the only user of
+ * the compile path), so there is no op-queue to blame — and yet on the user's
+ * own q3dm1 session the draw phase measured 32.5 ms/frame while the vertex
+ * path accounted for ~15 ms of it. The rest is this file: marking the PVS, the
+ * per-face backface and six-plane tests, the distance sort, and the per-vertex
+ * colour/texcoord calls — i.e. everything the pass does around the transform.
+ * Splitting it is what decides the next optimisation, so:
+ *   prep  = PVS marking + the cull/list-build loop + the distance sort;
+ *   total = the whole q3w_draw call;
+ *   emit  = total - prep (the emit loops, incl. every glVertex3f inside them);
+ *   "non-vertex emit" = emit - vert  (glBegin/glEnd/glColor/glBind executions
+ *                        and the loop's own per-face work).
+ * All of them are per-20-frame totals, drained with the cycle counters. */
+void q3w_cpu_stats(unsigned long long *prep, unsigned long long *total) {
+    if (prep) *prep = w_cyc_prep;
+    if (total) *total = w_cyc_total;
+}
+
+void q3w_frag_stats(unsigned int *n) {
+    if (n) *n = tgl_n_frag;
+}
+
+/* v38.126: the TSC itself, for the driver's one-time frequency calibration.
+ * The counters above are only meaningful as a RATIO until the caller knows how
+ * many cycles a millisecond is on the machine it is running on, and the guest
+ * TSC rate is the host's — so it has to be measured, not assumed. */
+unsigned long long q3w_tsc(void) {
+    return tgl_rdtsc();
 }
 
 /* `lit` = this vertex carries its own lightmap-sampled colour. The colours are
@@ -1178,6 +1467,15 @@ static int    add_cap;
 static int    add_n;
 
 void q3w_set_sort(int on) { q3w_sort_enabled = on; }
+
+/* v38.132: `q3arena <map> nocull` — turn the backface reject off entirely, so
+ * the A/B against a retail map is a keystroke and not a rebuild. Paired with
+ * q3w_cull_untrusted(), which reports how many faces the reject declined to
+ * touch on its own; `nocull` makes that number the whole candidate set, which
+ * is exactly the comparison worth having in the log. */
+void q3w_set_cull(int on) { q3w_cull_on = on; }
+int  q3w_cull_untrusted(void) { return v_cull_untrusted; }
+int  q3w_cull_enabled(void)   { return q3w_cull_on; }
 
 void q3w_sort_stats(int *enabled, int *n, int *sorted) {
     if (enabled) *enabled = q3w_sort_enabled;
@@ -1320,17 +1618,36 @@ static void frustum_log_once(const float cam[3], const float fwd[3]) {
         lb[p] = '\0';
         write_serial_string(lb);
     }
-}void q3w_draw(const q3bsp_mesh_t *m, const float cam[3], const float fwd[3],
-              const float right[3], float tan_hx, float tan_hy) {
+}
+
+/* v38.128: the shader slot that draws a face. Same index rule the emit loops
+ * use: a shaderNum past the table falls back to slot 0. */
+static const q3w_slot_t *w_slot_for(int shaderNum) {
+    return &tex_slot[(shaderNum >= 0 && shaderNum < Q3W_MAX_TEX) ? shaderNum : 0];
+}
+
+void q3w_draw(const q3bsp_mesh_t *m, const float cam[3], const float fwd[3],
+              const float right[3], float tan_hx, float tan_hy,
+              float time_sec, float z_far) {
     int vis = 0;
     static int logged_cluster = -999;
+    /* v38.126: the pass's own wall/TSC split (see q3w_cpu_stats). */
+    unsigned long long cyc0 = tgl_rdtsc();
+    unsigned long long cyc_prep;
+    /* v38.128: the sky pass's own inputs, read once per frame rather than per
+     * face (q3sky_enabled is a call across a module boundary). */
+    int sky_on = q3sky_enabled();
+    int sky_n = 0;
 
     v_faces = v_tris = v_culled = 0;
     v_lit_faces = 0;
     v_add_faces = 0;
+    v_sky_faces = 0;
+    v_sky_fallback = 0;
     v_marked = 0;
     v_culled_vis = v_culled_frustum = 0;
     v_culled_back = 0;
+    v_cull_untrusted = 0;   /* v38.132 */
     v_total_faces = 0;
     if (!m || !m->valid || !m->numFaces || !tex_inited) return;
     v_total_faces = m->numFaces;
@@ -1439,6 +1756,26 @@ static void frustum_log_once(const float cam[3], const float fwd[3]) {
                     continue;
                 }
             }
+            /* v38.128: a sky face is not geometry. The cloud box is built from
+             * the DIRECTIONS these faces cover (q3sky_draw), so the face itself
+             * must not also be painted over it — collected here, drawn once by
+             * the background pass below, and counted as a drawn face. A face
+             * whose sky has no cloud layer (or the `nosky` A/B) keeps the
+             * geometry path and is counted as the fallback it is. */
+            {
+                const q3w_slot_t *sl = w_slot_for(f->shaderNum);
+                if (sl->skyCloud) {
+                    if (sky_on && sky_n < sky_cap) {
+                        sky_idx[sky_n++] = i;
+                        continue;
+                    }
+                    v_sky_fallback++;
+                    t_sky_fallback++;
+                } else if (sl->skyDecl) {
+                    v_sky_fallback++;
+                    t_sky_fallback++;
+                }
+            }
             /* Additive faces are collected for the second pass below: they
              * must land on top of the opaque world, not inside it. */
             if (add_cap && tex_slot[f->shaderNum < Q3W_MAX_TEX ? f->shaderNum : 0].additive) {
@@ -1452,6 +1789,45 @@ static void frustum_log_once(const float cam[3], const float fwd[3]) {
         dl_entries = count;
         dl_sorted = 1;
     }
+    /* Everything up to here is per-face work that is not the transform: the PVS
+     * marking above, the backface/six-plane tests, the additive split and the
+     * nearest-first sort. The emit loops below are timed by TinyGL's own
+     * vertex counter, so the two together are the pass. */
+    cyc_prep = tgl_rdtsc();
+    w_cyc_prep += cyc_prep - cyc0;
+
+    /* The UNSORTED dev path (`nosort`) does its culls inline in the emit loop
+     * below, one frame after the background pass needs them. The sky's faces are
+     * therefore found HERE for that path, with the same three tests in the same
+     * order — the box has to be on screen before the world, and the emit loop
+     * cannot start it later without painting it over geometry already drawn. The
+     * loop recognises the same faces again and only counts them as drawn, so
+     * nothing is emitted twice. This is the one place the two paths differ in
+     * cost, and the double cull is what it costs to keep a diagnostic knob from
+     * silently deleting the sky. */
+    if (sky_on && !dl_sorted && sky_cap) {
+        for (int i = 0; i < m->numFaces; i++) {
+            const q3bsp_face_t *f = &m->faces[i];
+            float dx = f->center[0] - cam[0];
+            float dy = f->center[1] - cam[1];
+            float dz = f->center[2] - cam[2];
+
+            if (!w_slot_for(f->shaderNum)->skyCloud) continue;
+            if (vis && !vis_mark[i]) continue;
+            if (!w_cull_none(f->shaderNum) && face_is_backface(f, cam)) continue;
+            if (v_planes_n) {
+                if (face_outside_frustum(m, f)) continue;
+            } else {
+                float depth = dx * fwd[0] + dy * fwd[1] + dz * fwd[2];
+                if (depth < -f->radius || depth > Q3W_FAR) continue;
+            }
+            if (sky_n < sky_cap) sky_idx[sky_n++] = i;
+        }
+    }
+
+    /* v38.128: sky faces are collected above; the box itself draws below,
+     * after the generic pass (v38.143: moved — drawing it first meant the
+     * world overdrew every sky pixel at full fill cost). */
 
     {
         int started = 0;
@@ -1490,7 +1866,24 @@ static void frustum_log_once(const float cam[3], const float fwd[3]) {
                         continue;
                     }
                 }
-                /* Same split as the sorted path: additive last. */
+                /* Same split as the sorted path — the sky first, then additive
+                 * last — so the two orders agree on what is drawn where. */
+                {
+                    const q3w_slot_t *sl = w_slot_for(f->shaderNum);
+                    if (sl->skyCloud) {
+                        if (sky_on) {
+                            /* Already collected by the pre-scan above, and
+                             * drawn there: this face is a drawn face, not a
+                             * triangle, and the box stands in for it. */
+                            continue;
+                        }
+                        v_sky_fallback++;
+                        t_sky_fallback++;
+                    } else if (sl->skyDecl) {
+                        v_sky_fallback++;
+                        t_sky_fallback++;
+                    }
+                }
                 if (add_cap && tex_slot[f->shaderNum < Q3W_MAX_TEX ? f->shaderNum : 0].additive) {
                     if (add_n < add_cap) { add_idx[add_n++] = i; continue; }
                 }
@@ -1534,6 +1927,25 @@ static void frustum_log_once(const float cam[3], const float fwd[3]) {
         if (started) glEnd();
     }
 
+    /* v38.143: the sky, drawn LAST — id's RB_StageIteratorSky, which runs on
+     * the visible sky surfaces' tessellation after the generic pass of the
+     * same frame. The world already wrote real depth, and q3sky_draw tests
+     * (no writes), so the box fills only what nothing covered: same pixels
+     * as drawing it first into a cleared buffer, minus the overdraw. The
+     * faces it replaces are counted as drawn: they WERE drawn, by a box
+     * built from their directions, and the frame line's drawn+culled
+     * contract is about faces. Stays before the additive pass: glow blends
+     * onto sky as well as world. */
+    if (sky_n > 0) {
+        int sky_tris = 0;
+        q3sky_draw(m, sky_idx, sky_n, cam, time_sec, z_far);
+        q3sky_stats(0, 0, 0, 0, &sky_tris, 0);
+        v_sky_faces = sky_n;
+        t_sky_faces += sky_n;
+        v_faces += sky_n;
+        v_tris += sky_tris;
+    }
+
     /* v38.125: the additive pass — id's `sort additive`, and the reason the
      * demo's torches and the muzzle flash stop being black boxes. Every face
      * collected above is a shader whose stage blends GL_ONE GL_ONE: drawn in
@@ -1574,4 +1986,5 @@ static void frustum_log_once(const float cam[3], const float fwd[3]) {
     }
     glDisable(GL_CULL_FACE);
     glDisable(GL_TEXTURE_2D);
+    w_cyc_total += tgl_rdtsc() - cyc0;
 }

@@ -1350,6 +1350,9 @@ void vfs_init() {
 // Layout constants live in vfs.h (single source of truth: shell's `df` and
 // the allocator below both depend on VFS_DATA_START / VFS_DISK_SECTORS).
 
+// v38.157 batched node-table writer (defined below, next to vfs_save_unlocked).
+static int vfs_node_table_write(void);
+
 // Magic signature: 8 bytes + 2 bytes version + 6 bytes reserved = 16 bytes in sector 0
 static void vfs_save_unlocked() {
     unsigned char meta[512];
@@ -1379,17 +1382,56 @@ static void vfs_save_unlocked() {
         write_serial_string("[VFS] save failed: ATA write error (disk attached?)\n");
         return;
     }
-    
-    // Write node table
+
+    // v38.157: the node table is VFS_NODE_SECTORS * 512 = 1 MB (2048 sectors).
+    // It used to go out one single-sector PIO command at a time, each with its
+    // own CACHE FLUSH, with vfs_lock held and IRQs disabled — thousands of
+    // VM exits and host flushes inside one cli window. A runtime
+    // vfs_create_node (vfs_create_node -> vfs_save) is exactly what Q3's
+    // startup does to /tmp/q3home, and under KVM the caller's core sat in
+    // cli for seconds: the SMP watchdog declared CPU 1 HUNG with EIP at the
+    // rep outsw in ata_write_sector_drive_io. Batch the table through the
+    // multi-sector path instead (DMA when present): 16 transfers of up to
+    // 128 sectors, one flush each, tens of ms total instead of seconds.
+    vfs_node_table_write();
+}
+
+// The node table's batched writer. 128-sector pieces (ATA_BATCH_MAX, clamped
+// again by ata_batch_limit at the 128-sector LBA boundary), zero-padded tail
+// not needed — VFS_NODE_SECTORS is a whole number of 512-byte node records.
+// Falls back to the old per-sector loop when the heap is unavailable (very
+// early boot), where the I/O is still correct, just slow.
+static int vfs_node_table_write(void) {
     unsigned char* p = (unsigned char*)fs_nodes;
-    for (int i = 0; i < VFS_NODE_SECTORS; i++) {
-        if (ata_write_sector(VFS_NODE_START + i, p + (i * 512)) < 0) {
-            write_serial_string("[VFS] save failed at node-table sector ");
-            write_serial_hex((uint32_t)i);
-            write_serial_string("\n");
-            return;
+    unsigned char* wbuf = (unsigned char*)kmalloc(ATA_BATCH_MAX * 512);
+    if (!wbuf) {
+        for (int i = 0; i < VFS_NODE_SECTORS; i++) {
+            if (ata_write_sector(VFS_NODE_START + i, p + (i * 512)) < 0) {
+                write_serial_string("[VFS] save failed at node-table sector ");
+                write_serial_hex((uint32_t)i);
+                write_serial_string("\n");
+                return -1;
+            }
         }
+        return 0;
     }
+    int s = 0;
+    while (s < VFS_NODE_SECTORS) {
+        int batch = ata_batch_limit((unsigned int)(VFS_NODE_START + s),
+                                    VFS_NODE_SECTORS - s);
+        memcpy(wbuf, p + s * 512, (uint32_t)batch * 512);
+        if (ata_write_sectors_drive(0, (unsigned int)(VFS_NODE_START + s),
+                                    batch, wbuf) < 0) {
+            kfree(wbuf);
+            write_serial_string("[VFS] save failed at node-table sector ");
+            write_serial_hex((uint32_t)s);
+            write_serial_string("\n");
+            return -1;
+        }
+        s += batch;
+    }
+    kfree(wbuf);
+    return 0;
 }
 void vfs_save() {
     vfs_lock_acquire();
@@ -3132,8 +3174,8 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
 }
 
 static int vfs_alloc_sectors(int sectors_needed, int exclude_node) {
-    // VFS_DATA_START begins at 1025 (1 magic + 1024 node sectors with the
-    // 1024-node table, v4). sector_map is VFS_DISK_SECTORS bytes (4 KB of
+    // VFS_DATA_START begins at 2049 (1 magic + 2048 node sectors with the
+    // 2048-node table, v5). sector_map is VFS_DISK_SECTORS bytes (4 KB of
     // stack) so marking [0, VFS_DATA_START) as metadata is in-bounds by
     // construction.
     uint8_t sector_map[VFS_DISK_SECTORS];

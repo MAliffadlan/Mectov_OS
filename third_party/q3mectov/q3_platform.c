@@ -507,6 +507,23 @@ sysEvent_t Sys_GetEvent(void) {
 void Sys_ShowConsole(int level, qboolean quitOnClose) { (void)level; (void)quitOnClose; }
 void Sys_BeginStreamedFile(fileHandle_t f, int readahead) { (void)f; (void)readahead; }
 void Sys_EndStreamedFile(fileHandle_t f) { (void)f; }
+/* v38.150: this one is NOT harmless to leave returning 0, and the reason is
+ * worth writing down. id's FS_FOpenFileByMode flags EVERY FS_READ handle as
+ * "streamed" (Sys_BeginStreamedFile, then streamed = qtrue), and both
+ * FS_Read2 and FS_Seek consult that flag: FS_Read2 sends the read here
+ * instead of to FS_Read. So a stub that reports "no bytes" makes every
+ * handle-based read come back EMPTY while FS_ReadFile keeps working — which
+ * is exactly the split this port lived in: maps and textures loaded (they go
+ * through FS_ReadFile), and the official UI's scripts/arenas.txt read as zero
+ * bytes ("0 arenas parsed", and the retail CD-key screen instead of the main
+ * menu).
+ *
+ * The port's fix is on the trap side, where the read is issued: q3_vm.c's
+ * G_FS_READ and q3_uivm.c's UI_FS_READ call FS_Read, which has no streamed
+ * branch. A real streaming layer would need a handle -> FILE mapping that
+ * files.c keeps private, so this stays a stub on purpose — anything that
+ * routes a read through FS_Read2 gets nothing, which is the honest answer for
+ * a port with no read-ahead. */
 int  Sys_StreamedRead(void *buffer, int size, int count, fileHandle_t f) {
 	(void)buffer; (void)size; (void)count; (void)f;
 	return 0;

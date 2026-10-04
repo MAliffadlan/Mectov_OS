@@ -34,6 +34,43 @@ static void q3arena_task_entry(void) {
 }
 #endif
 
+/* v38.149: programmatic launch for the q3menu window (same fork pattern as
+ * the shell command below, minus the line parsing). map must be a bare
+ * [a-z0-9_] qpath, 1..63 chars — anything else is rejected, so the menu can
+ * only ever select among the staged .bsp map files, never open anything
+ * else. Returns 0 on fork success, -1 otherwise. Built only with
+ * MECTOV_Q3=1. */
+int q3arena_launch_map(const char *map) {
+#ifdef MECTOV_Q3
+        static char child_arg[80];    /* "q3arena " + map + NUL */
+        int i = 0;
+        if (!map || !map[0]) return -1;
+        while (map[i] && i < 63) {
+                char ch = map[i];
+                if (!((ch >= 'a' && ch <= 'z') ||
+                      (ch >= '0' && ch <= '9') || ch == '_')) return -1;
+                i++;
+        }
+        if (!map[i] && i > 0) {
+                int k;
+                child_arg[0] = 'q'; child_arg[1] = '3'; child_arg[2] = 'a';
+                child_arg[3] = 'r'; child_arg[4] = 'e'; child_arg[5] = 'n';
+                child_arg[6] = 'a'; child_arg[7] = ' ';
+                for (k = 0; k < i; k++) child_arg[8 + k] = map[k];
+                child_arg[8 + i] = '\0';
+                {
+                        extern int task_fork_kernel(void (*entry)(void), const char* child_arg);
+                        int pid = task_fork_kernel(q3arena_task_entry, child_arg);
+                        if (pid >= 0) return 0;
+                }
+        }
+        return -1;
+#else
+        (void)map;
+        return -1;
+#endif
+}
+
 void cmd_q3arena(void) {
 #ifdef MECTOV_Q3
         /* cmd_b holds the whole command line. v38.119 grammar, after the
@@ -119,6 +156,53 @@ fork:
                 }
         }
         print("Starting the official qagame VM with its level on screen...\n", 0x0C);
+        /* v38.133: the driver runs in a task of its own, so this shell is free
+         * — and it is the surface the user is actually looking at, because it
+         * is where the command was typed. Poll the driver's own status and
+         * print the load as it happens: a terminal that says nothing for two
+         * minutes is indistinguishable from a hang, which is exactly what the
+         * last report said (and the loading window can be behind this one, or
+         * on a host slow enough that its repaints are seconds apart).
+         *
+         * One line per stage change, a heartbeat every ~5 s while loading,
+         * then the game's own line — at which point this returns to the prompt
+         * the way it always has, so nothing about the post-launch flow (ESC in
+         * the game, then a second `q3arena`, the relaunch path the v38.130
+         * proof exercises) changes shape. The 5-minute cap means a driver that
+         * never reports cannot hold the shell hostage. */
+        {
+                extern int q3arena_status(char *buf, int n);
+                extern void task_sleep(int);
+                static char st[96];
+                unsigned waited = 0;
+                int last = -1, beats = 0;
+                while (waited < 300000u) {
+                        int ph = q3arena_status(st, (int)sizeof(st));
+                        if (ph != last) {
+                                if (ph == 1) {
+                                        print("[quake] ", 0x0B);
+                                        print(st, 0x07);
+                                        print("\n", 0x07);
+                                } else if (ph >= 2) {
+                                        print("[quake] ", 0x0B);
+                                        print(st, 0x0B);
+                                        print("\n", 0x0B);
+                                }
+                                last = ph;
+                                beats = 0;
+                        } else if (ph == 1 && ++beats >= 5) {
+                                print("[quake] ", 0x0B);
+                                print(st, 0x07);
+                                print("\n", 0x07);
+                                beats = 0;
+                        }
+                        /* In the game, or already over: hand the prompt back
+                         * and let the window own the story from here. */
+                        if (ph >= 2) break;
+                        task_sleep(1000);
+                        waited += 1000u;
+                }
+        }
         print("WASD/arrows move, mouse looks, ESC quits. id's own Pmove drives it.\n", 0x07);
 #else
         print("q3arena: engine not compiled in (build with MECTOV_Q3=1)\n", 0x0C);

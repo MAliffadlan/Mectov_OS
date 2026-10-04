@@ -84,6 +84,13 @@ void wm_close(int id);
 int  wm_is_open(int id);
 void wm_invalidate(int id);
 void wm_draw_all();
+/* v38.139: composite ONE window and nothing else. While a game owns the mouse
+ * capture the rest of the desktop is not moving, and re-drawing it ~30x a
+ * second is wall time taken straight out of the game's frame (measured: 19% of
+ * a 35 ms frame on the player's host). Returns 0 if no such visible window, in
+ * which case the caller must fall back to full_redraw(). Does not swap; the
+ * caller owns vsync + swap_buffers(), exactly as it does for full_redraw(). */
+int  wm_draw_window(int id);
 /* v38.110: MILLISECOND cost of the last full composite pass (wm_draw_all),
  * of blitting the q3arena game window's content buffer into the back buffer,
  * and of that window's app draw callback (q3ref_blit + HUD) — kernel tick
@@ -120,6 +127,23 @@ int  wm_capture_owner(void);                        // capturing window id, or -
 int  wm_capture_event(int dx, int dy, int btn);     // deliver relative motion
 int  wm_capture_center(int *x, int *y);             // where the arrow is pinned
 void wm_tick_all();
+/* v38.134: composite one desktop frame FROM THE CALLER'S TASK. The idle loop
+ * owns the normal present path, but a kernel task that never blocks starves it
+ * — the Q3 loader did exactly that, and its loading screen froze for a whole
+ * phase (measured: zero changed pixels across three 4-second-apart
+ * screendumps). The loader calls this at the points it owns; see kernel.c. */
+void desktop_pump(void);
+/* v38.137: composite AND swap the whole screen from the caller's task, with the
+ * entire screen damaged first. Use it when the caller knows the picture on the
+ * glass matters and cannot afford the damage-rect race in vga.c (a rect that
+ * misses its mark stays stale on screen until something damages it again). */
+void desktop_present_now(void);
+/* v38.139: drain the PS/2 relative-motion accumulator and deliver the packet to
+ * whichever window owns the capture. Returns the button state, or -1 when no
+ * window is capturing. Two callers by design (the desktop loop and the Q3 frame
+ * loop) — the accumulator is drained atomically, so the packet goes to whoever
+ * runs first and is never lost or double-counted. The look rate is this rate. */
+int  desktop_capture_pump(void);
 void wm_cleanup_task(int tid);  // Close all windows owned by task tid
 void wm_reset_session(void);     // Close every window and reset WM state
 

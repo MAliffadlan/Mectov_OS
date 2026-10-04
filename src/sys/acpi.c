@@ -2,6 +2,7 @@
 #include "../include/utils.h"
 #include "../include/serial.h"
 #include "../include/vmm.h"
+#include "../include/mem.h"   // mem_identity_tables / PT_ENTRIES: the mapped ceiling
 #include "../include/io.h"    // outw for the S5 PM1a/b control writes
 
 uint32_t smp_bsp_lapic_id = 0;
@@ -32,14 +33,41 @@ static uint16_t read_phys_u16(uintptr_t addr) {
     return value;
 }
 
-// Physical range that is safely identity-mapped by paging_init() (0..256MB).
-// ACPI tables always live in low RAM, so any pointer above this is bogus.
-#define ACPI_PHYS_MAX (256u * 1024u * 1024u)
+// The physical span paging_init() actually identity-mapped — the ceiling every
+// "is this address real?" check has to use.
+//
+// v38.156: this used to be a flat 256MB, written when the identity map stopped
+// there, and it never became true again. Every Q3 session boots at `-m 512`,
+// and SeaBIOS puts the RSDT (with the MADT, FADT and DSDT under it) in the
+// ~132KB strip at the top of RAM that the multiboot map reports as RESERVED:
+// usable RAM ends at 0x1FFDF000, the RSDT sits at 0x1FFE1D6F. That strip IS
+// mapped — paging_init() maps whole 2MB regions — but it is not "RAM" by the
+// allocator's measure, which is why the bound must be the MAPPING and not the
+// memory size: bounding by the detected (multiboot "available") RAM size
+// rejects the table again, 12KB short — that was this fix's first attempt, and
+// it failed exactly there on a real boot. The difference between those two
+// numbers is the whole reason this comment names both.
+//
+// The visible half of the old bound was SMP: "RSDT checksum failed!", no MADT,
+// and `[SMP] Only 1 CPU detected. SMP disabled.` put the whole desktop — game
+// task, compositor, shell, the busy-wait serial writes — on the BSP. A probe at
+// a smaller -m (tables at 0x07FE1D63, under the old bound) brings up four CPUs
+// out of the identical kernel, which is how this was found.
+//
+// The guard stays; what it must reject is a garbage pointer into unmapped or
+// MMIO space. Running before paging_init() (identity_tables still 8) fails
+// CLOSED — a smaller bound, never a larger one.
+static uint32_t acpi_phys_max(void) {
+    uint32_t mapped = mem_identity_tables() * (uint32_t)PT_ENTRIES * 4096u;
+    uint32_t cap = (uint32_t)PHYS_MAX_PAGES * 4096u;      // paging_init's ceiling
+    if (mapped > cap) mapped = cap;
+    return mapped;
+}
 
 static rsdp_t* find_rsdp(void) {
     // 1. Search in EBDA first 1KB
     uint32_t ebda = ((uint32_t)read_phys_u16(0x40E)) << 4;
-    if (ebda >= 0x400 && ebda < ACPI_PHYS_MAX) {
+    if (ebda >= 0x400 && ebda < acpi_phys_max()) {
         for (uint32_t i = ebda; i < ebda + 1024; i += 16) {
             if (string_starts_with((const char*)i, "RSD PTR ") && checksum((char*)i, 20)) {
                 return (rsdp_t*)i;
@@ -110,14 +138,14 @@ static void parse_madt(madt_t* madt) {
 // checksum. Returns 0 if the table is unusable. The length field comes from
 // the header itself, so we bound it to something sane before checksumming.
 static int validate_table(acpi_header_t* header, uint32_t max_len) {
-    if ((uintptr_t)header < 0x1000 || (uintptr_t)header >= ACPI_PHYS_MAX) {
+    if ((uintptr_t)header < 0x1000 || (uintptr_t)header >= acpi_phys_max()) {
         return 0;
     }
     uint32_t len = header->length;
     if (len < sizeof(acpi_header_t) || len > max_len) {
         return 0;
     }
-    if ((uintptr_t)header + len > ACPI_PHYS_MAX) {
+    if ((uintptr_t)header + len > acpi_phys_max()) {
         return 0;
     }
     return checksum((char*)header, (int)len);
@@ -136,7 +164,7 @@ int acpi_s5_ready(void) { return fadt_found; }
 // encoded form: 08 '_S5_' 12 pkglen 02 0A a 0A b. Virtually every real
 // firmware (SeaBIOS/QEMU included) emits exactly this for the sleep states.
 static void parse_s5_from_dsdt(uint32_t dsdt_addr) {
-    if (dsdt_addr == 0 || dsdt_addr >= ACPI_PHYS_MAX) return;
+    if (dsdt_addr == 0 || dsdt_addr >= acpi_phys_max()) return;
     acpi_header_t* d = (acpi_header_t*)dsdt_addr;
     if (!string_starts_with(d->signature, "DSDT")) return;
     if (!validate_table(d, 256 * 1024)) return;
@@ -215,7 +243,7 @@ void acpi_init(void) {
         xsdt_addr64 = rsdp->xsdt_address;
     }
 
-    if (xsdt_addr64 != 0 && (xsdt_addr64 >> 32) == 0 && (uint32_t)xsdt_addr64 < ACPI_PHYS_MAX) {
+    if (xsdt_addr64 != 0 && (xsdt_addr64 >> 32) == 0 && (uint32_t)xsdt_addr64 < acpi_phys_max()) {
         uint32_t addr = (uint32_t)xsdt_addr64;
         write_serial_string("[ACPI] XSDT Addr: ");
         write_serial_hex(addr);
@@ -237,7 +265,7 @@ void acpi_init(void) {
         int madt_done = 0, fadt_done = 0;
         for (int i = 0; i < entries; i++) {
             uint64_t ptr = xptrs[i];
-            if ((ptr >> 32) != 0 || ptr == 0 || ptr >= ACPI_PHYS_MAX) continue;
+            if ((ptr >> 32) != 0 || ptr == 0 || ptr >= acpi_phys_max()) continue;
             acpi_header_t* header = (acpi_header_t*)(uint32_t)ptr;
             if (!madt_done && string_starts_with(header->signature, "APIC")) {
                 if (validate_table(header, 1024 * 1024)) {
@@ -275,7 +303,7 @@ void acpi_init(void) {
     int madt_done = 0, fadt_done = 0;
     for (int i = 0; i < entries; i++) {
         uint32_t ptr = rptrs[i];
-        if (ptr == 0 || ptr >= ACPI_PHYS_MAX) continue;
+        if (ptr == 0 || ptr >= acpi_phys_max()) continue;
         acpi_header_t* header = (acpi_header_t*)ptr;
         if (!madt_done && string_starts_with(header->signature, "APIC")) {
             if (validate_table(header, 1024 * 1024)) {

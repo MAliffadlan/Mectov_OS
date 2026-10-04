@@ -21,6 +21,39 @@
  * for another mesh: the previous cache is released first. */
 int  q3w_load(const q3bsp_mesh_t *m);
 void q3w_unload(void);
+/* v38.131: loading progress for the early boot window. done/total count the
+ * world textures q3w_load has processed; stage is 1 while the collision world
+ * builds, 2 while textures decode, 0 when idle. */
+extern volatile int q3w_progress_stage;
+extern volatile int q3w_progress_done;
+extern volatile int q3w_progress_total;
+
+/* v38.132: a progress hook, so the driver can make the boot window repaint
+ * WHILE the textures decode.
+ *
+ * q3w_progress_done is volatile and updated every iteration of the decode loop,
+ * but nothing was reading it from a paint path — the window was painted once at
+ * open and then showed that same stale image for the whole load. A caller that
+ * wants live progress (the driver does: it invalidates its window) registers
+ * here and gets called as the count advances.
+ *
+ * It is a plain function pointer on purpose: this file does not include wm.h,
+ * and the renderer must not know what a window is. Pass 0 to unregister.
+ *
+ * v38.133: the hook RETURNS a request, and the loop honours it.
+ *
+ * It used to fire every Q3W_PROGRESS_STEP textures on the theory that 12 calls
+ * across a 94-texture map were enough for a bar to move. That is still true for
+ * painting — but the hook is now also the only place the driver can answer a
+ * user pressing ESC, and a step gate made the answer arrive up to STEP decodes
+ * late (seconds, on a real map). It is called on EVERY texture instead; the
+ * body is a dirty-flag set and one int read, next to a JPEG decode, so the
+ * gate was never paying its way. A non-zero return asks q3w_load to stop
+ * early: it breaks, leaves the undecoded slots as they were, and still runs
+ * its own cleanup and summaries, so a cancelled load tears down through the
+ * ordinary path. */
+typedef int (*q3w_progress_fn_t)(int done, int total);
+void q3w_set_progress_hook(q3w_progress_fn_t fn);
 
 /* Draw every face that survives culling, from the camera at `cam` looking
  * along `fwd` (unit).
@@ -33,9 +66,16 @@ void q3w_unload(void);
  * `tan_hx`/`tan_hy` are the half-extents the backend passed to glFrustum
  * (tan(fov/2) horizontally and vertically), so a face outside the real view
  * cone is dropped rather than merely depth-tested. `right` may be NULL for the
- * hand-built fallback paths, in which case only depth culling applies. */
+ * hand-built fallback paths, in which case only depth culling applies.
+ *
+ * v38.128: `time_sec` is the game clock the sky's tcMods animate against and
+ * `z_far` the projection's far plane (the cloud box is zFar/1.75 across). Both
+ * are ignored by a map with no sky, and the sky pass runs inside this call,
+ * before the opaque pass, because a background layer is the world draw's first
+ * customer (see q3sky.h). */
 void q3w_draw(const q3bsp_mesh_t *m, const float cam[3], const float fwd[3],
-              const float right[3], float tan_hx, float tan_hy);
+              const float right[3], float tan_hx, float tan_hy,
+              float time_sec, float z_far);
 
 /* Last frame's accounting (reset by each q3w_draw). Any pointer may be NULL. */
 void q3w_frame_stats(int *facesDrawn, int *trisDrawn, int *facesCulled);
@@ -61,6 +101,16 @@ void q3w_cull_stats(int *byVis, int *byFrustum, int *planes, int *byBack);
 void q3w_set_sort(int on);
 void q3w_sort_stats(int *enabled, int *pool, int *sorted);
 
+/* v38.132: the backface reject. q3w_set_cull(0) is `q3arena <map> nocull`.
+ * q3w_cull_untrusted() reports how many faces the reject considered but drew
+ * anyway because the file's own vertex normals disagree, so the log can show
+ * how much of the candidate set was actually cullable — a reject that silently
+ * eats the level is the failure this guards against. q3w_cull_enabled() is the
+ * raw switch, for the frame line to print. */
+void q3w_set_cull(int on);
+int  q3w_cull_untrusted(void);
+int  q3w_cull_enabled(void);
+
 /* Load-time accounting. */
 void q3w_load_stats(int *shaders, int *fromDisk, int *placeholders);
 
@@ -73,6 +123,14 @@ void q3w_load_stats(int *shaders, int *fromDisk, int *placeholders);
  * for neither — the fixture arena does not. */
 void q3w_flag_stats(int *addShaders, int *cullShaders, int *addFaces,
                     int *addFacesRun);
+
+/* v38.128: the sky's face accounting. `boxFaces` is how many faces the last
+ * frame handed to the cloud box (they are drawn by it, counted in `drawn`, and
+ * NOT emitted as geometry); `fallbackFaces` how many carried a sky shader the box
+ * could not take — no cloud layer, the `nosky` A/B, or an unallocatable pool —
+ * and were drawn as ordinary surfaces. The `*Run` pair are the session totals. */
+void q3w_sky_stats(int *boxFaces, int *boxFacesRun, int *fallbackFaces,
+                   int *fallbackRun);
 
 /* v38.124: the world's image path, for the view model's .md3 surfaces.
  *
@@ -98,6 +156,20 @@ void q3w_release_image(unsigned char *rgb);
 void q3w_glsplit_stats(unsigned long long *vert, unsigned long long *fill,
                        unsigned int *tri);
 void q3w_glsplit_reset(void);
+
+/* v38.126: the pass's NON-raster split, same TSC units and the same drain. The
+ * fork executes GL ops immediately (there is no op queue to blame), so what the
+ * vertex counter does not cover inside a slow draw phase is this file's own
+ * per-face work: `prep` = PVS marking + the backface/six-plane tests + the sort,
+ * `total` = the whole q3w_draw call. `total - prep - vert` is what the emit
+ * loops spend outside the transform. */
+void q3w_cpu_stats(unsigned long long *prep, unsigned long long *total);
+/* Shaded fragments since the last drain (see tgl_cyc.h): pixels that passed the
+ * depth test. Over the frame's 76800 pixels this is the overdraw ratio. */
+void q3w_frag_stats(unsigned int *n);
+/* The raw TSC, for the driver's one-time cycles-per-millisecond calibration:
+ * every *_kc number in the dev lines is a ratio until this rate is known. */
+unsigned long long q3w_tsc(void);
 
 /* How many faces the last frame drew out of a lightmap page (v38.114), and how
  * many the whole run has drawn that way. Both zero for a map with no lightmap

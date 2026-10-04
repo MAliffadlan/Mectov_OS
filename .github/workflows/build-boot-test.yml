@@ -398,7 +398,11 @@ jobs:
   quake3:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # v38.127: raised from 35 — the HUD step is two boots (the port cannot
+    # relaunch after ESC, so the `nohud` A/B is a second session).
+    # v38.128: raised again for the sky step, which is two more boots of the
+    # same kind (one with the cloud box on, one with `nosky`).
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -533,6 +537,60 @@ jobs:
           # directly-named textures resolved to their TGAs, no placeholders,
           # and the world is really drawn and live.
           python3 scripts/q3retail_test.py --iso mectov-q3.iso --timeout 600
+
+      - name: id's own status bar, decoded off the screen (TCG)
+        run: |
+          # v38.127 (Q3 phase 22): the HUD, in two boots so the A/B is real
+          # (the port cannot relaunch after ESC). build_q3pak.py ships a
+          # synthetic picture set in id's own formats whose number fields
+          # encode their digit in a colour, and q3a_data.py --with-hud stages
+          # it through the REAL staging path — so CI can prove id's status bar
+          # without a byte of id's art. Asserts the loader asked for all
+          # fifteen of id's names and got them (15 image(s), 0 missing), that
+          # the health column tracked the module's OWN countdown (id spawns at
+          # STAT_MAX_HEALTH + 25 and g_active.c takes it back down 1/s, so the
+          # samples read 115, 105, 100), that the ammo and health fields DECODE
+          # to 100 out of the screendump at id's own x positions, that the ammo
+          # icon is at id's icon offset while the armor icon is nowhere (armor
+          # 0, and id wraps field and icon in `if (value > 0)`), that the FFA
+          # score box carries gfx/2d/select, and that a `nohud` boot paints
+          # none of it while the frame histogram — the other suites' pixel
+          # evidence — stays identical.
+          python3 scripts/q3hud_test.py --iso mectov-q3.iso --timeout 600
+
+      - name: Q3 sky (v38.128)
+        run: |
+          # v38.128 (Q3 phase 23): the level's own sky, drawn the way id draws
+          # it — the `surfaceparm sky` surfaces are clipped into the six sides
+          # of a box centred on the camera, and the shader's layers fill it at
+          # `skyparms`' cloud height with their `tcMod scroll`/`scale` running
+          # on the game clock. The fixture is a second generated map
+          # (build_test_bsp.build(sky_ceiling=True)) whose ceiling is an
+          # opaque base layer plus an ADDITIVE cloud layer, both written the way
+          # q3dm1's textures/skies/tim_hell is: an additive layer can only ADD
+          # light, so the suite's near-white pixel count in the sky band is
+          # something the base layer cannot produce at any light level. With
+          # the camera PINNED, two screendumps a minute apart have to be
+          # pixel-identical over the world band and different over the sky
+          # band, and a second boot with `nosky` is the control where neither
+          # moves and no additive layer is drawn.
+          python3 scripts/q3sky_test.py --iso mectov-q3.iso --timeout 600
+
+      - name: Q3 sounds (v38.129)
+        run: |
+          # v38.129 (Q3 phase 24): id's own sounds through the SB16. The event
+          # tap in q3_vm.c reads the SAME events id's client reads (footsteps,
+          # the four-shot machgf fire cycle, falls, jump pads, the
+          # configstring-driven general sounds), maps them by name exactly as
+          # cg_event.c/cg_weapons.c spell them, and plays them through the
+          # WAV loader + 8-channel mixer in q3sound.c, which pours into the
+          # kernel's SB16 driver. CI has no speakers and needs none: QEMU's
+          # SB16 attached to the `none` audio backend is a REAL device with a
+          # silent wire, so every counted play is a real hand-off. Three
+          # boots: on (16 fixture WAVs load, played>0, skip=drop=0), `nosound`
+          # (loaded and tapped, played=0, skips counted), and NO card (grace:
+          # everything still loads, plays are skipped not dropped).
+          python3 scripts/q3snd_test.py --iso mectov-q3.iso --timeout 600
 
   storage:
     needs: build

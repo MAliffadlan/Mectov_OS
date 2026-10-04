@@ -44,5 +44,13 @@ int  get_use_term_buf();
 // Task Manager
 void open_taskmgr_app();
 
+// Quake III menu (q3menu_app.c) + programmatic map launcher used by it.
+// Declared here (not shell-internal) because the app lives outside the shell
+// tree; both are no-ops/fail-closed without MECTOV_Q3.
+void open_q3menu_app(void);
+int  q3arena_launch_map(const char *map);
+void q3arena_set_sens_hund(int h);
+int  q3arena_sens_hund(void);
+
 #endif
 
