@@ -5,9 +5,12 @@
 grounded. This report changes no code; it is a review artifact.
 **Author:** automated review session (BuffY) at the user's request.
 
-**Status update (2026-10-05):** **F1 is fixed and proven by a fault-injection harness** — see the
-F1 section for the diff summary and the before/after evidence. Everything else in this report still
-stands as written; the remaining findings (F0, F2–F10) are untouched.
+**Status update (2026-10-05):** **F1 is fixed and proven by a fault-injection harness**, and
+**F0 is closed** (its app-level double unlock *and* the scheduler stall it had narrowed to, with the
+post-mortem evidence and a 90-round 4-core stress) — see the F0 and F1 sections for the diffs and the
+before/after evidence. The 2026-10-04 text below each of those sections stands as written (it is the
+record of what was observed then). Everything else in this report stands as written; the remaining
+findings (F2–F11) are untouched.
 
 ---
 
@@ -73,34 +76,98 @@ The one failure is not a timeout and not noise; the run's log ends with:
 
 Severity is judged by blast radius × time-to-diagnose, not by how exotic the code path is.
 
-### F0 — [High] The condition-variable gate cannot fail in CI and does fail locally — the 4-core race is still open
+### F0 — [High] The cross-core condvar story was two bugs: an app-level double unlock and a scheduler slot-reuse corruption — **both FIXED (2026-10-05, v38.160)**
 
-**Reproduced live in this session:** `make check-quick` → `cond` → `FAIL` (513 s, exit code 2 for the whole
-run). The app's own assertions (`apps/conddemo.c:217,222`) tripped:
-`[CONDDEMO] FAIL consumed count`, `[CONDDEMO] FAIL missing/duplicate items`.
+**Updated 2026-10-05 (v38.160): closed.** The v38.92 release note recorded "a DIFFERENT,
+pre-existing cross-core race in the Ring 3 condvar hot path … drops/dupes items ~1 run in 4-6 on 2+
+cores (SMP1 is 100% green across stress)" and pinned `cond_test` to `MCTOV_SMP=1` in CI. Re-examined
+with the new `--repeat`/`--smp` harness mode, that turned out to be **two separate defects, in
+different layers**:
 
-This is not a mystery bug — the project documented it. README v38.92 says stress testing surfaced
-"a DIFFERENT, pre-existing cross-core race in the Ring 3 condvar hot path … drops/dupes items ~1 run
-in 4-6 on 2+ cores (SMP1 is 100% green across stress)", and that `cond_test` is therefore **pinned to
-`MCTOV_SMP=1` in CI** until it is root-caused.
+**1. The recorded item loss was an app-level mutual-exclusion hole — FIXED.** `apps/conddemo.c`'s
+consumer loop carried a **second `mct_mutex_unlock(&c_mu)`**, added by the same v38.92 commit that
+recorded the race. On 2+ cores the first unlock's `lock=0` store + futex wake lets a peer acquire the
+mutex, and the stray second store then releases it again while that peer is inside the critical
+section — two threads in the section, items lost/duped, exactly the `FAIL consumed count` /
+`FAIL missing/duplicate items` this report reproduced on 2026-10-04. On 1 core the stray store is
+harmless (the unlocker reacquires before any peer runs), which is why SMP1 stayed green. The fix is
+the single unlock; the calling comment records the history. (This session's control run on the
+pre-fix ISO did not re-observe the assertion path — its 4-core run hit the stall below first — so the
+app fix rests on the mechanism + `git blame` + the recorded signatures rather than on a fresh A/B of
+the assertions.)
 
-The new information is what that pin costs, and it is visible in two lines:
+**2. The relaunch stall was scheduler slot-reuse corruption — FIXED, with the mechanism proven by
+the post-mortem.** Symptom: on 4 cores the demo occasionally stops making progress and prints no
+verdict, always on the **2nd-or-later `run /apps/conddemo.mct` inside one boot** (stalls at rounds 2,
+3, 6, 23 and 36 across runs; a boot's first run passed every time) — which is why the single-run CI
+step stayed green. The v38.160 post-mortem (QEMU-monitor `xp` dumps, resolved against
+`myos.bin.debug` symbols) pinned it down instead of leaving it as a hypothesis:
 
-- `scripts/cond_test.py:100` boots `-smp ${MCTOV_SMP:-4}` — the default, and what `make check` /
-  `check-quick` give a user on their own machine, is **4 cores**.
-- `.github/workflows/build-boot-test.yml:233` runs `MCTOV_SMP=1 python3 scripts/cond_test.py` — CI is
-  **1 core**.
+| observed | value at the stall |
+|---|---|
+| kernel futex table | **empty** — no waiter registered anywhere |
+| BSP runqueue | `rq[0] = [0, 4, 8]` — the stuck consumer (tid 8) is QUEUED |
+| task 8 (conddemo consumer) | state `READY`, `rq_cpu=0`, saved frame **EIP=`task_exit_with_code+0x71`** — the kernel EXIT PARK LOOP (`for(;;) hlt` after SYS_EXIT); `zombie_since=0`, i.e. this thread never exited itself |
+| task 5 (conddemo.mct main) | `BLOCKED`, `waiting=8` (waitpid on that consumer) |
+| task 8's kernel stack | return-address chain back through `syscall_handler+0x409` — the SYS_EXIT call site of the slot's **previous** occupant |
+| `current_task` | `[8, 1, 2, 3, …]` — BSP naming the stuck tid; APs on idle tasks |
+| timer | `[LOAD]` lines kept printing long after the app stopped (BSP alive, no panic) |
 
-So the gate has two different meanings depending on where it runs: locally it exercises (and can
-catch regressions in) the futex/condvar path across cores; in CI it structurally cannot, and the
-28/28 green badge describes the single-core behaviour only. A regression in the cross-core handshake
-would land as "works on my machine, green in CI" — with the local failure reading like a flake,
-which is exactly the interpretation the v38.92 pin was trying to avoid.
+Root cause: a task that exits stays `current_task[cid]` on its core until that core's **next tick** —
+`task_exit_with_code` can only park in a `hlt` loop, and the switch happens in `schedule()`, so the
+window is ≤10 ms at 100 Hz. If the slot is reclaimed inside that window the stale core's tick writes
+its (dead) frame into the **recycled** slot (`tasks[cur].esp = esp`), overwriting the new thread's
+freshly built frame; the next pick then resumes the new thread into the dead hlt loop. It never
+executes one instruction of its own, so its parent's `waitpid` never completes and the round dies
+without a verdict. conddemo hits that window *structurally*: the last mutex worker exits, `join()`
+returns microseconds later, and the producer/consumer phase clones straight back into the same slots
+(slot 8 is reused by the next `clone` at 28038 in the captured serial log, ~µs after that slot's
+previous owner exited at 28029). Round 1 of a boot is always safe because no slot has a predecessor
+yet — the reason every single-run CI step and every first run stayed green.
 
-Nothing here says the CI pin was wrong (it keeps the suite meaningful while the race is open). It
-says the *coverage boundary* should be stated where people look: the suite table in README §Testing
-lists `cond_test` as a 4-core proof (README:509 — "TCG, 4 cores"), the honest note lives 70 rows
-down in a version-history cell, and neither the Makefile target nor `check.py` mentions the pin.
+Fix (all in `src/sys/task.c` unless noted):
+
+* `schedule()` writes **nothing** to a dead current task (esp, watermark, state, runqueue
+  membership, FPU image, tick accounting) and, when nothing is runnable, parks the core on its own
+  idle task instead of iret'ing a dead frame; the commit path also refuses a dead `next`.
+* `rq_enqueue()` refuses dead tids; `task_set_state()` refuses to revive FREE/ZOMBIE; `sem_destroy()`
+  (`src/sys/sync.c`) filters dead/idle waiters — the last unguarded READY write in `sync.c`.
+* Every slot-claiming path (`clone`/`thread_create_ex`, `task_fork`, `task_fork_exec`,
+  `create_idle_task`) **skips a FREE slot that a core still names as its current task**
+  (`slot_still_current()`), so a fresh frame can never be published into a window that a stale core
+  is about to clobber. It was always safe before because no *legitimate* FREE slot is current
+  anywhere.
+* Diagnostics: throttled-per-kind `[WATCH]` lines (`dead-cur`, `create-skip`, `revive-refused`,
+  `dead-in-rq`, `parked-frame`, `enqueue-dead`, `commit-dead`) plus a 1 Hz integrity sweep on the
+  BSP; `scripts/cond_test.py` now **fails** if a `parked-frame` line appears (a task resumed into
+  dead code) and reports `create-skip` as *survived* evidence rather than a failure.
+
+**Reproduction tooling (v38.160).** `scripts/cond_test.py` gained `--repeat N` (N demo runs in ONE
+boot; each round matches only the bytes appended after that round started, so a later round can never
+be satisfied by an earlier round's markers) and `--smp N`. Any failed round fails the suite, and the
+final line states the gate's shape (`[OK] cond_test: smp=4 runs=60/60 ALL PASS`). A stall also dumps
+a full post-mortem (registers of every vCPU, `current_task`, `rq[0..3]`, `tasks[0,4..9]`, two kernel
+stacks, the futex table). Measured on TCG, 4 cores:
+
+| run | result |
+|---|---|
+| control, pre-fix ISO, `--repeat 10` | rounds 1–2 PASS, **round 3 stalled** (no verdict in 296 s) |
+| pre-fix tree, `--repeat 10` | round 1 PASS, round 2 stalled (265 s) |
+| pre-fix tree, `--repeat 60` | 22 PASS, round 23 stalled; (`--repeat 60`, forensics run) 5 PASS, round 6 stalled |
+| pre-fix tree, `--repeat 60` (probe6) | 35 PASS, **round 36 stalled** (dump above) |
+| **fixed tree, `--repeat 60`** | **60/60 PASS** — `[WATCH] dead-cur` in every round, one `create-skip tid=8` survived, zero `parked-frame` |
+| **fixed tree, `--repeat 30`** (second ISO, per-kind diagnostics) | **30/30 PASS** — two `create-skip` events survived, zero `parked-frame` |
+
+The fix's own gate is therefore: 90/90 rounds green where the pre-fix tree stalled 5 times in ~100
+rounds, with the clobber window observed live (`dead-cur` every round, `create-skip` three times) and
+its corruption signature (`parked-frame`) never once — plus the pre/post app-level controls above.
+
+**CI pin removed.** The `cond` step in `.github/workflows/build-boot-test.yml` now runs
+`MCTOV_SMP=4 python3 scripts/cond_test.py --timeout 900` with the step comment naming both fixed
+defects; the deep multi-round stress stays a documented local command
+(`python3 scripts/cond_test.py --repeat 60`). Regressions on this tree: `make check-quick` 12/12 and
+`boot_test.py` rc=0 (see §2/§3 for the run logs). One detail from the stall dump is still
+unexplained and is recorded separately as F11.
 
 ### F1 — [High] Multi-sector filesystem writes drop the drive's error code on all three paths — **FIXED (2026-10-05)**
 
@@ -132,7 +199,7 @@ block layer — a deterministic media failure with no hardware needed.
 | `wfail_test.py --mode control` (post-fix) | rc=0; `write ok=True readback ok=True file on media=True failure markers=[]` |
 | `wfail_test.py --mode inject` (post-fix) | **rc=0** — `write ok=False readback ok=False file on media=False failure markers=['WFILE create FAILED']`; `[OK] inject: the refused write was reported to the writer (no false success, nothing on the medium)` |
 | Regression: `fat32_test.py`, `boot_test.py`, `make check64` | rc=0 each — FAT32 LFN round-trip via mtools intact, boot/login intact, 64-bit `M12 BOOT OK` + FS selftest + kbd/heap/blk/fs/cons/gui gates all PASS |
-| Regression: `make check-quick` (post-fix, 4-core TCG) | 12/12 PASS (this run; F0 stays open — see the F0 section for why one green run does not close a ~1-in-4-6 race) |
+| Regression: `make check-quick` (post-fix, 4-core TCG) | 12/12 PASS (this run; at the time F0's scheduler half was still open — see the F0 section for why one green run does not close a ~1-in-4-6 race, and for the 90-round stress that does) |
 
 The original static analysis follows; the line numbers and signatures it cites are the pre-fix state.
 
@@ -245,6 +312,29 @@ whole still prints 38 warning lines:
 **Fix:** run the rustc step with the jobserver variables blanked (or `-j1`), and drop or feature-gate the
 `mmx` target-feature.
 
+### F11 — [Low] `task_reap_zombies()` is dead code, and one dump detail from the F0 stall is explained by nothing in the tree
+
+Found while root-causing F0 (2026-10-05). Two small, separate observations, recorded so the next
+reviewer does not have to rediscover them:
+
+1. **The zombie reaper never runs.** `task_reap_zombies()` (`src/sys/task.c`) is documented in
+   `task.h` and in its own comment as "Called from the BSP main loop once per second as a safety net
+   for parents that launch children but never call `waitpid()`" — but **nothing in the tree calls
+   it** (`grep -rn "task_reap_zombies()" src/` → the definition and the declaration only). Zombies
+   are therefore only reaped by `waitpid()` and by `terminate_task()`'s reparent loop, and
+   `zombie_reap_ms` (plus its `/proc/sys/zombie_reap_ms` knob) has no effect today. Not the F0
+   stall — a working reaper would *free* a stuck child, not wedge a parent — but the documented
+   behaviour and the code disagree: either call it from the BSP loop or document it as dormant.
+2. **The unjoined producer in the F0 dump shows `FREE` with a zombie timestamp.** In the probe6
+   post-mortem the producer thread (tid 9) that the stuck parent never joined was already `FREE`
+   (`zombie_since` set, `parent=5`), yet the only paths that free a zombie are `waitpid()` (never
+   called for tid 9: the parent was stuck on tid 8 and the join order is 6, 7, 8, 9) and
+   `terminate_task()`'s reparent loop (which needs the *parent's* tid to exit — the parent was alive
+   and `BLOCKED`). Whether this review's reading missed a path or something frees slots outside the
+   task-table bookkeeping is unresolved; it does not affect the F0 fix (the stuck thread itself was
+   `READY` with a park-loop frame, and 90 post-fix rounds reproduce neither shape), but it is
+   recorded rather than explained away.
+
 ### Checked, no finding (recorded so the next reviewer can skip them)
 
 **a. `fs_nodes[].name` paths are bounded.**
@@ -331,16 +421,20 @@ These are in the project's own release notes; the review confirms they are docum
 the 12-extra-face backface-reject flake (~1 boot in 2, `q3hud` reports the split); the 13–16 ms/frame
 left in the present/composite path; no sound since v38.142; 12 version-table rows in the README whose
 pipes break the table; `MAX_TASKS`/`MAX_NODES` caps documented in code; and the cross-core condvar race
-behind F0, whose `MCTOV_SMP=1` pin is written down in the v38.92 row. F0 is therefore not a hidden bug —
-what is missing is only for a reader of the README's *testing* section to be told the same thing.
+behind F0 — **closed 2026-10-05 (v38.160)**: both of its defects are fixed, the CI `MCTOV_SMP=1` pin
+is gone, and the README §Testing table plus the CI step's own comment say what the step now proves
+(4-core condvar/mutex/condvar stress with a stall-signature assertion). The pin's history stays in the
+v38.92 row because that is where a reader looking for "why was this pinned?" will land.
 
 ---
 
 ## 8. Recommendations, ranked by risk ÷ effort
 
-0. **F0** — state the `MCTOV_SMP=1` pin next to the cond suite in README's testing table and in
-   `check.py`, so a red local `cond` reads as "known 4-core race" instead of "flaky suite"; then
-   root-cause the cross-core condvar handshake and unpin.
+0. **F0 — done (2026-10-05, v38.160).** Both defects are fixed: the app's double unlock, and the
+   scheduler slot-reuse corruption that replaced a reclaimed slot's fresh frame with its dead
+   predecessor's exit park loop (see the F0 section for the post-mortem evidence and the fix list).
+   Verified with 90/90 stress rounds on 4 cores against 5 stalls in ~100 pre-fix rounds, and the CI
+   step is unpinned (`MCTOV_SMP=4`). The one loose end lives in F11.
 1. **F1 — done (2026-10-05).** Write errors now propagate out of the ATA driver, `ext2_write_block()` /
    `fat32_write_sectors()` and the VFS data path, with `scripts/wfail_test.py` as a deterministic
    refusal gate; see the F1 section for the evidence table.
@@ -352,6 +446,10 @@ what is missing is only for a reader of the README's *testing* section to be tol
 6. **F4** — one-line fix to the `memory.md` intro.
 7. **F10** — silence the two rustc warnings (jobserver + `mmx`) and reword the release-note claim to
    "0 compiler warnings", which is what the build actually guarantees.
+7b. **F11** — decide whether the zombie reaper is live or dormant: call `task_reap_zombies()` from the
+   BSP main loop (its documented contract) or document it as dormant and drop the `zombie_reap_ms`
+   knob's promise. The second half of F11 (the `FREE` slot with a stale `zombie_since` in the F0 dump)
+   is an open reading question, not a known defect.
 8. Then the known-open work: present/composite path, backface defect, README table rows.
 
 ---

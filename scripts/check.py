@@ -180,6 +180,12 @@ SUITES = [
     ("tlb_sd",           "tlb_sd_test.py",            240),
     ("perm",             "perm_test.py",              360),
     ("thread",           "thread_test.py",            360),
+    # cond (v38.160): runs on the default 4 vCPUs here and in CI (the MCTOV_SMP=1
+    # pin is gone now that audit F0 is closed). The harness' --repeat runs N demo
+    # rounds per boot for stress, any failed round fails, and a "[WATCH]
+    # parked-frame" line (a task resumed into dead code) fails the suite outright.
+    # Deep verification is local: cond_test.py --repeat 60 (90 rounds green on
+    # this tree vs. 5 stalls in ~100 pre-fix rounds — see the v38.160 README row).
     ("cond",             "cond_test.py",              480),
     ("rlimit",           "rlimit_test.py",            360),
     ("ulimit",           "ulimit_test.py",            360),

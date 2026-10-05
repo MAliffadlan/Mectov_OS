@@ -217,20 +217,36 @@ jobs:
         run: |
           python3 scripts/pollselect_test.py --timeout 240
 
-      - name: Futex mutex + condvar regression (TCG, 1 core)
+      - name: Futex mutex + condvar regression (TCG, 4 cores, unpinned)
         run: |
           # Ring 3 conddemo app: 4 threads bump a shared counter to exactly
           # 20,000 under a futex mutex, then 2 producers + 2 consumers move
           # 3,000 items through a bounded buffer over a condvar. Asserts ALL
           # PASS + every item consumed exactly once + zero [PANIC].
-          # v38.92: pinned to 1 core. A PRE-EXISTING cross-core race in the
-          # Ring 3 condvar hot path (observed on the v38.91 baseline too:
-          # consumed count off by one, item lost/duped, ~1 run in 4-6 on
-          # 2+ cores; SMP1 100% green across stress) is being root-caused
-          # separately; pinning keeps this suite meaningful without masking
-          # it as a random CI flake. The kernel futex/cond semantics (timed
-          # wait, per-waiter deadline, requeue op) are still fully exercised.
-          MCTOV_SMP=1 python3 scripts/cond_test.py --timeout 480
+          # v38.92's "pre-existing cross-core race" turned out to be TWO bugs,
+          # both fixed in v38.160:
+          #  (1) apps/conddemo.c carried a stray SECOND mct_mutex_unlock(&c_mu)
+          #      in the consumer loop (same commit): on 2+ cores the first
+          #      unlock's lock=0 store + wake lets a peer enter the critical
+          #      section and the stray second store releases it again — items
+          #      lost/duped, the recorded assertion failures. Harmless on 1 core
+          #      (the owner reacquires before a peer runs). One unlock now.
+          #  (2) a scheduler slot-reuse corruption: an exiting task stays
+          #      current on its core until that core's next tick (<=10 ms), so
+          #      a slot reclaimed inside that window had the NEW thread's
+          #      freshly built frame overwritten by the dead task's exit park
+          #      loop — the new thread never ran and its parent parked in
+          #      waitpid forever (the intermittent stall, round 2+ of a boot).
+          #      schedule() now never writes to a dead current task, slot
+          #      claiming skips a slot a core still claims, and a 1 Hz
+          #      integrity sweep reports the signature.
+          # SMP is deliberately UNPINNED: 1 core cannot exercise either bug.
+          # Before unpinning: --repeat 60 on 4 vCPUs (TCG) = 60/60 rounds
+          # (the same shape that stalled at round 36 pre-fix), --repeat 30
+          # green. Deeper multi-round stress stays a local command:
+          #   python3 scripts/cond_test.py --repeat 60
+          # (v38.160 README row, docs/audit/architecture-review-2026-10-04.md F0).
+          MCTOV_SMP=4 python3 scripts/cond_test.py --timeout 900
 
       - name: Resource limits (RLIMIT_NPROC/AS/NOFILE) regression (TCG)
         run: |

@@ -138,7 +138,18 @@ static void consumer(void* arg) {
         // didn't catch. Requeue stays kernel-tested only until a dedicated
         // stress suite proves it — wake-all + timed park remains hot path.
         if (consumed == TOTAL_ITEMS) mct_cond_broadcast(&not_empty);
-        mct_mutex_unlock(&c_mu);
+        // v38.160: EXACTLY ONE unlock per critical section. This loop carried
+        // a second mct_mutex_unlock(&c_mu) since v38.92 (added by that commit
+        // together with the SMP=1 pin): the first unlock's lock=0 store + wake
+        // lets a peer acquire the mutex, and the stray second store then
+        // releases it AGAIN while that peer is inside — two threads in the
+        // critical section, items lost/duped, ~1 run in 4-6 on 2+ cores,
+        // structurally invisible on 1 core (the unlocker reacquires before a
+        // peer runs). The mutex has no owner tracking, so a second store to
+        // lock=0 is indistinguishable from a release; the fix is one unlock.
+        // Consequence for the note above: stress recorded with this stray
+        // unlock in the tree cannot stand as evidence of a kernel race —
+        // remeasure on this tree before reopening that question.
         mct_mutex_unlock(&c_mu);
     }
 }

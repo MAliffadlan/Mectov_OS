@@ -316,8 +316,17 @@ int sem_destroy(int id) {
         return -1;
     }
     // Wake everyone parked (they will see the semaphore destroyed).
+    // v38.160: only LIVE, non-idle waiters. This was the last unguarded READY
+    // write in sync.c — the list can outlive a waiter that was killed while
+    // parked (wake_one drops those, this path did not), and task_set_state no
+    // longer resurrects a dead tid, so the check has to happen here.
     for (int i = 0; i < sems[id].waiter_count; i++) {
-        task_set_state(sems[id].waiters[i], TASK_STATE_READY);
+        int w = sems[id].waiters[i];
+        extern int task_is_alive(int);
+        extern int task_is_idle(int);
+        if (w > 0 && task_is_alive(w) && !task_is_idle(w)) {
+            task_set_state(w, TASK_STATE_READY);
+        }
     }
     sems[id].in_use = 0;
     sems[id].waiter_count = 0;

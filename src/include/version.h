@@ -100,6 +100,65 @@
 // ok=False, WFILE create FAILED) and mtools confirms no file on the medium. The
 // no-injection control boot stays green. `make check-wfail` runs both.
 // 150-158 are spoken for (see above); 159 is the next free number.
-#define OS_VERSION "38.159"
+// v38.160: audit finding F0 is closed — v38.92's single "pre-existing
+// cross-core race" was two independent defects.
+//  1. FIXED (app) — the recorded symptoms (items lost/duped, ~1 run in 4-6 on
+//     2+ cores; the `FAIL consumed count` / `FAIL missing/duplicate items` the
+//     audit reproduced on 2026-10-04) were an app-level mutual-exclusion hole:
+//     apps/conddemo.c's consumer loop carried a SECOND mct_mutex_unlock(&c_mu),
+//     added by that same v38.92 commit. The first unlock's lock=0 store + futex
+//     wake lets a peer acquire the mutex; the stray second store then releases
+//     it again while that peer is inside — two threads in the critical section.
+//     On one core the stray store is harmless (its owner reacquires before any
+//     peer runs), which is exactly why SMP1 stress stayed green. One unlock now.
+//  2. FIXED (kernel) — the intermittent 4-core stall (2nd-or-later demo run in
+//     one boot, ~1 in 20 rounds) was scheduler slot-reuse corruption, and the
+//     v38.160 post-mortem pinned all of it rather than inferring it: the stuck
+//     consumer (tasks[8]) was READY and queued in rq[0] while its saved frame
+//     was the kernel EXIT PARK LOOP (EIP=task_exit_with_code+0x71, the
+//     `for(;;) hlt` a task reaches after SYS_EXIT), its parent was parked in
+//     waitpid(8) with waiting=8, zombie_since=0 (that thread never exited
+//     itself) and the futex table was empty. Root cause: a task that exits
+//     stays current on its core until that core's NEXT tick —
+//     task_exit_with_code can only park in a hlt loop, and the switch happens
+//     in schedule(), i.e. <=10 ms at 100 Hz. When the slot is reclaimed inside
+//     that window the stale core's tick wrote its dead frame into the RECYCLED
+//     slot (`tasks[cur].esp = esp`), overwriting the new thread's freshly built
+//     frame; the next pick then resumed the new thread into the dead hlt loop,
+//     so it never ran a single instruction, its parent's waitpid never
+//     completed and the round died with no verdict. conddemo hits that window
+//     by construction: the last mutex worker exits, join() returns microseconds
+//     later and the producer/consumer phase clones straight back into the same
+//     slots. Round 1 of a boot is always safe (no slot has a predecessor yet),
+//     which is why every single-run CI step and every first run stayed green.
+//     Fix (src/sys/task.c): schedule() skips every write to a dead current task
+//     (esp, watermark, state, runqueue, FPU image, tick accounting) and, with
+//     nothing runnable, parks the core on its own idle task instead of iret'ing
+//     a dead frame; rq_enqueue refuses dead tids and the commit path refuses a
+//     dead `next`; task_set_state refuses to revive FREE/ZOMBIE; sem_destroy
+//     filters dead/idle waiters (the last unguarded READY write in sync.c); and
+//     every slot-claiming path (clone/fork/fork_exec/idle) skips a FREE slot
+//     that a core still names as its current task (slot_still_current).
+//     Diagnostics: throttled `[WATCH]` lines (dead-cur, create-skip,
+//     revive-refused, dead-in-rq, parked-frame) plus a 1 Hz integrity sweep on
+//     the BSP; scripts/cond_test.py FAILS the run if a parked-frame line ever
+//     appears (a task resumed into dead code) and reports create-skip as
+//     survived evidence, not a failure.
+//     Verified: `--repeat 60` on 4 vCPUs (TCG) = 60/60 rounds ALL PASS — the
+//     same shape that stalled at round 36 before the fix — with a dead-cur
+//     event in every round and one `create-skip tid=8` (the clobber window
+//     demonstrably fires and is now survived). A second run, `--repeat 30`, is
+//     green too. Regressions on this tree: make check-quick 12/12, boot_test
+//     rc=0.
+// scripts/cond_test.py gained --repeat N (N rounds in one boot; per-round
+// serial offsets so a later round cannot consume an earlier round's markers,
+// per-round terminal re-focus), --smp N, the stall-signature assertion above,
+// a full QEMU-monitor post-mortem on a stall (registers, current_task, rq[0..3],
+// tasks[], both kstacks, the futex table) and a final
+// "[OK] cond_test: smp=4 runs=N/N ALL PASS" gate-shape line. CI's cond step is
+// unpinned (MCTOV_SMP=4) now that both bugs are fixed; the deep multi-round
+// stress stays a local command, documented in README.
+// 159 is spoken for; 160 is the next free number.
+#define OS_VERSION "38.160"
 
 #endif

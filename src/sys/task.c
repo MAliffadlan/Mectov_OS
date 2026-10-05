@@ -289,10 +289,58 @@ uint32_t task_cpu_load(int cid) {
 
 int task_cpu_count(void) { return rq_cpu_count(); }
 
+// v38.160 diagnostic: one compact line per scheduler state-machine anomaly,
+// throttled PER KIND to at most one per ~2 s so a self-sustaining bad cycle
+// cannot drown the serial log while distinct anomalies still all show up
+// (a shared throttle would hide a create-skip behind a dead-cur in the same
+// tick). `arg` carries the caller's extra context (frame esp, stale runqueue,
+// attempted state, ...). Resolve the tags against the release that printed
+// them; a stall after a "dead-cur"/"create-skip" line is the v38.160
+// slot-reuse signature.
+#define WATCH_KINDS 8
+static void watch_log(int kind, const char* tag, int tid, int state, uint32_t arg) {
+    static uint32_t last_ms[WATCH_KINDS] = {0};
+    if (kind < 0 || kind >= WATCH_KINDS) kind = WATCH_KINDS - 1;
+    uint32_t now = get_ticks();
+    if ((uint32_t)(now - last_ms[kind]) < 2000) return;
+    last_ms[kind] = now;
+    write_serial_string("[WATCH] ");
+    write_serial_string(tag);
+    write_serial_string(" tid=");
+    write_serial_hex((uint32_t)tid);
+    write_serial_string(" state=");
+    write_serial_hex((uint32_t)state);
+    write_serial_string(" arg=");
+    write_serial_hex(arg);
+    write_serial_string("\n");
+}
+
+// v38.160: is FREE slot `tid` still named as some core's current task? That is
+// exactly the state a task leaves behind when it exits: task_exit_with_code
+// parks in a kernel hlt loop and only the NEXT tick on that core (<=10 ms at
+// 100 Hz) switches it away. A slot like that must not be handed to a new task
+// yet — that core's next tick writes its (dead) park frame into the recycled
+// slot, overwriting the new task's freshly built frame (see schedule()).
+static int slot_still_current(int tid) {
+    for (int c = 0; c < MAX_CPUS; c++) {
+        if (current_task[c] == tid) return 1;
+    }
+    return 0;
+}
+
 // Queue tid on cpu's runqueue (no-op if already queued).
 static void rq_enqueue(int cpu, int tid) {
     if (tid < 0 || tid >= MAX_TASKS || cpu < 0 || cpu >= MAX_CPUS) return;
     if (tasks[tid].rq_cpu >= 0) return;
+    // v38.160: a dead task (ZOMBIE/FREE) must never become runnable again.
+    // Its saved frame is an exit park loop, so picking it would resume dead
+    // code — and after a slot recycle, the WRONG task's frame. Every
+    // legitimate enqueue happens while the task is READY (create, fork, wake,
+    // schedule's keep-current path).
+    if (tasks[tid].state == TASK_STATE_ZOMBIE || tasks[tid].state == TASK_STATE_FREE) {
+        watch_log(0, "enqueue-dead", tid, tasks[tid].state, (uint32_t)tasks[tid].esp);
+        return;
+    }
     // Idle tasks are pinned to the core matching their tid and NEVER leave it.
     // If one ends up enqueued elsewhere, a wake/state-corruption bug ran a
     // worker's frame under an idle task's identity (current_task[cid] says
@@ -324,6 +372,41 @@ static void rq_remove(int tid) {
 // QEMU). rq_least_loaded MUST only consider real cores: scanning the whole
 // 16-slot table would pick a phantom CPU (4..15) whose queue never ticks and
 // park every new task on a core that does not exist.
+// v38.160: is the frame saved at `sp` a task's kernel park loop (the exit /
+// dead-park hlt loops)? A READY/RUNNING task found in one of those loops is a
+// corpse that stayed pickable — the exact signature of the condvar stall.
+static int frame_is_park(uint32_t tid, uint32_t sp, uint32_t* out_eip) {
+    if (sp < kstack_guard(tid) || sp + 0x38 > kstack_top(tid)) return 0;
+    uint32_t eip = *(volatile uint32_t*)(sp + 0x34);   // registers_t.eip
+    uint32_t exit_lp = (uint32_t)(uintptr_t)&task_exit_with_code;
+    uint32_t dead_lp = (uint32_t)(uintptr_t)&task_dead_park;
+    if (eip >= exit_lp && eip < exit_lp + 0x100) { *out_eip = eip; return 1; }
+    if (eip >= dead_lp && eip < dead_lp + 0x10)  { *out_eip = eip; return 1; }
+    return 0;
+}
+
+// v38.160: 1 Hz invariant sweep (BSP only, under task_lock). Reports the two
+// shapes that wedge an app on this tree:
+//   * a dead tid (ZOMBIE/FREE) still sitting in a runqueue — a wake/enqueue
+//     path reached a task after it died. The stale entry is dropped so it can
+//     never be picked (rq_pick skips non-READY, but the entry would keep
+//     rq_least_loaded() busy and hide the bug);
+//   * a READY/RUNNING task whose saved frame is an exit park loop — a slot
+//     reused before its dead predecessor's core had ticked (see schedule()).
+static void sched_integrity_sweep(void) {
+    for (int i = 1; i < MAX_TASKS; i++) {
+        int st = tasks[i].state;
+        if ((st == TASK_STATE_ZOMBIE || st == TASK_STATE_FREE) && tasks[i].rq_cpu >= 0) {
+            watch_log(5, "dead-in-rq", i, st, (uint32_t)tasks[i].rq_cpu);
+            rq_remove(i);
+        } else if (st == TASK_STATE_READY || st == TASK_STATE_RUNNING) {
+            uint32_t eip = 0;
+            if (frame_is_park((uint32_t)i, tasks[i].esp, &eip))
+                watch_log(6, "parked-frame", i, st, eip);
+        }
+    }
+}
+
 static int rq_cpu_count(void) {
     extern uint32_t smp_cpu_count;
     int n = (int)smp_cpu_count;
@@ -519,7 +602,9 @@ static int create_idle_task(int cpu) {
     spin_lock(&task_lock);
     int tid = -1;
     for (int i = 1; i < MAX_TASKS; i++) {
-        if (tasks[i].state == TASK_STATE_FREE) { tid = i; break; }
+        if (tasks[i].state != TASK_STATE_FREE) continue;
+        if (slot_still_current(i)) continue;   // v38.160: core has not let go yet
+        tid = i; break;
     }
     if (tid < 0) {
         spin_unlock(&task_lock);
@@ -925,6 +1010,14 @@ uint32_t schedule(uint32_t esp) {
                 }
             }
         }
+        // v38.160: 1 Hz integrity net (see sched_integrity_sweep): the stall
+        // this release fixes left no trace on its own, only a wedged round.
+        static uint32_t last_sweep_ms = 0;
+        uint32_t now_ms = get_ticks();
+        if ((uint32_t)(now_ms - last_sweep_ms) >= 1000) {
+            last_sweep_ms = now_ms;
+            sched_integrity_sweep();
+        }
     }
 
     // Fast path: single-task system (kernel only), nothing to pick.
@@ -954,7 +1047,20 @@ uint32_t schedule(uint32_t esp) {
         panic_finish();
     }
 
-    if (cur >= 0) {
+    // v38.160: a current task that has EXITED (ZOMBIE) or been freed can never
+    // be resumed, and its slot may already have been recycled by a create
+    // (thread_create_ex claims the first FREE slot). Writing this tick's frame
+    // into such a slot would overwrite the NEW task's freshly built frame with
+    // the dead task's park loop, and the next pick resumes the new task into
+    // dead code: it never runs a single instruction, its parent parks in
+    // waitpid() forever, and the round stalls — the v38.160 condvar stall.
+    // Skip every write to a dead cur; the frame is worthless either way.
+    int cur_dead = (cur > 0 && cur < MAX_TASKS &&
+                    (tasks[cur].state == TASK_STATE_ZOMBIE ||
+                     tasks[cur].state == TASK_STATE_FREE));
+    if (cur_dead) watch_log(1, "dead-cur", cur, tasks[cur].state, esp);
+
+    if (cur >= 0 && !cur_dead) {
         tasks[cur].esp = esp;
         if (esp >= kstack_guard(cur) + KERNEL_STACK_GUARD && esp <= kstack_top(cur)) {
             uint32_t used = kstack_top(cur) - esp;
@@ -978,10 +1084,23 @@ uint32_t schedule(uint32_t esp) {
     int next = rq_pick(cid);
     if (next < 0) next = rq_steal(cid);
     if (next < 0) {
-        if (cur >= 0 &&
+        if (cur >= 0 && !cur_dead &&
             (tasks[cur].state == TASK_STATE_READY ||
              tasks[cur].state == TASK_STATE_RUNNING)) {
             next = cur;
+        } else if (cur_dead) {
+            // v38.160: never iret a dead task's frame back in. Park this core
+            // on its own idle task (task 0 on the BSP, the pinned AP idle
+            // elsewhere) so current_task[] stops naming a slot whose
+            // successor may already be live. Idle tasks only ever run on
+            // their own core, so this cannot hand one to a foreign CPU.
+            int idle = (cid == 0) ? 0 : ((cid < MAX_TASKS) ? cid : 0);
+            if (idle != cur) {
+                next = idle;
+            } else {
+                spin_unlock(&task_lock);
+                return esp;
+            }
         } else {
             // Nothing runnable to switch to: we iret right back into the
             // CURRENT frame. If cur is a task that blocked itself mid-syscall
@@ -1003,7 +1122,7 @@ uint32_t schedule(uint32_t esp) {
     //     the per-CPU load sample: a tick counts as busy only when the picked
     //     task is real work — never task 0 (kernel main loop / BSP idle) or a
     //     pinned per-CPU idle task.
-    if (cur > 0 && !tasks[cur].is_idle) tasks[cur].cpu_ticks++;
+    if (cur > 0 && !cur_dead && !tasks[cur].is_idle) tasks[cur].cpu_ticks++;
     if (cid < MAX_CPUS) {
         if (next != 0 && !tasks[next].is_idle) cpu_win_busy[cid]++;
         if (++cpu_win_ticks[cid] >= (uint32_t)cpu_load_window) {
@@ -1017,6 +1136,17 @@ uint32_t schedule(uint32_t esp) {
     //    foreign core (the rq_pick/steal guards above make it impossible, but
     //    a corrupted runqueue could still hand one back — refuse to commit).
     if (next > 0 && next < MAX_TASKS && tasks[next].is_idle && cid != next) {
+        spin_unlock(&task_lock);
+        return esp;
+    }
+    // v38.160: never commit a dead tid. rq_pick/rq_steal only return READY
+    // tasks and everything here runs under task_lock, so a dead tid at this
+    // point means a stale runqueue entry for a slot that has since died or
+    // been recycled — iret'ing it would run a park loop (or the wrong task's
+    // frame). Refuse the switch instead of compounding the corruption.
+    if (next > 0 && next < MAX_TASKS &&
+        (tasks[next].state == TASK_STATE_ZOMBIE || tasks[next].state == TASK_STATE_FREE)) {
+        watch_log(2, "commit-dead", next, tasks[next].state, (uint32_t)tasks[next].esp);
         spin_unlock(&task_lock);
         return esp;
     }
@@ -1050,9 +1180,15 @@ uint32_t schedule(uint32_t esp) {
                 next = rq_pick(cid);
                 if (next < 0) next = rq_steal(cid);
                 if (next < 0) {
-                    current_task[cid] = -1;
-                    spin_unlock(&task_lock);
-                    return esp;
+                    // v38.160: never leave current_task[] empty —
+                    // irq_esp_sanity_check panics on cur < 0, and a dead
+                    // identity colliding with slot reuse is the stall this
+                    // release fixes. Park the core on its own idle task.
+                    next = (cid == 0) ? 0 : ((cid < MAX_TASKS) ? cid : 0);
+                    if (next == cur) {
+                        spin_unlock(&task_lock);
+                        return esp;
+                    }
                 }
                 tasks[next].state = TASK_STATE_RUNNING;
                 current_task[cid] = next;
@@ -1075,7 +1211,7 @@ uint32_t schedule(uint32_t esp) {
     // the swap is skipped. fxsave does not disturb the hardware state, so
     // the early-return paths above never need a matching restore.
     if (next != cur) {
-        if (cur >= 0 && cur < MAX_TASKS) fpu_save(tasks[cur].fxsave);
+        if (cur >= 0 && cur < MAX_TASKS && !cur_dead) fpu_save(tasks[cur].fxsave);
         fpu_restore(tasks[next].fxsave);
     }
 
@@ -1228,6 +1364,17 @@ int thread_create_ex(void (*entry)(), int priority, uint32_t page_dir,
 
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == TASK_STATE_FREE) {
+            // v38.160: skip a FREE slot whose previous owner is still named
+            // as some core's current task: that core has not ticked yet, and
+            // its next tick would overwrite the fresh frame built below with
+            // the dead park loop (slot_still_current). The slot becomes
+            // claimable again within one tick (<=10 ms); the caller gets the
+            // next free slot instead, which is invisible to it (it uses the
+            // returned tid).
+            if (slot_still_current(i)) {
+                watch_log(3, "create-skip", i, TASK_STATE_FREE, (uint32_t)i);
+                continue;
+            }
             
             uint32_t user_esp;
             if (child_stack != 0) {
@@ -1418,7 +1565,14 @@ void task_set_state(int tid, int state) {
     __asm__ __volatile__("pushfl; popl %0; cli" : "=r"(eflags) : : "memory");
     spin_lock(&task_lock);
     int old = tasks[tid].state;
-    if (old != state) {
+    // v38.160: never resurrect the dead. A stale wake (waiter-list entry for a
+    // recycled tid, a signal aimed at a zombie) must not flip FREE/ZOMBIE back
+    // to runnable: the slot's saved frame is an exit park loop, and the tid may
+    // already belong to a NEW task (see schedule()'s cur_dead guard).
+    if ((old == TASK_STATE_FREE || old == TASK_STATE_ZOMBIE) &&
+        (state == TASK_STATE_READY || state == TASK_STATE_RUNNING)) {
+        watch_log(4, "revive-refused", tid, old, (uint32_t)state);
+    } else if (old != state) {
         tasks[tid].state = state;
         if (state == TASK_STATE_READY) {
             tasks[tid].sleep_ticks = 0;
@@ -1800,6 +1954,10 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
 
     for (int i = 1; i < MAX_TASKS; i++) {
         if (tasks[i].state != TASK_STATE_FREE) continue;
+        if (slot_still_current(i)) {   // v38.160: stale slot, claimable in one tick
+            watch_log(3, "create-skip", i, TASK_STATE_FREE, (uint32_t)i);
+            continue;
+        }
 
         // Byte-copy the parent's kernel stack, then patch the child's saved
         // syscall frame. The parent is inside the fork syscall with IF=0
@@ -2192,6 +2350,10 @@ int task_fork_exec(int in_fd, int out_fd, const char* path, const char* arg) {
     int child = -1;
     for (int i = 1; i < MAX_TASKS; i++) {
         if (tasks[i].state != TASK_STATE_FREE) continue;
+        if (slot_still_current(i)) {   // v38.160: stale slot, claimable in one tick
+            watch_log(3, "create-skip", i, TASK_STATE_FREE, (uint32_t)i);
+            continue;
+        }
         child = i;
         break;
     }
