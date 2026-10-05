@@ -66,6 +66,28 @@ static void tls_logmsg(tls_conn_t* c, const char* m) {
     if (c->log) c->log(c->io, m);
 }
 
+// Log a short tag plus a number. The log callback existed from the start and
+// was never called from anywhere, which is why a handshake that broke on real
+// server input could only be diagnosed by reading the wire with a packet
+// capture. Recording the handshake message type as it is processed makes the
+// failure point visible from the serial log instead.
+static void tls_lognum(tls_conn_t* c, const char* tag, int v) {
+    if (!c->log) return;
+    char b[48];
+    int n = 0;
+    while (tag[n] && n < 30) { b[n] = tag[n]; n++; }
+    // The values logged here include error codes, which are negative, so the
+    // sign has to be printed or -2 comes out as "." (the byte after '0').
+    uint32_t u;
+    if (v < 0) { b[n++] = '-'; u = (uint32_t)(-v); }
+    else u = (uint32_t)v;
+    if (u >= 100) b[n++] = (char)('0' + (u / 100) % 10);
+    if (u >= 10)  b[n++] = (char)('0' + (u / 10) % 10);
+    b[n++] = (char)('0' + (u % 10));
+    b[n] = 0;
+    tls_logmsg(c, b);
+}
+
 static uint16_t rd16(const uint8_t* p) { return (uint16_t)((p[0] << 8) | p[1]); }
 
 int tls_random(void* buf, uint32_t len) {
@@ -104,6 +126,31 @@ static void derive(uint8_t* out, uint32_t outlen, const uint8_t* secret,
     uint32_t infolen = (uint32_t)outlen;
     hkdf_label(label, ctx, ctxlen, info, &infolen);
     tls_hkdf_expand(secret, info, infolen, out, outlen);
+}
+
+// Derive-Secret with an EMPTY transcript, which is a value of its own and not
+// the same thing as no context at all.
+//
+// The key schedule writes this step as Derive-Secret(Secret, "derived", ""),
+// and the third argument is a transcript -- an empty one -- so the context is
+// Transcript-Hash(""), i.e. SHA-256 of the empty string. Passing a zero-length
+// context instead (the obvious reading of "no messages") is what RFC 8448
+// catches: it pins the result at
+// 6f2615a108c702c5678f54fc9dbab69716c076189c48250cebeac3576c3611ba for the
+// early secret, and the zero-length-context form gives a different value.
+//
+// That one difference poisons the handshake secret, so BOTH handshake traffic
+// secrets come out wrong. Every record up to the ServerHello is read in the
+// clear, so nothing looks broken: the version, the key share and the transcript
+// all check out, the suite is accepted, and then the peer's first encrypted
+// record fails to authenticate with nothing on the wire to say why. The
+// self-test could not see it either -- it drives the primitives with RFC
+// vectors directly and never runs the key schedule through a live handshake.
+static void derive_empty(uint8_t* out, uint32_t outlen, const uint8_t* secret,
+                         const char* label) {
+    uint8_t empty[32];
+    tls_sha256("", 0, empty);
+    derive(out, outlen, secret, label, empty, 32);
 }
 
 // ------------------------------------------------------------------ key schedule
@@ -156,21 +203,28 @@ static int emit_record(tls_conn_t* c, int type, const uint8_t* data, uint32_t le
     if (reclen > TLS_MAX_RECORD) return TLS_ERR_OVERFLOW;
     if (c->out_len - c->out_off + reclen + 5 > TLS_MAX_PLAIN) return TLS_ERR_OVERFLOW;
     uint8_t* o = c->out + c->out_off;
-    tls_memcpy(o, inner, len + 1);
+    // The header goes out first because it is not decoration: RFC 8446 5.2 makes
+    // the AEAD's additional data the record header itself (type, version and
+    // length). Passing a NULL/zero-length AAD instead still produces a
+    // well-formed record -- the tag simply covers less than the peer's does --
+    // so the failure only shows up as an unauthenticated record on the way IN,
+    // which is why it took a live handshake to find.
+    o[0] = REC_APPLICATION;           // outer type is always application_data
+    o[1] = 0x03;
+    o[2] = 0x03;
+    tls_store16(o + 3, reclen);
+    uint8_t aad[5];
+    tls_memcpy(aad, o, 5);
     int rc;
     if (is_chacha) {
-        rc = tls_chacha20_poly1305_seal(c->wr_key, nonce, NULL, 0, inner, len + 1,
-                                        o, tag);
+        rc = tls_chacha20_poly1305_seal(c->wr_key, nonce, aad, 5, inner, len + 1,
+                                        o + 5, tag);
     } else {
-        rc = tls_aes128_gcm_seal(c->wr_key, nonce, NULL, 0, inner, len + 1, o, tag);
+        rc = tls_aes128_gcm_seal(c->wr_key, nonce, aad, 5, inner, len + 1,
+                                 o + 5, tag);
     }
     if (rc != 0) return TLS_ERR_PROTOCOL;
-    tls_memcpy(o + len + 1, tag, 16);
-    uint32_t n = 0;
-    o[n++] = REC_APPLICATION;         // outer type is always application_data
-    o[n++] = 0x03;
-    o[n++] = 0x03;
-    tls_store16(o + n, reclen); n += 2;
+    tls_memcpy(o + 5 + len + 1, tag, 16);
     c->out_len = c->out_off + 5 + reclen;
     c->wr_seq++;
     return TLS_OK;
@@ -218,9 +272,16 @@ static int read_record(tls_conn_t* c) {
 static int open_record(tls_conn_t* c, int* type, uint8_t** plain, uint32_t* plen) {
     if (!c->enc_rd) {
         if (c->rec_want < 1) { c->err = TLS_ERR_PROTOCOL; return TLS_ERR_PROTOCOL; }
-        *type = c->rec[0];
-        *plain = c->rec + 1;
-        *plen = c->rec_want - 1;
+        // read_record() splits the record: c->hdr[0] is the content type and
+        // c->rec holds ONLY the fragment. Reading the type out of c->rec[0]
+        // returned whatever handshake message came first instead -- a
+        // ServerHello announced itself as "record type 2" -- and no plaintext
+        // record could ever be processed. The encrypted path is unaffected
+        // because there the outer type is always application_data and the real
+        // type is the last byte of the inner plaintext.
+        *type  = c->hdr[0];
+        *plain = c->rec;
+        *plen  = c->rec_want;
         return TLS_OK;
     }
     if (c->rec_want < 17) { c->err = TLS_ERR_PROTOCOL; return TLS_ERR_PROTOCOL; }
@@ -228,22 +289,42 @@ static int open_record(tls_conn_t* c, int* type, uint8_t** plain, uint32_t* plen
     uint8_t nonce[12];
     nonce_for(nonce, c->rd_iv, c->rd_seq);
     int rc;
+    // Decrypt IN PLACE. The output must not be offset from the input: writing
+    // the plaintext one byte ahead of the ciphertext makes every write land on
+    // the next input byte before it is read, so the result is corrupt from the
+    // second byte on. It does not look like a decryption failure either --
+    // these AEADs verify the tag over the ciphertext FIRST, so the tag passes
+    // and the damage only shows up later as an unparsable handshake message.
+    // Both ciphers read a byte before writing it, so in-place is safe here.
+    // The additional data is the record header, which read_record() left intact
+    // in c->hdr. Both ciphers read a byte before writing it, so in-place is
+    // safe here; the plaintext goes back over the ciphertext at the same
+    // offset, not one byte ahead of it.
     if (c->suite == TLS_CHACHA20_POLY1305_SHA256) {
-        rc = tls_chacha20_poly1305_open(c->rd_key, nonce, NULL, 0, c->rec, ctlen,
-                                        c->rec + ctlen, c->rec + 1);
+        rc = tls_chacha20_poly1305_open(c->rd_key, nonce, c->hdr, 5, c->rec, ctlen,
+                                        c->rec + ctlen, c->rec);
     } else {
-        rc = tls_aes128_gcm_open(c->rd_key, nonce, NULL, 0, c->rec, ctlen,
-                                 c->rec + ctlen, c->rec + 1);
+        rc = tls_aes128_gcm_open(c->rd_key, nonce, c->hdr, 5, c->rec, ctlen,
+                                 c->rec + ctlen, c->rec);
     }
-    if (rc != 0) { c->err = TLS_ERR_PROTOCOL; return TLS_ERR_PROTOCOL; }
+    if (rc != 0) {
+        tls_lognum(c, "record decrypt failed, ctlen ", (int)ctlen);
+        c->err = TLS_ERR_PROTOCOL;
+        return TLS_ERR_PROTOCOL;
+    }
     c->rd_seq++;
-    // strip zero padding, the content type is the last non-zero byte
+    // The inner plaintext is content || content type || zero padding, so the
+    // content type is the LAST non-zero byte; everything before it is content.
     uint32_t i = ctlen;
-    while (i > 0 && c->rec[i] == 0) i--;
-    if (i == 0) { c->err = TLS_ERR_PROTOCOL; return TLS_ERR_PROTOCOL; }
-    *type = c->rec[i];
-    *plen = i - 1;
-    *plain = c->rec + 1;
+    while (i > 0 && c->rec[i - 1] == 0) i--;
+    if (i == 0) {
+        tls_logmsg(c, "record has no content type");
+        c->err = TLS_ERR_PROTOCOL;
+        return TLS_ERR_PROTOCOL;
+    }
+    *type  = c->rec[i - 1];
+    *plen  = i - 1;
+    *plain = c->rec;
     return TLS_OK;
 }
 
@@ -313,14 +394,21 @@ static uint32_t str_len(const char* s) {
     return n;
 }
 
-// Write a uint16-prefixed extension header and remember where its body starts.
-// Returns the offset of the length field so the caller can backfill.
+// Write a uint16-prefixed extension header and return the offset of the BODY --
+// the two bytes of type and two of length are the four bytes before it.
+//
+// Returning the length-field offset instead cost this file its only
+// client-visible bug: five callers did `ext_begin(...); n += 2;`, which left n
+// pointing AT the length field, so each extension body overwrote its own
+// header and every client hello was two bytes short per extension. Nothing
+// offline could see it -- the handshake only ever ran against the stub in the
+// self-test -- and the first real server answered BAD_EXTENSION.
 static uint32_t ext_begin(uint8_t* b, uint32_t n, uint16_t type) {
     b[n] = (uint8_t)(type >> 8);
     b[n + 1] = (uint8_t)type;
     b[n + 2] = 0;              // patched by ext_end
     b[n + 3] = 0;
-    return n + 2;
+    return n + 4;
 }
 
 static void ext_end(uint8_t* b, uint32_t len_at, uint32_t body_start, uint32_t end) {
@@ -354,53 +442,54 @@ static uint32_t build_client_hello(tls_conn_t* c, uint8_t* b) {
 
     // server_name
     {
-        uint32_t len_at = ext_begin(b, n, EXT_SERVER_NAME); n += 2;
-        uint32_t body = n;
+        uint32_t body = ext_begin(b, n, EXT_SERVER_NAME); n = body;
         tls_store16(b + n, (uint32_t)str_len(c->host) + 3); n += 2;
         b[n++] = 0;                                  // host_name
         uint32_t hl = str_len(c->host);
         tls_store16(b + n, hl); n += 2;
         tls_memcpy(b + n, c->host, hl); n += hl;
-        ext_end(b, len_at, body, n);
+        ext_end(b, body - 2, body, n);
     }
     // supported_groups
     {
-        uint32_t len_at = ext_begin(b, n, EXT_SUPPORTED_GROUPS); n += 2;
-        uint32_t body = n;
+        uint32_t body = ext_begin(b, n, EXT_SUPPORTED_GROUPS); n = body;
         tls_store16(b + n, 2); n += 2;
         b[n++] = 0; b[n++] = GROUP_X25519;
-        ext_end(b, len_at, body, n);
+        ext_end(b, body - 2, body, n);
     }
     // signature_algorithms
     {
-        uint32_t len_at = ext_begin(b, n, EXT_SIG_ALGS); n += 2;
-        uint32_t body = n;
+        uint32_t body = ext_begin(b, n, EXT_SIG_ALGS); n = body;
         uint32_t cnt = (uint32_t)(sizeof(SIG_ALGS) / 2);
         tls_store16(b + n, cnt * 2); n += 2;
         for (uint32_t i = 0; i < cnt; i++) {
             b[n++] = (uint8_t)(SIG_ALGS[i] >> 8);
             b[n++] = (uint8_t)SIG_ALGS[i];
         }
-        ext_end(b, len_at, body, n);
+        ext_end(b, body - 2, body, n);
     }
     // supported_versions: TLS 1.3 and nothing else, so a 1.2-only server
     // fails here rather than being negotiated down to.
+    //
+    // The version list is `versions<2..254>` -- a ONE-byte length, unlike
+    // every other list in this hello. Writing the two-byte form put 0x00 first,
+    // which a server reads as an EMPTY list of versions followed by two stray
+    // bytes, and the first real server answered LENGTH_MISMATCH. The offline
+    // gate never saw it because nothing there parses a client hello.
     {
-        uint32_t len_at = ext_begin(b, n, EXT_SUPPORTED_VERSIONS); n += 2;
-        uint32_t body = n;
-        tls_store16(b + n, 2); n += 2;
-        b[n++] = 0x03; b[n++] = 0x04;
-        ext_end(b, len_at, body, n);
+        uint32_t body = ext_begin(b, n, EXT_SUPPORTED_VERSIONS); n = body;
+        b[n++] = 2;                                  // versions<2..254>
+        b[n++] = 0x03; b[n++] = 0x04;                // TLS 1.3
+        ext_end(b, body - 2, body, n);
     }
     // key_share with our X25519 public key
     {
-        uint32_t len_at = ext_begin(b, n, EXT_KEY_SHARE); n += 2;
-        uint32_t body = n;
+        uint32_t body = ext_begin(b, n, EXT_KEY_SHARE); n = body;
         tls_store16(b + n, 36); n += 2;
         b[n++] = 0; b[n++] = GROUP_X25519;
         tls_store16(b + n, 32); n += 2;
         tls_memcpy(b + n, c->ks_pub, 32); n += 32;
-        ext_end(b, len_at, body, n);
+        ext_end(b, body - 2, body, n);
     }
 
     tls_store16(b + ext_len_at, n - ext_len_at - 2);
@@ -482,13 +571,25 @@ static int derive_handshake_keys(tls_conn_t* c) {
 
     uint8_t derived[32], hs_secret[32];
     tls_hkdf_extract(NULL, 0, zero, 32, early);          // early secret
-    derive(derived, 32, early, "derived", NULL, 0);
+    derive_empty(derived, 32, early, "derived");
     tls_hkdf_extract(derived, 32, shared, 32, hs_secret);
+    // Kept for the next stage: the master secret comes off the Handshake
+    // Secret, and nothing else in the struct holds it.
+    tls_memcpy(c->handshake_secret, hs_secret, 32);
 
     uint8_t th[32];
     transcript_hash(c, th);
     derive(c->client_hs_secret, 32, hs_secret, "c hs traffic", th, 32);
     derive(c->server_hs_secret, 32, hs_secret, "s hs traffic", th, 32);
+#ifdef TLS_DEBUG_SECRETS
+    {   // Development aid: compare against the peer's keylog.
+        extern void tls_debug_hex(tls_conn_t*, const char*, const uint8_t*, uint32_t);
+        tls_debug_hex(c, "shared   ", shared, 32);
+        tls_debug_hex(c, "th       ", th, 32);
+        tls_debug_hex(c, "c hs sec ", c->client_hs_secret, 32);
+        tls_debug_hex(c, "s hs sec ", c->server_hs_secret, 32);
+    }
+#endif
 
     int is_chacha = (c->suite == TLS_CHACHA20_POLY1305_SHA256);
     uint8_t k[32], iv[12];
@@ -516,17 +617,35 @@ static int split_certificates(tls_conn_t* c, const uint8_t* b, uint32_t len) {
     uint32_t total = (uint32_t)tls_load24(b + n); n += 3;
     if (n + total != len) return TLS_ERR_PROTOCOL;
     if (total > TLS_HS_MAX) return TLS_ERR_OVERFLOW;
-    tls_memcpy(c->certs, b + n, total);
+    // The wire list interleaves framing with certificates:
+    //   CertificateEntry = cert<3..2^24-1> || extensions<0..2^16-1>
+    // so the entries are copied out TIGHTLY, one after another, with the
+    // prefixes dropped. That is what tls_verify_chain() walks -- it takes a
+    // concatenation and advances by lens[i] -- so leaving the 3-byte lengths
+    // and 2-byte extension lengths in place made every chain parse as garbage
+    // starting at its first byte.
     c->cert_count = 0;
-    uint32_t o = 0;
+    uint32_t o = 0;                 // read cursor, into the wire list
+    uint32_t w = 0;                 // write cursor, into c->certs
     while (o + 3 <= total) {
         uint32_t cl = tls_load24(b + n + o); o += 3;
         if (o + cl > total) return TLS_ERR_PROTOCOL;
         if (c->cert_count >= TLS_CHAIN_MAX) return TLS_ERR_PROTOCOL;
-        c->cert_off[c->cert_count] = o;
+        if (w + cl > TLS_HS_MAX) return TLS_ERR_OVERFLOW;
+        tls_memcpy(c->certs + w, b + n + o, cl);
+        c->cert_off[c->cert_count] = w;
         c->cert_len[c->cert_count] = cl;
         c->cert_count++;
+        w += cl;
         o += cl;
+        // The per-certificate extensions belong to the list even though they
+        // are never part of a certificate, so their length still has to be
+        // consumed here. Skipping them left o two bytes short per entry and the
+        // final length check failed on every real chain.
+        if (o + 2 > total) return TLS_ERR_PROTOCOL;
+        uint32_t el = rd16(b + n + o); o += 2;
+        if (o + el > total) return TLS_ERR_PROTOCOL;
+        o += el;
     }
     if (o != total) return TLS_ERR_PROTOCOL;
     if (c->cert_count == 0) return TLS_ERR_PROTOCOL;
@@ -624,13 +743,20 @@ static int verify_certificate_verify(tls_conn_t* c, const uint8_t* b, uint32_t l
 
 // ------------------------------------------------------------------ app secrets
 
-static int derive_app_keys(tls_conn_t* c) {
+// `th` is the transcript hash through the SERVER's Finished. It is passed in
+// rather than re-read from the running transcript, because by the time this
+// runs our own Finished has already been appended to it and folded in.
+static int derive_app_keys(tls_conn_t* c, const uint8_t th[32]) {
     uint8_t derived[32], zero[32], master[32];
     tls_memset(zero, 0, 32);
-    derive(derived, 32, c->server_hs_secret, "derived", NULL, 0);
+    // From the HANDSHAKE SECRET, not from a handshake traffic secret. Feeding
+    // the traffic secret here is an easy slip -- both are 32 bytes and the
+    // handshake secret is not otherwise kept around -- and it produces app
+    // keys that agree with nothing. The handshake completes either way, because
+    // the Finished is checked with the handshake keys, so the first sign of
+    // trouble is the peer refusing to decrypt the request that follows.
+    derive_empty(derived, 32, c->handshake_secret, "derived");
     tls_hkdf_extract(derived, 32, zero, 32, master);
-    uint8_t th[32];
-    transcript_hash(c, th);              // through the server's Finished
     derive(c->client_ap_secret, 32, master, "c ap traffic", th, 32);
     derive(c->server_ap_secret, 32, master, "s ap traffic", th, 32);
 
@@ -644,8 +770,35 @@ static int derive_app_keys(tls_conn_t* c) {
     tls_memcpy(c->rd_iv, iv, 12);
     c->wr_seq = 0;
     c->rd_seq = 0;
+#ifdef TLS_DEBUG_SECRETS
+    {   extern void tls_debug_hex(tls_conn_t*, const char*, const uint8_t*, uint32_t);
+        tls_debug_hex(c, "c ap sec ", c->client_ap_secret, 32);
+        tls_debug_hex(c, "s ap sec ", c->server_ap_secret, 32);
+        tls_debug_hex(c, "wr key   ", c->wr_key, is_chacha ? 32u : 16u);
+        tls_debug_hex(c, "wr iv    ", c->wr_iv, 12);
+    }
+#endif
     return TLS_OK;
 }
+
+#ifdef TLS_DEBUG_SECRETS
+// Hex-dump a secret to the log callback. Built only when TLS_DEBUG_SECRETS is
+// defined (see the browser_https_debug Makefile target); it must never be in a
+// shipped image, because it writes key material to the serial console.
+void tls_debug_hex(tls_conn_t* c, const char* tag, const uint8_t* p, uint32_t n) {
+    if (!c->log) return;
+    char line[100];
+    int k = 0;
+    while (tag[k] && k < 12) { line[k] = tag[k]; k++; }
+    static const char D[] = "0123456789abcdef";
+    for (uint32_t i = 0; i < n && k < 96; i++) {
+        line[k++] = D[p[i] >> 4];
+        line[k++] = D[p[i] & 15];
+    }
+    line[k] = 0;
+    tls_logmsg(c, line);
+}
+#endif
 
 // ------------------------------------------------------------------ public API
 
@@ -703,6 +856,7 @@ static int handle_handshake(tls_conn_t* c, const uint8_t* b, uint32_t len) {
     if (4u + blen != len) return TLS_ERR_PROTOCOL;
     const uint8_t* body = b + 4;
     int rc;
+    tls_lognum(c, "hs ", type);
 
     switch (type) {
         case HS_SERVER_HELLO: {
@@ -724,9 +878,19 @@ static int handle_handshake(tls_conn_t* c, const uint8_t* b, uint32_t len) {
         case HS_CERTIFICATE: {
             tls_sha256_update(&c->transcript, b, len);
             rc = split_certificates(c, body, blen);
-            if (rc != TLS_OK) return rc;
+            if (rc != TLS_OK) {
+                // "the chain does not parse" and "the chain is untrusted" are
+                // different verdicts and the browser reports them differently,
+                // so the distinction has to survive to the log.
+                tls_lognum(c, "certificate framing rc ", rc);
+                return rc;
+            }
             rc = verify_chain(c, now_unix());
-            if (rc != TLS_OK) return rc;
+            if (rc != TLS_OK) {
+                tls_lognum(c, "chain verdict rc ", rc);
+                tls_logmsg(c, "certificate chain rejected");
+                return rc;
+            }
             c->state = ST_WAIT_CERT_VERIFY;
             return TLS_OK;
         }
@@ -766,13 +930,26 @@ static int handle_handshake(tls_conn_t* c, const uint8_t* b, uint32_t len) {
 
 static int finish_handshake(tls_conn_t* c) {
     uint8_t th[32], fk[32], verify[32];
-    transcript_hash(c, th);
+    transcript_hash(c, th);              // through the server's Finished
+#ifdef TLS_DEBUG_SECRETS
+    {   extern void tls_debug_hex(tls_conn_t*, const char*, const uint8_t*, uint32_t);
+        tls_debug_hex(c, "th(fin)  ", th, 32);
+    }
+#endif
     derive(fk, 32, c->client_hs_secret, "finished", NULL, 0);
     tls_memcpy(c->finished_key, fk, 32);
     tls_hmac_sha256(fk, 32, th, 32, verify);
     int rc = send_handshake(c, HS_FINISHED, verify, 32);
     if (rc != TLS_OK && rc != TLS_WANT_WRITE) return rc;
-    rc = derive_app_keys(c);
+    // The application secrets are derived from the transcript through the
+    // SERVER's Finished, and send_handshake() just appended OUR Finished to the
+    // running transcript (as it must, for the Finished MAC to be right).
+    // Re-reading the transcript here would fold our own Finished in as well and
+    // yield a key the peer never computes -- which shows up as the server
+    // failing to decrypt the first request we send, long after a handshake that
+    // looked entirely successful. Hence the saved hash, and hence this order:
+    // the Finished goes out under the handshake key, then the keys switch.
+    rc = derive_app_keys(c, th);
     if (rc != TLS_OK) return rc;
     c->done = 1;
     c->state = ST_DONE;
@@ -781,7 +958,20 @@ static int finish_handshake(tls_conn_t* c) {
 
 int tls_step(tls_conn_t* c) {
     if (c->state == ST_FAILED) return c->err;
-    if (c->state == ST_DONE) return TLS_OK;
+    if (c->state == ST_DONE) {
+        // The handshake is over, and from here tls_step() is a record pump.
+        // It has to be one, because tls_read() drives the connection through
+        // this same call: returning TLS_OK here without touching the socket
+        // left every post-handshake byte -- the response, a NewSessionTicket, a
+        // close_notify -- sitting unread in the kernel buffer for the life of
+        // the connection, with tls_read() dutifully reporting "nothing yet"
+        // every time it was asked. That is a silent hang for every HTTPS fetch,
+        // and nothing before it looks wrong.
+        if (c->out_off < c->out_len) {
+            int rc = tls_flush(c);
+            if (rc != TLS_OK) return rc;
+        }
+    }
 
     if (c->state == ST_START) {
         int rc = send_client_hello(c);
@@ -800,6 +990,17 @@ int tls_step(tls_conn_t* c) {
         int rc = read_record(c);
         if (rc == TLS_WANT_READ) return TLS_WANT_READ;
         if (rc != TLS_OK) { c->err = rc; c->state = ST_FAILED; return rc; }
+        // RFC 8446 5: a middlebox may still inject a PLAINTEXT
+        // change_cipher_spec after the ServerHello has switched this side to
+        // encrypted records, and it must be ignored. Checking the header here
+        // -- before the cipher layer -- is the only place that works: by then
+        // open_record() is decrypting everything, and a one-byte record has no
+        // room for a tag, so it would fail as a protocol error. An encrypted
+        // record can never be mistaken for this (its outer type is
+        // application_data and it is at least 17 bytes long).
+        if (c->hdr[0] == REC_CHANGE_CIPHER && c->rec_want == 1 && c->rec[0] == 1) {
+            continue;
+        }
         int type;
         uint8_t* plain;
         uint32_t plen;
@@ -847,6 +1048,7 @@ int tls_step(tls_conn_t* c) {
             c->in_len += take;
             continue;
         }
+        tls_lognum(c, "unexpected record type ", type);
         c->err = TLS_ERR_PROTOCOL;
         c->state = ST_FAILED;
         return c->err;
@@ -875,10 +1077,23 @@ int tls_write(tls_conn_t* c, const void* buf, uint32_t len) {
 int tls_read(tls_conn_t* c, void* buf, uint32_t len) {
     if (c->in_off >= c->in_len) {
         if (c->recv_closed) return TLS_CLOSED;
+        // A single tls_step() can pull a record and still end on WANT_READ,
+        // because it keeps reading until the transport runs dry. Bailing out on
+        // that return value would throw away the plaintext it just buffered, so
+        // the buffer -- not the return code -- decides whether to hand data
+        // back,
         int rc = tls_step(c);
-        if (rc == TLS_WANT_READ) return 0;
-        if (rc < 0 && rc != TLS_WANT_WRITE) return rc;
-        if (c->in_off >= c->in_len) return c->recv_closed ? TLS_CLOSED : 0;
+        // Buffered plaintext wins over the reason the pump stopped. A peer that
+        // answers and closes in one burst -- which is what `Connection: close`
+        // does, and therefore what most HTTP/1.1 servers do -- hands tls_step()
+        // its last record and then EOF in the same call, so returning the error
+        // here would throw away a complete, already-decrypted response. Only
+        // report the error or the close once there is nothing left to hand
+        // back.
+        if (c->in_off >= c->in_len) {
+            if (rc < 0 && rc != TLS_WANT_READ && rc != TLS_WANT_WRITE) return rc;
+            return c->recv_closed ? TLS_CLOSED : 0;
+        }
     }
     uint32_t have = c->in_len - c->in_off;
     uint32_t take = have < len ? have : len;

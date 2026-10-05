@@ -229,6 +229,10 @@ struct tls_conn {
     uint32_t    server_not_after;
 
     // ---- secrets
+    // handshake_secret is the RFC 8446 Handshake Secret itself, kept because the
+    // Master Secret is derived from IT ("derived" off the handshake stage) and
+    // not from either handshake traffic secret.
+    uint8_t     handshake_secret[32];
     uint8_t     client_hs_secret[32], server_hs_secret[32];
     uint8_t     client_ap_secret[32], server_ap_secret[32];
     uint8_t     client_key[32], server_key[32];
@@ -273,7 +277,9 @@ struct tls_conn {
     int         enc_rd, enc_wr;
     uint64_t    hs_rd_seq, hs_wr_seq;
 
-    // ---- the certificate chain exactly as it arrived, plus offsets into it
+    // ---- the presented chain, repacked from the wire list as one tightly
+    // concatenated DER blob (the CertificateEntry framing is stripped), which
+    // is the shape tls_verify_chain() walks. cert_off[] indexes into it.
     uint8_t     certs[TLS_HS_MAX];
     uint32_t    cert_off[TLS_CHAIN_MAX];
     uint32_t    cert_len[TLS_CHAIN_MAX];

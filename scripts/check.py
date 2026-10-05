@@ -52,6 +52,12 @@ SUITES = [
     ("tmpfs",            "tmpfs_test.py",              300),
     ("browser",          "browser_test.py",            300),
     ("browser_web",      "browser_web_test.py",        300),
+    # HTTPS in the Mini Browser (v38.163). The positive handshake path is
+    # covered by tls_host below, so this one is about the WIRING and the
+    # refusal: the server sees a real ClientHello, and the browser must reject
+    # the untrusted chain and render nothing, while the plain-HTTP control pages
+    # still frame both Content-Length and chunked replies correctly.
+    ("browser_https",    "browser_https_test.py",     300),
     ("fork",             "fork_test.py",              240),
     ("procfs",           "procfs_test.py",            240),
     ("jobcontrol",       "jobcontrol_test.py",        240),
@@ -199,6 +205,15 @@ SUITES = [
     # thing", and that cannot be tested against a live server that changes
     # under you.
     ("tls",              "tls_selftest.py",            360),
+    # Host-side integration for the same engine (v38.163). No guest and no ISO:
+    # it compiles the shipped engine for the host and drives a real TLS 1.3
+    # server behind a throwaway trust anchor, then compares every secret the
+    # engine derived against the server's own keylog. It is the only suite that
+    # can see a wrong key schedule -- a broken handshake still LOOKS fine from
+    # the outside right up to the moment the peer refuses to decrypt -- and it
+    # runs in seconds. Needs gcc -m32 and python3-cryptography, exactly as
+    # scripts/tls_selftest_host.sh does.
+    ("tls_host",         "tls_handshake_test.py",      120),
 ]
 
 # Fast, high-signal subset for local iteration (~6-8 min TCG).

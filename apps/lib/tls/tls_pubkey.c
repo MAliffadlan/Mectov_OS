@@ -201,15 +201,28 @@ void tls_bn_modexp(tls_bn_t* out, const tls_bn_t* base, const uint8_t* exp,
 }
 
 // ------------------------------------------------------------------ MGF1
+// RFC 8017 appendix B.2.1: MGF1(seed, len) = Hash(seed || C) for consecutive
+// C, and C is a FOUR-octet big-endian counter -- not the single byte it looks
+// like at a glance, since the first blocks happen to have a leading zero anyway.
+// Feeding one byte instead of four hashes seed||0x00 rather than
+// seed||0x00 0x00 0x00 0x00, so every mask differs and RSA-PSS verification
+// fails on signatures that are perfectly good. Nothing caught this because the
+// self-test drives the hashes and the RSA signature primitives with vectors but
+// has never verified a PSS signature.
 static void mgf1(const uint8_t* seed, uint32_t seedlen, uint8_t* out, uint32_t len) {
     uint32_t done = 0;
-    uint8_t counter = 0;
+    uint32_t counter = 0;
     while (done < len) {
-        uint8_t block[36];
+        uint8_t block[32];
+        uint8_t c[4];
+        c[0] = (uint8_t)(counter >> 24);
+        c[1] = (uint8_t)(counter >> 16);
+        c[2] = (uint8_t)(counter >> 8);
+        c[3] = (uint8_t)counter;
         tls_sha256_t sh;
         tls_sha256_init(&sh);
         tls_sha256_update(&sh, seed, seedlen);
-        tls_sha256_update(&sh, &counter, 1);
+        tls_sha256_update(&sh, c, 4);
         tls_sha256_final(&sh, block);
         uint32_t take = len - done;
         if (take > 32) take = 32;

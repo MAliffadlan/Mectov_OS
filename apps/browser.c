@@ -1,11 +1,23 @@
-// apps/browser.c — Mectov Mini-Browser v3.0 [Ring 3] (v38.70)
+// apps/browser.c — Mectov Mini-Browser v3.1 [Ring 3] (v38.163)
 //
-// Real HTTP fetch + simple HTML rendering:
-//   - URL parsing: [http://]host[:port][/path]. IP literals (a.b.c.d) skip
-//     DNS and connect directly — deterministic in CI via QEMU slirp host
+// Real HTTP/HTTPS fetch + simple HTML rendering:
+//   - URL parsing: [http://|https://]host[:port][/path]. IP literals (a.b.c.d)
+//     skip DNS and connect directly — deterministic in CI via QEMU slirp host
 //     gateway 10.0.2.2; hostnames go through SYS_DNS_RESOLVE as before.
+//     Only the scheme selects TLS: http:// is plain, https:// is TLS 1.3 with
+//     the connection's SNI and certificate hostname both taken from the URL.
+//     A bare `host:443/path` stays plain HTTP on port 443 — guessing TLS from
+//     the port number would silently downgrade nothing and upgrade something
+//     the user did not ask for.
 //   - HTTP/1.0 GET with Host + User-Agent (HTTP/1.0 => no chunked encoding,
-//     server close = end of body).
+//     server close = end of body). Content-Length and Transfer-Encoding:
+//     chunked from a 1.1 server are still honoured: Content-Length ends the
+//     read as soon as the promised body arrives instead of waiting for the
+//     peer to close, and a chunked body is de-chunked before rendering.
+//   - TLS runs through apps/lib/tls (the same library scripts/tls_selftest.py
+//     gates offline); the handshake is driven from the poll loop via
+//     tls_step(), never by blocking, so the window keeps painting while it
+//     completes.
 //   - Response parsing: status line kept for the status bar, headers stripped
 //     at the first CRLFCRLF, only the body is rendered. A response that does
 //     not start with "HTTP/" is shown as plain text (simple test servers).
@@ -15,6 +27,7 @@
 //     when done, error reasons on failure.
 
 #include "src/include/syscall.h"
+#include "lib/tls/tls.h"
 
 typedef struct {
     int type;
@@ -61,6 +74,19 @@ static int  req_port = 80;
 static uint8_t req_ip[4];
 static int  req_is_literal = 0;
 
+// ---- TLS (v38.163). `req_tls` is what the URL asked for; `using_tls` is what
+// this request is actually doing, because the two differ for the whole time a
+// request is in flight and every branch below keys on `using_tls`.
+static tls_conn_t tls;
+static int req_tls = 0;
+static int using_tls = 0;
+
+// ---- Response framing, sniffed from the headers once they are complete.
+static int body_start = -1;     // offset of the first body byte, -1 until known
+static int body_expected = -1;  // Content-Length, or -1 when close-delimited
+static int body_chunked = 0;    // Transfer-Encoding: chunked
+static int body_decoded_len = 0; // body bytes actually rendered (post de-chunk)
+
 // ---------------------------------------------------------------- helpers
 
 static int my_strlen(const char* s) { int n = 0; while (s[n]) n++; return n; }
@@ -98,6 +124,58 @@ static int ci_starts_with(const char* s, const char* prefix) {
 
 static int is_digit(char c) { return c >= '0' && c <= '9'; }
 
+static int hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// ------------------------------------------------------- TLS transport glue
+//
+// apps/lib/tls talks to the network only through these two callbacks, so the
+// browser decides when the TLS engine is allowed to touch a socket — and it is
+// the poll loop, never the engine itself. The return conventions are the
+// engine's: send returns bytes accepted (0 = try later, <0 = error) and recv
+// returns >0 bytes, 0 = nothing yet, <0 = closed or error.
+static int tls_send_cb(void* ctx, const uint8_t* buf, uint32_t len) {
+    (void)ctx;
+    if (conn_id < 0) return -1;
+    // net_tcp_send() clamps a call at 1400 bytes and returns what it took, so
+    // a short write is normal here and tls_flush() simply calls again.
+    int n = sys_tcp_send(conn_id, buf, (int)len);
+    return n < 0 ? -1 : n;
+}
+
+static int tls_recv_cb(void* ctx, uint8_t* buf, uint32_t len) {
+    (void)ctx;
+    if (conn_id < 0) return -1;
+    // -1 closed, -2 lost: both are "no more bytes, ever" to the engine.
+    int n = sys_tcp_recv(conn_id, buf, (int)len);
+    return n < 0 ? -1 : n;
+}
+
+// Milestones go to the serial log, which is what a gate reads: the handshake
+// outcome is otherwise only visible as a status bar on a screenshot.
+static void tls_log_cb(void* ctx, const char* msg) {
+    (void)ctx;
+    sys_print("[TLS] ", 0x0E);
+    sys_print(msg, 0x0E);
+    sys_print("\n", 0x0E);
+}
+
+static const char* tls_err_text(int rc) {
+    switch (rc) {
+        case TLS_ERR_IO:          return "TLS transport closed";
+        case TLS_ERR_PROTOCOL:    return "TLS protocol error";
+        case TLS_ERR_VERIFY:      return "TLS certificate not trusted";
+        case TLS_ERR_UNSUPPORTED: return "TLS suite not offered by server";
+        case TLS_ERR_ENTROPY:     return "TLS aborted: no entropy";
+        case TLS_ERR_OVERFLOW:    return "TLS message too large";
+        default:                  return "TLS handshake failed";
+    }
+}
+
 // Try to interpret s[0..len) as an IPv4 literal. Returns 1 and fills ip.
 static int parse_ip4(const char* s, int len, uint8_t* ip) {
     int part = 0, pos = 0;
@@ -126,8 +204,10 @@ static int parse_url(void) {
     int host_len = 0;
     req_port = 80;
     req_is_literal = 0;
+    req_tls = 0;
 
-    if (ci_starts_with(p, "http://")) p += 7;
+    if (ci_starts_with(p, "https://")) { req_tls = 1; req_port = 443; p += 8; }
+    else if (ci_starts_with(p, "http://")) p += 7;
 
     // host = up to ':' or '/'
     while (p[host_len] && p[host_len] != ':' && p[host_len] != '/') {
@@ -336,10 +416,101 @@ static void html_to_text(const char* in, int in_len) {
 
 // ------------------------------------------------------------ HTTP parsing
 
+// Re-scan the response head for framing. Runs after every read, so it is a
+// no-op once the body's start is known.
+static void sniff_headers(void) {
+    if (body_start >= 0) return;
+    if (raw_len < 5 || !ci_starts_with(raw_buf, "HTTP/")) return;
+
+    int hdr_end = -1;
+    for (int j = 0; j < raw_len - 3; j++) {
+        if (raw_buf[j] == '\r' && raw_buf[j+1] == '\n' &&
+            raw_buf[j+2] == '\r' && raw_buf[j+3] == '\n') { hdr_end = j + 4; break; }
+    }
+    if (hdr_end < 0) return;      // headers are still arriving
+    body_start = hdr_end;
+
+    int line = 0;
+    while (line < hdr_end) {
+        int eol = line;
+        while (eol < hdr_end && raw_buf[eol] != '\r' && raw_buf[eol] != '\n') eol++;
+        const char* h = raw_buf + line;
+        int hl = eol - line;
+
+        if (hl >= 15 && ci_starts_with(h, "content-length:")) {
+            int i = 15, v = 0, d = 0;
+            while (i < hl && h[i] == ' ') i++;
+            while (i < hl && is_digit(h[i]) && d <= 9) { v = v * 10 + (h[i] - '0'); i++; d++; }
+            if (d > 0) body_expected = v;
+        } else if (hl >= 18 && ci_starts_with(h, "transfer-encoding:")) {
+            for (int i = 18; i + 7 <= hl; i++) {
+                if (ci_starts_with(h + i, "chunked")) { body_chunked = 1; break; }
+            }
+        }
+
+        while (line < hdr_end && raw_buf[line] != '\n') line++;
+        line++;
+    }
+}
+
+// Walk a chunked body at raw_buf[from..end). Copies the decoded bytes to `dst`
+// unless dst is NULL, in which case it only measures. Returns 1 once the
+// terminating zero-length chunk has been seen, 0 while the stream is still
+// incomplete or is not a chunk stream at all, and stores the decoded length in
+// *out_len. Writing to `dst = raw_buf + from` is safe: the decoded prefix is
+// never longer than the encoded prefix it came from, so no unread byte is
+// overwritten.
+static int chunk_walk(int from, int end, char* dst, int* out_len) {
+    int r = from, w = 0;
+    for (;;) {
+        while (r + 1 < end && raw_buf[r] == '\r' && raw_buf[r+1] == '\n') r += 2;
+        if (r >= end) break;
+
+        int sz = 0, digits = 0;
+        while (r < end) {
+            int d = hexval(raw_buf[r]);
+            if (d < 0) break;
+            sz = sz * 16 + d; r++; digits++;
+            if (digits > 8) { if (out_len) *out_len = w; return 0; }
+        }
+        if (digits == 0) { if (out_len) *out_len = w; return 0; }
+
+        while (r < end && raw_buf[r] != '\n') r++;   // chunk extensions
+        if (r >= end) break;
+        r++;
+
+        if (sz == 0) { if (out_len) *out_len = w; return 1; }
+        if (r + sz > end) {                          // truncated final chunk
+            if (dst) for (int i = 0; i < end - r; i++) dst[w + i] = raw_buf[r + i];
+            w += end - r;
+            break;
+        }
+        if (dst) for (int i = 0; i < sz; i++) dst[w + i] = raw_buf[r + i];
+        w += sz;
+        r += sz;
+    }
+    if (out_len) *out_len = w;
+    return 0;
+}
+
+// Is the body complete? Content-Length lets the read stop as soon as the
+// promised bytes have arrived instead of waiting for the peer to hang up, and
+// a chunked body is complete at its terminating zero-length chunk. Anything
+// else is delimited by the close that Connection: close asks for.
+static int response_complete(void) {
+    sniff_headers();
+    if (body_start < 0) return 0;
+    if (body_chunked) return chunk_walk(body_start, raw_len, 0, 0);
+    if (body_expected >= 0) return raw_len - body_start >= body_expected;
+    return 0;
+}
+
 // Parse the raw response: strip headers, keep body, capture status code.
 static void parse_response(void) {
     int code = 0;
     char code_str[8];
+
+    sniff_headers();
 
     if (raw_len > 5 && raw_buf[0] == 'H' && raw_buf[1] == 'T' && raw_buf[2] == 'T' &&
         raw_buf[3] == 'P' && raw_buf[4] == '/') {
@@ -359,10 +530,45 @@ static void parse_response(void) {
                 raw_buf[j+2] == '\r' && raw_buf[j+3] == '\n') { body = j + 4; break; }
         }
         if (body < 0) body = raw_len; // malformed: show what we have
-        html_to_text(raw_buf + body, raw_len - body);
+        if (body_chunked) {
+            // De-chunk in place, then render the decoded bytes; a response that
+            // is still truncated simply renders what arrived.
+            int dec = 0;
+            chunk_walk(body, raw_len, raw_buf + body, &dec);
+            body_decoded_len = dec;
+            html_to_text(raw_buf + body, dec);
+        } else {
+            int blen = raw_len - body;
+            if (body_expected >= 0 && body_expected < blen) blen = body_expected;
+            body_decoded_len = blen;
+            html_to_text(raw_buf + body, blen);
+        }
     } else {
         html_to_text(raw_buf, raw_len);
         code = 0;
+    }
+
+    // Serial summary: the suites assert on this instead of on pixels, because
+    // a page that rendered from a cached or downgraded reply looks identical.
+    {
+        char nb[12];
+        sys_print("[BROWSER] done tls=", 0x0A);
+        sys_print(using_tls ? "1" : "0", 0x0A);
+        sys_print(" code=", 0x0A);
+        my_itoa(code, nb);
+        sys_print(nb, 0x0A);
+        sys_print(" bytes=", 0x0A);
+        my_itoa(raw_len, nb);
+        sys_print(nb, 0x0A);
+        // Wire bytes and rendered body bytes differ by the header block and,
+        // for a chunked reply, by the chunk framing -- which is exactly how a
+        // suite can tell de-chunking happened instead of guessing at pixels.
+        sys_print(" body=", 0x0A);
+        my_itoa(body_decoded_len, nb);
+        sys_print(nb, 0x0A);
+        sys_print(" host=", 0x0A);
+        sys_print(req_host, 0x0A);
+        sys_print("\n", 0x0A);
     }
 
     // status summary
@@ -377,6 +583,12 @@ static void parse_response(void) {
     my_itoa(raw_len, nbuf);
     my_strcat(status_msg, nbuf);
     my_strcat(status_msg, " bytes");
+    if (using_tls) {
+        // Which suite was negotiated belongs on screen: "it loaded" does not
+        // tell you whether it loaded over TLS, or over which cipher.
+        my_strcat(status_msg, " - ");
+        my_strcat(status_msg, tls_cipher_name(tls_cipher_id(&tls)));
+    }
     if (page_title[0]) {
         my_strcat(status_msg, " - ");
         my_strcat(status_msg, page_title);
@@ -462,6 +674,10 @@ static void start_request(int wid) {
     scroll_offset = 0;
     loading = 1;
     conn_id = -1;
+    body_start = -1;
+    body_expected = -1;
+    body_chunked = 0;
+    body_decoded_len = 0;
     request_started_at = sys_get_ticks();
 
     if (parse_url() != 0) {
@@ -469,7 +685,17 @@ static void start_request(int wid) {
         set_status("Bad URL - use host[:port][/path]", 0);
         draw_browser(wid);
         return;
-    }    if (req_is_literal) {
+    }
+
+    using_tls = req_tls;
+    if (using_tls) {
+        // The URL's host is both the SNI name and the name the leaf
+        // certificate must match; there is no way to make those differ.
+        tls_init(&tls, req_host);
+        tls_set_transport(&tls, tls_send_cb, tls_recv_cb, 0, tls_log_cb);
+    }
+
+    if (req_is_literal) {
         conn_id = sys_tcp_connect(req_ip, req_port);
         if (conn_id < 0) {
             loading = 0;
@@ -492,20 +718,37 @@ static void send_request(void) {
     my_strcat(req, req_path);
     my_strcat(req, " HTTP/1.0\r\nHost: ");
     my_strcat(req, req_host);
-    if (req_port != 80) {
+    // The port is omitted when it is the scheme's default: a Host header of
+    // "example.com:443" is legal but it makes some virtual hosts answer a
+    // different site than the certificate was issued for.
+    int default_port = using_tls ? 443 : 80;
+    if (req_port != default_port) {
         char pb[8];
         my_strcat(req, ":");
         my_itoa(req_port, pb);
         my_strcat(req, pb);
     }
-    my_strcat(req, "\r\nUser-Agent: MectovBrowser/3.0\r\nConnection: close\r\n\r\n");
-    sys_tcp_send(conn_id, req, my_strlen(req));
+    my_strcat(req, "\r\nUser-Agent: MectovBrowser/3.1\r\nConnection: close\r\n\r\n");
+
+    int len = my_strlen(req);
+    if (using_tls) {
+        // tls_write() encrypts and queues; tls_flush() hands the ciphertext to
+        // the transport in whatever sizes the socket accepts.
+        if (tls_write(&tls, req, (uint32_t)len) != TLS_OK) {
+            browser_state = 0;
+            return;
+        }
+        tls_flush(&tls);
+    } else {
+        sys_tcp_send(conn_id, req, len);
+    }
     browser_state = 3;
     request_started_at = sys_get_ticks();
     set_status("Loading ", req_host);
 }
 
 static void finish_ok(int wid) {
+    if (using_tls) tls_send_close_notify(&tls);
     if (conn_id >= 0) { sys_tcp_close(conn_id); conn_id = -1; }
     loading = 0;
     browser_state = 0;
@@ -516,6 +759,7 @@ static void finish_ok(int wid) {
 }
 
 static void finish_err(int wid, const char* msg) {
+    if (using_tls) tls_send_close_notify(&tls);
     if (conn_id >= 0) { sys_tcp_close(conn_id); conn_id = -1; }
     loading = 0;
     browser_state = 0;
@@ -635,8 +879,75 @@ void _start() {
                     }
                 } else if (browser_state == 2) {
                     if (ns.tcp_state == 2) { // TCP_ESTABLISHED
+                        if (using_tls) {
+                            // The handshake is driven from here, one step per
+                            // poll, so the window keeps painting while it runs.
+                            browser_state = 4;
+                            set_status("TLS handshake ", req_host);
+                        } else {
+                            send_request();
+                        }
+                        draw_browser(wid);
+                    }
+                } else if (browser_state == 4) {
+                    int rc = tls_step(&tls);
+                    if (rc == TLS_OK) {
+                        // Serial marker: a page rendering over HTTPS is
+                        // indistinguishable on screen from one rendering over
+                        // HTTP, so the suites read the negotiated suite here.
+                        sys_print("[BROWSER] tls-ok cipher=", 0x0A);
+                        sys_print(tls_cipher_name(tls_cipher_id(&tls)), 0x0A);
+                        sys_print(" host=", 0x0A);
+                        sys_print(req_host, 0x0A);
+                        sys_print("\n", 0x0A);
                         send_request();
                         draw_browser(wid);
+                    } else if (rc < 0 && rc != TLS_WANT_READ && rc != TLS_WANT_WRITE) {
+                        // Negative and not a "call again": the handshake is
+                        // over. TLS_ERR_VERIFY here means the chain or the
+                        // hostname was rejected, which is the answer the user
+                        // needs to see verbatim.
+                        sys_print("[BROWSER] tls-fail ", 0x0C);
+                        sys_print(tls_err_text(rc), 0x0C);
+                        sys_print("\n", 0x0C);
+                        finish_err(wid, tls_err_text(rc));
+                    }
+                } else if (browser_state == 3 && using_tls) {
+                    char rx_buf[1024];
+                    int rx_len;
+                    while ((rx_len = tls_read(&tls, rx_buf, 1024)) > 0) {
+                        int copy = rx_len;
+                        if (raw_len + copy >= RAW_MAX - 1) copy = RAW_MAX - 1 - raw_len;
+                        if (copy > 0) {
+                            for (int i = 0; i < copy; i++) raw_buf[raw_len + i] = rx_buf[i];
+                            raw_len += copy;
+                            raw_buf[raw_len] = '\0';
+                        }
+                        if (response_complete()) break;
+                        if (raw_len >= RAW_MAX - 1) break;
+                        if (copy < rx_len) break;   // buffer full
+                    }
+                    if (rx_len == TLS_CLOSED) {
+                        finish_ok(wid);
+                    } else if (rx_len < 0) {
+                        // An abrupt close without close_notify: if a body
+                        // already arrived, render it (a close-delimited HTTP/1.0
+                        // response is exactly this shape) but say so, because
+                        // silently accepting a truncated stream is the bug
+                        // TLS exists to prevent.
+                        if (raw_len > 0) {
+                            sys_print("[TLS] peer closed without close_notify\n", 0x0E);
+                            finish_ok(wid);
+                        } else {
+                            sys_print("[BROWSER] tls-fail ", 0x0C);
+                            sys_print(tls_err_text(rx_len), 0x0C);
+                            sys_print("\n", 0x0C);
+                            finish_err(wid, tls_err_text(rx_len));
+                        }
+                    } else if (response_complete()) {
+                        finish_ok(wid);
+                    } else {
+                        tls_flush(&tls);   // push anything the engine queued
                     }
                 } else if (browser_state == 3) {
                     // Drain everything available (recv is non-blocking:
@@ -671,6 +982,11 @@ void _start() {
                         finish_ok(wid);
                     } else if (rx_len == -2) {
                         finish_err(wid, "Connection lost.");
+                    } else if (response_complete()) {
+                        // Content-Length satisfied: no need to wait for the
+                        // peer to close, which is what used to make every
+                        // fixed-length page sit until the server hung up.
+                        finish_ok(wid);
                     }
                 }
             }

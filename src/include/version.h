@@ -252,6 +252,71 @@
 // modulus kept its DER sign byte (257 bytes for a 2048-bit key). Nothing in
 // this release is verified by "it compiled".
 // 161 is spoken for; 162 is the next free number.
-#define OS_VERSION "38.162"
+// v38.163: HTTPS in the Mini Browser, and the nine defects that only a LIVE
+// handshake could reach.
+//
+// apps/browser.c understands https:// now: state 4 drives tls_step from the
+// poll loop so the handshake is non-blocking like the rest of that app, SNI is
+// sent for the URL's host, and the reply is framed -- Content-Length, chunked,
+// or close-delimited. 443 is the scheme's default port and is NOT redirected by
+// the slirp gateway, so a test uses its own port and the kernel needs no
+// change. Every record the request and the reply pass through is the same code
+// v38.162 shipped.
+//
+// What the engine needed was not new code but a test that can COMPLETE a
+// handshake. The v38.162 self-test drives each primitive with committed vectors,
+// and a guest has no server whose chain the image trusts, so the record layer,
+// the key schedule and the certificate-list framing had no test at all.
+// scripts/tls_handshake_test.py supplies one: it compiles the shipped engine for
+// the host, drives a real TLS 1.3 server behind a throwaway trust anchor, and
+// compares the secrets the engine derives against the server's own keylog.
+// Nine real defects fell out of it, none of them visible to either existing
+// suite:
+//   1. Derive-Secret(Secret, "derived", "") used a zero-length context where
+//      the RFC means Transcript-Hash("") -- SHA-256 of the empty string.
+//      RFC 8448 pins the result (6f2615a1... for the early secret). This poisons
+//      the handshake secret, so BOTH handshake traffic secrets are wrong, and
+//      the peer's first encrypted record then fails to authenticate with
+//      nothing on the wire to say why.
+//   2. The AEAD's additional data was omitted, on seal and on open. RFC 8446 5.2
+//      makes it the record header: type, version, length.
+//   3. split_certificates() never consumed each CertificateEntry's 2-byte
+//      extensions length, so the final length check failed on every real chain.
+//   4. The certificate list reached the verifier with its wire framing still in
+//      it, so the first certificate was parsed starting at its own 3-byte
+//      length. It is repacked tightly now.
+//   5. MGF1 appended a ONE-byte counter where RFC 8017 requires four octets, so
+//      every RSA-PSS signature failed. The self-test never verified a PSS
+//      signature at all -- it only checked SHA-384 existed "for RSA-PSS".
+//   6. The master secret was derived from the server handshake TRAFFIC secret
+//      instead of from the handshake secret, which the struct did not keep.
+//   7. The application secrets were derived after our own Finished had already
+//      been folded into the transcript, so they matched nothing the peer
+//      computes.
+//   8. tls_step() returned early once the handshake was done, so tls_read()
+//      never touched the socket again: every post-handshake byte -- the reply,
+//      a session ticket, a close_notify -- sat unread in the kernel buffer for
+//      the life of the connection.
+//   9. tls_read() discarded buffered plaintext when the pump stopped with an
+//      error or a close in the same call, which is exactly how a
+//      Content-Length reply arrives: the peer answers and closes in one burst.
+//
+// Two of these are worth naming for their shape rather than their size. #6 and
+// #7 each produce a handshake that COMPLETES -- the Finished is checked with the
+// handshake keys and passes -- so the only symptom is the peer refusing to
+// decrypt the first request, long after everything looked healthy. #9 appears
+// only when the server closes right after answering. A gate that stops at "did
+// it connect" sees none of the three.
+//
+// Also in this release: scripts/browser_https_test.py, which proves the wiring
+// and the refusal (the server must see a real ClientHello, and the browser must
+// then reject the untrusted chain and render nothing) plus both plain-HTTP
+// framings. Two of that suite's own bugs are fixed here: wrap_socket() ran the
+// entire handshake on the connection before the byte-recording relay existed,
+// so it blocked forever, and the browsing helper sampled the serial log AFTER
+// submitting the URL, stepping straight past a refusal it had just caused.
+// docs/architecture/tls.md gained the live-handshake section.
+// 162 is spoken for; 163 is the next free number.
+#define OS_VERSION "38.163"
 
 #endif

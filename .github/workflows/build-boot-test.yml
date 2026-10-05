@@ -431,6 +431,30 @@ jobs:
           # an end-to-end HTTPS test would mask as "could not connect".
           python3 scripts/tls_selftest.py --timeout 360
 
+      - name: TLS 1.3 engine — live handshake against a real server (host)
+        run: |
+          # v38.163: the guest self-test above drives the primitives with
+          # committed vectors, but a guest has no server whose chain the image
+          # trusts, so nothing there ever completes a handshake. This step does:
+          # it compiles the shipped engine for the host, talks to a real OpenSSL
+          # TLS 1.3 server behind a throwaway trust anchor, and asserts that
+          # every secret the engine derives matches the server's keylog, that
+          # the request and reply survive the round trip, and that a chain the
+          # store does not contain is refused with a verification error rather
+          # than a protocol one. It is the only check that can see a wrong key
+          # schedule; a broken handshake still looks healthy from outside until
+          # the peer refuses to decrypt.
+          python3 scripts/tls_handshake_test.py
+
+      - name: HTTPS in the Mini Browser — refusal + plain-HTTP framing (TCG)
+        run: |
+          # v38.163: the browser drives the engine over its own poll loop, and
+          # must refuse an untrusted certificate end to end while still framing
+          # Content-Length and chunked plain replies. The TLS server presents a
+          # throwaway chain the image deliberately does not trust, so the
+          # interesting assertion is the negative one.
+          python3 scripts/browser_https_test.py --timeout 300
+
   quake3:
     needs: build
     runs-on: ubuntu-latest

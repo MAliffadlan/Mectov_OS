@@ -1,7 +1,9 @@
 import sys
 import os
+import shutil
 import struct
 import subprocess
+import tempfile
 
 # Magic Number "MCT1"
 MCT_MAGIC = 0x4D435431
@@ -22,7 +24,16 @@ def build_app(sources, output_mct):
     elf_file = f"{base_name}.elf"
     bin_file = f"{base_name}.bin"
     ld_file = f"{base_name}.ld"
-    o_files = [f"{os.path.splitext(s)[0]}.o" for s in sources]
+
+    # Object files go in a per-build temp directory, NOT next to their sources.
+    # Two targets that share a source (browser.mct and tlsselftest.mct both link
+    # apps/lib/tls/*.c) otherwise compile to the same paths, and `make -j8` runs
+    # them in parallel: one build's cleanup deleted the other's objects between
+    # its compile and its link step, which surfaced as "ld: cannot find
+    # apps/lib/tls/tls_hash.o" on an otherwise clean tree.
+    o_dir = tempfile.mkdtemp(prefix="mct_objs_")
+    o_files = [os.path.join(o_dir, os.path.splitext(os.path.basename(s))[0] + ".o")
+               for s in sources]
     
     # 1. Create Linker Script
     # Ini memastikan entry point ada di offset 0 dan sections berurutan
@@ -127,9 +138,7 @@ SECTIONS {
     print(f"    - Data/BSS Size: {data_size} bytes")
 
     # Cleanup temporary files
-    for obj in o_files:
-        os.remove(obj)
-
+    shutil.rmtree(o_dir, ignore_errors=True)
     os.remove(bin_file)
     os.remove(ld_file)
     return 0

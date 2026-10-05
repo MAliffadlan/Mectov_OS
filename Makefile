@@ -321,8 +321,22 @@ explorer.mct: apps/explorer.c $(MCT_LIBC_H)
 pci.mct: apps/pci.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/pci.c pci.mct
 
-browser.mct: apps/browser.c $(MCT_LIBC_H)
-	python3 scripts/build_mct.py apps/browser.c browser.mct
+# The TLS library's own sources (v38.162/163). Defined here, above every rule
+# that lists them: make expands a rule's prerequisites when it READS the rule,
+# so a variable defined further down the file is still empty at that point.
+# That is not a stylistic preference -- defining these next to the
+# tlsselftest.mct rule below silently left browser.mct with no dependency on
+# tls13.c, so editing the engine rebuilt the self-test and shipped the browser
+# in the ISO unchanged.
+TLS_LIB_SRCS = apps/lib/tls/tls_hash.c apps/lib/tls/tls_cipher.c \
+               apps/lib/tls/tls_pubkey.c apps/lib/tls/asn1_x509.c \
+               apps/lib/tls/tls13.c
+TLS_LIB_HDRS = apps/lib/tls/tls.h apps/lib/tls/test_vectors.h
+
+# browser.mct links the TLS library (v38.163): it is the first app whose URL bar
+# accepts https://.
+browser.mct: apps/browser.c $(MCT_LIBC_H) $(TLS_LIB_SRCS) $(TLS_LIB_HDRS)
+	python3 scripts/build_mct.py apps/browser.c $(TLS_LIB_SRCS) browser.mct
 
 paint.mct: apps/paint.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/paint.c paint.mct
@@ -380,12 +394,8 @@ hardening_test.mct: apps/hardening_test.c $(MCT_LIBC_H)
 # TLS engine self-test (v38.162). It links the library sources directly instead
 # of a prebuilt libc, so the guest checks the same object code the browser will
 # use at runtime. Generated fixtures + the trust store are checked in, so this
-# rule needs no network and no openssl at build time.
-TLS_LIB_SRCS = apps/lib/tls/tls_hash.c apps/lib/tls/tls_cipher.c \
-               apps/lib/tls/tls_pubkey.c apps/lib/tls/asn1_x509.c \
-               apps/lib/tls/tls13.c
-TLS_LIB_HDRS = apps/lib/tls/tls.h apps/lib/tls/test_vectors.h
-
+# rule needs no network and no openssl at build time. (TLS_LIB_SRCS/HDRS are
+# defined above the browser.mct rule -- see the note there on why.)
 tlsselftest.mct: apps/tlsselftest.c $(TLS_LIB_SRCS) $(TLS_LIB_HDRS) src/include/version.h
 	python3 scripts/build_mct.py apps/tlsselftest.c $(TLS_LIB_SRCS) tlsselftest.mct
 
