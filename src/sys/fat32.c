@@ -1,4 +1,6 @@
 // src/sys/fat32.c — FAT32 read/write driver (512-byte sectors, <=16 spc).
+// v38.159: every write path returns the medium's verdict (see the helpers
+// below) — a refused write is a failed operation, never a silent success.
 //
 // Mirrors the ext2 integration pattern: fat32_init() validates the BPB,
 // fat32_populate_vfs() maps the volume into the VFS tree as FS_FAT32_* nodes,
@@ -49,15 +51,25 @@ static void fat32_read_sectors(uint32_t lba, unsigned char* buf, int count) {
         done += batch;
     }
 }
-static void fat32_write_sectors(uint32_t lba, const unsigned char* buf, int count) {
+// v38.159: returns 0 only when every run reached the medium. It used to be
+// void and dropped ata_write_sectors_drive()'s result, so a refused write
+// looked like a successful one and the VFS/report layer said "stored".
+static int fat32_write_sectors(uint32_t lba, const unsigned char* buf, int count) {
     // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
     int done = 0;
     while (done < count) {
         int batch = ata_batch_limit(lba + done, count - done);
-        ata_write_sectors_drive(fat32_drive, lba + done, batch,
-                                buf + done * 512);
+        if (ata_write_sectors_drive(fat32_drive, lba + done, batch,
+                                    buf + done * 512) != 0) {
+            write_serial_string("[FAT32] sector write refused at LBA ");
+            write_serial_hex(lba + done);
+            write_serial_string(" (the drive reported the failure; the caller "
+                                "must not treat this as stored)\n");
+            return -1;
+        }
         done += batch;
     }
+    return 0;
 }
 
 static uint32_t fat32_cluster_sector(uint32_t cluster) {
@@ -72,9 +84,9 @@ static void fat32_read_cluster(uint32_t cluster, unsigned char* buf) {
     }
     fat32_read_sectors(fat32_cluster_sector(cluster), buf, fat32_spc);
 }
-static void fat32_write_cluster(uint32_t cluster, const unsigned char* buf) {
-    if (cluster < FAT32_ROOT_CLUSTER || cluster > fat32_max_cluster) return;
-    fat32_write_sectors(fat32_cluster_sector(cluster), buf, fat32_spc);
+static int fat32_write_cluster(uint32_t cluster, const unsigned char* buf) {
+    if (cluster < FAT32_ROOT_CLUSTER || cluster > fat32_max_cluster) return -1;
+    return fat32_write_sectors(fat32_cluster_sector(cluster), buf, fat32_spc);
 }
 
 // FAT entry for `cluster`. Mirrors into every FAT copy on write so fsck-style
@@ -89,7 +101,7 @@ static uint32_t fat32_get_next(uint32_t cluster) {
     memcpy(&v, b + off, 4);
     return v & 0x0FFFFFFF;
 }
-static void fat32_set_next(uint32_t cluster, uint32_t value) {
+static int fat32_set_next(uint32_t cluster, uint32_t value) {
     uint32_t fat_off = cluster * 4;
     uint32_t sec = fat32_reserved + fat_off / fat32_bps;
     uint32_t off = fat_off % fat32_bps;
@@ -99,16 +111,22 @@ static void fat32_set_next(uint32_t cluster, uint32_t value) {
     memcpy(&v, b + off, 4);
     v = (v & 0xF0000000) | (value & 0x0FFFFFFF);
     memcpy(b + off, &v, 4);
+    int failed = 0;
     for (uint8_t i = 0; i < fat32_num_fats; i++) {
-        fat32_write_sectors(fat32_reserved + (uint32_t)i * fat32_sectors_per_fat + sec - fat32_reserved, b, 1);
+        if (fat32_write_sectors(fat32_reserved + (uint32_t)i * fat32_sectors_per_fat + sec - fat32_reserved, b, 1) != 0) {
+            failed = 1;
+        }
     }
+    return failed ? -1 : 0;
 }
 
 // Allocate a free cluster (scan from 2), mark it EOC, return it (or 0).
 static uint32_t fat32_alloc_cluster(void) {
     for (uint32_t c = FAT32_ROOT_CLUSTER; c <= fat32_max_cluster; c++) {
         if (fat32_get_next(c) == FAT32_FREE_CLUSTER) {
-            fat32_set_next(c, FAT32_EOC_MIN);
+            // v38.159: an allocation whose FAT entry did not reach the medium
+            // is not an allocation — report "no cluster" instead.
+            if (fat32_set_next(c, FAT32_EOC_MIN) != 0) return 0;
             return c;
         }
     }
@@ -121,7 +139,7 @@ static void fat32_free_chain(uint32_t cluster) {
     int guard = 0;
     while (c >= FAT32_ROOT_CLUSTER && c <= fat32_max_cluster && guard++ < 1 << 20) {
         uint32_t nxt = fat32_get_next(c);
-        fat32_set_next(c, FAT32_FREE_CLUSTER);
+        (void)fat32_set_next(c, FAT32_FREE_CLUSTER);   // release path: log-only
         if (nxt < FAT32_ROOT_CLUSTER || nxt > fat32_max_cluster || nxt >= FAT32_EOC_MIN) break;
         c = nxt;
     }
@@ -462,7 +480,9 @@ int fat32_write_file(uint32_t first_cluster, const char* buf, int size) {
             uint32_t tail = fat32_get_next(first_cluster);
             if (tail >= FAT32_ROOT_CLUSTER && tail < FAT32_EOC_MIN) {
                 fat32_free_chain(tail);
-                fat32_set_next(first_cluster, FAT32_EOC_MIN);
+                // v38.159: a truncate whose FAT update was refused did not
+                // happen — say so instead of returning the file as truncated.
+                if (fat32_set_next(first_cluster, FAT32_EOC_MIN) != 0) return -1;
             }
             return (int)first_cluster;
         }
@@ -482,7 +502,9 @@ int fat32_write_file(uint32_t first_cluster, const char* buf, int size) {
         int chunk = remaining;
         if (chunk > fat32_spc * 512) chunk = fat32_spc * 512;
         memcpy(cbuf, buf + written, chunk);
-        fat32_write_cluster(cluster, cbuf);
+        // v38.159: the data itself — a refused cluster write fails the whole
+        // write instead of being counted as written bytes.
+        if (fat32_write_cluster(cluster, cbuf) != 0) return -1;
         written += chunk;
         remaining -= chunk;
         prev = cluster;
@@ -494,7 +516,7 @@ int fat32_write_file(uint32_t first_cluster, const char* buf, int size) {
                     fat32_free_chain(new_first);
                     return -1;
                 }
-                fat32_set_next(prev, nxt);
+                if (fat32_set_next(prev, nxt) != 0) return -1;
                 cluster = nxt;
             }
         }
@@ -502,7 +524,7 @@ int fat32_write_file(uint32_t first_cluster, const char* buf, int size) {
     // Truncate: free any clusters left after the written data.
     if (cluster >= FAT32_ROOT_CLUSTER && cluster <= fat32_max_cluster && cluster < FAT32_EOC_MIN) {
         fat32_free_chain(cluster);
-        fat32_set_next(prev, FAT32_EOC_MIN);
+        if (fat32_set_next(prev, FAT32_EOC_MIN) != 0) return -1;
     }
     return (int)new_first;
 }
@@ -517,7 +539,7 @@ int fat32_update_dirent(uint32_t parent_cluster, const char* name,
     e->cluster_high = (uint16_t)((first_cluster >> 16) & 0xFFFF);
     e->cluster_low = (uint16_t)(first_cluster & 0xFFFF);
     e->size = size;
-    fat32_write_cluster(ent.cluster, cbuf);
+    if (fat32_write_cluster(ent.cluster, cbuf) != 0) return -1;
     return 0;
 }
 
@@ -581,10 +603,10 @@ static int fat32_write_dirent(uint32_t parent_cluster, const char* name, int is_
         }
         uint32_t nxt = fat32_alloc_cluster();
         if (nxt < FAT32_ROOT_CLUSTER) return -1;
-        fat32_set_next(tail, nxt);
+        if (fat32_set_next(tail, nxt) != 0) return -1;
         static unsigned char zbuf[FAT32_MAX_SPC * 512];
         memset(zbuf, 0, fat32_spc * 512);
-        fat32_write_cluster(nxt, zbuf);
+        if (fat32_write_cluster(nxt, zbuf) != 0) return -1;
         slot_cluster = nxt;
         slot_off = 0;
     }
@@ -622,7 +644,9 @@ static int fat32_write_dirent(uint32_t parent_cluster, const char* name, int is_
     e->cluster_low = (uint16_t)(cluster & 0xFFFF);
     e->cluster_high = (uint16_t)((cluster >> 16) & 0xFFFF);
     e->size = size;
-    fat32_write_cluster(slot_cluster, cbuf);
+    // v38.159: the dirent is what makes the file exist — a refused write here
+    // fails the create instead of reporting a name that is not on the medium.
+    if (fat32_write_cluster(slot_cluster, cbuf) != 0) return -1;
     return 0;
 }
 
@@ -655,7 +679,10 @@ uint32_t fat32_create_entry(uint32_t parent_cluster, const char* name, int is_di
         dotdot->attr = FAT32_ATTR_DIR;
         dotdot->cluster_low = (uint16_t)(parent_cluster & 0xFFFF);
         dotdot->cluster_high = (uint16_t)((parent_cluster >> 16) & 0xFFFF);
-        fat32_write_cluster(new_cluster, dbuf);
+        if (fat32_write_cluster(new_cluster, dbuf) != 0) {
+            fat32_free_chain(new_cluster);
+            return 0;
+        }
     } else {
         // Allocate a cluster for new files too (mkfs.fat/mtools and Windows
         // do the same): the returned cluster is the create-success signal, and
@@ -686,14 +713,14 @@ static void fat32_delete_range(uint32_t start_cluster, int start_off,
         int dirty = 0;
         while (off + 32 <= cluster_bytes) {
             if (c == end_cluster && off >= end_off) {
-                if (dirty) fat32_write_cluster(c, cbuf);
+                if (dirty) (void)fat32_write_cluster(c, cbuf);   // release path: log-only
                 return;
             }
             cbuf[off] = FAT32_ENTRY_DELETED;
             dirty = 1;
             off += 32;
         }
-        if (dirty) fat32_write_cluster(c, cbuf);
+        if (dirty) (void)fat32_write_cluster(c, cbuf);
         c = fat32_get_next(c);
         off = 0;
     }
@@ -710,7 +737,8 @@ int fat32_remove_entry(uint32_t parent_cluster, const char* name) {
         static unsigned char cbuf[FAT32_MAX_SPC * 512];
         fat32_read_cluster(ent.cluster, cbuf);
         cbuf[ent.offset] = FAT32_ENTRY_DELETED;
-        fat32_write_cluster(ent.cluster, cbuf);
+        // v38.159: a refused tombstone write means the entry is still there.
+        if (fat32_write_cluster(ent.cluster, cbuf) != 0) return -1;
     }
     return 0;
 }

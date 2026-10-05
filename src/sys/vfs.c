@@ -730,6 +730,11 @@ void vfs_init() {
         extern uint8_t _binary_fat32demo_mct_end[];
         changed += vfs_update_file_if_needed("apps/fat32demo.mct", (const char*)_binary_fat32demo_mct_start, _binary_fat32demo_mct_end - _binary_fat32demo_mct_start);
 
+        // v38.159: write-result demo for scripts/wfail_test.py (F1).
+        extern uint8_t _binary_wfiledemo_mct_start[];
+        extern uint8_t _binary_wfiledemo_mct_end[];
+        changed += vfs_update_file_if_needed("apps/wfiledemo.mct", (const char*)_binary_wfiledemo_mct_start, _binary_wfiledemo_mct_end - _binary_wfiledemo_mct_start);
+
         // first Rust Ring 3 app (no_std freestanding)
         extern uint8_t _binary_rusthello_mct_start[];
         extern uint8_t _binary_rusthello_mct_end[];
@@ -1056,6 +1061,11 @@ void vfs_init() {
     vfs_create_file("apps/fat32demo.mct");
     vfs_write_file("apps/fat32demo.mct", (const char*)_binary_fat32demo_mct_start, _binary_fat32demo_mct_end - _binary_fat32demo_mct_start);
 
+    extern uint8_t _binary_wfiledemo_mct_start[];
+    extern uint8_t _binary_wfiledemo_mct_end[];
+    vfs_create_file("apps/wfiledemo.mct");
+    vfs_write_file("apps/wfiledemo.mct", (const char*)_binary_wfiledemo_mct_start, _binary_wfiledemo_mct_end - _binary_wfiledemo_mct_start);
+
     // first Rust Ring 3 app (no_std freestanding)
     extern uint8_t _binary_rusthello_mct_start[];
     extern uint8_t _binary_rusthello_mct_end[];
@@ -1354,7 +1364,11 @@ void vfs_init() {
 static int vfs_node_table_write(void);
 
 // Magic signature: 8 bytes + 2 bytes version + 6 bytes reserved = 16 bytes in sector 0
-static void vfs_save_unlocked() {
+// v38.159: returns 0 when the metadata AND the node table reached the disk,
+// -1 otherwise. A file whose node record never made it does not survive a
+// remount, so a caller that reports "stored" while this failed is lying — the
+// user-visible write paths below now check it.
+static int vfs_save_unlocked() {
     unsigned char meta[512];
     memset(meta, 0, 512);
     
@@ -1380,7 +1394,7 @@ static void vfs_save_unlocked() {
     // and bail instead of grinding through every sector of the node table.
     if (ata_write_sector(VFS_MAGIC_SECTOR, meta) < 0) {
         write_serial_string("[VFS] save failed: ATA write error (disk attached?)\n");
-        return;
+        return -1;
     }
 
     // v38.157: the node table is VFS_NODE_SECTORS * 512 = 1 MB (2048 sectors).
@@ -1393,7 +1407,8 @@ static void vfs_save_unlocked() {
     // rep outsw in ata_write_sector_drive_io. Batch the table through the
     // multi-sector path instead (DMA when present): 16 transfers of up to
     // 128 sectors, one flush each, tens of ms total instead of seconds.
-    vfs_node_table_write();
+    if (vfs_node_table_write() != 0) return -1;
+    return 0;
 }
 
 // The node table's batched writer. 128-sector pieces (ATA_BATCH_MAX, clamped
@@ -1433,10 +1448,11 @@ static int vfs_node_table_write(void) {
     kfree(wbuf);
     return 0;
 }
-void vfs_save() {
+int vfs_save() {
     vfs_lock_acquire();
-    vfs_save_unlocked();
+    int rc = vfs_save_unlocked();
     vfs_lock_release();
+    return rc;
 }
 
 static int vfs_load_unlocked() {
@@ -3235,7 +3251,9 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
         int r = ext2_write_file_data(fs_nodes[node].ext2_inode, data, size);
         if (r >= 0) {
             fs_nodes[node].size = r;
-            if (!vfs_seeding) vfs_save();
+            // v38.159: the file's node record is part of the write — if the
+            // node table could not be saved, the write did not land.
+            if (!vfs_seeding && vfs_save() != 0) return -1;
         }
         return r;
     }
@@ -3255,12 +3273,19 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
         if (nc >= 0) {
             int parent = fs_nodes[node].parent;
             if (parent >= 0 && fs_nodes[parent].type == FS_FAT32_DIR) {
-                fat32_update_dirent((uint32_t)fs_nodes[parent].data_sector,
-                                    fs_nodes[node].name, (uint32_t)nc, (uint32_t)size);
+                // v38.159: the dirent carries the size and the first cluster —
+                // if it did not reach the medium, the file's contents are not
+                // addressable and the write must be reported as failed.
+                if (fat32_update_dirent((uint32_t)fs_nodes[parent].data_sector,
+                                        fs_nodes[node].name, (uint32_t)nc,
+                                        (uint32_t)size) != 0) {
+                    write_serial_string("[VFS] fat32 write: dirent update refused\n");
+                    return -1;
+                }
             }
             fs_nodes[node].data_sector = nc;
             fs_nodes[node].size = size;
-            if (!vfs_seeding) vfs_save();
+            if (!vfs_seeding && vfs_save() != 0) return -1;
         }
         return (nc >= 0) ? size : nc;
     }
@@ -3305,6 +3330,7 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
     // command, zero-padding the partial tail sector inside the batch buffer.
     int secs = (size + 511) / 512;
     int s = 0;
+    int io_failed = 0;   // v38.159: any refused sector fails the whole write
     unsigned char* wbuf = (unsigned char*)kmalloc(ATA_BATCH_MAX * 512);
     if (wbuf) {
         while (s < secs) {
@@ -3313,7 +3339,11 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
             int n = batch * 512;
             if (s * 512 + n > size) n = size - s * 512;
             if (n > 0) memcpy(wbuf, data + s * 512, n);
-            ata_write_sectors_drive(0, (unsigned int)(start_sector + s), batch, wbuf);
+            if (ata_write_sectors_drive(0, (unsigned int)(start_sector + s),
+                                        batch, wbuf) != 0) {
+                io_failed = 1;
+                break;
+            }
             s += batch;
         }
         kfree(wbuf);
@@ -3327,10 +3357,17 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
             memset(tmp, 0, 512);
             int chunk = remaining > 512 ? 512 : remaining;
             if (chunk > 0) memcpy(tmp, data + offset, chunk);
-            if (ata_write_sector((unsigned int)sector++, tmp) < 0) break;
+            if (ata_write_sector((unsigned int)sector++, tmp) < 0) {
+                io_failed = 1;
+                break;
+            }
             offset += 512;
             remaining -= 512;
         }
+    }
+    if (io_failed) {
+        write_serial_string("[VFS] write failed: the drive refused the data sectors\n");
+        return -1;
     }
     
     fs_nodes[node].size = size;
@@ -3347,7 +3384,12 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
     // identical — the file data itself was already written above — so skip
     // the 256-sector vfs_save(), the dominant cost of small file writes.
     if (!vfs_seeding && (size != old_size || fs_nodes[node].data_sector != old_sector)) {
-        vfs_save();
+        // v38.159: the file data reached the medium, but if the node-table
+        // record could not be persisted the write is not durable — report it.
+        if (vfs_save() != 0) {
+            write_serial_string("[VFS] write failed: node table save refused\n");
+            return -1;
+        }
     }
     return size;
 }

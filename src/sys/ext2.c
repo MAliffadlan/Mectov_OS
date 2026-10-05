@@ -3,6 +3,7 @@
 #include "../include/utils.h"
 #include "../include/vfs.h"
 #include "../include/mem.h"
+#include "../include/serial.h"   // write_serial_string/hex for refused writes (v38.159)
 
 static int ext2_drive = -1;
 static ext2_superblock_t sb;
@@ -330,46 +331,65 @@ int ext2_read_file_data(uint32_t inode_num, char* buf, int max_size) {
 // Write support (persistence) — create/overwrite/delete on disk
 // ============================================================
 
-extern void write_serial_string(const char*);
-
-static void ext2_write_block(uint32_t block, unsigned char* buf) {
+// v38.159: returns 0 on success, -1 when the medium refused any part of the
+// block. It used to be void and dropped ata_write_sectors_drive()'s result, so
+// a disk error turned into "the filesystem accepted your data" — while the
+// in-memory superblock/bitmaps went on describing media that never changed.
+static int ext2_write_block(uint32_t block, unsigned char* buf) {
     // Same bounds as ext2_read_block: never write past the filesystem's
     // block count (v38.81: the hardcoded 2MB drive clamp is gone — volumes
     // are bigger now; the count + overflow guards carry the safety).
-    if (block >= sb.s_blocks_count) return;
+    if (block >= sb.s_blocks_count) return -1;
     uint32_t sectors_per_block = block_size / 512;
     if (sectors_per_block == 0 ||
-        block > 0xFFFFFFFFu / sectors_per_block) return;
+        block > 0xFFFFFFFFu / sectors_per_block) return -1;
     uint32_t start_sector = block * sectors_per_block;
     // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
     uint32_t done = 0;
     while (done < sectors_per_block) {
         int batch = ata_batch_limit(start_sector + done, sectors_per_block - done);
-        ata_write_sectors_drive(ext2_drive, start_sector + done, batch,
-                                buf + done * 512);
+        if (ata_write_sectors_drive(ext2_drive, start_sector + done, batch,
+                                    buf + done * 512) != 0) {
+            write_serial_string("[EXT2] block write refused at block ");
+            write_serial_hex(block);
+            write_serial_string(" (the drive reported the failure; "
+                                "the caller must not treat this as stored)\n");
+            return -1;
+        }
         done += batch;
     }
+    return 0;
 }
 
 // Persist the in-memory superblock + BGD table back to disk. The superblock is
 // always at byte offset 1024 (sectors 2-3), independent of block size; the BGD
 // table occupies one block at bgd_block (ext2_init caps us at 32 groups, which
 // fits in a single 4K block).
-static void ext2_sync_super(void) {
-    if (!bgd_table) return;
+// v38.159: returns 0 when the superblock + group descriptors reached the
+// medium, -1 otherwise. The allocation paths treat a failure as "allocation
+// did not happen" so a refused metadata write cannot be reported as a
+// successful create/write.
+static int ext2_sync_super(void) {
+    if (!bgd_table) return -1;
     unsigned char buf[1024];
     memset(buf, 0, sizeof(buf));
     memcpy(buf, &sb, sizeof(ext2_superblock_t));
-    ata_write_sector_drive(ext2_drive, 2, buf);
-    ata_write_sector_drive(ext2_drive, 3, buf + 512);
+    int failed = 0;
+    if (ata_write_sector_drive(ext2_drive, 2, buf) != 0) failed = 1;
+    if (ata_write_sector_drive(ext2_drive, 3, buf + 512) != 0) failed = 1;
     // Heap-allocated: keeps this function's stack footprint small — it is
     // called from the allocators which already hold bitmap buffers.
     unsigned char* bgd_buf = (unsigned char*)kmalloc(4096);
-    if (!bgd_buf) return;
+    if (!bgd_buf) return -1;
     memset(bgd_buf, 0, 4096);
     memcpy(bgd_buf, bgd_table, ext2_max_groups * sizeof(ext2_bg_descriptor_t));
-    ext2_write_block(bgd_block, bgd_buf);
+    if (ext2_write_block(bgd_block, bgd_buf) != 0) failed = 1;
     kfree(bgd_buf);
+    if (failed) {
+        write_serial_string("[EXT2] superblock/group-descriptor write refused\n");
+        return -1;
+    }
+    return 0;
 }
 
 int ext2_write_inode(uint32_t inode_num, ext2_inode_t* inode) {
@@ -391,7 +411,9 @@ int ext2_write_inode(uint32_t inode_num, ext2_inode_t* inode) {
     unsigned char buf[4096];
     ext2_read_block(inode_table_block + block_index, buf);
     memcpy(buf + offset, inode, sizeof(ext2_inode_t));
-    ext2_write_block(inode_table_block + block_index, buf);
+    // v38.159: an inode that did not reach the medium is not written — the
+    // caller must see it (size/mtime/blocks all live here).
+    if (ext2_write_block(inode_table_block + block_index, buf) != 0) return -1;
     return 0;
 }
 
@@ -409,7 +431,10 @@ static void ext2_zero_inode_slot(uint32_t inode_num) {
     unsigned char buf[4096];
     ext2_read_block(inode_table_block + block_index, buf);
     memset(buf + offset, 0, inode_size);
-    ext2_write_block(inode_table_block + block_index, buf);
+    // Scrubbing a fresh inode slot cannot fail the enclosing create on its own:
+    // the inode write that follows reports the same broken medium (and
+    // ext2_write_block logs every refusal).
+    (void)ext2_write_block(inode_table_block + block_index, buf);
 }
 
 // --- Block allocator (single bitmap block per group; <= 32768 blocks/group) ---
@@ -445,10 +470,16 @@ static uint32_t ext2_alloc_block(void) {
             if (ext2_block_is_metadata(bg, candidate)) continue;
             if (!(bmp[i >> 3] & (1 << (i & 7)))) {
                 bmp[i >> 3] |= (1 << (i & 7));
-                ext2_write_block(bmp_block, bmp);
                 sb.s_free_blocks_count--;
                 bgd_table[bg].bg_free_blocks_count--;
-                ext2_sync_super();
+                // v38.159: neither the bitmap nor the superblock may fail
+                // silently — a block whose allocation was never stored would
+                // be handed out again after a remount.
+                if (ext2_write_block(bmp_block, bmp) != 0 ||
+                    ext2_sync_super() != 0) {
+                    kfree(bmp);
+                    return 0;
+                }
                 kfree(bmp);
                 return candidate;
             }
@@ -470,10 +501,12 @@ static void ext2_free_block(uint32_t block) {
     ext2_read_block(bmp_block, bmp);
     if (bmp[idx >> 3] & (1 << (idx & 7))) {
         bmp[idx >> 3] &= ~(1 << (idx & 7));
-        ext2_write_block(bmp_block, bmp);
+        // Release path (void by design): a refused free leaves a leak, never
+        // corruption, and ext2_write_block + ext2_sync_super log it.
+        (void)ext2_write_block(bmp_block, bmp);
         sb.s_free_blocks_count++;
         bgd_table[bg].bg_free_blocks_count++;
-        ext2_sync_super();
+        (void)ext2_sync_super();
     }
     kfree(bmp);
 }
@@ -494,10 +527,16 @@ static uint32_t ext2_alloc_inode(void) {
         for (uint32_t i = 0; i < remaining; i++) {
             if (!(bmp[i >> 3] & (1 << (i & 7)))) {
                 bmp[i >> 3] |= (1 << (i & 7));
-                ext2_write_block(bmp_block, bmp);
                 sb.s_free_inodes_count--;
                 bgd_table[bg].bg_free_inodes_count--;
-                ext2_sync_super();
+                // v38.159: same rule as the block allocator — an inode whose
+                // allocation was not persisted must not be reported as
+                // allocated.
+                if (ext2_write_block(bmp_block, bmp) != 0 ||
+                    ext2_sync_super() != 0) {
+                    kfree(bmp);
+                    return 0;
+                }
                 kfree(bmp);
                 return bg * sb.s_inodes_per_group + i + 1;
             }
@@ -518,10 +557,10 @@ static void ext2_free_inode(uint32_t inode_num) {
     ext2_read_block(bmp_block, bmp);
     if (bmp[idx >> 3] & (1 << (idx & 7))) {
         bmp[idx >> 3] &= ~(1 << (idx & 7));
-        ext2_write_block(bmp_block, bmp);
+        (void)ext2_write_block(bmp_block, bmp);   // release path: log-only
         sb.s_free_inodes_count++;
         bgd_table[bg].bg_free_inodes_count++;
-        ext2_sync_super();
+        (void)ext2_sync_super();
     }
     kfree(bmp);
 }
@@ -543,20 +582,19 @@ static uint32_t ext2_get_block(ext2_inode_t* inode, uint32_t lb, int alloc) {
             if (inode->i_block[12] == 0) return 0;
             unsigned char zb[4096];
             memset(zb, 0, sizeof(zb));
-            ext2_write_block(inode->i_block[12], zb);
+            if (ext2_write_block(inode->i_block[12], zb) != 0) return 0;
         }
         uint32_t* ind = (uint32_t*)kmalloc(block_size);
         if (!ind) return 0;
         ext2_read_block(inode->i_block[12], (unsigned char*)ind);
         uint32_t idx = lb - 12;
-        uint32_t blk = ind[idx];
-        if (blk == 0 && alloc) {
-            blk = ext2_alloc_block();
-            if (blk) {
-                ind[idx] = blk;
-                ext2_write_block(inode->i_block[12], (unsigned char*)ind);
+        uint32_t blk = ind[idx];            if (blk == 0 && alloc) {
+                blk = ext2_alloc_block();
+                if (blk) {
+                    ind[idx] = blk;
+                    if (ext2_write_block(inode->i_block[12], (unsigned char*)ind) != 0) blk = 0;
+                }
             }
-        }
         kfree(ind);
         return blk;
     }
@@ -582,7 +620,9 @@ static uint32_t ext2_get_block(ext2_inode_t* inode, uint32_t lb, int alloc) {
                 {
                     unsigned char zb[4096];
                     memset(zb, 0, sizeof(zb));
-                    ext2_write_block(inode->i_block[13], zb);
+                    // v38.159: a mapping table that did not reach the medium
+                    // must not be used as if it had.
+                    if (ext2_write_block(inode->i_block[13], zb) != 0) return 0;
                 }
             }
             dind = (uint32_t *)kmalloc(block_size);
@@ -595,9 +635,15 @@ static uint32_t ext2_get_block(ext2_inode_t* inode, uint32_t lb, int alloc) {
                 {
                     unsigned char zb[4096];
                     memset(zb, 0, sizeof(zb));
-                    ext2_write_block(dind[i1], zb);
+                    if (ext2_write_block(dind[i1], zb) != 0) {
+                        kfree(dind);
+                        return 0;
+                    }
                 }
-                ext2_write_block(inode->i_block[13], (unsigned char *)dind);
+                if (ext2_write_block(inode->i_block[13], (unsigned char *)dind) != 0) {
+                    kfree(dind);
+                    return 0;
+                }
             }
             sind = (uint32_t *)kmalloc(block_size);
             if (!sind) { kfree(dind); return 0; }
@@ -607,7 +653,7 @@ static uint32_t ext2_get_block(ext2_inode_t* inode, uint32_t lb, int alloc) {
                 blk = ext2_alloc_block();
                 if (blk) {
                     sind[i2] = blk;
-                    ext2_write_block(dind[i1], (unsigned char *)sind);
+                    if (ext2_write_block(dind[i1], (unsigned char *)sind) != 0) blk = 0;
                 }
             }
             kfree(sind);
@@ -640,7 +686,9 @@ static void ext2_clear_block_ptr(ext2_inode_t* inode, uint32_t lb) {
             inode->i_block[12] = 0;
             ext2_free_block(indblk);
         } else {
-            ext2_write_block(inode->i_block[12], (unsigned char*)ind);
+            // Truncate path (void by design): a refused table update leaks a
+            // block, never corrupts one, and ext2_write_block logs it.
+            (void)ext2_write_block(inode->i_block[12], (unsigned char*)ind);
         }
         kfree(ind);
     }
@@ -670,11 +718,11 @@ static void ext2_clear_block_ptr(ext2_inode_t* inode, uint32_t lb) {
                     if (empty) {
                         uint32_t sblk = dind[i1];
                         dind[i1] = 0;
-                        ext2_write_block(inode->i_block[13],
-                                         (unsigned char *)dind);
+                        (void)ext2_write_block(inode->i_block[13],
+                                               (unsigned char *)dind);
                         ext2_free_block(sblk);
                     } else {
-                        ext2_write_block(dind[i1], (unsigned char *)sind);
+                        (void)ext2_write_block(dind[i1], (unsigned char *)sind);
                     }
                 }
                 kfree(sind);
@@ -789,7 +837,10 @@ int ext2_write_file_data(uint32_t inode_num, const char* buf, int size) {
             memset(bbuf, 0, sizeof(bbuf));
         }
         memcpy(bbuf, buf + written, chunk);
-        ext2_write_block(blk, bbuf);
+        // v38.159: this is the data itself — stop here on a refused write and
+        // let the caller report the failure instead of bumping i_size over
+        // bytes the medium never accepted.
+        if (ext2_write_block(blk, bbuf) != 0) return -1;
         written += chunk;
         lb++;
     }
@@ -802,7 +853,7 @@ int ext2_write_file_data(uint32_t inode_num, const char* buf, int size) {
             unsigned char bbuf[4096];
             ext2_read_block(blk, bbuf);
             memset(bbuf + (written % block_size), 0, block_size - (written % block_size));
-            ext2_write_block(blk, bbuf);
+            if (ext2_write_block(blk, bbuf) != 0) return -1;
         }
     }
     
@@ -894,8 +945,8 @@ static int ext2_try_dir_block(uint32_t block, uint32_t inode_num,
             } else {
                 e->rec_len = (uint16_t)need;
             }
-            ext2_write_block(block, buf);
-            return 1;
+            // v38.159: 1 = placed, 0 = no room, -1 = the write was refused.
+            return (ext2_write_block(block, buf) == 0) ? 1 : -1;
         } else if (e->inode != 0 && rec >= ext2_entry_size(e->name_len) + need) {
             // Split a slack entry (e.g. the big lost+found tail entry).
             uint32_t cur = ext2_entry_size(e->name_len);
@@ -907,8 +958,7 @@ static int ext2_try_dir_block(uint32_t block, uint32_t inode_num,
             ne->name_len = (uint8_t)name_len;
             ne->file_type = file_type;
             memcpy(ne->name, name, name_len);
-            ext2_write_block(block, buf);
-            return 1;
+            return (ext2_write_block(block, buf) == 0) ? 1 : -1;
         }
         off += rec;
     }
@@ -924,7 +974,7 @@ static int ext2_dir_append_block(uint32_t dir_inode, uint32_t newblk) {
             d2.i_block[i] = newblk;
             d2.i_size += block_size;
             d2.i_blocks = ext2_count_blocks(&d2);
-            ext2_write_inode(dir_inode, &d2);
+            if (ext2_write_inode(dir_inode, &d2) != 0) return -1;
             return 0;
         }
     }
@@ -934,7 +984,7 @@ static int ext2_dir_append_block(uint32_t dir_inode, uint32_t newblk) {
         d2.i_block[12] = indblk;
         unsigned char zb[4096];
         memset(zb, 0, sizeof(zb));
-        ext2_write_block(indblk, zb);
+        if (ext2_write_block(indblk, zb) != 0) return -1;
     }
     uint32_t* ind2 = (uint32_t*)kmalloc(block_size);
     if (!ind2) return -1;
@@ -943,12 +993,13 @@ static int ext2_dir_append_block(uint32_t dir_inode, uint32_t newblk) {
     for (uint32_t i = 0; i < block_size / 4; i++) {
         if (!ind2[i]) { ind2[i] = newblk; placed = 1; break; }
     }
-    if (placed) ext2_write_block(d2.i_block[12], (unsigned char*)ind2);
+    int ref_ok = 1;
+    if (placed && ext2_write_block(d2.i_block[12], (unsigned char*)ind2) != 0) ref_ok = 0;
     kfree(ind2);
-    if (!placed) return -1;
+    if (!placed || !ref_ok) return -1;
     d2.i_size += block_size;
     d2.i_blocks = ext2_count_blocks(&d2);
-    ext2_write_inode(dir_inode, &d2);
+    if (ext2_write_inode(dir_inode, &d2) != 0) return -1;
     return 0;
 }
 
@@ -993,7 +1044,13 @@ static int ext2_dir_add_entry(uint32_t dir_inode, uint32_t inode_num,
     e->name_len = (uint8_t)name_len;
     e->file_type = file_type;
     memcpy(e->name, name, name_len);
-    ext2_write_block(newblk, buf);
+    // v38.159: the new directory block must be on the medium before the inode
+    // points at it; a refused write fails the add instead of leaving a
+    // directory whose entry lives only in RAM.
+    if (ext2_write_block(newblk, buf) != 0) {
+        ext2_free_block(newblk);
+        return -1;
+    }
     if (ext2_dir_append_block(dir_inode, newblk) != 0) {
         ext2_free_block(newblk);
         return -1;
@@ -1043,7 +1100,9 @@ static void ext2_rm_inode(uint32_t inode_num) {
         ext2_free_block(inode.i_block[13]);
         inode.i_block[13] = 0;
     }
-    ext2_write_inode(inode_num, &inode);
+    // Release path (void by design): the free below still has to happen, and a
+    // refused inode write only leaves stale bytes for fsck to report.
+    (void)ext2_write_inode(inode_num, &inode);
     ext2_free_inode(inode_num);
     // Zero the whole inode slot so a freed inode carries no stale mode/size/
     // blocks on disk — otherwise fsck reports "i_blocks is N, should be 0" and
@@ -1128,7 +1187,10 @@ static int ext2_unlink_entry(uint32_t parent_inode, const char* name, uint32_t* 
         e->name_len = 0;
         e->file_type = 0;
     }
-    ext2_write_block(blocks[found_block], buf);
+    if (ext2_write_block(blocks[found_block], buf) != 0) {
+        kfree(blocks);
+        return -1;
+    }
     kfree(blocks);
     return 0;
 }
@@ -1183,10 +1245,16 @@ uint32_t ext2_create_entry(uint32_t parent_inode, const char* name, uint8_t file
         e2->name_len = 2;
         e2->file_type = EXT2_FT_DIR;
         memcpy(e2->name, "..", 2);
-        ext2_write_block(blk, dblk);
+        if (ext2_write_block(blk, dblk) != 0) {
+            ext2_free_block(blk);
+            return 0;
+        }
     }
-    ext2_write_inode(inode_num, &inode);
-    
+    if (ext2_write_inode(inode_num, &inode) != 0) {
+        ext2_rm_inode(inode_num); // rollback
+        return 0;
+    }
+
     if (ext2_dir_add_entry(parent_inode, inode_num, name, file_type) != 0) {
         ext2_rm_inode(inode_num); // rollback
         return 0;
@@ -1196,7 +1264,10 @@ uint32_t ext2_create_entry(uint32_t parent_inode, const char* name, uint8_t file
         ext2_inode_t pinode;
         if (ext2_read_inode(parent_inode, &pinode) == 0) {
             pinode.i_links_count++;
-            ext2_write_inode(parent_inode, &pinode);
+            // v38.159: the parent's link count is part of the create — if it
+            // did not reach the medium, the entry must not be reported as
+            // created.
+            if (ext2_write_inode(parent_inode, &pinode) != 0) return 0;
         }
     }
     return inode_num;
@@ -1215,7 +1286,7 @@ int ext2_remove_entry(uint32_t parent_inode, const char* name) {
         ext2_inode_t pinode;
         if (ext2_read_inode(parent_inode, &pinode) == 0 && pinode.i_links_count > 0) {
             pinode.i_links_count--;
-            ext2_write_inode(parent_inode, &pinode);
+            if (ext2_write_inode(parent_inode, &pinode) != 0) return -1;
         }
     }
     ext2_rm_inode(victim);

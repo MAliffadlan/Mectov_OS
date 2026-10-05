@@ -140,7 +140,7 @@ void set_current_dir(int dir);
 void vfs_init();
 
 // Simpan/load dari ATA disk
-void vfs_save();
+int vfs_save();   // v38.159: 0 = persisted, -1 = the medium refused the save
 int vfs_load();
 
 // Operasi node

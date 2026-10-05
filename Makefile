@@ -222,6 +222,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/lseekfiledemo_mct.o \
        $(OBJ_DIR)/pollselectdemo_mct.o \
        $(OBJ_DIR)/fat32demo_mct.o \
+       $(OBJ_DIR)/wfiledemo_mct.o \
        $(OBJ_DIR)/rusthello_mct.o \
        $(OBJ_DIR)/demandtest_mct.o \
        $(OBJ_DIR)/segvtest_mct.o \
@@ -408,6 +409,10 @@ pollselectdemo.mct: apps/pollselectdemo.c $(MCT_LIBC_H)
 fat32demo.mct: apps/fat32demo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/fat32demo.c fat32demo.mct
 
+# v38.159: reports the write syscalls' own return values — see scripts/wfail_test.py.
+wfiledemo.mct: apps/wfiledemo.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/wfiledemo.c wfiledemo.mct
+
 # Rust Ring 3 app: freestanding no_std, built via rustc (build_rust_mct.py
 # finds rustc in ~/.cargo/bin when it is not on PATH).
 rusthello.mct: apps/rusthello.rs scripts/build_rust_mct.py
@@ -565,6 +570,9 @@ $(OBJ_DIR)/pollselectdemo_mct.o: pollselectdemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/fat32demo_mct.o: fat32demo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 fat32demo.mct $(OBJ_DIR)/fat32demo_mct.o
+
+$(OBJ_DIR)/wfiledemo_mct.o: wfiledemo.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 wfiledemo.mct $(OBJ_DIR)/wfiledemo_mct.o
 
 $(OBJ_DIR)/rusthello_mct.o: rusthello.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 rusthello.mct $(OBJ_DIR)/rusthello_mct.o
@@ -1083,6 +1091,15 @@ check64: iso64 blkdisk.img ext2test.img
 	python3 scripts/fs_test.py && \
 	python3 scripts/cons_test.py && python3 scripts/gui_test.py
 
+# Medium write-failure propagation (v38.159, audit report F1). Control mode
+# proves a healthy medium still works end to end; inject mode wraps the FAT32
+# image in QEMU's blkdebug filter (every write_aio -> EIO) and requires the
+# guest to report the refusal instead of reporting success. Two boots; the
+# fixture is created/seeded on demand (scripts/wfail_test.py).
+check-wfail: iso
+	python3 scripts/wfail_test.py --mode control
+	python3 scripts/wfail_test.py --mode inject
+
 # M11 fixture: deterministic ATA disk (scripts/mk_blkdisk.py is idempotent).
 blkdisk.img:
 	python3 scripts/mk_blkdisk.py $@
@@ -1093,7 +1110,7 @@ ext2test.img:
 	python3 scripts/mk_ext2disk.py $@
 
 .PHONY: all all32 all64 clean clean_all clean64 check check-quick iso qvm \
-        myos64 iso64 check64 \
+        myos64 iso64 check64 check-wfail \
         check-q3 check-q3tgl check-q3play check-q3vm check-q3arena check-q3retail \
         check-q3vis check-q3heavy check-q3jump check-q3viewmodel check-q3hud \
         check-q3sky check-q3cull check-virtiogpu

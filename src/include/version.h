@@ -81,7 +81,25 @@
 // not move at all. That defect is named here and in the README row, not
 // hidden: the check asserts the level's palette exactly and its covered area
 // to within 1%, and reports the warm-bucket split it sees.
-// 150-157 are spoken for (see above); 158 is the next free number.
-#define OS_VERSION "38.158"
+// v38.159: write errors stopped being swallowed — finding F1 of the audit
+// report (docs/audit/architecture-review-2026-10-04.md). The root cause sat one
+// layer below where the report placed it: ata_write_sectors_drive_io() and
+// ata_write_sector_drive_io() polled only BSY/DRQ and never read ERR/DF in the
+// status register, so a write command that completed WITH AN ERROR still looked
+// like success. ata_status_error() now checks the status register after the
+// command completes on all three write paths (multi-sector PIO, single-sector
+// PIO, DMA) and returns -1; ext2/fat32 write helpers became int and every
+// internal caller (bitmaps, dirents, FAT copies, superblock/inode sync) checks
+// and rolls back; vfs_save() and the VFS data path propagate the refusal to the
+// syscall's return value instead of storing a size for bytes that never landed.
+// Release-only paths (free_block/free_chain/...) still log and continue by
+// design — refusing to free during recovery would leak worse.
+// Proof: scripts/wfail_test.py + apps/wfiledemo.c — with QEMU blkdebug refusing
+// every write_aio (errno EIO) the pre-fix guest printed "WFILE write ok" while
+// the medium held nothing; the post-fix guest reports the failure (write
+// ok=False, WFILE create FAILED) and mtools confirms no file on the medium. The
+// no-injection control boot stays green. `make check-wfail` runs both.
+// 150-158 are spoken for (see above); 159 is the next free number.
+#define OS_VERSION "38.159"
 
 #endif

@@ -17,7 +17,7 @@ on:
 #   browser-net    -> browser HTTP + hostname/gateway + POSIX socket + poll/select
 #   doom-rust      -> windowed DOOM, Rust app, ASLR (2 boots), fsync/mmap/lseek
 #   quake3         -> ioquake3 engine core on the MECTOV_Q3=1 ISO variant
-#   storage        -> FAT32/mount/AHCI/xHCI/VirtIO/bigread-DMA/iocache
+#   storage        -> FAT32/mount/AHCI/xHCI/VirtIO/bigread-DMA/iocache/write-failure
 #   selftest       -> watchdogs, TLB shootdown, multi-core panic (if: always())
 #   kvm            -> KVM 4-core fork/FPU (skips itself when /dev/kvm is absent)
 #   config-matrix  -> unchanged 12-combo boot+fork matrix on the artifacts
@@ -668,6 +668,25 @@ jobs:
           # Cached reads must beat cold disk reads by >= 4x (iobench's own
           # verdict); exercises the write-through + save-skip path.
           python3 scripts/iocache_test.py --timeout 300
+
+      - name: Medium write-failure propagation — control (TCG)
+        run: |
+          # v38.159 (audit F1): apps/wfiledemo.c writes 512 bytes to /fat32 and
+          # prints what the syscalls returned; the host reads the file back with
+          # mtools. The control boot must show write + read-back + medium all
+          # agreeing. It seeds its own fixture (--fat32 fat32_wfail.img) so the
+          # job's empty-scratch fat32.img is never touched.
+          python3 scripts/wfail_test.py --mode control --timeout 240 --fat32 fat32_wfail.img
+
+      - name: Medium write-failure propagation — blkdebug EIO injection (TCG)
+        run: |
+          # The same boot with the FAT32 image wrapped in QEMU's blkdebug
+          # filter: every write_aio is refused with errno EIO while reads stay
+          # normal. The guest must report the refusal to the writer (no "WFILE
+          # write ok") and mtools must find no file on the medium. Before
+          # v38.159 this boot reported success; the step fails if the false
+          # success ever comes back.
+          python3 scripts/wfail_test.py --mode inject --timeout 240 --fat32 fat32_wfail.img
 
   selftest:
     needs: build

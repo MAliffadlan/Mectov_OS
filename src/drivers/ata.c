@@ -56,6 +56,39 @@ static int ata_no_drive(int drive) {
     uint8_t st = inb(base + 7);
     return (st == 0x00 || st == 0xFF);
 }
+// v38.159: a command can COMPLETE and still have failed — the drive reports it
+// in the Status register (bit 0 ERR = aborted command, bit 5 DF = device
+// fault) instead of by timing out. The polling loops here only ever looked at
+// BSY/DRQ, so a device that refused a write (QEMU with a failing block backend,
+// a real drive with a bad sector) looked like a successful write, and every
+// layer above reported success.
+//
+// Only consulted AFTER a command completed (BSY clear); a device clears these
+// bits when it accepts the next command, so a stale error from one write does
+// not leak into the next successful one.
+static int ata_status_error(int drive) {
+    uint16_t base = ata_base_port(drive);
+    return (inb(base + 7) & 0x21) ? 1 : 0;
+}
+
+// Every write the drive refused (ERR/DF after the command). The filesystem
+// layers use it as the backstop for release/scrub writes whose callers cannot
+// fail, and scripts/wfail_test.py asserts it against a medium that injects
+// write errors.
+volatile uint32_t ata_write_errors = 0;
+
+// One line per refused write, so a failing medium is named in the log instead
+// of showing up later as unexplained corruption. Rare by construction: the
+// happy path never reaches it.
+static void ata_note_write_error(int drive, unsigned int lba) {
+    ata_write_errors++;
+    write_serial_string("[ATA] write refused by drive ");
+    write_serial_hex((uint32_t)drive);
+    write_serial_string(" at LBA ");
+    write_serial_hex(lba);
+    write_serial_string(" (status ERR/DF set)\n");
+}
+
 int ata_wait_bsy() { return ata_wait_bsy_drive(0); }
 int ata_wait_drq() { return ata_wait_drq_drive(0); }
 
@@ -285,6 +318,12 @@ static int ata_write_sectors_drive_io(int drive, unsigned int lba, int count, co
     }
     outb(base + 7, 0xE7);   // CACHE FLUSH
     ata_wait_bsy_drive(drive);
+    // v38.159: the command completed — ask whether the DRIVE accepted it.
+    if (ata_status_error(drive)) {
+        ata_note_write_error(drive, lba);
+        spin_unlock_irqrestore(&ata_lock, ata_eflags);
+        return -1;
+    }
     spin_unlock_irqrestore(&ata_lock, ata_eflags);
     return 0;
 }
@@ -484,6 +523,15 @@ static int ata_dma_transfer(int drive, unsigned int lba, int count,
     if (is_write) {
         outb(base + 7, 0xE7);                // CACHE FLUSH after WRITE DMA
         ata_wait_bsy_drive(drive);
+        // v38.159: the BMIDE error bits above only describe the CONTROLLER; a
+        // drive that refused the command reports it in its own status
+        // register, which used to be read by nobody. Without this the DMA path
+        // handed a refused write back to the caller as success.
+        if (ata_status_error(drive)) {
+            ata_note_write_error(drive, lba);
+            outb(bm + BMIDE_STATUS, 0x06);
+            return -1;
+        }
     }
     ata_wait_bsy_drive(drive);
     return 0;
@@ -545,6 +593,12 @@ static int ata_write_sector_drive_io(int drive, unsigned int lba, unsigned char*
     int wc = 256;
     __asm__ volatile("cld; rep outsw" : "+S"(pw), "+c"(wc) : "d"(base) : "memory");
     outb(base + 7, 0xE7); ata_wait_bsy_drive(drive);
+    // v38.159: same completion check as the multi-sector path above.
+    if (ata_status_error(drive)) {
+        ata_note_write_error(drive, lba);
+        spin_unlock_irqrestore(&ata_lock, ata_eflags);
+        return -1;
+    }
     spin_unlock_irqrestore(&ata_lock, ata_eflags);
     return 0;
 }
