@@ -1,6 +1,6 @@
 # Memory Management Architecture
 
-Mectov OS implements a two-tier memory manager comprising a Physical Memory Manager (PMM) and a Virtual Memory Manager (VMM), featuring two-level x86 paging, process heap isolation, and page table safety guarantees.
+Mectov OS implements a two-tier memory manager comprising a Physical Memory Manager (PMM) and a Virtual Memory Manager (VMM), featuring **PAE 3-level x86 paging with 64-bit PTEs and NX (W^X)** since v38.49, process heap isolation, and page table safety guarantees. (The intro said "two-level x86 paging" until v38.161; the description two sections below has been the accurate one since the PAE migration.)
 
 ---
 
@@ -11,8 +11,9 @@ Mectov OS implements a two-tier memory manager comprising a Physical Memory Mana
    - Uses a bit array (`pmm_bitmap[]`) where `0` represents a free page and `1` represents an allocated page.
 
 2. **Memory Map Parsing**:
-   - `init_mem(uint32_t mem_size)` parses the Multiboot memory map provided by GRUB.
-   - Computes total pages: `total_pages = (mem_size + 4095) / 4096`.
+   - `init_mem(uint32_t mem_size)` takes the *scalar* size the caller read from the Multiboot **header** (`mem_lower`/`mem_upper`-derived, see `kernel.c`); it does **not** walk the Multiboot mmap array.
+   - Computes total pages by flooring: `total_pages = mem_size / PAGE_SIZE`.
+   - The distinction has teeth (v38.156): RAM size and the *mapped span* are different quantities, and the ACPI table bound bug lived exactly in that gap — a table pointer is only valid if paging_init() mapped it, not merely if it fits in RAM.
    - Reserves the first 1MB of physical memory (BIOS/IVT/EBDA/VGA MMIO) and the kernel executable code region (`_kernel_start` to `_kernel_end`).
 
 3. **Allocation API**:
@@ -47,7 +48,7 @@ Mectov OS implements a two-tier memory manager comprising a Physical Memory Mana
    - `task_cleanup()` switches the active CPU `CR3` to the kernel boot page directory (`tasks[0].page_dir`) *before* invoking `vmm_free_address_space()`.
 
 2. **Ext2 VFS Traversal Bounds Check (`src/sys/ext2.c`)**:
-   - Validates node indices (`new_dir >= 0` and `new_file >= 0`) during Ext2 VFS tree population to prevent array underflow writes (`fs_nodes[-1]`) when maximum VFS node limit (64) is reached.
+   - Validates node indices (`new_dir >= 0` and `new_file >= 0`) during Ext2 VFS tree population to prevent array underflow writes (`fs_nodes[-1]`) when the VFS node limit is reached. That limit is `MAX_NODES = 2048` (`src/include/vfs.h`; layout v5 since v38.141) — the 64 quoted here until v38.161 was the pre-v38.23 value.
 
 ---
 

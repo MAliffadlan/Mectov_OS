@@ -46,8 +46,17 @@ SECTIONS {
         return 1
 
     # 3. Link
+    # --no-warn-rwx-segments (v38.161, audit F10): GNU ld 2.39+ warns once per
+    # flat app image that a LOAD segment is RWX. That is intentional here and
+    # already documented (docs/architecture/memory.md): W^X covers user
+    # heap/stack/mmap, while a loaded .mct keeps its text executable because
+    # there is no dynamic linker to split segments. The 36 notes per clean
+    # build were not defects, but they made the project's "0 warnings" claim
+    # unreadable — the 64-bit linkers already pass this flag; the 32-bit ones
+    # now do too.
     try:
-        subprocess.run(["ld", "-m", "elf_i386", "-T", ld_file, o_file, "-o", elf_file], check=True)
+        subprocess.run(["ld", "-m", "elf_i386", "-T", ld_file, o_file, "-o", elf_file,
+                        "--no-warn-rwx-segments"], check=True)
     except subprocess.CalledProcessError:
         print("[!] Linking failed!")
         return 1

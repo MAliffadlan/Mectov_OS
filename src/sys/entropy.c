@@ -18,7 +18,12 @@
 #include "../include/utils.h"
 #include "../include/msr.h"
 
-#define CHACHA_ROUNDS 8
+// v38.161 (audit F8): this counter is DOUBLE rounds. Each iteration below runs
+// one column round and one diagonal round, so 8 here is the full 16-round
+// ChaCha permutation — the box is stronger than the historical "ChaCha8" name
+// implied, and the name was the only thing wrong with it. Spell the unit out
+// so a future reader cannot lower it thinking they are setting 8 rounds.
+#define CHACHA_DOUBLE_ROUNDS 8
 #define POOL_WORDS 8
 
 static uint32_t pool[POOL_WORDS];
@@ -53,7 +58,7 @@ static void chacha_block(const uint32_t key[8], const uint32_t ctr[4],
 
     uint32_t w[16];
     for (int i = 0; i < 16; i++) w[i] = x[i];
-    for (int r = 0; r < CHACHA_ROUNDS; r++) {
+    for (int r = 0; r < CHACHA_DOUBLE_ROUNDS; r++) {
         QR(w[0], w[4], w[8], w[12]);
         QR(w[1], w[5], w[9], w[13]);
         QR(w[2], w[6], w[10], w[14]);
@@ -159,7 +164,17 @@ int get_random_bytes(void* buf, uint32_t n) {
 }
 
 uint32_t get_random_u32(void) {
+    // v38.161 (audit F8): a caller that ran in the microseconds before
+    // entropy_init() finished used to get a hard 0 — a *constant* where the
+    // caller asked for a random value (ASLR and the first TCP ISN both call
+    // this). Retry first, because seeding only needs a moment; if the pool is
+    // still unseeded, fall back to a TSC-mixed value that is never constant
+    // and never zero, and let the next call pick up real DRBG output.
     uint32_t w = 0;
-    if (get_random_bytes(&w, 4) != 0) return 0;
-    return w;
+    for (int t = 0; t < 64; t++) {
+        if (get_random_bytes(&w, 4) == 0) return w;
+    }
+    uint32_t tsc = read_tsc();
+    w = tsc ^ (tsc >> 13) ^ add_counter ^ 0x9E3779B9u;
+    return w ? w : 0xA5A5A5A5u;
 }

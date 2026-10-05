@@ -74,17 +74,28 @@ def dump_serial(path, label, lines=40):
 def verify_ext2_seed(ext2_img):
     """Fail fast, with a clear reason, when doom1.wad is missing/truncated in
     the /ext2 image — historically the #1 confounder for 'never entered game
-    loop'. Best-effort: silently skipped when debugfs is unavailable."""
+    loop'.
+
+    v38.161 (audit F6): this is a GATE, not a courtesy. Until v38.161 it
+    printed [skip] and returned when debugfs was missing or failed, which meant
+    the one suite that needs it silently lost the discrimination it exists for
+    — a gate that cannot fail is a gate that cannot protect. debugfs ships in
+    e2fsprogs (already required for mkfs.ext2) and is now in check.py's TOOLS
+    preflight, so a host that reaches this function has it; if that assumption
+    is ever wrong, say so loudly instead of quietly testing less.
+    """
     if shutil.which("debugfs") is None:
-        print("[skip] debugfs unavailable — seed check bypassed")
-        return
+        print("[FAIL] cannot verify the DOOM seed: debugfs is not installed")
+        print("       install e2fsprogs (it provides debugfs, mkfs.ext2 and")
+        print("       mkfs.fat's siblings) — see .github/workflows/build-boot-test.yml")
+        sys.exit(2)
     try:
         r = subprocess.run(
             ["debugfs", "-R", "stat /doom1.wad", ext2_img],
             capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        print("[skip] debugfs failed to run — seed check bypassed")
-        return
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"[FAIL] cannot verify the DOOM seed: debugfs did not run ({e})")
+        sys.exit(2)
     out = (r.stdout or "") + (r.stderr or "")
     m = re.search(r"Size:\s+(\d+)", out)
     if r.returncode != 0 or not m:

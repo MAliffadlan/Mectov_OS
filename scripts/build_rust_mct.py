@@ -10,8 +10,9 @@ provides the user stack.
 
 Compiler: rustc targeting `i686-unknown-uefi` (the only built-in freestanding
 32-bit x86 target with a prebuilt core; its C ABI is cdecl like every other
-i686 target). SSE/MMX are disabled via -C target-feature so no FPU state
-escapes (the kernel does not save it, matching -mno-sse -mno-mmx for C apps).
+i686 target). SSE is disabled via -C target-feature so no FPU state escapes
+(the kernel does not save it, matching -mno-sse -mno-mmx for C apps); the
+earlier `-mmx` in that list was a rustc warning, not a feature (v38.161).
 That target decorates extern "C" symbols with a leading underscore, so the
 entry symbol is `__start` — the script resolves the real name from nm.
 
@@ -47,16 +48,27 @@ def build_app(rs_file, output_mct):
     bin_file = f"{base_name}.bin"
     ld_file = f"{base_name}.ld"
 
-    # 1. Compile: freestanding no_std object, no unwind, no SSE/MMX. The
-    #    crate is compiled as a `lib` so `_start` is a plain exported symbol
-    #    (a bin crate emits an undefined `_start` expecting a crt0 shim).
+    # 1. Compile: freestanding no_std object, no unwind, no SSE. The crate is
+    #    compiled as a `lib` so `_start` is a plain exported symbol (a bin
+    #    crate emits an undefined `_start` expecting a crt0 shim).
+    #    v38.161 (audit F10): `-mmx` is gone — rustc warned on every clean
+    #    build that "mmx" is an unknown/unstable target-feature, and `-sse`
+    #    already excludes it. MAKEFLAGS is dropped from the environment for
+    #    the same release's other warning: make -jN exports a jobserver FDs
+    #    pair that rustc cannot use, so it printed "jobserver ... Bad file
+    #    descriptor" on every incremental build and silently lost the
+    #    parallelism it was handed. Running rustc without those variables is
+    #    the fix; there is one rustc invocation per build, so no parallelism
+    #    is actually lost.
     rustc = find_rustc()
+    rustc_env = {k: v for k, v in os.environ.items()
+                 if k not in ("MAKEFLAGS", "MFLAGS", "CARGO_MAKEFLAGS")}
     try:
         subprocess.run(
             [rustc, "--target", "i686-unknown-uefi", "--crate-type", "lib",
              "--emit", "obj", "-C", "panic=abort", "-C", "opt-level=0",
-             "-C", "target-feature=-mmx,-sse", rs_file, "-o", o_file],
-            check=True,
+             "-C", "target-feature=-sse", rs_file, "-o", o_file],
+            check=True, env=rustc_env,
         )
     except subprocess.CalledProcessError:
         print("[!] rustc failed!")
@@ -91,7 +103,8 @@ SECTIONS {{
         pass
     try:
         subprocess.run(
-            ["ld", "-m", "elf_i386", "-e", entry_sym, "-T", ld_file, o_file, "-o", elf_file],
+            ["ld", "-m", "elf_i386", "-e", entry_sym, "-T", ld_file, o_file, "-o", elf_file,
+             "--no-warn-rwx-segments"],
             check=True,
         )
     except subprocess.CalledProcessError:

@@ -81,6 +81,20 @@ void wm_lock_acquire(void) {
 
 void wm_lock_release(void) {
     if (wm_lock_depth > 1) { wm_lock_depth--; return; }
+    // v38.161 (audit F9): depth 0 means this caller is releasing a lock it
+    // never took. The old code cleared the lock and restored the flags
+    // anyway, which would drop ANOTHER task's critical section silently.
+    // Report it (throttled — an unbalanced pair can be self-sustaining) and
+    // change nothing: the lock state we do not own is not ours to clear.
+    if (wm_lock_depth <= 0) {
+        static uint32_t wm_unbalanced_last_ms = 0;
+        uint32_t now = get_ticks();
+        if ((uint32_t)(now - wm_unbalanced_last_ms) >= 2000) {
+            wm_unbalanced_last_ms = now;
+            write_serial_string("[WATCH] wm-unbalanced-release (depth=0)\n");
+        }
+        return;
+    }
     wm_lock_depth = 0;
     wm_lock_owner = -1;
     spin_unlock_irqrestore(&wm_lock, wm_eflags);

@@ -19,7 +19,7 @@ Mectov OS features a preemptive priority Round-Robin task scheduler capable of m
    - `rq[MAX_CPUS]`, one FIFO array of tids per core, guarded by `task_lock`.
    - A task is queued iff `tasks[tid].rq_cpu >= 0`. RUNNING members are only ever the current task of that CPU; pickers/stealers only take READY members, so a task can never execute on two CPUs at once.
    - `current_task[MAX_CPUS]` tracks the active task per core (`get_cid()`).
-   - Supports up to `MAX_TASKS = 32` concurrent task slots.
+   - Supports up to `MAX_TASKS = 64` concurrent task slots (`src/sys/task.c`; the 32 published here until v38.161 was stale — the limit was raised with the GDT TLS coupling, and the README's v38.44 row already said 64). `MAX_CPUS` is 16.
 
 3. **Idle Tasks**: Task 0 (the kernel main loop) is the BSP's idle, pinned to runqueue 0. Each Application Processor gets its own pinned Ring 0 idle task (`create_idle_task`, `ap_idle` hlt-park) during `init_tasking()`, so an empty queue parks the core instead of stealing the BSP's main loop.
 

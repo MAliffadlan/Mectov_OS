@@ -197,7 +197,11 @@ SUITES = [
 QUICK = {"boot", "fork", "procfs", "jobcontrol", "fputest", "fuzz",
          "iocache", "app_smoke", "doom", "thread", "cond", "usb"}
 
-TOOLS = ["qemu-system-i386", "mkfs.fat", "mkfs.ext2", "mcopy", "mmd"]
+# debugfs is not needed to build the images, but scripts/doom_test.py's seed
+# pre-flight requires it (v38.161, audit F6) — list it here so a host without
+# e2fsprogs fails the preflight instead of losing the check that names the
+# suite's own #1 confounder.
+TOOLS = ["qemu-system-i386", "mkfs.fat", "mkfs.ext2", "mcopy", "mmd", "debugfs"]
 
 
 def suite_entries(args):
@@ -224,8 +228,17 @@ def suite_entries(args):
 
 
 def kvm_available():
-    return (os.path.exists("/dev/kvm") and
-            os.access("/dev/kvm", os.R_OK | os.W_OK))
+    """Opening is the only honest probe (v38.161, audit F7). The other four
+    gates (kbd/heap/cons/gui) were migrated in a969f84 after CI showed that
+    /dev/kvm can exist — even look readable — and still fail to open, which
+    killed QEMU at startup and reported the symptom as a kernel failure. This
+    was the last exists()+access() copy; leaving it invited the next person to
+    copy *this* one."""
+    try:
+        os.close(os.open("/dev/kvm", os.O_RDWR))
+        return True
+    except OSError:
+        return False
 
 
 def preflight():

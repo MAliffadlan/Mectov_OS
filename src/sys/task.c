@@ -296,8 +296,11 @@ int task_cpu_count(void) { return rq_cpu_count(); }
 // tick). `arg` carries the caller's extra context (frame esp, stale runqueue,
 // attempted state, ...). Resolve the tags against the release that printed
 // them; a stall after a "dead-cur"/"create-skip" line is the v38.160
-// slot-reuse signature.
-#define WATCH_KINDS 8
+// slot-reuse signature. Kind 8 ("free-zombie") is the v38.161 audit-F11
+// correction: the reaper DOES run (kernel.c's 1 Hz BSP tick), so a zombie
+// whose parent is alive can be freed by timeout — observable here instead of
+// looking like a slot that leaked.
+#define WATCH_KINDS 9
 static void watch_log(int kind, const char* tag, int tid, int state, uint32_t arg) {
     static uint32_t last_ms[WATCH_KINDS] = {0};
     if (kind < 0 || kind >= WATCH_KINDS) kind = WATCH_KINDS - 1;
@@ -2869,6 +2872,12 @@ void task_reap_zombies(void) {
                            tasks[p].state == TASK_STATE_FREE ||
                            tasks[p].state == TASK_STATE_ZOMBIE);
         if (parent_gone || (now - tasks[i].zombie_since) > (uint32_t)zombie_reap_ms) {
+            // v38.161 (audit F11): make the reaper observable. This is why a
+            // FREE slot can still carry a zombie_since while its parent is
+            // alive — the parent never called waitpid() and the timeout
+            // expired. That is the exact shape the F0 probe6 dump showed;
+            // it is this function doing its documented job, not a leak.
+            if (!parent_gone) watch_log(8, "free-zombie", i, tasks[i].state, (uint32_t)p);
             tasks[i].state = TASK_STATE_FREE;
             num_tasks--;
         }

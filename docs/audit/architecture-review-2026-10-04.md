@@ -9,8 +9,24 @@ grounded. This report changes no code; it is a review artifact.
 **F0 is closed** (its app-level double unlock *and* the scheduler stall it had narrowed to, with the
 post-mortem evidence and a 90-round 4-core stress) — see the F0 and F1 sections for the diffs and the
 before/after evidence. The 2026-10-04 text below each of those sections stands as written (it is the
-record of what was observed then). Everything else in this report stands as written; the remaining
-findings (F2–F11) are untouched.
+record of what was observed then).
+
+**Status update (2026-10-06, v38.161):** the rest of the list is closed, and one finding was wrong.
+
+| Finding | Outcome (v38.161) |
+|---|---|
+| F2 | fixed — `scheduler.md` now says `MAX_TASKS = 64` |
+| F3 | fixed — `memory.md` and the README's current-capacity bullet say 2048 (`vfs.h`, layout v5) |
+| F4 | fixed — the `memory.md` intro says PAE 3-level with NX |
+| F5 | fixed — `init_mem` is documented as the scalar from the Multiboot header, flooring the page count, with the RAM-vs-mapped-span note |
+| F6 | fixed — a missing/failing `debugfs` is now a hard FAIL (exit 2) with an install hint, and `debugfs` is in `check.py`'s `TOOLS` preflight |
+| F7 | fixed — `check.py` decides KVM by `os.open("/dev/kvm", os.O_RDWR)`, matching the other four gates |
+| F8 | fixed — `CHACHA_DOUBLE_ROUNDS` names the unit; `get_random_u32()` retries before falling back to a non-constant TSC mix instead of returning 0 |
+| F9 | fixed — `wm_lock_release()` at depth 0 logs `[WATCH] wm-unbalanced-release` and changes nothing |
+| F10 | fixed — the rustc step runs without the make jobserver variables and without the bogus `-mmx`; the 32-bit app linkers pass `--no-warn-rwx-segments` (the 64-bit ones already did) |
+| F11 | **corrected, and both halves dissolve** — see the F11 section: `task_reap_zombies()` *is* called (the 2026-10-04 pass grepped only `src/`, and the call sites are in `kernel.c` at the tree root), and once it runs the dump detail it could not explain is the reaper doing its documented job |
+
+The F2–F11 sections below keep their original text as the record, with a short status line added.
 
 ---
 
@@ -226,7 +242,10 @@ existing gate would catch this. **The implemented fix is the stronger variant: t
 error check (see the status note above) means the refused write is now caught at its source, not
 just propagated, and the injection harness above is the gate the last sentence asked for.**
 
-### F2 — [Medium] `scheduler.md` advertises `MAX_TASKS = 32`; the kernel runs 64
+### F2 — [Medium] `scheduler.md` advertises `MAX_TASKS = 32`; the kernel runs 64 — **FIXED (v38.161)**
+
+`docs/architecture/scheduler.md` now states `MAX_TASKS = 64` (and `MAX_CPUS = 16`), with a note that
+the published 32 was stale since the GDT TLS coupling raise. Text below is the original record.
 
 `docs/architecture/scheduler.md:22` — "Supports up to `MAX_TASKS = 32` concurrent task slots" — versus
 `src/sys/task.c:22` — `#define MAX_TASKS 64`. The README (v38.44 row) already says 64, so the doc is
@@ -312,7 +331,28 @@ whole still prints 38 warning lines:
 **Fix:** run the rustc step with the jobserver variables blanked (or `-j1`), and drop or feature-gate the
 `mmx` target-feature.
 
-### F11 — [Low] `task_reap_zombies()` is dead code, and one dump detail from the F0 stall is explained by nothing in the tree
+### F11 — [Low] `task_reap_zombies()` is dead code, and one dump detail from the F0 stall is explained by nothing in the tree — **CORRECTED (v38.161): it is not dead, and the dump detail is its normal behaviour**
+
+**The 2026-10-05 text below is wrong on its first point, and that changes its second.** The claim
+"nothing in the tree calls it" came from `grep -rn "task_reap_zombies()" src/` — but the callers live
+in `kernel.c`, at the tree root, not under `src/`:
+
+- `kernel.c:650` — the Ring 3 framebuffer-takeover loop's 1 Hz tick;
+- `kernel.c:1005` — the desktop main loop's 1 Hz tick (`now - last_clock_tick >= 1000`), right next
+to `security_auto_lock_tick()`.
+
+So the reaper runs once per second on the BSP exactly as `task.h` documents, and
+`zombie_reap_ms` / `/proc/sys/zombie_reap_ms` are live. That also explains observation 2 without any
+missing path: the unjoined producer (tid 9) had exited into `ZOMBIE`, its parent (tid 5) was alive
+but stuck on tid 8 and so never called `waitpid()` for 9, and after the 15 s `zombie_reap_ms` timeout
+the reaper freed the slot — which is precisely the "explained by nothing in the tree" shape the
+text below describes. It was the reaper all along, doing its documented job (a working reaper frees a
+stuck *child*; it never wedges a *parent*, which is why it was never the F0 stall).
+v38.161 makes the behaviour observable rather than leaving it to inference: when the reaper frees a
+zombie **whose parent is still alive**, it logs a throttled
+`[WATCH] free-zombie tid=<n> state=<n> arg=<parent tid>` line (watch kind 8, ~2 s throttle per kind).
+
+The original (incorrect) text is kept below as the record.
 
 Found while root-causing F0 (2026-10-05). Two small, separate observations, recorded so the next
 reviewer does not have to rediscover them:
@@ -358,11 +398,11 @@ with IF=0, and `net_poll()` wraps itself).
 
 | Document | Claim | Code | Verdict |
 |---|---|---|---|
-| `docs/architecture/scheduler.md:22` | `MAX_TASKS = 32` | `src/sys/task.c:22` → 64 | **STALE** |
-| `docs/architecture/memory.md:50` | node limit 64 | `src/include/vfs.h:6` → 2048 (README says 256) | **STALE ×2** |
-| `docs/architecture/memory.md:3` | two-level x86 paging | `:29`, `:56` + `src/sys/vmm.c` (PAE 3-level) | **SELF-CONTRADICTION** |
-| `docs/architecture/memory.md:14` | `init_mem` parses the mmap | `src/sys/mem.c:124` (scalar `mem_size`) | **STALE** |
-| `docs/architecture/memory.md:15` | round-up to page count | `src/sys/mem.c:125` floors | **STALE** |
+| `docs/architecture/scheduler.md:22` | `MAX_TASKS = 32` | `src/sys/task.c:22` → 64 | **STALE → fixed v38.161** |
+| `docs/architecture/memory.md:50` | node limit 64 | `src/include/vfs.h:6` → 2048 (`VFS_LAYOUT_VERSION` 5); README's current-capacity bullet now says 2048 too | **STALE ×2 → fixed v38.161** |
+| `docs/architecture/memory.md:3` | two-level x86 paging | `:29`, `:56` + `src/sys/vmm.c` (PAE 3-level) | **SELF-CONTRADICTION → fixed v38.161** |
+| `docs/architecture/memory.md:14` | `init_mem` parses the mmap | `src/sys/mem.c:124` (scalar `mem_size`) | **STALE → fixed v38.161** |
+| `docs/architecture/memory.md:15` | round-up to page count | `src/sys/mem.c:125` floors | **STALE → fixed v38.161** |
 | `docs/kernel-locking.md` lock order | `task_lock > shell_lock > fd_lock > vfs_lock > blkcache_lock > ata_lock` | spot-checked: `task.c:1092` (cli-first), `fd.c:17`, `wm.c:73`, `shell_core.c`, `vfs.c` irqsave | **OK** |
 | `docs/architecture/scheduler.md` | per-CPU runqueues, `rq[MAX_CPUS]` | `src/sys/task.c:238` (`MAX_CPUS 16`), `schedule()` per CPU | **OK** |
 | `docs/drivers/network.md:85` | TCP capacity 16 (v38.44) | `src/include/net.h:84` (`TCP_MAX_CONNS 16`) | **OK** |
@@ -383,7 +423,9 @@ Checked because "28/28 green" only means something if the gates can fail.
   `KVM regressions skipped by default — add --kvm` (`scripts/check.py:208-213`).
 - **The biggest integrity gap is F0:** the one suite whose local and CI behaviour disagree is exactly
   the one exercising cross-core synchronisation, and CI's version of it is pinned to a single core.
-- **Weak spots found:** F6 (a pre-flight that disables itself) and F7 (the weaker KVM probe). Only
+- **Weak spots found:** F6 (a pre-flight that disables itself) and F7 (the weaker KVM probe) —
+  **both fixed in v38.161**: a missing `debugfs` now fails the DOOM suite instead of skipping the
+  seed check, and `check.py` opens `/dev/kvm` instead of testing `exists()`+`access()`. Only
   one suite in the tree carries fewer than three `assert`/`PASS`/`FAIL` markers —
   `scripts/font_render_test.py` (2) — and it is not in the fast tier, so it was **not** examined in
   this pass; that is a follow-up, not a finding.
@@ -419,8 +461,12 @@ Checked because "28/28 green" only means something if the gates can fail.
 
 These are in the project's own release notes; the review confirms they are documented, not hidden:
 the 12-extra-face backface-reject flake (~1 boot in 2, `q3hud` reports the split); the 13–16 ms/frame
-left in the present/composite path; no sound since v38.142; 12 version-table rows in the README whose
-pipes break the table; `MAX_TASKS`/`MAX_NODES` caps documented in code; and the cross-core condvar race
+left in the present/composite path; no sound since v38.142; version-table rows in the README whose
+pipes break the table — **3 rows, fixed in v38.161** (v38.128's `map|clampmap|animMap` and
+`tcMod scroll|scale`, v38.50's `PCD|PWT`, v38.41's `OSFXSR|OSXMMEXCPT`). The "12 rows" figure this
+report first published was a scan artefact: it counted already-escaped `\|` sequences as separators,
+which the table renders correctly. A rescan for pipes whose predecessor is not a backslash is the
+honest count, and it is 3.); `MAX_TASKS`/`MAX_NODES` caps documented in code; and the cross-core condvar race
 behind F0 — **closed 2026-10-05 (v38.160)**: both of its defects are fixed, the CI `MCTOV_SMP=1` pin
 is gone, and the README §Testing table plus the CI step's own comment say what the step now proves
 (4-core condvar/mutex/condvar stress with a stall-signature assertion). The pin's history stays in the
@@ -437,19 +483,24 @@ v38.92 row because that is where a reader looking for "why was this pinned?" wil
    step is unpinned (`MCTOV_SMP=4`). The one loose end lives in F11.
 1. **F1 — done (2026-10-05).** Write errors now propagate out of the ATA driver, `ext2_write_block()` /
    `fat32_write_sectors()` and the VFS data path, with `scripts/wfail_test.py` as a deterministic
-   refusal gate; see the F1 section for the evidence table.
-2. **F2/F3/F5** — correct the four stale numbers/claims; the docs are this project's only spec.
-3. **F7** — finish the `os.open()` migration in `scripts/check.py`.
-4. **F6** — make the DOOM seed pre-flight mandatory where `debugfs` exists, and fail loudly where it
-   does not, so the suite's own confounder can be named again.
-5. **F9** — assert lock balance in `wm_lock_release()` (or log when depth is 0).
-6. **F4** — one-line fix to the `memory.md` intro.
-7. **F10** — silence the two rustc warnings (jobserver + `mmx`) and reword the release-note claim to
-   "0 compiler warnings", which is what the build actually guarantees.
-7b. **F11** — decide whether the zombie reaper is live or dormant: call `task_reap_zombies()` from the
-   BSP main loop (its documented contract) or document it as dormant and drop the `zombie_reap_ms`
-   knob's promise. The second half of F11 (the `FREE` slot with a stale `zombie_since` in the F0 dump)
-   is an open reading question, not a known defect.
+   refusal gate; see the F1 section for the evidence table.2. **F2/F3/F5 — done (v38.161).** Corrected the stale numbers/claims in `scheduler.md`, `memory.md`
+   and the README's current-capacity bullet; the docs are this project's only spec.
+3. **F7 — done (v38.161).** `scripts/check.py` probes `/dev/kvm` by opening it.
+4. **F6 — done (v38.161).** The DOOM seed pre-flight fails loudly (exit 2) without `debugfs`, and
+   `debugfs` joined `check.py`'s `TOOLS` preflight so the missing tool is named there first.
+5. **F9 — done (v38.161).** `wm_lock_release()` at depth 0 logs `[WATCH] wm-unbalanced-release` and
+   leaves the lock state alone.
+6. **F4 — done (v38.161).** The `memory.md` intro now says PAE 3-level with NX.
+7. **F10 — done (v38.161).** The rustc step no longer inherits the make jobserver variables and no
+   longer names the unknown/unstable `mmx` feature; the 32-bit app linkers pass
+   `--no-warn-rwx-segments` (the 64-bit ones already did), so a clean build is now free of both the
+   jobserver note and the 36 linker notes — "0 warnings" means what it says.
+7b. **F11 — corrected (v38.161), not fixed: there was nothing to fix.** `task_reap_zombies()` is
+   called from `kernel.c`'s two 1 Hz BSP tick paths (lines 650 and 1005); the 2026-10-04 pass grepped
+   only `src/` and missed the root-level file. That also explains the `FREE` slot with a stale
+   `zombie_since`: the reaper freed it after the 15 s `zombie_reap_ms` timeout because the parent
+   never called `waitpid()`. v38.161 emits a throttled `[WATCH] free-zombie` line when that happens,
+   so the behaviour is observable in any future post-mortem instead of looking like a leak.
 8. Then the known-open work: present/composite path, backface defect, README table rows.
 
 ---

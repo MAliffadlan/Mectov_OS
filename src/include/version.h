@@ -159,6 +159,61 @@
 // unpinned (MCTOV_SMP=4) now that both bugs are fixed; the deep multi-round
 // stress stays a local command, documented in README.
 // 159 is spoken for; 160 is the next free number.
-#define OS_VERSION "38.160"
+// v38.161: the audit's remaining findings
+// (docs/audit/architecture-review-2026-10-04.md, F2-F11) are closed in one
+// pass — and one of them turned out to be wrong.
+//   F2  docs/architecture/scheduler.md said MAX_TASKS = 32; src/sys/task.c runs
+//       64 (MAX_CPUS is 16). Fixed.
+//   F3  The VFS node limit was quoted as 64 (memory.md) and 256 (README's
+//       v38.44 row). Both stale: src/include/vfs.h is 2048, layout v5 since
+//       v38.141. The README's current-capacity bullet says 2048 and points at
+//       the code now.
+//   F4  memory.md's intro promised "two-level x86 paging" while the same file
+//       documents the v38.49 PAE 3-level migration. Intro fixed.
+//   F5  memory.md said init_mem() walks the Multiboot mmap and rounds the page
+//       count up; the code takes the scalar mem_size from the Multiboot header
+//       and floors it (mem_size / PAGE_SIZE). Rewritten, with the v38.156
+//       RAM-vs-mapped-span lesson attached — that gap was a real boot bug.
+//   F6  scripts/doom_test.py's seed pre-flight printed [skip] and returned when
+//       debugfs was missing or failed, silently removing the discrimination it
+//       exists for (a missing/truncated doom1.wad was historically the #1
+//       "never entered game loop" confounder). It now FAILS (exit 2) with an
+//       install hint, and debugfs joined check.py's TOOLS preflight.
+//   F7  scripts/check.py was the last copy of the KVM probe that decided with
+//       exists()+os.access(); /dev/kvm can exist and still fail to open (the
+//       reason a969f84 migrated kbd/heap/cons/gui). It opens the node now.
+//   F8  src/sys/entropy.c's CHACHA_ROUNDS counter actually counted DOUBLE
+//       rounds (8 -> the full 16-round permutation), so the box was stronger
+//       than its name; the macro is CHACHA_DOUBLE_ROUNDS now. get_random_u32()
+//       also returned a hard 0 while the pool was unseeded — a constant where
+//       ASLR and the first TCP ISN asked for randomness; it retries, then
+//       falls back to a TSC-mixed value that is never constant and never zero.
+//   F9  src/gui/wm.c's wm_lock_release() decremented to 0 and cleared the lock
+//       unconditionally, so an unbalanced release could silently drop another
+//       task's critical section. Depth 0 now logs a throttled
+//       [WATCH] wm-unbalanced-release and changes nothing.
+//   F10 A "0 warning" clean build still printed 36 `ld: ... RWX permissions`
+//       notes (one per Ring 3 payload) plus two rustc warnings. The notes are
+//       intentional (W^X covers user heap/stack/mmap; a loaded .mct keeps its
+//       text executable) and the 64-bit linkers already passed
+//       --no-warn-rwx-segments — the 32-bit app linkers do too now. The rustc
+//       step no longer inherits MAKEFLAGS (rustc cannot use make's jobserver,
+//       which printed a "Bad file descriptor" note on every incremental build)
+//       and no longer names the unknown/unstable `mmx` target-feature.
+//   F11 CORRECTED, not fixed: the claim that task_reap_zombies() is dead code
+//       came from a grep of src/ only — the callers are in kernel.c, at both
+//       1 Hz BSP ticks (lines 650 and 1005). The reaper runs, so
+//       zombie_reap_ms and /proc/sys/zombie_reap_ms are live, and that also
+//       explains F11's "unexplained" dump detail: the FREE slot with a stale
+//       zombie_since was the reaper freeing a zombie whose parent never called
+//       waitpid(), after the 15 s timeout. A throttled [WATCH] free-zombie
+//       line (watch kind 8) now records it when it happens.
+// Also in this release: three README version rows carried unescaped `|` inside
+// code spans (v38.128's map|clampmap|animMap and tcMod scroll|scale, v38.50's
+// PCD|PWT, v38.41's OSFXSR|OSXMMEXCPT) — escaped now, so the table renders.
+// The "12 rows" the audit published was a scan artefact that counted already
+// escaped \| as separators.
+// 160 is spoken for; 161 is the next free number.
+#define OS_VERSION "38.161"
 
 #endif

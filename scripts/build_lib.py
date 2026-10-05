@@ -31,7 +31,8 @@ SECTIONS {
 
     try:
         subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-pie", "-fno-pic", "-static", "-O2", "-msoft-float", "-mno-80387", "-mno-sse", "-mno-mmx", "-DBUILDING_LIBC", "-s", "-I.", "-c", c_file, "-o", o_file], check=True)
-        subprocess.run(["ld", "-m", "elf_i386", "-T", ld_file, o_file, "-o", elf_file], check=True)
+        subprocess.run(["ld", "-m", "elf_i386", "-T", ld_file, o_file, "-o", elf_file,
+                        "--no-warn-rwx-segments"], check=True)
         subprocess.run(["objcopy", "-O", "binary", elf_file, bin_file], check=True)
     except subprocess.CalledProcessError:
         print("[!] Compilation failed!")
