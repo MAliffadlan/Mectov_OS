@@ -682,6 +682,12 @@ void vfs_init() {
         extern uint8_t _binary_nxtest_mct_start[];
         extern uint8_t _binary_nxtest_mct_end[];
         changed += vfs_update_file_if_needed("apps/nxtest.mct", (const char*)_binary_nxtest_mct_start, _binary_nxtest_mct_end - _binary_nxtest_mct_start);
+        // TLS 1.3 engine self-test (v38.162): RFC/NIST vectors, OpenSSL-made
+        // signature and certificate fixtures, and the X.509 path-building
+        // rule. Runs entirely offline, so it is a gate rather than a demo.
+        extern uint8_t _binary_tlsselftest_mct_start[];
+        extern uint8_t _binary_tlsselftest_mct_end[];
+        changed += vfs_update_file_if_needed("apps/tlsselftest.mct", (const char*)_binary_tlsselftest_mct_start, _binary_tlsselftest_mct_end - _binary_tlsselftest_mct_start);
         // Ring 3 direct-framebuffer demo (display-server foundation)
         extern uint8_t _binary_fbmap_mct_start[];
         extern uint8_t _binary_fbmap_mct_end[];
@@ -1001,6 +1007,10 @@ void vfs_init() {
     extern uint8_t _binary_hardening_test_mct_end[];
     vfs_create_file("apps/hardening_test.mct");
     vfs_write_file("apps/hardening_test.mct", (const char*)_binary_hardening_test_mct_start, _binary_hardening_test_mct_end - _binary_hardening_test_mct_start);
+    extern uint8_t _binary_tlsselftest_mct_start[];
+    extern uint8_t _binary_tlsselftest_mct_end[];
+    vfs_create_file("apps/tlsselftest.mct");
+    vfs_write_file("apps/tlsselftest.mct", (const char*)_binary_tlsselftest_mct_start, _binary_tlsselftest_mct_end - _binary_tlsselftest_mct_start);
     extern uint8_t _binary_nxtest_mct_start[];
     extern uint8_t _binary_nxtest_mct_end[];
     vfs_create_file("apps/nxtest.mct");

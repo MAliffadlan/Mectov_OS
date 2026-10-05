@@ -420,6 +420,17 @@ jobs:
           # the test asserts bases differ across boots AND within one boot.
           python3 scripts/aslr_test.py --timeout 300
 
+      - name: TLS 1.3 engine self-test — primitives, X.509, path building (TCG)
+        run: |
+          # v38.162: `run /apps/tlsselftest.mct` checks the Ring-3 TLS library
+          # against RFC/NIST vectors and OpenSSL-made signature and certificate
+          # fixtures, and asserts the X.509 rule both accepts the chain it was
+          # given and refuses the near-misses (wrong host, wrong CA, expired,
+          # tampered signature, missing issuer). No network is involved, so
+          # this job catches a regression in the crypto or the verifier that
+          # an end-to-end HTTPS test would mask as "could not connect".
+          python3 scripts/tls_selftest.py --timeout 360
+
   quake3:
     needs: build
     runs-on: ubuntu-latest

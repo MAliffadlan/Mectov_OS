@@ -191,6 +191,14 @@ SUITES = [
     ("ulimit",           "ulimit_test.py",            360),
     ("bigread",          "bigread_test.py",           420),
     ("aslr",             "aslr_test.py",              300),
+    # TLS 1.3 engine (v38.162): boots, opens the Terminal and runs
+    # `run /apps/tlsselftest.mct`, which needs no network at all — every input
+    # is a committed fixture, and the suite asserts the guest's own tally
+    # ("checks N, failures 0") rather than just an exit status. Offline on
+    # purpose: the interesting failure in a TLS stack is "accepted the wrong
+    # thing", and that cannot be tested against a live server that changes
+    # under you.
+    ("tls",              "tls_selftest.py",            360),
 ]
 
 # Fast, high-signal subset for local iteration (~6-8 min TCG).

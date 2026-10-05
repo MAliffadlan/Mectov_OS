@@ -210,6 +210,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/tmpfsdemo_mct.o \
        $(OBJ_DIR)/fputest_mct.o \
        $(OBJ_DIR)/hardening_test_mct.o \
+       $(OBJ_DIR)/tlsselftest_mct.o \
        $(OBJ_DIR)/nxtest_mct.o \
        $(OBJ_DIR)/fbmap_mct.o \
        $(OBJ_DIR)/execdemo_mct.o \
@@ -376,6 +377,18 @@ fputest.mct: apps/fputest.c $(MCT_LIBC_H)
 hardening_test.mct: apps/hardening_test.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/hardening_test.c hardening_test.mct
 
+# TLS engine self-test (v38.162). It links the library sources directly instead
+# of a prebuilt libc, so the guest checks the same object code the browser will
+# use at runtime. Generated fixtures + the trust store are checked in, so this
+# rule needs no network and no openssl at build time.
+TLS_LIB_SRCS = apps/lib/tls/tls_hash.c apps/lib/tls/tls_cipher.c \
+               apps/lib/tls/tls_pubkey.c apps/lib/tls/asn1_x509.c \
+               apps/lib/tls/tls13.c
+TLS_LIB_HDRS = apps/lib/tls/tls.h apps/lib/tls/test_vectors.h
+
+tlsselftest.mct: apps/tlsselftest.c $(TLS_LIB_SRCS) $(TLS_LIB_HDRS) src/include/version.h
+	python3 scripts/build_mct.py apps/tlsselftest.c $(TLS_LIB_SRCS) tlsselftest.mct
+
 nxtest.mct: apps/nxtest.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/nxtest.c nxtest.mct
 
@@ -534,6 +547,9 @@ $(OBJ_DIR)/fputest_mct.o: fputest.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/hardening_test_mct.o: hardening_test.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 hardening_test.mct $(OBJ_DIR)/hardening_test_mct.o
+
+$(OBJ_DIR)/tlsselftest_mct.o: tlsselftest.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 tlsselftest.mct $(OBJ_DIR)/tlsselftest_mct.o
 
 $(OBJ_DIR)/nxtest_mct.o: nxtest.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 nxtest.mct $(OBJ_DIR)/nxtest_mct.o

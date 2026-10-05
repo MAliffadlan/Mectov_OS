@@ -6,14 +6,23 @@ import subprocess
 # Magic Number "MCT1"
 MCT_MAGIC = 0x4D435431
 
-def build_app(c_file, output_mct):
-    print(f"[*] Building {c_file} -> {output_mct}")
-    
-    base_name = os.path.splitext(c_file)[0]
-    o_file = f"{base_name}.o"
+def build_app(sources, output_mct):
+    """Compile and link one or more C sources into a flat .mct app image.
+
+    sources is a list. A single-source app is the common case (and the original
+    signature); multi-source exists for apps that bundle a library, such as
+    tlsselftest.mct, which links apps/lib/tls/*.c so the guest checks exercise
+    the same object code the browser will use at runtime.
+    """
+    if isinstance(sources, str):
+        sources = [sources]
+    print(f"[*] Building {' '.join(sources)} -> {output_mct}")
+
+    base_name = os.path.splitext(sources[0])[0]
     elf_file = f"{base_name}.elf"
     bin_file = f"{base_name}.bin"
     ld_file = f"{base_name}.ld"
+    o_files = [f"{os.path.splitext(s)[0]}.o" for s in sources]
     
     # 1. Create Linker Script
     # Ini memastikan entry point ada di offset 0 dan sections berurutan
@@ -39,11 +48,12 @@ SECTIONS {
     # soft-float baseline — e.g. fputest enables SSE for its inline asm
     # (with -mno-sse the compiler rejects %%xmm register names outright).
     extra_flags = os.environ.get("MCT_CFLAGS_EXTRA", "").split()
-    try:
-        subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic", "-static", "-O2", "-msoft-float", "-mno-80387", "-mno-sse", "-mno-mmx", "-I.", "-c", c_file, "-o", o_file] + extra_flags, check=True)
-    except subprocess.CalledProcessError:
-        print("[!] Compilation failed!")
-        return 1
+    for src, obj in zip(sources, o_files):
+        try:
+            subprocess.run(["gcc", "-m32", "-ffreestanding", "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-fno-pie", "-fno-pic", "-static", "-O2", "-msoft-float", "-mno-80387", "-mno-sse", "-mno-mmx", "-I.", "-c", src, "-o", obj] + extra_flags, check=True)
+        except subprocess.CalledProcessError:
+            print(f"[!] Compilation failed: {src}")
+            return 1
 
     # 3. Link
     # --no-warn-rwx-segments (v38.161, audit F10): GNU ld 2.39+ warns once per
@@ -55,7 +65,7 @@ SECTIONS {
     # unreadable — the 64-bit linkers already pass this flag; the 32-bit ones
     # now do too.
     try:
-        subprocess.run(["ld", "-m", "elf_i386", "-T", ld_file, o_file, "-o", elf_file,
+        subprocess.run(["ld", "-m", "elf_i386", "-T", ld_file] + o_files + ["-o", elf_file,
                         "--no-warn-rwx-segments"], check=True)
     except subprocess.CalledProcessError:
         print("[!] Linking failed!")
@@ -117,15 +127,18 @@ SECTIONS {
     print(f"    - Data/BSS Size: {data_size} bytes")
 
     # Cleanup temporary files
-    os.remove(o_file)
-     
+    for obj in o_files:
+        os.remove(obj)
+
     os.remove(bin_file)
     os.remove(ld_file)
     return 0
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python3 build_mct.py <source.c> <output.mct>")
+        print("Usage: python3 build_mct.py <source.c> [more.c ...] <output.mct>")
         sys.exit(1)
 
-    sys.exit(build_app(sys.argv[1], sys.argv[2]))
+    # The last argument is the output; everything before it is a source. That
+    # keeps the two-argument form byte-identical to the original call.
+    sys.exit(build_app(sys.argv[1:-1], sys.argv[-1]))

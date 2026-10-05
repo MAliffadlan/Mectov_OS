@@ -214,6 +214,44 @@
 // The "12 rows" the audit published was a scan artefact that counted already
 // escaped \| as separators.
 // 160 is spoken for; 161 is the next free number.
-#define OS_VERSION "38.161"
+// v38.162: a TLS 1.3 engine in Ring 3, written from the RFCs and checked
+// against them before anything was allowed to depend on it.
+//
+// apps/lib/tls/ is self-contained: SHA-256/384/512, HMAC, HKDF, ChaCha20,
+// Poly1305, AEAD_CHACHA20_POLY1305, AES-128-GCM, X25519, RSA PKCS#1 v1.5 +
+// PSS, ECDSA P-256/P-384, DER and X.509 parsing, and the record layer plus
+// handshake state machine. No new syscall and no kernel change: SYS_GETRANDOM
+// (117) supplies entropy, SYS_TCP_* moves bytes, and a failed getrandom aborts
+// the handshake rather than falling back to a weak RNG. Outgoing records are
+// split to fit net_tcp_send()'s 1400-byte clamp.
+//
+// The reason this release exists before an HTTPS browser does is the gate.
+// apps/tlsselftest.mct links the library sources directly and checks them with
+// no network at all: RFC 4231/5869/8439/7748 and FIPS-197/NIST-GCM vectors,
+// OpenSSL-made RSA/ECDSA signature fixtures, real DER certificates, and the
+// X.509 path-building rule — which must both accept the chain it was handed and
+// refuse the near-misses (wrong host, wrong CA, expired, tampered signature,
+// missing issuer). scripts/tls_selftest.py drives it in the guest and asserts
+// the guest's own tally, so a stack that answers two assertions and dies cannot
+// pass.
+//
+// Writing it against those vectors found twelve real defects, and the shape of
+// them is the point of the gate. Eight were in the primitives: the RSA exponent
+// was read in two different bit orders (silently reducing 0x010001 to the
+// exponent 1), the Montgomery field left Montgomery form by multiplying by the
+// image of 1 instead of by 1, jac_to_affine_x applied one R too many, jac_add's
+// Y3 multiplied by the un-doubled r that X3 had already doubled, fsub left a
+// non-zero n for a zero result so an add of a point and its negation never
+// became the point at infinity, the AEAD trailer counted bits where the RFC
+// counts bytes, ChaCha20 loaded its key and nonce big-endian, and the P-384
+// modulus and curve constant b were transcribed wrong — twice, which is why
+// those constants are generated now rather than typed. Four were in the X.509
+// layer: an OID comparison tested the body length against the whole TLV length,
+// a cursor was reset to 0 between notBefore and notAfter, an offset was reused
+// for an inner SEQUENCE so the RSAPublicKey was parsed 11 bytes in, and the
+// modulus kept its DER sign byte (257 bytes for a 2048-bit key). Nothing in
+// this release is verified by "it compiled".
+// 161 is spoken for; 162 is the next free number.
+#define OS_VERSION "38.162"
 
 #endif
