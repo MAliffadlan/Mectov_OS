@@ -379,7 +379,17 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update -qq
+          # gcc-multilib: this job downloads the artifacts rather than building
+          # them, so it never inherited the 32-bit headers `build` installs.
+          # The TLS handshake step compiles the shipped engine for the *host*
+          # with `gcc -m32` (scripts/tls_handshake_test.py), which needs
+          # /usr/include/i386-linux-gnu — without it that step died with
+          # "bits/wordsize.h: No such file or directory", i.e. a broken CI
+          # install wearing the costume of a kernel failure. Same shape as the
+          # mtools omission that killed the 64-bit job, and the debugfs
+          # omission behind audit finding F6.
           sudo apt-get install -y -qq \
+            gcc-multilib \
             qemu-system-x86 \
             python3-pil \
             dosfstools
