@@ -2,10 +2,16 @@
 
 Welcome to the official technical documentation for **Mectov OS**, a monolithic operating system kernel built from scratch in C and Assembly.
 
-Two lines live in this repository:
+One line lives in this repository: the **x86 32-bit kernel** (`src/` + `kernel.c`),
+built by bare `make`, run with `./run.sh`. Every document below describes it.
 
-* **x86_64 (mainline)** — `kernel64.c` + `k64/`, built by bare `make`, run with `./run64.sh`. This is where development happens.
-* **x86 32-bit (original line, reference)** — `src/` + `kernel.c`, still fully buildable as `make all32` and runnable with `./run.sh`. The documents below describe that line; where it solves a problem well, the 64-bit kernel reuses the idea (see [the 64-bit audit and roadmap](architecture/x86_64_port.md)).
+There was a 64-bit kernel (`kernel64.c` + `k64/`, M1–M14) that was briefly the
+default build. It was removed once it was clear the momentum had moved the other
+way: the release line had gone 36 commits into `src/` against 4 into `k64/`, and
+everything the desktop needs — networking, audio, USB, SATA, a writable
+filesystem, 54 apps, Quake III Arena — existed only in 32-bit. See
+[why 32-bit only](architecture/why-32bit.md) for the reasoning and for the
+measurements that port produced, which are still a live to-do list.
 
 ---
 
@@ -17,7 +23,7 @@ Two lines live in this repository:
 * **[Memory Management](architecture/memory.md)** — Physical page allocation (PMM), Virtual Memory (VMM/Paging), heap isolation, and process tear-down safety.
 * **[Preemptive Scheduler](architecture/scheduler.md)** — Priority Round-Robin scheduler, context switching, interrupt gates, and deadlock prevention.
 * **[Syscall Subsystem](architecture/syscalls.md)** — `int 0x80` Ring 3 interface, register passing, and modular syscall dispatching (`syscall_gui`, `syscall_vfs`, `syscall_net`, etc.).
-* **[x86_64 Port](architecture/x86_64_port.md)** — 64-bit kernel (`kernel64.c`, `k64/`) milestone status, measured `-m64` reusability of `src/`, the dependency map of the 32-bit desktop, the M10→M16 delivery order, and per-milestone design notes (M10 heap, M11 block layer, M12 filesystems).
+* **[Why 32-bit only](architecture/why-32bit.md)** — why the 64-bit kernel was removed, and the 301-site pointer-truncation measurement it left behind as a 32-bit to-do list.
 
 ### 2. Device Drivers (`docs/drivers/`)
 * **[VGA / VBE Video Driver](drivers/vga_vbe.md)** — 1024x768 VESA VBE linear framebuffer, triple-buffer rendering, dirty region tracking, and hardware mouse cursor.
@@ -38,12 +44,9 @@ Two lines live in this repository:
 ## 🛠️ Quick Build & Run Instructions
 
 ```bash
-# 64-bit (default): kernel + ISO, then boot it in QEMU
-make clean64 && make          # -> myos64.bin, mectov64.iso
-./run64.sh                    # windowed QEMU; ./run64.sh --headless for the gate
-make check64                  # 64-bit gate battery + the scripts/ tests
-
-# 32-bit (original line)
-make all32                    # -> myos.bin
-./run.sh                      # builds the ISO itself, boots QEMU (KVM), 4 cores
+make clean_all && make         # -> myos.bin
+make iso                       # -> mectov.iso  (./run.sh does this for you)
+./run.sh                      # builds the ISO, boots QEMU (KVM), 4 cores
+make check                     # 66-suite gate battery (~25 min)
+make check-quick               # 12-suite fast subset
 ```
