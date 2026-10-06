@@ -63,6 +63,11 @@ SUITES = [
     ("jobcontrol",       "jobcontrol_test.py",        240),
     ("fputest",          "fputest.py",                240),
     ("nxtest",           "nxtest.py",                 240),
+    # The feature-probe path: NX really active, and the SMEP state definite and
+    # consistent with what CPUID reports. SMEP itself cannot be exercised under
+    # QEMU's i386 models (none advertise it), so this gates the probe, not the
+    # bit. Cheap: no login, no app launch — it reads the paging banner.
+    ("cpuid",            "cpuid_test.py",             180),
     # KVM regressions (opt-in via --kvm): CI runs them when /dev/kvm exists,
     # but a local /dev/kvm is not enough — some hosts' KVM cannot run the
     # qemu32 machine and the guest stalls for the full timeout (this box
@@ -217,8 +222,12 @@ SUITES = [
 ]
 
 # Fast, high-signal subset for local iteration (~6-8 min TCG).
+# cpuid is in here because it is the cheapest suite in the battery (no login,
+# no app launch — it reads the paging banner) and it gates the feature-probe
+# path that nxtest's NX half depends on. nxtest itself stays out of the fast
+# tier: it needs the Terminal, so it costs minutes rather than seconds.
 QUICK = {"boot", "fork", "procfs", "jobcontrol", "fputest", "fuzz",
-         "iocache", "app_smoke", "doom", "thread", "cond", "usb"}
+         "iocache", "app_smoke", "doom", "thread", "cond", "usb", "cpuid"}
 
 # debugfs is not needed to build the images, but scripts/doom_test.py's seed
 # pre-flight requires it (v38.161, audit F6) — list it here so a host without

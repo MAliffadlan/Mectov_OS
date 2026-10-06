@@ -5,7 +5,7 @@ scripts/nxtest.py — W^X regression for PAE + NX (v38.49).
 Boots mectov.iso, logs in, runs `run /apps/nxtest.mct` and verifies that
 EXECUTING CODE ON THE USER STACK is killed by SIGSEGV:
 
-  1. the kernel booted with NX active       ("[MEM] PAE paging on (NX enabled)")
+  1. the kernel booted with NX active       ("[MEM] PAE paging on (NX enabled...")
   2. the app placed code on its stack and called it — and DIED
      ("[CRASH] Ring 3 fault" + "SYS_EXIT code=0x0000008B" = 128+SIGSEGV)
   3. the FAIL line never appears (executing data would mean NX is off)
@@ -91,7 +91,10 @@ def main():
             return 1
         print("[OK] booted to login screen")
 
-        if not wait_for_in_file(SERIAL_LOG, "[MEM] PAE paging on (NX enabled)", 15):
+        # Match only the NX half of the banner: since v38.164 it also carries an
+        # SMEP state, so pinning the whole old string would fail on a correct
+        # build. SMEP's own consistency is gated by scripts/cpuid_test.py.
+        if not wait_for_in_file(SERIAL_LOG, "[MEM] PAE paging on (NX enabled", 15):
             print("[FAIL] PAE boot banner missing NX enabled")
             return 1
         print("[OK] PAE active with NX enabled")

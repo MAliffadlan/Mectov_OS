@@ -78,3 +78,49 @@ means no-execute.
 - **QEMU note**: the default `qemu32` CPU model lacks the NX CPUID bit —
   all harnesses now pass `-cpu qemu32,+nx` (the kernel degrades cleanly
   to PAE-without-NX and logs `NX unavailable` if the feature is absent).
+
+### What the paging stack does *not* defend against (v38.164)
+
+Measured, not assumed. A standalone CPUID probe under every CPU model the
+harnesses use:
+
+| `-cpu` | max basic leaf | SMEP (7:EBX[7]) | SMAP (7:EBX[14]) |
+|---|---|---|---|
+| `qemu32` (the default) | **0x04** | leaf absent | leaf absent |
+| `pentium3` | 0x03 | leaf absent | leaf absent |
+| `core2duo` | 0x0A | no | no |
+| `Nehalem` | 0x0B | no | no |
+| `qemu64` | 0x0D | no | no |
+
+- **SMEP is implemented but never exercised.** `paging_enable_smep()` sets
+  CR4.SMEP when the CPU reports it, and the boot banner says which of three
+  states it landed in (`enabled` / `cpu-absent` / `cpuid-leaf7-absent`). No
+  i386 QEMU model advertises the bit, so under CI it is always a no-op. The
+  code is correct for bare metal; the *coverage* does not exist.
+- **SMAP is impossible here, by design.** It requires 4-level paging
+  (Intel SDM Vol 3A §4.6) and this kernel is PAE **3**-level, so CR4.SMAP
+  would `#GP`. Even ignoring that, no i386 QEMU model exposes it, and every
+  deliberate user-memory access in the syscall layer would need `stac`/`clac`
+  bracketing.
+- **The probe bug this uncovered**: `paging_enable_smep()` issued `cpuid`
+  with EAX=7 without first asking CPUID.0 for the maximum leaf. Intel SDM
+  Vol 2A makes an out-of-range leaf's EBX/ECX/EDX *undefined*, and because
+  CPUID is normally a comparison chain the bad leaf falls through and returns
+  a real-looking register — measured EBX = 0x3F on `qemu32`, whose real
+  maximum is 4. The old code then tested bit 7 of that garbage.
+  `paging_enable_nxe()` had the same shape against extended leaf
+  0x80000001. Both now gate on the maximum leaf first, and
+  `scripts/cpuid_test.py` (CI, `boot-core`) fails if the check is removed —
+  verified by reintroducing the bug and watching the suite catch it.
+- **gcc's `-fstack-protector` is not usable on this kernel.** i386 gcc
+  supports exactly one guard location, `%gs:0x14`, and `%gs` here is the
+  per-task TLS segment whose base is the user TCB — offset 0x14 lands inside
+  the app-visible scratch area (`MCT_TLS_SCRATCH_OFFSET = 16`). There is no
+  `-mstack-protector-guard=` option for i386 that avoids this. Doing it
+  properly needs a per-CPU kernel canary loaded at the three Ring 0 entry
+  points (`irq_common_stub`, `isr_common_stub`, `isr128`) — the most
+  safety-critical code in the kernel. Not attempted; the heap already carries
+  magic + canary (`sys/mem.c`), the stack does not.
+- **Still missing**: kernel ASLR (the image is linked at a fixed 1 MB,
+  `linker.ld`), stack canaries outside the heap, SMAP, and any form of
+  page-out — exhaustion is an OOM, never a swap.

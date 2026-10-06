@@ -71,6 +71,12 @@ static pte_t mmio_page_tables[MMIO_WINDOW_PT][PT_ENTRIES] __attribute__((aligned
 static int nx_enabled = 0;
 int paging_nx_enabled(void) { return nx_enabled; }
 
+// Why SMEP is or is not on. Kept as a tri-state rather than a bool so a reader
+// of the boot log can distinguish "the CPU cannot do it" from "we never got as
+// far as asking" — the bug this replaces looked identical to both.
+static int smep_state = SMEP_UNPROBED;
+int paging_smep_state(void) { return smep_state; }
+
 // get_cid() lives in task.c (needs LAPIC MMIO up). paging_init runs long
 // before tasking, so a local read of the LAPIC id is the honest way to say
 // "this is the BSP" during early boot. Safe pre-paging: identity access.
@@ -78,12 +84,37 @@ static int get_cid_safe(void) {
     return (*(volatile uint32_t*)0xFEE00020 >> 24) & 15;
 }
 
+// Highest leaf CPUID answers for, basic (EAX=0) and extended (EAX=0x80000000).
+// Intel SDM Vol 2A: "If EAX is greater than the maximum supported leaf, the
+// data returned in EBX, ECX and EDX are undefined." That is not theoretical:
+// CPUID is often implemented as a comparison chain, so an out-of-range leaf
+// falls through to the next match and hands back a real-looking register. The
+// old paging_enable_{nxe,smep} read a leaf they never proved existed, so on
+// any CPU whose max leaf is below the one asked for they were testing garbage.
+// QEMU's qemu32 TCG model — the default for every gate here — answers
+// CPUID.0 with EAX=4, yet a bare `cpuid` with EAX=7 returns EBX=0x3F.
+static uint32_t cpuid_max_leaf_basic(void) {
+    uint32_t a, b, c, d;
+    __asm__ __volatile__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0));
+    (void)b; (void)c; (void)d;
+    return a;
+}
+
+static uint32_t cpuid_max_leaf_extended(void) {
+    uint32_t a, b, c, d;
+    __asm__ __volatile__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                         : "a"(0x80000000u));
+    (void)b; (void)c; (void)d;
+    return a;
+}
+
 // EFER.NXE on the CURRENT cpu. MSR writes are cheap and idempotent; the
 // BSP does this inside paging_init before CR0.PG, every AP in ap_main.
 void paging_enable_nxe(void) {
     uint32_t a, b, c, d;
+    if (cpuid_max_leaf_extended() < 0x80000001u) return;  // no extended leaves
     __asm__ __volatile__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
-                         : "a"(0x80000001));
+                         : "a"(0x80000001u));
     if (!(d & (1u << 20))) return;   // no NX feature -> leave bit 63 reserved
     wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_NXE);
     if (get_cid_safe() == 0) nx_enabled = 1;
@@ -92,17 +123,25 @@ void paging_enable_nxe(void) {
 // Enable SMEP on the CURRENT cpu if the feature is present (leaf 7, EBX bit 7).
 // SMEP forbids the kernel from fetching instructions from user pages — a
 // ret2usr payload can no longer pivot Ring 0 execution into a user-mapped
-// buffer. CPUID-gated like NXE: QEMU -cpu host advertises it under KVM, and
-// the default qemu32 TCG model does not. Called from paging_init (BSP) and
-// ap_main (every AP) so the flag lands on all cores.
+// buffer. CPUID-gated like NXE. Called from paging_init (BSP) and ap_main (every
+// AP) so the flag lands on all cores.
+//
+// Note on coverage: no i386 QEMU model advertises SMEP, so this is a no-op
+// under QEMU and the flag is currently unexercised by the gates. It is still
+// correct for bare metal and for any future 64-bit-capable emulator; see
+// smep_state below so a reader can tell "the CPU lacks it" from "we never
+// asked". SMAP (leaf 7 EBX bit 14) is deliberately NOT attempted: it requires
+// 4-level paging and this kernel is PAE 3-level, so CR4.SMAP would #GP.
 void paging_enable_smep(void) {
+    if (cpuid_max_leaf_basic() < 7) { smep_state = SMEP_NO_LEAF7; return; }
     uint32_t a, b, c, d;
     __asm__ __volatile__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
                          : "a"(7), "c"(0));
-    if (!(b & (1u << 7))) return;    // no SMEP -> nothing to enable
+    if (!(b & (1u << 7))) { smep_state = SMEP_NO_CPU; return; }
     __asm__ __volatile__("mov %%cr4, %0" : "=r"(d));
     d |= 0x00100000;                  // CR4.SMEP (bit 20)
     __asm__ __volatile__("mov %0, %%cr4" : : "r"(d));
+    smep_state = SMEP_ON;
     write_serial_string("[MEM] SMEP enabled\n");
 }
 
@@ -247,7 +286,14 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     __asm__ __volatile__("mov %0, %%cr0": : "r"(cr0));
 
     write_serial_string("[MEM] PAE paging on (NX ");
-    write_serial_string(nx_enabled ? "enabled)\n" : "unavailable)\n");
+    write_serial_string(nx_enabled ? "enabled" : "unavailable");
+    write_serial_string(", SMEP ");
+    switch (smep_state) {
+        case SMEP_ON:       write_serial_string("enabled)\n"); break;
+        case SMEP_NO_CPU:   write_serial_string("cpu-absent)\n"); break;
+        case SMEP_NO_LEAF7: write_serial_string("cpuid-leaf7-absent)\n"); break;
+        default:            write_serial_string("unprobed)\n"); break;
+    }
 }
 
 // Map a virtual address to a physical address explicitly in the BOOT tables.

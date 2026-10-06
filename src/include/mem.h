@@ -75,6 +75,16 @@ void paging_init(uint32_t fb_addr, uint32_t fb_size);
 // is reserved and its presence faults.
 int  paging_nx_enabled(void);
 void paging_enable_nxe(void);
+
+// SMEP outcome, reported instead of a silent skip. SMEP itself is
+// CPUID.(7,0):EBX[7] gated, so a reader of the boot log must be able to tell
+// "this CPU cannot" from "we never asked".
+#define SMEP_UNPROBED 0  // paging_enable_smep() has not run yet
+#define SMEP_ON       1  // CR4.SMEP set on this cpu
+#define SMEP_NO_CPU   2  // leaf 7 exists, EBX[7] clear — hardware lacks it
+#define SMEP_NO_LEAF7 3  // CPUID.0:EAX < 7 — the leaf is not there to ask
+int  paging_smep_state(void);
+void paging_enable_smep(void);
 // Boot (kernel) paging structures — identity-mapped globals, used by
 // vmm.c to clone kernel page tables into fresh address spaces.
 extern pte_t boot_pdpt[PDPT_ENTRIES];

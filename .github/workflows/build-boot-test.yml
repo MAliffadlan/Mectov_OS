@@ -204,6 +204,14 @@ jobs:
         run: |
           python3 scripts/nxtest.py --timeout 240
 
+      # NX proved active is one half of the paging contract; the other half is
+      # that the CPUID probe reads leaves it actually has. Cheap (no login, no
+      # app launch) and it is the gate that would catch a max-leaf check being
+      # dropped again.
+      - name: CPUID feature-probe regression (TCG)
+        run: |
+          python3 scripts/cpuid_test.py --timeout 180
+
       - name: FAT32 regression (drive 3, TCG)
         run: |
           python3 scripts/fat32_test.py --timeout 240
