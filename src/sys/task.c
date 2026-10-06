@@ -3699,12 +3699,18 @@ int task_mmap_handle_fault(uint32_t addr, uint32_t cr3, uint32_t err) {
                     return 0;
                 }
             }
-            uint32_t flags = PAGE_PRESENT | PAGE_USER | PAGE_SHARED;
+            uint64_t flags = PAGE_PRESENT | PAGE_USER | PAGE_SHARED;
             if (write_fault) {
                 flags |= PAGE_RW;
                 uint32_t page = (va - b) / 4096;
                 r->dirty[page / 8] |= (uint8_t)(1u << (page % 8));
             }
+            // v38.164: a file mapping is DATA, not code. PAGE_NX makes an
+            // execute from it fault like any other user data. Gated on
+            // EFER.NXE — bit 63 is reserved without it, so setting it there
+            // would fault the mapping itself (config-matrix/ram-sweep boot
+            // a pre-NX CPU on purpose). Flags are uint64_t: PAGE_NX is bit 63.
+            if (paging_nx_enabled()) flags |= PAGE_NX;
             vmm_map_page(cr3, va, phys, flags);
             write_serial_string("[MMAP] file paged ");
             write_serial_hex(va);
@@ -3713,7 +3719,11 @@ int task_mmap_handle_fault(uint32_t addr, uint32_t cr3, uint32_t err) {
         }
 
         // Anonymous: zero-filled writable frame, as before.
-        vmm_map_page(cr3, va, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+        // v38.164: this is DATA, so it carries PAGE_NX like the stack and heap
+        // already do — executing from an mmap region must fault. Gated on
+        // EFER.NXE for the same reason as the file path above.
+        uint64_t nx = paging_nx_enabled() ? PAGE_NX : 0;
+        vmm_map_page(cr3, va, phys, PAGE_PRESENT | PAGE_RW | PAGE_USER | nx);
         memset((void*)(uintptr_t)va, 0, 4096);
         write_serial_string("[MMAP] demand paged ");
         write_serial_hex(va);

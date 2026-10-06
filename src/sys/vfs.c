@@ -682,6 +682,12 @@ void vfs_init() {
         extern uint8_t _binary_nxtest_mct_start[];
         extern uint8_t _binary_nxtest_mct_end[];
         changed += vfs_update_file_if_needed("apps/nxtest.mct", (const char*)_binary_nxtest_mct_start, _binary_nxtest_mct_end - _binary_nxtest_mct_start);
+        // W^X regression (v38.164): executing code from an mmap'd page must
+        // SIGSEGV. Same invariant as nxtest, different source of data — its
+        // own task because nxtest is already dead by the time it would run.
+        extern uint8_t _binary_mmapnx_mct_start[];
+        extern uint8_t _binary_mmapnx_mct_end[];
+        changed += vfs_update_file_if_needed("apps/mmapnx.mct", (const char*)_binary_mmapnx_mct_start, _binary_mmapnx_mct_end - _binary_mmapnx_mct_start);
         // TLS 1.3 engine self-test (v38.162): RFC/NIST vectors, OpenSSL-made
         // signature and certificate fixtures, and the X.509 path-building
         // rule. Runs entirely offline, so it is a gate rather than a demo.
@@ -1015,6 +1021,10 @@ void vfs_init() {
     extern uint8_t _binary_nxtest_mct_end[];
     vfs_create_file("apps/nxtest.mct");
     vfs_write_file("apps/nxtest.mct", (const char*)_binary_nxtest_mct_start, _binary_nxtest_mct_end - _binary_nxtest_mct_start);
+    extern uint8_t _binary_mmapnx_mct_start[];
+    extern uint8_t _binary_mmapnx_mct_end[];
+    vfs_create_file("apps/mmapnx.mct");
+    vfs_write_file("apps/mmapnx.mct", (const char*)_binary_mmapnx_mct_start, _binary_mmapnx_mct_end - _binary_mmapnx_mct_start);
     extern uint8_t _binary_fbmap_mct_start[];
     extern uint8_t _binary_fbmap_mct_end[];
     vfs_create_file("apps/fbmap.mct");

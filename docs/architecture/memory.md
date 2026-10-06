@@ -64,12 +64,26 @@ means no-execute.
   `boot_pds` / 256×2MB identity PTs in `mem.c`). CR4.PAE is set before
   CR0.PG; the SMP trampoline sets it per-AP before enabling paging, and
   every AP repeats the EFER.NXE MSR write (`paging_enable_nxe`).
-- **W^X policy**: user heap + stack demand-zero pages and anonymous mmap
-  pages are mapped PAGE_NX; images and the signal trampoline stay
-  executable. A page-fault with the I/D bit set (instruction fetch) is
-  NEVER demand-mapped — it logs `[W^X] execute fault` and kills the task
-  with SIGSEGV (or panics in Ring 0). `apps/nxtest.mct` places a `ret` on
-  its stack and calls it; CI (`scripts/nxtest.py`) asserts the kill.
+- **W^X policy**: every user DATA mapping carries PAGE_NX — heap and stack
+  demand-zero pages, anonymous `mmap`, file-backed `mmap`, SysV shared
+  memory, and `SYS_VMM_ALLOC`. Only images (`.mct` / `.elf` plus the shared
+  library) and the signal trampoline are meant to stay executable. A
+  page-fault with the I/D bit set (instruction fetch) is NEVER demand-mapped
+  — it logs `[W^X] execute fault` and kills the task with SIGSEGV (or panics
+  in Ring 0).
+  Every site is gated on `paging_nx_enabled()`, because without EFER.NXE bit
+  63 is a reserved PTE bit and setting it there would fault the mapping
+  itself — `config-matrix` and `ram-sweep` boot a pre-NX CPU on purpose. The
+  flags are `uint64_t` for the same reason: `PAGE_NX` is bit 63, and a
+  `uint32_t` silently truncates it to 0.
+  Two probes cover the policy, one QEMU boot each (`scripts/nxtest.py`):
+  `apps/nxtest.mct` places a `ret` on its stack and `apps/mmapnx.mct` places
+  one in an `mmap`'d page; each asserts the fetch fault and the SIGSEGV.
+- **Known gap (v38.164 audit)**: two other sites *intend* PAGE_NX but store
+  it in a `uint32_t`, so the assignment truncates to 0 and no NX is applied —
+  the fault-in argument page (`syscall.c`, `SYS_...FAULTIN`) and the
+  framebuffer window (`task.c`). Neither is covered by a probe. Fixing them
+  means widening those two locals to `uint64_t`.
 - **Fork fix found during migration**: the old clone path re-allocated a
   fresh PT for every kernel-region PDE and overwrote the copy
   `vmm_create_address_space` had just made — leaking ~120 frames (≈0.5MB)

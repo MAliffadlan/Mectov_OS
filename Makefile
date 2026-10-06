@@ -211,8 +211,9 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/fputest_mct.o \
        $(OBJ_DIR)/hardening_test_mct.o \
        $(OBJ_DIR)/tlsselftest_mct.o \
-       $(OBJ_DIR)/nxtest_mct.o \
-       $(OBJ_DIR)/fbmap_mct.o \
+$(OBJ_DIR)/nxtest_mct.o \
+        $(OBJ_DIR)/mmapnx_mct.o \
+        $(OBJ_DIR)/fbmap_mct.o \
        $(OBJ_DIR)/execdemo_mct.o \
        $(OBJ_DIR)/execchild_mct.o \
        $(OBJ_DIR)/tcpserver_mct.o \
@@ -401,6 +402,9 @@ tlsselftest.mct: apps/tlsselftest.c $(TLS_LIB_SRCS) $(TLS_LIB_HDRS) src/include/
 nxtest.mct: apps/nxtest.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/nxtest.c nxtest.mct
 
+mmapnx.mct: apps/mmapnx.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/mmapnx.c mmapnx.mct
+
 fbmap.mct: apps/fbmap.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/fbmap.c fbmap.mct
 
@@ -562,6 +566,9 @@ $(OBJ_DIR)/tlsselftest_mct.o: tlsselftest.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/nxtest_mct.o: nxtest.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 nxtest.mct $(OBJ_DIR)/nxtest_mct.o
+
+$(OBJ_DIR)/mmapnx_mct.o: mmapnx.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 mmapnx.mct $(OBJ_DIR)/mmapnx_mct.o
 
 $(OBJ_DIR)/fbmap_mct.o: fbmap.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 fbmap.mct $(OBJ_DIR)/fbmap_mct.o

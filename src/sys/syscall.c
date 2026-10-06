@@ -930,8 +930,13 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = 0;
                 break;
             }
-            regs->eax = vmm_alloc_page_at(task_get_page_dir(tid), vaddr,
-                                          PAGE_PRESENT | PAGE_RW | PAGE_USER);
+            // v38.164: this is a user DATA page, so PAGE_NX applies. uint64_t
+            // on purpose — PAGE_NX is bit 63 and a uint32_t would silently
+            // truncate it to 0, leaving the page executable. Gated on EFER.NXE
+            // because bit 63 is reserved without it.
+            uint64_t flags = PAGE_PRESENT | PAGE_RW | PAGE_USER;
+            if (paging_nx_enabled()) flags |= PAGE_NX;
+            regs->eax = vmm_alloc_page_at(task_get_page_dir(tid), vaddr, flags);
             break;
         }
 

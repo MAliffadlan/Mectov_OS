@@ -143,10 +143,14 @@ uint32_t shm_at(int shmid) {
     // Map each frame user-accessible RW into THIS task's page directory.
     // Bump each frame's refcount: the task's address space now holds a
     // reference that vmm_free_address_space will drop on exit.
-    for (uint32_t i = 0; i < s->nframes; i++) {
-        if (vmm_map_page(pd, va + i * 4096, s->frames[i],
-                         PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_SHARED) != 0) {
-            // Roll back the pages mapped so far.
+        for (uint32_t i = 0; i < s->nframes; i++) {
+            // v38.164: shared memory is DATA, so it carries PAGE_NX like the
+            // rest of user space. Gated on EFER.NXE (bit 63 is reserved
+            // without it). uint64_t because PAGE_NX is bit 63.
+            uint64_t flags = PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_SHARED;
+            if (paging_nx_enabled()) flags |= PAGE_NX;
+            if (vmm_map_page(pd, va + i * 4096, s->frames[i], flags) != 0) {
+                // Roll back the pages mapped so far.
             for (uint32_t j = 0; j < i; j++) {
                 uint32_t rva = va + j * 4096;
                 pte_t* pdpt = (pte_t*)(uintptr_t)pd;
