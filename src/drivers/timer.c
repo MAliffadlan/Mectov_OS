@@ -168,6 +168,17 @@ static void timer_handler(registers_t* regs) {
             write_serial_string(c == 0 ? "c0=" : c == 1 ? " c1=" : c == 2 ? " c2=" : " c3=");
             write_serial_hex(task_cpu_load(c));
         }
+        /* kbd queue depth high-water mark + drop count: answers whether the
+         * desktop's one-pop-per-iteration ever backlogs IRQ-fed bursts. */
+        {
+            extern void kbd_diag(unsigned *maxdepth, unsigned *drops);
+            unsigned kd = 0, kx = 0;
+            kbd_diag(&kd, &kx);
+            write_serial_string(" kbd=");
+            write_serial_hex(kd);
+            write_serial_string("/");
+            write_serial_hex(kx);
+        }
         write_serial_string("\n");
     }
     

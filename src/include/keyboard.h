@@ -23,6 +23,7 @@ void kbd_feed_scancode(uint8_t sc);
 // while busy without reading port 0x60 itself.
 int keyboard_take_esc(void);
 uint8_t k_get_scancode();
+void kbd_diag(unsigned *maxdepth, unsigned *drops);
 // Pop the next scancode together with the modifier snapshot (bit0=shift,
 // bit1=ctrl, bit2=alt) captured when the byte was fed — see keyboard.c for
 // why consumers that resolve a character must use this instead of the live

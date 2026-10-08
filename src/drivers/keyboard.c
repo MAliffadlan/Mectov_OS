@@ -30,6 +30,18 @@ static uint8_t kbd_mods[KBD_BUFFER_SIZE];
 static volatile uint32_t kbd_head = 0;
 static volatile uint32_t kbd_tail = 0;
 
+// Queue-depth instrumentation for the single-pop question (the desktop loop
+// pops one scancode per iteration while an IRQ can feed a whole sequence):
+// high-water mark + silent-drop count. Read via kbd_diag(); plain volatile
+// reads are exact enough for diagnostics on 32-bit aligned words.
+static volatile unsigned kbd_max_depth = 0;
+static volatile unsigned kbd_drops = 0;
+
+void kbd_diag(unsigned *maxdepth, unsigned *drops) {
+    if (maxdepth) *maxdepth = kbd_max_depth;
+    if (drops) *drops = kbd_drops;
+}
+
 // Set on ESC press, cleared by keyboard_take_esc(). Lets code that needs to
 // notice ESC while busy (speaker.c's delay loop) do so without reading port
 // 0x60 behind ps2_drain()'s back. The scancode still reaches kbd_buffer below,
@@ -65,6 +77,14 @@ static void keyboard_feed_byte(uint8_t scancode) {
         kbd_buffer[kbd_head] = scancode;
         kbd_mods[kbd_head] = mods;
         kbd_head = next;
+        {
+            unsigned depth = (kbd_head >= kbd_tail)
+                ? (kbd_head - kbd_tail)
+                : (KBD_BUFFER_SIZE - kbd_tail + kbd_head);
+            if (depth > kbd_max_depth) kbd_max_depth = depth;
+        }
+    } else {
+        kbd_drops++;
     }
     spin_unlock(&kbd_lock);
 }
