@@ -3324,7 +3324,7 @@ int task_fb_map(fb_info_t* uinfo) {
     tasks[tid].mmap_regions[slot].map_flags = MMAP_FLAG_DEVICE;
     tasks[tid].mmap_regions[slot].dirty = NULL;
 
-    uint32_t nx = paging_nx_enabled() ? PAGE_NX : 0;
+    uint64_t nx = paging_nx_enabled() ? PAGE_NX : 0;
     uint64_t flags = PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_DEV | nx;
     for (uint32_t off = 0; off < size; off += 4096) {
         if (vmm_map_page(tasks[tid].page_dir, base + off,
