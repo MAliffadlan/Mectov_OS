@@ -249,6 +249,15 @@ static void wm_restore_unlocked(int id) {
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (wm_wins[i].visible && wm_wins[i].id == id) {
             wm_wins[i].minimized = 0;
+            /* A capture held across the minimize piled every packet into
+             * mouse_raw_dx/dy (nobody drained while minimized). Drop it the
+             * same way a fresh capture does, or the first pump after restore
+             * delivers the whole pile as one yank. */
+            if (wm_wins[i].capture_mouse) {
+                extern int mouse_take_delta(int *dx, int *dy);
+                int junk_x = 0, junk_y = 0;
+                mouse_take_delta(&junk_x, &junk_y);
+            }
             wm_raise(id); // marks the screen dirty and sets needs_redraw
             return;
         }
@@ -1379,7 +1388,7 @@ int wm_capture_owner(void) {
     wm_lock_acquire();
     int id = -1;
     for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (wm_wins[i].visible && wm_wins[i].capture_mouse) { id = wm_wins[i].id; break; }
+        if (wm_wins[i].visible && !wm_wins[i].minimized && wm_wins[i].capture_mouse) { id = wm_wins[i].id; break; }
     }
     wm_lock_release();
     return id;
@@ -1390,7 +1399,7 @@ int wm_capture_event(int dx, int dy, int btn) {
     int handled = 0;
     for (int i = 0; i < MAX_WINDOWS; i++) {
         WmWin* w = &wm_wins[i];
-        if (!w->visible || !w->capture_mouse || !w->mouse_fn) continue;
+        if (!w->visible || w->minimized || !w->capture_mouse || !w->mouse_fn) continue;
         // Under capture mouse_fn() receives DELTAS in its (cx, cy) arguments,
         // not window-relative coordinates (see wm.h).
         w->mouse_fn(w->id, dx, dy, btn);
