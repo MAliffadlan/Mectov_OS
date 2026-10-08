@@ -721,7 +721,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                 int sm_ty = (int)fb_height - TASKBAR_H_PX;
                 int sm_h = START_MENU_H;
                 int sm_y = sm_ty - sm_h;
-                int in_start_menu = (start_menu_open && mx >= 2 && mx <= 202 && my >= sm_y && my <= sm_ty);
+                int in_start_menu = (start_menu_open && mx >= 2 && mx <= 2 + SM_W && my >= sm_y && my <= sm_ty);
                 if (!in_start_menu) {
                     // Click is outside all popups - close them
                     if (start_menu_open) { start_menu_open = 0; needs_redraw = 1; }

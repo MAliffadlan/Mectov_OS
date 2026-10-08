@@ -3,9 +3,18 @@
 
 #define TASKBAR_H_PX 28     // taskbar pixel height (classic)
 
-// Start menu geometry (shared by taskbar.c draw/hit-test and kernel.c's
-// popup-dismiss bounds): 40 px header + 12 items x 28 px.
-#define START_MENU_H 404
+// Start menu geometry, shared by taskbar.c draw/hover/click and kernel.c's
+// popup-dismiss bounds: 40 px header + 10 app rows + 12 px section divider
+// + 3 system rows + 16 px footer hint. When a search query is active the
+// menu flattens to just the matching rows (no divider); the panel keeps
+// its full height either way.
+#define SM_HEAD_H 40
+#define SM_ROW_H 28
+#define SM_W 200
+#define SM_SECT_H 12
+#define SM_FOOT_H 16
+#define SM_APPS 10   // sm_labels[0..9]; 10..12 are the System group
+#define START_MENU_H (SM_HEAD_H + 10*SM_ROW_H + SM_SECT_H + 3*SM_ROW_H + SM_FOOT_H)
 #define START_MENU_ITEMS 13
 
 void taskbar_draw();

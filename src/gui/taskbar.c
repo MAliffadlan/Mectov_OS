@@ -25,7 +25,15 @@ static char sm_search[16];
 static int sm_search_len = 0;
 static int sm_filtered[START_MENU_ITEMS];
 static int sm_filtered_count = 0;
+// Display rows built alongside the filter: >=0 indexes sm_filtered,
+// SM_DISP_SECT is the Apps/System divider, SM_DISP_FOOT the hint footer.
+// Hover, click and paint all walk these rows, so the three can never drift.
+#define SM_DISP_SECT -1
+#define SM_DISP_FOOT -2
+static int sm_disp[START_MENU_ITEMS + 2];
+static int sm_disp_count = 0;
 static void sm_rebuild_filter(void);
+static int sm_disp_at(int sm_y, int my);
 
 void taskbar_track_mouse(int mx, int my, int px, int py) {
     (void)px; (void)py;
@@ -58,15 +66,12 @@ void taskbar_track_mouse(int mx, int my, int px, int py) {
         }
     } else if (start_menu_open) {
         // Above the taskbar: hover over an open Start menu item.
-        int sm_h = START_MENU_H, sm_w = 200;
+        int sm_h = START_MENU_H, sm_w = SM_W;
         int sm_y = ty - sm_h;
         if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
-            if (my >= sm_y + 36) {
-                int rel_y = my - (sm_y + 36);
-                int item = rel_y / 28;
-                sm_rebuild_filter();
-                if (item >= 0 && item < sm_filtered_count) new_menu = item;
-            }
+            sm_rebuild_filter();
+            int d = sm_disp_at(sm_y, my);
+            if (d >= 0 && sm_disp[d] >= 0) new_menu = d;
         }
     }
 
@@ -186,11 +191,74 @@ static void sm_rebuild_filter(void) {
     sm_filtered_count = 0;
     if (sm_search_len == 0) {
         for (int i = 0; i < START_MENU_ITEMS; i++) sm_filtered[sm_filtered_count++] = i;
+    } else {
+        for (int i = 0; i < START_MENU_ITEMS; i++) {
+            if (stristr(sm_labels[i], sm_search)) sm_filtered[sm_filtered_count++] = i;
+        }
+    }
+    /* Display rows: grouped (Apps, divider, System, footer) with no query,
+     * flat matching rows + footer while filtering — the suites sample
+     * filtered rows at flat positions, so the divider must not shift them. */
+    sm_disp_count = 0;
+    if (sm_search_len == 0) {
+        int has_sys = 0;
+        for (int i = 0; i < sm_filtered_count; i++) {
+            if (sm_filtered[i] < SM_APPS) sm_disp[sm_disp_count++] = i;
+            else has_sys = 1;
+        }
+        if (has_sys && sm_disp_count > 0) sm_disp[sm_disp_count++] = SM_DISP_SECT;
+        for (int i = 0; i < sm_filtered_count; i++) {
+            if (sm_filtered[i] >= SM_APPS) sm_disp[sm_disp_count++] = i;
+        }
+    } else {
+        for (int i = 0; i < sm_filtered_count; i++) sm_disp[sm_disp_count++] = i;
+    }
+    sm_disp[sm_disp_count++] = SM_DISP_FOOT;
+    /* Keep the hover on a live ITEM row: narrowing the query can leave it
+     * past the end, and dividers/footers can never hold the selection. */
+    if (hover_menu_idx >= sm_disp_count) {
+        hover_menu_idx = -1;
+        for (int d = sm_disp_count - 1; d >= 0; d--) {
+            if (sm_disp[d] >= 0) { hover_menu_idx = d; break; }
+        }
+    } else if (hover_menu_idx >= 0 && sm_disp[hover_menu_idx] < 0) {
+        hover_menu_idx = -1;
+    }
+}
+
+// Height of display row d, and the y of the row under the cursor.
+static int sm_disp_h(int d) {
+    int tag = sm_disp[d];
+    if (tag == SM_DISP_SECT) return SM_SECT_H;
+    if (tag == SM_DISP_FOOT) return SM_FOOT_H;
+    return SM_ROW_H;
+}
+
+// Display row under y (sm_y-relative), or -1 when above the rows.
+static int sm_disp_at(int sm_y, int my) {
+    int y = sm_y + SM_HEAD_H;
+    for (int d = 0; d < sm_disp_count; d++) {
+        int h = sm_disp_h(d);
+        if (my >= y && my < y + h) return d;
+        y += h;
+    }
+    return -1;
+}
+
+// Move the hover one item row in dir (-1 up, +1 down), skipping the
+// divider and footer and stopping at the ends.
+static void sm_step_hover(int dir) {
+    sm_rebuild_filter();
+    int d = hover_menu_idx;
+    if (d < 0 || d >= sm_disp_count) {
+        d = (dir < 0) ? sm_disp_count - 1 : 0;
+        while (d >= 0 && d < sm_disp_count && sm_disp[d] < 0) d += dir;
+        hover_menu_idx = (d >= 0 && d < sm_disp_count) ? d : -1;
         return;
     }
-    for (int i = 0; i < START_MENU_ITEMS; i++) {
-        if (stristr(sm_labels[i], sm_search)) sm_filtered[sm_filtered_count++] = i;
-    }
+    int n = d + dir;
+    while (n >= 0 && n < sm_disp_count && sm_disp[n] < 0) n += dir;
+    if (n >= 0 && n < sm_disp_count) hover_menu_idx = n;
 }
 
 static void handle_start_menu_click(int item); // forward decl
@@ -207,10 +275,24 @@ void taskbar_handle_key(int sc, char c) {
         if (sm_search_len > 0) sm_search_len--;
     } else if (sc == 0x1C && sm_filtered_count > 0 &&
                (sm_search_len > 0 || hover_menu_idx >= 0)) { // Enter
-        int pick = (hover_menu_idx >= 0 && hover_menu_idx < sm_filtered_count)
-                       ? hover_menu_idx : 0;
-        handle_start_menu_click(sm_filtered[pick]);
-        return;
+        /* Hover is a display row; map it back to the filtered item. A hover
+         * on a divider/footer (mouse crossed one) falls back to the first
+         * item row, same as Enter with no hover at all. */
+        sm_rebuild_filter();
+        int pick = -1;
+        if (hover_menu_idx >= 0 && hover_menu_idx < sm_disp_count &&
+            sm_disp[hover_menu_idx] >= 0)
+            pick = sm_filtered[sm_disp[hover_menu_idx]];
+        else {
+            for (int d = 0; d < sm_disp_count; d++) {
+                if (sm_disp[d] >= 0) { pick = sm_filtered[sm_disp[d]]; break; }
+            }
+        }
+        if (pick >= 0) { handle_start_menu_click(pick); return; }
+    } else if (sc == 0x48) { // Up: previous item row, stop at the top
+        sm_step_hover(-1);
+    } else if (sc == 0x50) { // Down: next item row, stop at the bottom
+        sm_step_hover(1);
     } else if (c >= ' ' && c <= '~') {
         if (sm_search_len < (int)sizeof(sm_search) - 1) {
             sm_search[sm_search_len++] = c;
@@ -515,18 +597,32 @@ void taskbar_draw() {
         }
 
         // Menu items with icons — only the ones matching the search query.
-        // The hover index and click hit-test are positions in THIS filtered
-        // list; the original menu index is sm_filtered[n].
+        // Display rows (items + section divider + footer) come from
+        // sm_rebuild_filter; hover/click walk the same rows, so paint and
+        // hit-test share one row map.
         sm_rebuild_filter();
-        int oy = sm_y + 40; // after header
+        int oy = sm_y + SM_HEAD_H; // after header
         if (sm_filtered_count == 0) {
             draw_string_px(sm_w / 2 - 4 * 8, oy + 8, "No results", TB_TEXT_DIM, TB_BG);
+            oy += SM_ROW_H;
         }
-        for (int n = 0; n < sm_filtered_count; n++) {
-            int orig = sm_filtered[n];
+        for (int d = 0; d < sm_disp_count; d++) {
+            int tag = sm_disp[d];
+            if (tag == SM_DISP_SECT) {
+                draw_rect(8, oy + SM_SECT_H / 2, sm_w - 16, 1, RETRO_SHADOW);
+                draw_string_px(10, oy + 2, "System", TB_TEXT_DIM, TB_BG);
+                oy += SM_SECT_H;
+                continue;
+            }
+            if (tag == SM_DISP_FOOT) {
+                draw_string_px(8, oy + 4, "UpDn move Enter open", TB_TEXT_DIM, TB_BG);
+                oy += SM_FOOT_H;
+                continue;
+            }
+            int orig = sm_filtered[tag];
             int item_y = oy;
-            int item_h = 28;
-            int hovered = (hover_menu_idx == n);
+            int item_h = SM_ROW_H;
+            int hovered = (hover_menu_idx == d);
             
             // Selection: classic amber highlight with black text
             if (hovered) {
@@ -731,17 +827,14 @@ void taskbar_handle_click(int mx, int my) {
     
     // ---------- Start menu items hit test ----------
     if (start_menu_open && my < ty) {
-        int sm_h = START_MENU_H, sm_w = 200;
+        int sm_h = START_MENU_H, sm_w = SM_W;
         int sm_y = ty - sm_h;
         if (mx >= 2 && mx <= 2 + sm_w && my >= sm_y && my <= sm_y + sm_h) {
-            if (my >= sm_y + 36) {
-                int rel_y = my - (sm_y + 36);
-                int item = rel_y / 28;
-                sm_rebuild_filter();
-                if (item >= 0 && item < sm_filtered_count) {
-                    handle_start_menu_click(sm_filtered[item]);
-                    return;
-                }
+            sm_rebuild_filter();
+            int d = sm_disp_at(sm_y, my);
+            if (d >= 0 && sm_disp[d] >= 0) {
+                handle_start_menu_click(sm_filtered[sm_disp[d]]);
+                return;
             }
         }
         // Click outside start menu area closes it
@@ -794,7 +887,7 @@ void taskbar_handle_click(int mx, int my) {
         start_menu_open = !start_menu_open;
         if (start_menu_open) {
             calendar_open = 0; volume_popup_open = 0;
-            sm_search_len = 0; sm_rebuild_filter();
+            sm_search_len = 0; hover_menu_idx = -1; sm_rebuild_filter();
         }
         return;
     }
