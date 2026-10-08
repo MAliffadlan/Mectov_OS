@@ -829,7 +829,6 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                     gdb_stub_break();
                     needs_redraw = 1;
                 }
-                extern int keyboard_alt_held;
                 extern int alt_tab_active;
                 extern void wm_alt_tab_start(void);
                 extern void wm_alt_tab_next(void);
@@ -934,7 +933,7 @@ void kernel_main(uint32_t magic, uint32_t addr) {
                         // never reaches the focused window as 'L'.
                         pending_lock = 1;
                         needs_redraw = 1;
-                    } else if (sc == 0x0F && keyboard_alt_held) {
+                    } else if (sc == 0x0F && (kbd_mods & 4)) {
                         wm_alt_tab_start();
                         needs_redraw = 1;
                     } else if (wm_scancode_focus() >= 0) {
