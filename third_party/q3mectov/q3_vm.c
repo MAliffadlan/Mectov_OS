@@ -1767,6 +1767,11 @@ static void q3arena_win_key(int id, char c, uint8_t sc) {
  * layer's mouse path. Flushed by the next usercmd. */
 static void q3arena_win_mouse(int id, int dx, int dy, int btn) {
     (void)id;
+    /* Split-brain guard: capture survives focus loss, so this handler can
+     * fire for a window that no longer owns input. Drop before touching any
+     * intent state (a_btn/a_human_move/look counters), or an unfocused click
+     * flips the tour and fire state. */
+    if (wm_capture_owner() != a_win) return;
     /* v38.122: button bit 0 = left = BUTTON_ATTACK, press and release alike
      * (the kernel main loop only calls wm_capture_event when the button state
      * CHANGES or the pointer moved, so this is edge-correct). */
@@ -1779,7 +1784,6 @@ static void q3arena_win_mouse(int id, int dx, int dy, int btn) {
     a_look_ev++;
     a_idle_frames = 0;      /* v38.149: see a_idle_frames above */
     a_last_input_ms = a_ms();
-    if (wm_capture_owner() != a_win) return;
     a_input_seen = 1;
     q3arena_note_input();
     if (a_mouse_first) {
