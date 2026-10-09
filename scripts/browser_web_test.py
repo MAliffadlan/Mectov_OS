@@ -46,7 +46,7 @@ FAKE_PAGE = ("FAKE PAGE — deterministic test page.\\n"
 
 LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 
-SM_Y = (768 - 28) - 404  # Start menu panel top (START_MENU_H = 404 since Pixel Paint)
+SM_Y = (768 - 28) - 432  # START_MENU_H = 432 (header + 10 apps + divider + 3 sys + footer)
 
 # Browser window: created at (50,50) 520x380; WM carves a 20px titlebar +
 # 1px frame -> client area on screen spans x 51..548, y 71..428 (518x358).

@@ -33,7 +33,7 @@ DUMP3 = "/tmp/mectov_paint_cleared.ppm"
 
 LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 
-SM_Y = (768 - 28) - 404  # Start menu panel top (START_MENU_H is now 404)
+SM_Y = (768 - 28) - 432  # START_MENU_H = 432 (header + 10 apps + divider + 3 sys + footer)
 
 # Paint window: created at (60,40) 600x420. WM titlebar 20px + 1px frame ->
 # client on screen spans x 61..659, y 61..459.

@@ -34,7 +34,7 @@ SERVER_LOG = "/tmp/mectov_browser_http.log"
 
 LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 
-SM_Y = (768 - 28) - 404  # Start menu panel top (START_MENU_H = 404 since Pixel Paint)
+SM_Y = (768 - 28) - 432  # START_MENU_H = 432 (header + 10 apps + divider + 3 sys + footer)
 
 # Browser window: created at (50,50) 520x380, TITLEBAR_H = 20 -> client area
 # Window is created at (50,50) sized 520x380. The WM carves a 20px titlebar

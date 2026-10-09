@@ -73,7 +73,7 @@ CHUNK_BODY = ("chunked control page -- de-chunked before render.\n"
 LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 # Start menu panel top (START_MENU_H = 404 since Pixel Paint); row 3 is
 # "Mini Browser".
-SM_Y = (768 - 28) - 404
+SM_Y = (768 - 28) - 432  # START_MENU_H = 432 (header + 10 apps + divider + 3 sys + footer)
 WIN_X0, WIN_Y0 = 50, 50
 URL_FIELD_Y0 = WIN_Y0 + 25
 
