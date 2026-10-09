@@ -36,28 +36,46 @@ typedef struct {
 } gui_event_t;
 
 #define CW 520
-#define CH 380
+#define CH 400   // +20 for the bottom tab strip (URL/page/status keep coordinates)
 #define URL_MAX 120
-#define RAW_MAX 24576   // raw HTTP response
-#define PAGE_MAX 16384  // rendered text
+#define RAW_MAX 24576   // raw HTTP response (single in-flight fetch, global)
+#define PAGE_MAX 16384  // rendered text, per tab
 #define TITLE_MAX 64
+#define MAX_TABS 4
+#define HIST_MAX 10
+#define TAB_H 20     // bottom tab strip height (above the status bar)
+#define BM_FILE "/ext2/bookmarks.txt"
 
-static char url_buf[URL_MAX + 1] = "example.com";
-static int url_len = 11;
-static int focused_url = 1;
+// Per-tab state. Network/TLS framing (raw_buf, conn_id, tls, req_*) stays
+// global: one in-flight fetch at a time (tls_conn_t is far too big x4).
+// Switching tabs mid-load cancels the load — deterministic, no cross-tab
+// connection confusion.
+typedef struct {
+    char url_buf[URL_MAX + 1];
+    int url_len;
+    int focused_url;
+    char page_text[PAGE_MAX];
+    int page_len;
+    int total_lines;
+    char page_title[TITLE_MAX];
+    int scroll_offset;
+    char status_msg[128];
+    char hist[HIST_MAX][URL_MAX + 1];
+    int hist_len;   // entries used
+    int hist_pos;   // index of the current page (-1 = none yet)
+    int used;
+} tab_t;
+
+static tab_t tabs[MAX_TABS];
+static int cur_tab = 0;
+#define T (&tabs[cur_tab])
 
 static char raw_buf[RAW_MAX];
 static int raw_len = 0;
-static char page_text[PAGE_MAX];
-static int page_len = 0;
-static int total_lines = 1;
-static char page_title[TITLE_MAX] = "";
 
 static int loading = 0;
 static int browser_state = 0; // 0=Idle 1=DNS wait 2=TCP connect wait 3=Receiving
 static int conn_id = -1;
-static int scroll_offset = 0;
-static char status_msg[128] = "Ready - type a URL and press ENTER";
 // Actual client-area size as reported by the WM (event type 5). The window
 // is win_cw x win_ch on screen, but the WM carves out a 20px titlebar + 1px frame on
 // every side, so drawing at fixed win_cw/win_ch coordinates clips anything below
@@ -197,10 +215,10 @@ static int parse_ip4(const char* s, int len, uint8_t* ip) {
     return pos == len;
 }
 
-// Parse "url_buf" into req_host / req_port / req_path / req_ip.
+// Parse "T->url_buf" into req_host / req_port / req_path / req_ip.
 // Returns 0 on success, -1 on a malformed URL.
 static int parse_url(void) {
-    const char* p = url_buf;
+    const char* p = T->url_buf;
     int host_len = 0;
     req_port = 80;
     req_is_literal = 0;
@@ -309,12 +327,12 @@ static int decode_entity(const char* in, int i, int in_len, char* out, int* out_
     return 1;
 }
 
-// Render an HTML document (or plain text) into page_text. Extracts <title>.
+// Render an HTML document (or plain text) into T->page_text. Extracts <title>.
 static void html_to_text(const char* in, int in_len) {
-    my_memset(page_text, 0, PAGE_MAX);
-    my_memset(page_title, 0, TITLE_MAX);
-    page_len = 0;
-    total_lines = 1;
+    my_memset(T->page_text, 0, PAGE_MAX);
+    my_memset(T->page_title, 0, TITLE_MAX);
+    T->page_len = 0;
+    T->total_lines = 1;
 
     char tag[24];
     int in_tag = 0, tag_len = 0;
@@ -343,10 +361,10 @@ static void html_to_text(const char* in, int in_len) {
                 } else if (my_strcmp_eq(low, "script") || my_strcmp_eq(low, "style")) {
                     in_skip = 1;
                 } else if (my_strcmp_eq(low, "br") || my_strcmp_eq(low, "hr")) {
-                    if (!last_nl && page_len < PAGE_MAX - 1) { page_text[page_len++] = '\n'; last_nl = 1; total_lines++; }
+                    if (!last_nl && T->page_len < PAGE_MAX - 1) { T->page_text[T->page_len++] = '\n'; last_nl = 1; T->total_lines++; }
                     pending_space = 0;
                 } else if (tag_in_list(low)) {
-                    if (!last_nl && page_len < PAGE_MAX - 1) { page_text[page_len++] = '\n'; last_nl = 1; total_lines++; }
+                    if (!last_nl && T->page_len < PAGE_MAX - 1) { T->page_text[T->page_len++] = '\n'; last_nl = 1; T->total_lines++; }
                     pending_space = 0;
                 } else if (my_strcmp_eq(low, "title")) {
                     title_on = !closing;
@@ -365,24 +383,24 @@ static void html_to_text(const char* in, int in_len) {
 
         if (c == '<') { in_tag = 1; tag_len = 0; pending_space = 0; saw_tag = 1; continue; }
         if (c == '&') {
-            i += decode_entity(in, i, in_len, page_text, &page_len, PAGE_MAX) - 1;
+            i += decode_entity(in, i, in_len, T->page_text, &T->page_len, PAGE_MAX) - 1;
             last_nl = 0;
             continue;
         }
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
             if (title_on && c == ' ') {
-                int tl = my_strlen(page_title);
-                if (tl > 0 && page_title[tl - 1] != ' ' && tl < TITLE_MAX - 1)
-                    page_title[tl] = ' ';
+                int tl = my_strlen(T->page_title);
+                if (tl > 0 && T->page_title[tl - 1] != ' ' && tl < TITLE_MAX - 1)
+                    T->page_title[tl] = ' ';
             }
             if (c == '\n' && !saw_tag) {
                 // Plain-text input (no HTML tags seen — e.g. the Web Gateway
                 // Proxy's line-structured replies): preserve real line breaks
                 // instead of collapsing them into one paragraph.
-                if (!last_nl && page_len < PAGE_MAX - 1) {
-                    page_text[page_len++] = '\n';
+                if (!last_nl && T->page_len < PAGE_MAX - 1) {
+                    T->page_text[T->page_len++] = '\n';
                     last_nl = 1;
-                    total_lines++;
+                    T->total_lines++;
                 }
                 pending_space = 0;
             } else if (!last_nl) {
@@ -393,25 +411,25 @@ static void html_to_text(const char* in, int in_len) {
         if (c < 32 || c > 126) continue;
 
         if (title_on) {
-            int tl = my_strlen(page_title);
-            if (tl < TITLE_MAX - 1) page_title[tl] = c;
+            int tl = my_strlen(T->page_title);
+            if (tl < TITLE_MAX - 1) T->page_title[tl] = c;
         }
-        if (page_len >= PAGE_MAX - 2) break;
+        if (T->page_len >= PAGE_MAX - 2) break;
         if (last_nl) {
             // trim leading spaces on a fresh line
         } else if (pending_space) {
-            page_text[page_len++] = ' ';
+            T->page_text[T->page_len++] = ' ';
             pending_space = 0;
         }
-        page_text[page_len++] = c;
+        T->page_text[T->page_len++] = c;
         last_nl = 0;
     }
-    if (page_len < PAGE_MAX) page_text[page_len] = '\0';
+    if (T->page_len < PAGE_MAX) T->page_text[T->page_len] = '\0';
     // trim trailing blank lines
-    while (page_len > 0 && (page_text[page_len - 1] == '\n' || page_text[page_len - 1] == ' '))
-        page_len--;
-    page_text[page_len] = '\0';
-    if (page_len == 0) { my_strcpy(page_text, "(empty page)"); page_len = my_strlen(page_text); }
+    while (T->page_len > 0 && (T->page_text[T->page_len - 1] == '\n' || T->page_text[T->page_len - 1] == ' '))
+        T->page_len--;
+    T->page_text[T->page_len] = '\0';
+    if (T->page_len == 0) { my_strcpy(T->page_text, "(empty page)"); T->page_len = my_strlen(T->page_text); }
 }
 
 // ------------------------------------------------------------ HTTP parsing
@@ -572,43 +590,206 @@ static void parse_response(void) {
     }
 
     // status summary
-    my_strcpy(status_msg, "");
+    my_strcpy(T->status_msg, "");
     if (code > 0) {
         my_itoa(code, code_str);
-        my_strcat(status_msg, "HTTP ");
-        my_strcat(status_msg, code_str);
-        my_strcat(status_msg, " - ");
+        my_strcat(T->status_msg, "HTTP ");
+        my_strcat(T->status_msg, code_str);
+        my_strcat(T->status_msg, " - ");
     }
     char nbuf[12];
     my_itoa(raw_len, nbuf);
-    my_strcat(status_msg, nbuf);
-    my_strcat(status_msg, " bytes");
+    my_strcat(T->status_msg, nbuf);
+    my_strcat(T->status_msg, " bytes");
     if (using_tls) {
         // Which suite was negotiated belongs on screen: "it loaded" does not
         // tell you whether it loaded over TLS, or over which cipher.
-        my_strcat(status_msg, " - ");
-        my_strcat(status_msg, tls_cipher_name(tls_cipher_id(&tls)));
+        my_strcat(T->status_msg, " - ");
+        my_strcat(T->status_msg, tls_cipher_name(tls_cipher_id(&tls)));
     }
-    if (page_title[0]) {
-        my_strcat(status_msg, " - ");
-        my_strcat(status_msg, page_title);
+    if (T->page_title[0]) {
+        my_strcat(T->status_msg, " - ");
+        my_strcat(T->status_msg, T->page_title);
     }
     if (code >= 300 && code < 400)
-        my_strcat(status_msg, " [redirect not followed]");
+        my_strcat(T->status_msg, " [redirect not followed]");
+}
+
+// ------------------------------------------------------- tabs + history
+
+static void set_status(const char* a, const char* b);
+static void start_request(int wid);
+
+static int tab_used_count(void) {
+    int n = 0;
+    for (int i = 0; i < MAX_TABS; i++) if (tabs[i].used) n++;
+    return n;
+}
+
+static void tab_fresh(int i) {
+    my_memset((void*)&tabs[i], 0, (int)sizeof(tab_t));
+    tabs[i].used = 1;
+    tabs[i].focused_url = 1;
+    tabs[i].hist_pos = -1;
+    my_strcpy(tabs[i].status_msg, "Ready - type a URL and press ENTER");
+    my_strcpy(tabs[i].page_text, "(new tab)");
+    tabs[i].page_len = my_strlen(tabs[i].page_text);
+    tabs[i].total_lines = 1;
+}
+
+// One in-flight fetch at a time (global net state): leaving a tab mid-load
+// cancels it instead of stranding a connection no pump will ever drain.
+static void cancel_load(const char* why) {
+    if (conn_id >= 0) { sys_tcp_close(conn_id); conn_id = -1; }
+    loading = 0;
+    browser_state = 0;
+    if (why) set_status(why, 0);
+}
+
+static void tab_switch(int i) {
+    if (i < 0 || i >= MAX_TABS || !tabs[i].used || i == cur_tab) return;
+    if (loading) cancel_load("Load cancelled (tab switch)");
+    cur_tab = i;
+    sys_print("[BROWSER] tab switch=", 0x0A);
+    char nb[12];
+    my_itoa(i, nb);
+    sys_print(nb, 0x0A);
+    sys_print("\n", 0x0A);
+}
+
+static void tab_new(void) {
+    for (int i = 0; i < MAX_TABS; i++) {
+        if (!tabs[i].used) {
+            if (loading) cancel_load("Load cancelled (new tab)");
+            tab_fresh(i);
+            cur_tab = i;
+            sys_print("[BROWSER] tab new=", 0x0A);
+            char nb[12];
+            my_itoa(i, nb);
+            sys_print(nb, 0x0A);
+            sys_print(" count=", 0x0A);
+            my_itoa(tab_used_count(), nb);
+            sys_print(nb, 0x0A);
+            sys_print("\n", 0x0A);
+            return;
+        }
+    }
+    set_status("Tab limit (4)", 0);
+}
+
+static void tab_close(int i) {
+    if (i < 0 || i >= MAX_TABS || !tabs[i].used) return;
+    if (tab_used_count() <= 1) { tab_fresh(i); cur_tab = i; return; }
+    if (loading && i == cur_tab) cancel_load(0);
+    tabs[i].used = 0;
+    if (i == cur_tab) {
+        for (int j = 0; j < MAX_TABS; j++) {
+            if (tabs[j].used) { cur_tab = j; break; }
+        }
+    }
+    sys_print("[BROWSER] tab close=", 0x0A);
+    {
+        char nb[12];
+        my_itoa(i, nb);
+        sys_print(nb, 0x0A);
+        sys_print(" count=", 0x0A);
+        my_itoa(tab_used_count(), nb);
+        sys_print(nb, 0x0A);
+        sys_print("\n", 0x0A);
+    }
+}
+
+// History: plain URL stack per tab. New navigations truncate any forward
+// entries; back/forward reload without pushing (no duplicates, no loops).
+static void hist_push(const char* url) {
+    tab_t* t = T;
+    if (t->hist_pos >= 0 && my_strcmp_eq(t->hist[t->hist_pos], url)) return;
+    if (t->hist_pos < t->hist_len - 1) t->hist_len = t->hist_pos + 1;
+    if (t->hist_len >= HIST_MAX) {
+        for (int i = 1; i < HIST_MAX; i++) my_strcpy(t->hist[i - 1], t->hist[i]);
+        t->hist_len = HIST_MAX - 1;
+    }
+    my_strcpy(t->hist[t->hist_len], url);
+    t->hist_len++;
+    t->hist_pos = t->hist_len - 1;
+}
+
+static void nav_to_url(int wid, const char* url, int push) {
+    my_strcpy(T->url_buf, url);
+    T->url_len = my_strlen(T->url_buf);
+    if (push) hist_push(url);
+    start_request(wid);
+}
+
+static void hist_back(int wid) {
+    if (T->hist_pos > 0) {
+        if (loading) cancel_load(0);
+        T->hist_pos--;
+        nav_to_url(wid, T->hist[T->hist_pos], 0);
+    }
+}
+
+static void hist_forward(int wid) {
+    if (T->hist_pos >= 0 && T->hist_pos < T->hist_len - 1) {
+        if (loading) cancel_load(0);
+        T->hist_pos++;
+        nav_to_url(wid, T->hist[T->hist_pos], 0);
+    }
+}
+
+static void bookmark_save(int wid) {
+    (void)wid;
+    if (T->url_len == 0) return;
+    sys_create_file(BM_FILE);
+    int fd = sys_open_mode(BM_FILE, O_APPEND);
+    if (fd < 0) { set_status("Bookmark failed", 0); return; }
+    sys_write(fd, T->url_buf, T->url_len);
+    sys_write(fd, "\n", 1);
+    sys_close(fd);
+    set_status("Bookmarked ", T->url_buf);
+    sys_print("[BROWSER] bookmark ", 0x0A);
+    sys_print(T->url_buf, 0x0A);
+    sys_print("\n", 0x0A);
+}
+
+// Tab strip click: back/forward/bookmark buttons, tab switch/close, new.
+// Geometry mirrors the strip drawn in draw_browser (same x constants).
+// Returns 1 when the click landed on a strip control (consumed).
+static int tab_strip_click(int wid, int mx, int my) {
+    int strip_y = win_ch - 16 - TAB_H;
+    if (my < strip_y || my >= win_ch - 16) return 0;
+    if (mx >= 4 && mx < 34) { hist_back(wid); return 1; }
+    if (mx >= 34 && mx < 64) { hist_forward(wid); return 1; }
+    if (mx >= 64 && mx < 94) { bookmark_save(wid); return 1; }
+    int tx = 94;
+    for (int i = 0; i < MAX_TABS; i++) {
+        if (!tabs[i].used) continue;
+        if (mx >= tx && mx < tx + 96) {
+            if (mx >= tx + 96 - 16) tab_close(i);
+            else tab_switch(i);
+            return 1;
+        }
+        tx += 100;
+    }
+    if (tab_used_count() < MAX_TABS && mx >= tx && mx < tx + 28) {
+        tab_new();
+        return 1;
+    }
+    return 0;
 }
 
 // ------------------------------------------------------------------ draw
 
 static int visible_rows(void) {
-    int v = (win_ch - 20 - 40) / 16;
+    int v = (win_ch - 20 - TAB_H - 40) / 16;
     return v > 1 ? v : 1;
 }
 
 static void clamp_scroll(void) {
-    int max = total_lines - visible_rows();
+    int max = T->total_lines - visible_rows();
     if (max < 0) max = 0;
-    if (scroll_offset > max) scroll_offset = max;
-    if (scroll_offset < 0) scroll_offset = 0;
+    if (T->scroll_offset > max) T->scroll_offset = max;
+    if (T->scroll_offset < 0) T->scroll_offset = 0;
 }
 
 static void draw_browser(int wid) {
@@ -618,8 +799,8 @@ static void draw_browser(int wid) {
     // Address bar (dark header)
     sys_draw_rect(wid, 0, 0, win_cw, 30, 0x00313244);
     sys_draw_text(wid, 8, 8, "URL:", 0x006C7086);
-    sys_draw_rect(wid, 40, 4, win_cw - 50, 22, focused_url ? 0x00FFFFFF : 0x00CCCCCC);
-    sys_draw_text(wid, 44, 8, url_buf, 0x00111111);
+    sys_draw_rect(wid, 40, 4, win_cw - 50, 22, T->focused_url ? 0x00FFFFFF : 0x00CCCCCC);
+    sys_draw_text(wid, 44, 8, T->url_buf, 0x00111111);
     if (loading) sys_draw_rect(wid, win_cw - 20, 8, 10, 10, 0x00FF3333);
     sys_draw_text(wid, win_cw - 60, 34, "Ring 3", 0x00F9E2AF);
 
@@ -637,26 +818,54 @@ static void draw_browser(int wid) {
     int max_ch = (win_cw - 28) / 8 - 1;
     int current_line = 0;
 
-    for (int i = 0; i <= page_len; i++) {
-        char c = (i < page_len) ? page_text[i] : '\n';
+    for (int i = 0; i <= T->page_len; i++) {
+        char c = (i < T->page_len) ? T->page_text[i] : '\n';
         if (c == '\n' || line_len >= max_ch) {
             line[line_len] = '\0';
-            if (current_line >= scroll_offset) {
+            if (current_line >= T->scroll_offset) {
                 if (line_len > 0) sys_draw_text(wid, lx, ly, line, 0x00111111);
                 ly += 16;
-                if (ly > win_ch - 20) break;
+                if (ly > win_ch - 20 - TAB_H) break;
             }
             current_line++;
             line_len = 0;
-            if (c != '\n' && i < page_len) line[line_len++] = c;
+            if (c != '\n' && i < T->page_len) line[line_len++] = c;
         } else if (c >= 32 && c <= 126) {
             line[line_len++] = c;
         }
     }
 
+    // Tab strip (above the status bar): back/forward/bookmark buttons,
+    // one header per tab (x = close), "+" for a new tab.
+    {
+        int strip_y = win_ch - 16 - TAB_H;
+        sys_draw_rect(wid, 0, strip_y, win_cw, TAB_H, 0x00313244);
+        int can_back = (T->hist_pos > 0);
+        int can_fwd = (T->hist_pos >= 0 && T->hist_pos < T->hist_len - 1);
+        sys_draw_text(wid, 4 + 8, strip_y + 3, "<", can_back ? 0x00FFFFFF : 0x00666666);
+        sys_draw_text(wid, 34 + 8, strip_y + 3, ">", can_fwd ? 0x00FFFFFF : 0x00666666);
+        sys_draw_text(wid, 64 + 8, strip_y + 3, "*", 0x00FFD94D);
+        int tx = 94;
+        for (int i = 0; i < MAX_TABS; i++) {
+            if (!tabs[i].used) continue;
+            sys_draw_rect(wid, tx, strip_y + 2, 96, TAB_H - 4,
+                          (i == cur_tab) ? 0x00FFFFFF : 0x00CCCCCC);
+            char tlabel[12];
+            const char* tsrc = tabs[i].page_title[0] ? tabs[i].page_title : tabs[i].url_buf;
+            int li = 0;
+            while (tsrc[li] && li < 10) { tlabel[li] = tsrc[li]; li++; }
+            tlabel[li] = '\0';
+            sys_draw_text(wid, tx + 4, strip_y + 4, tlabel, 0x00111111);
+            sys_draw_text(wid, tx + 96 - 14, strip_y + 4, "x", 0x00111111);
+            tx += 100;
+        }
+        if (tab_used_count() < MAX_TABS)
+            sys_draw_text(wid, tx + 6, strip_y + 4, "+", 0x00FFFFFF);
+    }
+
     // Status bar
     sys_draw_rect(wid, 0, win_ch - 16, win_cw - 12, 16, 0x00313244);
-    sys_draw_text(wid, 6, win_ch - 13, status_msg, 0x00A6E3A1);
+    sys_draw_text(wid, 6, win_ch - 13, T->status_msg, 0x00A6E3A1);
 
     sys_update_window(wid);
 }
@@ -664,14 +873,14 @@ static void draw_browser(int wid) {
 // ------------------------------------------------------------ state machine
 
 static void set_status(const char* a, const char* b) {
-    my_strcpy(status_msg, a);
-    if (b) my_strcat(status_msg, b);
+    my_strcpy(T->status_msg, a);
+    if (b) my_strcat(T->status_msg, b);
 }
 
 static void start_request(int wid) {
     raw_len = 0;
-    page_len = 0;
-    scroll_offset = 0;
+    T->page_len = 0;
+    T->scroll_offset = 0;
     loading = 1;
     conn_id = -1;
     body_start = -1;
@@ -752,7 +961,7 @@ static void finish_ok(int wid) {
     if (conn_id >= 0) { sys_tcp_close(conn_id); conn_id = -1; }
     loading = 0;
     browser_state = 0;
-    focused_url = 0;
+    T->focused_url = 0;
     parse_response();
     clamp_scroll();
     draw_browser(wid);
@@ -763,22 +972,29 @@ static void finish_err(int wid, const char* msg) {
     if (conn_id >= 0) { sys_tcp_close(conn_id); conn_id = -1; }
     loading = 0;
     browser_state = 0;
-    focused_url = 1;
-    my_strcpy(page_text, msg);
-    page_len = my_strlen(page_text);
-    total_lines = 1;
+    T->focused_url = 1;
+    my_strcpy(T->page_text, msg);
+    T->page_len = my_strlen(T->page_text);
+    T->total_lines = 1;
     set_status("Failed", 0);
     draw_browser(wid);
 }
 
 void _start() {
-    url_len = my_strlen(url_buf);
+    // Tab 0 is the initial tab (replaces the old file-scope initializers).
+    tabs[0].used = 1;
+    my_strcpy(tabs[0].url_buf, "example.com");
+    tabs[0].url_len = my_strlen(tabs[0].url_buf);
+    tabs[0].focused_url = 1;
+    tabs[0].hist_len = 0;
+    tabs[0].hist_pos = -1;
+    my_strcpy(tabs[0].status_msg, "Ready - type a URL and press ENTER");
     int wid = sys_create_window(50, 50, CW, CH, "Mini Browser");
     if (wid < 0) sys_exit();
 
-    my_strcpy(page_text, "Mectov Mini-Browser v3.0 [Ring 3]\nReal HTTP fetch + simple HTML rendering.\nType a URL and press ENTER.");
-    page_len = my_strlen(page_text);
-    total_lines = 3;
+    my_strcpy(T->page_text, "Mectov Mini-Browser v3.0 [Ring 3]\nReal HTTP fetch + simple HTML rendering.\nType a URL and press ENTER.");
+    T->page_len = my_strlen(T->page_text);
+    T->total_lines = 3;
     draw_browser(wid);
 
     gui_event_t ev;
@@ -793,46 +1009,48 @@ void _start() {
                     if (conn_id >= 0) sys_tcp_close(conn_id);
                     sys_exit();
                 }
-                if (focused_url) {
+                if (T->focused_url) {
                     if (ev.key == '\b') {
-                        if (url_len > 0) { url_len--; url_buf[url_len] = '\0'; draw_browser(wid); }
+                        if (T->url_len > 0) { T->url_len--; T->url_buf[T->url_len] = '\0'; draw_browser(wid); }
                     } else if (ev.key == '\n') {
-                        if (url_len > 0) start_request(wid);
-                    } else if (ev.key >= 32 && ev.key <= 126 && url_len < URL_MAX - 1) {
-                        url_buf[url_len++] = (char)ev.key;
-                        url_buf[url_len] = '\0';
+                        if (T->url_len > 0) nav_to_url(wid, T->url_buf, 1);
+                    } else if (ev.key >= 32 && ev.key <= 126 && T->url_len < URL_MAX - 1) {
+                        T->url_buf[T->url_len++] = (char)ev.key;
+                        T->url_buf[T->url_len] = '\0';
                         draw_browser(wid);
                     }
                 } else {
                     if (ev.key == ' ') {
-                        focused_url = 1;
+                        T->focused_url = 1;
                         draw_browser(wid);
                     } else if (ev.key == 'w' || ev.key == 'W') {
-                        if (scroll_offset > 0) scroll_offset--;
+                        if (T->scroll_offset > 0) T->scroll_offset--;
                         draw_browser(wid);
                     } else if (ev.key == 's' || ev.key == 'S') {
-                        scroll_offset++;
+                        T->scroll_offset++;
                         clamp_scroll();
                         draw_browser(wid);
                     }
                 }
             } else if (ev.type == 3) { // Mouse
                 if (ev.key == 1) { // Left click
-                    if (ev.y < 30) {
-                        focused_url = 1;
+                    if (tab_strip_click(wid, ev.x, ev.y)) {
+                        draw_browser(wid);
+                    } else if (ev.y < 30) {
+                        T->focused_url = 1;
                     } else if (ev.x > win_cw - 12) {
-                        focused_url = 0;
+                        T->focused_url = 0;
                         if (ev.y < 30 + 12) {
-                            if (scroll_offset > 0) scroll_offset--;
+                            if (T->scroll_offset > 0) T->scroll_offset--;
                         } else if (ev.y > win_ch - 12) {
-                            scroll_offset++;
+                            T->scroll_offset++;
                             clamp_scroll();
                         } else {
-                            if (ev.y < win_ch / 2) { if (scroll_offset > 0) scroll_offset--; }
-                            else { scroll_offset++; clamp_scroll(); }
+                            if (ev.y < win_ch / 2) { if (T->scroll_offset > 0) T->scroll_offset--; }
+                            else { T->scroll_offset++; clamp_scroll(); }
                         }
                     } else {
-                        focused_url = 0;
+                        T->focused_url = 0;
                     }
                     draw_browser(wid);
                 }
@@ -845,9 +1063,9 @@ void _start() {
                 }
             } else if (ev.type == 4) { // Scroll wheel
                 if (ev.key > 0) {
-                    for (int s = 0; s < 3 && scroll_offset > 0; s++) scroll_offset--;
+                    for (int s = 0; s < 3 && T->scroll_offset > 0; s++) T->scroll_offset--;
                 } else if (ev.key < 0) {
-                    scroll_offset += 3;
+                    T->scroll_offset += 3;
                     clamp_scroll();
                 }
                 draw_browser(wid);
@@ -965,10 +1183,10 @@ void _start() {
                             raw_buf[raw_len] = '\0';
                         }
                         char nb[12];
-                        my_strcpy(status_msg, "Loading ");
+                        my_strcpy(T->status_msg, "Loading ");
                         my_itoa(raw_len, nb);
-                        my_strcat(status_msg, nb);
-                        my_strcat(status_msg, " bytes");
+                        my_strcat(T->status_msg, nb);
+                        my_strcat(T->status_msg, " bytes");
                         // Repaint at most every 10th received chunk: each
                         // draw costs a full WM re-composite, and repainting
                         // per chunk doubled QEMU's host CPU during a fetch

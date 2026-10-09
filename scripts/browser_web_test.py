@@ -48,13 +48,13 @@ LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 
 SM_Y = (768 - 28) - 432  # START_MENU_H = 432 (header + 10 apps + divider + 3 sys + footer)
 
-# Browser window: created at (50,50) 520x380; WM carves a 20px titlebar +
-# 1px frame -> client area on screen spans x 51..548, y 71..428 (518x358).
+# Browser window: created at (50,50) 520x400 (tab strip added +20); WM carves a 20px titlebar +
+# 1px frame -> client area on screen spans x 51..568, y 71..448 (518x378).
 WIN_X0, WIN_Y0 = 50, 50
-WIN_X1, WIN_Y1 = 570, 430
+WIN_X1, WIN_Y1 = 570, 450
 URL_FIELD_Y0, URL_FIELD_Y1 = WIN_Y0 + 25, WIN_Y0 + 47   # client 4..26
 PAGE_Y0, PAGE_Y1 = WIN_Y0 + 61, WIN_Y0 + 363            # client 40..342
-STATUS_Y0, STATUS_Y1 = WIN_Y0 + 363, WIN_Y0 + 379       # client 342..358
+STATUS_Y0, STATUS_Y1 = WIN_Y0 + 383, WIN_Y0 + 399       # client 362..378 (tab strip above)
 
 
 def wait_for_in_file(path, needle, timeout):

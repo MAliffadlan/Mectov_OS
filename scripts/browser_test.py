@@ -36,16 +36,16 @@ LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 
 SM_Y = (768 - 28) - 432  # START_MENU_H = 432 (header + 10 apps + divider + 3 sys + footer)
 
-# Browser window: created at (50,50) 520x380, TITLEBAR_H = 20 -> client area
-# Window is created at (50,50) sized 520x380. The WM carves a 20px titlebar
+# Browser window: created at (50,50) 520x400 (tab strip added +20), TITLEBAR_H = 20 -> client area
+# Window is created at (50,50) sized 520x400. The WM carves a 20px titlebar
 # plus a 1px frame on every side, so the client area on screen spans
-# x 51..548, y 71..428 (518x358). The status strip is the last 16 client rows
-# (client y 342..357 -> screen y 413..428).
+# x 51..568, y 71..448 (518x378). The status strip is the last 16 client rows
+# (client y 362..377 -> screen y 433..448).
 WIN_X0, WIN_Y0 = 50, 50
-WIN_X1, WIN_Y1 = 570, 430
+WIN_X1, WIN_Y1 = 570, 450
 URL_FIELD_Y0, URL_FIELD_Y1 = WIN_Y0 + 25, WIN_Y0 + 47   # client 4..26
 PAGE_Y0, PAGE_Y1 = WIN_Y0 + 61, WIN_Y0 + 363            # client 40..342
-STATUS_Y0, STATUS_Y1 = WIN_Y0 + 363, WIN_Y0 + 379       # client 342..358
+STATUS_Y0, STATUS_Y1 = WIN_Y0 + 383, WIN_Y0 + 399       # client 362..378 (tab strip above)
 
 PAGE_HTML = b"""<html><head><title>Mectov Test Page</title></head>
 <body>
@@ -109,6 +109,23 @@ def wait_for_in_file(path, needle, timeout):
         time.sleep(0.5)
     return False
 
+
+
+def read_file(path):
+    with open(path, "r", errors="replace") as f:
+        return f.read()
+
+
+def wait_for_done_count(n, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if read_file(SERIAL_LOG).count("[BROWSER] done") >= n:
+                return True
+        except OSError:
+            pass
+        time.sleep(0.5)
+    return False
 
 def mon_cmd(cmd, wait=0.15):
     try:
@@ -384,6 +401,104 @@ def main():
         except FileNotFoundError:
             pass
         print("[OK] IP-literal URL skipped DNS; no PANIC/WATCHDOG")
+
+        # ---- 5. Tabs: new / navigate / switch / back-forward / bookmark / close
+        # Tab strip: client y 342..362 -> screen 413..433 (mid 423). Client x
+        # maps to screen as 51+x. [+] with one tab used sits at client
+        # 194..222; back/fwd/star at 4/34/64 (+15 mid each).
+        TAB_Y = WIN_Y0 + 21 + 352
+        if not wait_for_in_file(SERIAL_LOG, "[BROWSER] done", 25):
+            print("FAIL: first page never finished loading")
+            return 1
+        done_before = read_file(SERIAL_LOG).count("[BROWSER] done")
+        click(WIN_X0 + 1 + 208, TAB_Y, wait=1.0)  # [+]
+        if not wait_for_in_file(SERIAL_LOG, "[BROWSER] tab new=", 10):
+            print("FAIL: [+] did not open a second tab")
+            return 1
+        print("[OK] [+] opened tab 2")
+        # Fresh tab: empty URL field.
+        if not screendump(DUMP1):
+            print("FAIL: no screendump after tab open")
+            return 1
+        w, h, px = load_ppm(DUMP1)
+        fresh_dark = count_color(px, w, WIN_X0 + 44, URL_FIELD_Y0, WIN_X1 - 6, URL_FIELD_Y1,
+                                 (0x11, 0x11, 0x11), tol=40)
+        if fresh_dark > 15:
+            print(f"FAIL: new tab URL field not empty (px={fresh_dark})")
+            return 1
+        print("[OK] new tab has an empty URL field")
+        # Navigate tab 2 twice (same server, exercises history).
+        click(WIN_X0 + 200, URL_FIELD_Y0 + 9, wait=0.5)
+        keys2 = []
+        for ch in f"10.0.2.2:{port}/second":
+            if ch == ".":
+                keys2.append("dot")
+            elif ch == ":":
+                keys2.append("shift-semicolon")
+            elif ch == "/":
+                keys2.append("slash")
+            else:
+                keys2.append(ch)
+        type_keys(keys2)
+        mon_cmd("sendkey ret")
+        if not wait_for_done_count(done_before + 1, 30):
+            print("FAIL: tab 2 first navigation never finished")
+            return 1
+        click(WIN_X0 + 200, URL_FIELD_Y0 + 9, wait=0.5)
+        type_keys(["backspace"] * 24)
+        keys3 = []
+        for ch in f"10.0.2.2:{port}/third":
+            if ch == ".":
+                keys3.append("dot")
+            elif ch == ":":
+                keys3.append("shift-semicolon")
+            elif ch == "/":
+                keys3.append("slash")
+            else:
+                keys3.append(ch)
+        type_keys(keys3)
+        mon_cmd("sendkey ret")
+        if not wait_for_done_count(done_before + 2, 30):
+            print("FAIL: tab 2 second navigation never finished")
+            return 1
+        print("[OK] tab 2 loaded two pages (history=2)")
+        # Back -> reloads /second; Forward -> /third again.
+        click(WIN_X0 + 1 + 19, TAB_Y, wait=0.5)  # Back
+        if not wait_for_done_count(done_before + 3, 30):
+            print("FAIL: Back did not reload")
+            return 1
+        click(WIN_X0 + 1 + 49, TAB_Y, wait=0.5)  # Forward
+        if not wait_for_done_count(done_before + 4, 30):
+            print("FAIL: Forward did not reload")
+            return 1
+        print("[OK] Back/Forward reloaded through history")
+        # Bookmark the current page.
+        click(WIN_X0 + 1 + 79, TAB_Y, wait=0.5)  # star
+        if not wait_for_in_file(SERIAL_LOG, "[BROWSER] bookmark 10.0.2.2:", 10):
+            print("FAIL: bookmark star did not persist the URL")
+            return 1
+        print("[OK] bookmark star persisted the URL")
+        # Switch back to tab 0: its URL field must show the first URL again.
+        click(WIN_X0 + 1 + 142, TAB_Y, wait=1.0)  # tab 0 header
+        if not wait_for_in_file(SERIAL_LOG, "[BROWSER] tab switch=0", 10):
+            print("FAIL: click on tab 0 did not switch")
+            return 1
+        if not screendump(DUMP1):
+            print("FAIL: no screendump after tab switch")
+            return 1
+        w, h, px = load_ppm(DUMP1)
+        back_dark = count_color(px, w, WIN_X0 + 44, URL_FIELD_Y0, WIN_X1 - 6, URL_FIELD_Y1,
+                                (0x11, 0x11, 0x11), tol=40)
+        if back_dark < 30:
+            print(f"FAIL: tab 0 URL field not restored (px={back_dark})")
+            return 1
+        print("[OK] tab switch restored tab 0 (URL + page)")
+        # Close tab 1 via its x box.
+        click(WIN_X0 + 1 + 281, TAB_Y, wait=1.0)  # x of tab 1 header
+        if not wait_for_in_file(SERIAL_LOG, "[BROWSER] tab close=1", 10):
+            print("FAIL: x did not close tab 1")
+            return 1
+        print("[OK] x closed tab 1")
         print("PASS: browser fetched + rendered over real HTTP")
         return 0
     finally:
