@@ -45,6 +45,8 @@ typedef struct {
 #define HIST_MAX 10
 #define TAB_H 20     // bottom tab strip height (above the status bar)
 #define BM_FILE "/ext2/bookmarks.txt"
+#define MAX_LINKS 64 // clickable <a> targets per page
+#define LINK_COLOR 0x0000A8D8
 
 // Per-tab state. Network/TLS framing (raw_buf, conn_id, tls, req_*) stays
 // global: one in-flight fetch at a time (tls_conn_t is far too big x4).
@@ -64,6 +66,12 @@ typedef struct {
     int hist_len;   // entries used
     int hist_pos;   // index of the current page (-1 = none yet)
     int used;
+    // Clickable links: [link_start, link_end) is a page_text byte range, so a
+    // click maps to text directly and wrapping at draw time stays correct.
+    int link_count;
+    int link_start[MAX_LINKS];
+    int link_end[MAX_LINKS];
+    char link_href[MAX_LINKS][URL_MAX + 1];
 } tab_t;
 
 static tab_t tabs[MAX_TABS];
@@ -336,11 +344,15 @@ static void html_to_text(const char* in, int in_len) {
 
     char tag[24];
     int in_tag = 0, tag_len = 0;
+    int tag_start = 0;       // where the current tag began in `in`
     int in_skip = 0;        // inside <script>/<style>
     int title_on = 0;
     int pending_space = 0;
     int last_nl = 1;        // treat start as after-newline (strip leading blanks)
     int saw_tag = 0;        // any '<' seen? plain-text input keeps its newlines
+    int link_open = -1;     // index into the link table while inside <a>...</a>
+
+    T->link_count = 0;
 
     for (int i = 0; i < in_len; i++) {
         char c = in[i];
@@ -352,9 +364,17 @@ static void html_to_text(const char* in, int in_len) {
                 const char* name = tag;
                 int closing = 0;
                 if (tag[0] == '/') { closing = 1; name = tag + 1; }
+                // The name runs up to the first attribute: `<a href="/">`
+                // must match "a", not `a href="/"`. Every tag comparison below
+                // (script/style/title/a/block tags) keys off this.
                 char low[24];
-                my_strcpy(low, name);
-                to_lower(low);
+                {
+                    int k = 0;
+                    while (name[k] && name[k] != ' ' && name[k] != '\t' && k < 23) k++;
+                    for (int j = 0; j < k; j++) low[j] = name[j];
+                    low[k] = '\0';
+                    to_lower(low);
+                }
                 if (in_skip) {
                     if (closing && (my_strcmp_eq(low, "script") || my_strcmp_eq(low, "style")))
                         in_skip = 0;
@@ -368,6 +388,41 @@ static void html_to_text(const char* in, int in_len) {
                     pending_space = 0;
                 } else if (my_strcmp_eq(low, "title")) {
                     title_on = !closing;
+                } else if (my_strcmp_eq(low, "a")) {
+                    if (closing) {
+                        if (link_open >= 0) {
+                            T->link_end[link_open] = T->page_len;
+                            link_open = -1;
+                        }
+                    } else if (T->link_count < MAX_LINKS) {
+                        /* The tag buffer is capped at 23 chars, so the href is
+                         * read out of the raw source between tag_start and i
+                         * rather than from the truncated name. */
+                        int h = tag_start, e = i, hl = 0;
+                        char href[URL_MAX + 1];
+                        while (h + 5 < e) {
+                            if ((in[h] == 'h' || in[h] == 'H') &&
+                                ci_starts_with(in + h, "href")) {
+                                int q = h + 4;
+                                while (q < e && (in[q] == ' ' || in[q] == '=')) q++;
+                                if (q < e && (in[q] == '"' || in[q] == '\'')) {
+                                    char qc = in[q++];
+                                    while (q < e && in[q] != qc && hl < URL_MAX)
+                                        href[hl++] = in[q++];
+                                    break;
+                                }
+                            }
+                            h++;
+                        }
+                        href[hl] = '\0';
+                        if (hl > 0) {
+                            int n = T->link_count++;
+                            my_strcpy(T->link_href[n], href);
+                            T->link_start[n] = T->page_len;
+                            T->link_end[n] = T->page_len;
+                            link_open = n;
+                        }
+                    }
                 }
                 in_tag = 0; tag_len = 0;
             } else if (tag_len < 23) {
@@ -381,7 +436,7 @@ static void html_to_text(const char* in, int in_len) {
             continue;
         }
 
-        if (c == '<') { in_tag = 1; tag_len = 0; pending_space = 0; saw_tag = 1; continue; }
+        if (c == '<') { in_tag = 1; tag_len = 0; tag_start = i; pending_space = 0; saw_tag = 1; continue; }
         if (c == '&') {
             i += decode_entity(in, i, in_len, T->page_text, &T->page_len, PAGE_MAX) - 1;
             last_nl = 0;
@@ -586,6 +641,12 @@ static void parse_response(void) {
         sys_print(nb, 0x0A);
         sys_print(" host=", 0x0A);
         sys_print(req_host, 0x0A);
+        sys_print(" links=", 0x0A);
+        {
+            char lb[12];
+            my_itoa(T->link_count, lb);
+            sys_print(lb, 0x0A);
+        }
         sys_print("\n", 0x0A);
     }
 
@@ -619,6 +680,7 @@ static void parse_response(void) {
 
 static void set_status(const char* a, const char* b);
 static void start_request(int wid);
+static void nav_to_url(int wid, const char* url, int push);
 
 static int tab_used_count(void) {
     int n = 0;
@@ -780,6 +842,77 @@ static int tab_strip_click(int wid, int mx, int my) {
 
 // ------------------------------------------------------------------ draw
 
+// Link hit boxes, recorded while painting. Recording what was actually drawn
+// is the only way a click stays consistent with the screen: recomputing the
+// wrap in a second place is what made an earlier version miss by a column.
+static int link_hit_n;
+static int link_hit_x[MAX_LINKS], link_hit_y[MAX_LINKS];
+static int link_hit_w[MAX_LINKS], link_hit_i[MAX_LINKS];
+
+// Which link table entry covers page_text byte `pos`? -1 when none.
+static int link_index_at(int pos) {
+    for (int n = 0; n < T->link_count; n++) {
+        if (pos >= T->link_start[n] && pos < T->link_end[n]) return n;
+        if (T->link_start[n] > pos) break;
+    }
+    return -1;
+}
+
+// Is page_text byte `pos` inside a link?
+static int link_at(int pos) { return link_index_at(pos) >= 0; }
+
+// Client (x,y) over a recorded link box? Returns the link index or -1.
+static int link_hit_at(int cx, int cy) {
+    for (int h = 0; h < link_hit_n; h++) {
+        if (cx >= link_hit_x[h] && cx < link_hit_x[h] + link_hit_w[h] &&
+            cy >= link_hit_y[h] && cy < link_hit_y[h] + 16)
+            return link_hit_i[h];
+    }
+    return -1;
+}
+
+// Relative href: same host AND same port, path resolved against the current
+// request path (last segment replaced). The port must be carried over: the
+// page's own host:port is what the link was served from, and dropping it
+// silently retargets the fetch at port 80.
+static void resolve_href(char* out, const char* href) {
+    if (ci_starts_with(href, "http://") || ci_starts_with(href, "https://")) {
+        my_strcpy(out, href);
+        return;
+    }
+    my_strcpy(out, "http://");
+    my_strcat(out, req_host);
+    if (req_port != 80) {
+        my_strcat(out, ":");
+        char pb[8];
+        my_itoa(req_port, pb);
+        my_strcat(out, pb);
+    }
+    if (href[0] != '/') {
+        my_strcat(out, req_path);
+        for (int k = my_strlen(out); k > 0; k--)
+            if (out[k - 1] == '/') { out[k - 1] = '\0'; break; }
+    }
+    my_strcat(out, href);
+}
+
+// Click a link under the cursor, if any. Returns 1 when one was followed.
+static int link_click(int wid, int cx, int cy) {
+    int n = link_hit_at(cx, cy);
+    if (n < 0 || n >= T->link_count) return 0;
+    const char* href = T->link_href[n];
+    if (href[0] == '#') return 0;          // in-page anchor: nothing to do
+    {
+        char target[URL_MAX + 1];
+        resolve_href(target, href);
+        sys_print("[BROWSER] link ", 0x0A);
+        sys_print(target, 0x0A);
+        sys_print("\n", 0x0A);
+        nav_to_url(wid, target, 1);
+        return 1;
+    }
+}
+
 static int visible_rows(void) {
     int v = (win_ch - 20 - TAB_H - 40) / 16;
     return v > 1 ? v : 1;
@@ -811,25 +944,58 @@ static void draw_browser(int wid) {
     sys_draw_rect(wid, win_cw - 12, win_ch - 12, 12, 12, 0x00C0C0C0);
     sys_draw_text(wid, win_cw - 10, win_ch - 14, "v", 0x00111111);
 
-    // Page text
+    // Page text. A line is emitted in runs of "inside a link" vs "not", so a
+    // link is drawn in LINK_COLOR with an underline and everything else in ink.
+    // line_base is the page_text offset of line[0], which is what makes the
+    // click mapping exact across wraps.
     int lx = 8, ly = 40;
     int line_len = 0;
     char line[128];
     int max_ch = (win_cw - 28) / 8 - 1;
     int current_line = 0;
+    int line_base = 0;
+    link_hit_n = 0;   // boxes are rebuilt from this frame's paint
 
     for (int i = 0; i <= T->page_len; i++) {
         char c = (i < T->page_len) ? T->page_text[i] : '\n';
         if (c == '\n' || line_len >= max_ch) {
             line[line_len] = '\0';
             if (current_line >= T->scroll_offset) {
-                if (line_len > 0) sys_draw_text(wid, lx, ly, line, 0x00111111);
+                int run_start = 0;
+                while (run_start < line_len) {
+                    int in_link = link_at(line_base + run_start);
+                    int run_end = run_start;
+                    while (run_end < line_len &&
+                           link_at(line_base + run_end) == in_link) run_end++;
+                    char run[128];
+                    int n = run_end - run_start;
+                    for (int k = 0; k < n; k++) run[k] = line[run_start + k];
+                    run[n] = '\0';
+                    int rx = lx + run_start * 8;
+                    if (in_link) {
+                        sys_draw_text(wid, rx, ly, run, LINK_COLOR);
+                        sys_draw_rect(wid, rx, ly + 13, n * 8, 1, LINK_COLOR);
+                        // Record the painted box so a click hits exactly this.
+                        int li = link_index_at(line_base + run_start);
+                        if (li >= 0 && link_hit_n < MAX_LINKS) {
+                            link_hit_x[link_hit_n] = rx;
+                            link_hit_y[link_hit_n] = ly;
+                            link_hit_w[link_hit_n] = n * 8;
+                            link_hit_i[link_hit_n] = li;
+                            link_hit_n++;
+                        }
+                    } else {
+                        sys_draw_text(wid, rx, ly, run, 0x00111111);
+                    }
+                    run_start = run_end;
+                }
                 ly += 16;
                 if (ly > win_ch - 20 - TAB_H) break;
             }
             current_line++;
             line_len = 0;
-            if (c != '\n' && i < T->page_len) line[line_len++] = c;
+            line_base = i + 1;
+            if (c != '\n' && i < T->page_len) { line[line_len++] = c; line_base = i; }
         } else if (c >= 32 && c <= 126) {
             line[line_len++] = c;
         }
@@ -908,6 +1074,18 @@ static void start_request(int wid) {
         conn_id = sys_tcp_connect(req_ip, req_port);
         if (conn_id < 0) {
             loading = 0;
+            sys_print("[BROWSER] connect-fail rc=", 0x0C);
+            {
+                char nb[12];
+                my_itoa(conn_id, nb);
+                sys_print(nb, 0x0C);
+                sys_print(" host=", 0x0C);
+                sys_print(req_host, 0x0C);
+                sys_print(" port=", 0x0C);
+                my_itoa(req_port, nb);
+                sys_print(nb, 0x0C);
+                sys_print("\n", 0x0C);
+            }
             set_status("No free TCP connection slots", 0);
         } else {
             browser_state = 2;
@@ -1035,6 +1213,8 @@ void _start() {
             } else if (ev.type == 3) { // Mouse
                 if (ev.key == 1) { // Left click
                     if (tab_strip_click(wid, ev.x, ev.y)) {
+                        draw_browser(wid);
+                    } else if (link_click(wid, ev.x, ev.y)) {
                         draw_browser(wid);
                     } else if (ev.y < 30) {
                         T->focused_url = 1;

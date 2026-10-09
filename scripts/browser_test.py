@@ -20,6 +20,7 @@ Exit code 0 = pass, 1 = fail.
 import argparse
 import http.server
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -54,6 +55,7 @@ PAGE_HTML = b"""<html><head><title>Mectov Test Page</title></head>
 HTML tags are stripped by the mini browser renderer. ABCDEFG 0123456789.</p>
 <p>Entities: A &amp; B &lt;ok&gt;.</p>
 <a href="/">a link</a>
+<p><a href="/linked-target">CLICKME</a></p>
 </body>
 </html>
 """
@@ -499,6 +501,68 @@ def main():
             print("FAIL: x did not close tab 1")
             return 1
         print("[OK] x closed tab 1")
+
+        # ---- 6. Clickable links: render in link color, click navigates
+        # Back on tab 0 (which still shows the first page) and click CLICKME.
+        # Client area maps to screen as (WIN_X0+1, WIN_Y0+21); the page starts
+        # at client y=40, 16px rows, so row r sits at client y 40+16r.
+        if not wait_for_in_file(SERIAL_LOG, "[BROWSER] done", 25):
+            print("FAIL: tab 0 page never re-rendered")
+            return 1
+        click(WIN_X0 + 200, URL_FIELD_Y0 + 9, wait=0.4)
+        type_keys(["backspace"] * 24)
+        type_keys(["ret"])
+        if not wait_for_in_file(SERIAL_LOG, "[BROWSER] tab switch=0", 10):
+            print("FAIL: could not get back to tab 0")
+            return 1
+        # CLICKME is the last paragraph's link; scan rows for the link colour.
+        if not screendump(DUMP1):
+            print("FAIL: no screendump for link scan")
+            return 1
+        w, h, px = load_ppm(DUMP1)
+        link_px = 0
+        link_row = -1
+        # Scan bottom-up: the page's LAST link is CLICKME (/linked-target);
+        # the first one is "/", which would prove nothing new.
+        for r in range(13, -1, -1):
+            y0 = WIN_Y0 + 21 + 40 + 16 * r
+            n = count_color(px, w, WIN_X0 + 12, y0, WIN_X1 - 20, y0 + 14,
+                            (0x00, 0xA8, 0xD8), tol=30)
+            if n > 8:
+                link_px = n
+                link_row = r
+                break
+        print(f"[*] link-coloured row: {link_row} (px={link_px})")
+        if link_row < 0:
+            print("FAIL: no link rendered in LINK_COLOR")
+            return 1
+        print("[OK] link rendered in link colour")
+        # Serial is the stronger evidence: the parser must have captured the
+        # <a href> targets (pixel colour alone cannot prove the href parsed).
+        m = re.findall(r"\[BROWSER\] done .*? links=(\d+)", read_file(SERIAL_LOG))
+        if not m or int(m[-1]) < 1:
+            print(f"FAIL: parser captured no links (links={m[-1:] or ['?']})")
+            return 1
+        print(f"[OK] parser captured {m[-1]} link target(s)")
+        # Click it: the server must see a GET for /linked-target.
+        done_before2 = read_file(SERIAL_LOG).count("[BROWSER] done")
+        click(WIN_X0 + 1 + 20, WIN_Y0 + 21 + 40 + 16 * link_row + 6, wait=1.0)
+        if not wait_for_in_file(SERIAL_LOG, "[BROWSER] link http://", 10):
+            print("FAIL: clicking the link did not navigate")
+            return 1
+        if not wait_for_done_count(done_before2 + 1, 25):
+            print("FAIL: link navigation never finished loading")
+            return 1
+        try:
+            with open(SERVER_LOG) as f:
+                srv_log = f.read()
+        except FileNotFoundError:
+            srv_log = ""
+        if "PATH=/linked-target" not in srv_log:
+            print("FAIL: server never received the linked path")
+            print(srv_log[-400:] or "(server saw no request)")
+            return 1
+        print("[OK] clicking a link fetched its target")
         print("PASS: browser fetched + rendered over real HTTP")
         return 0
     finally:
