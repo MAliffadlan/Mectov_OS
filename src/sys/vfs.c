@@ -2162,7 +2162,7 @@ static void vfs_sync_aliases_unlocked(int node) {
     }
 }
 
-int vfs_hardlink(const char* existing_path, const char* new_path) {
+int vfs_hardlink_as(const char* existing_path, const char* new_path, int acting_uid) {
     if (!existing_path || !new_path) return -1;
     vfs_lock_acquire();
     // POSIX link(): follow the existing path fully; refuse the final
@@ -2172,6 +2172,20 @@ int vfs_hardlink(const char* existing_path, const char* new_path) {
     // Only plain VFS files: symlinks/dirs/proc/dev have their own semantics.
     if (fs_nodes[src].type != FS_FILE) { vfs_lock_release(); return -3; }
     if (fs_nodes[src].data_sector <= 0) { vfs_lock_release(); return -4; } // nothing to share yet
+
+    // Authorization (Batch A / C4): without these guards a user could
+    // hard-link /etc/passwd into a directory they control and rewrite the
+    // account database through the alias (the old alias was created
+    // creator-owned 0644, so the caller could write it). POSIX
+    // protected_hardlinks semantics: non-root may only link files it owns;
+    // /etc/passwd additionally stays out of reach even for a
+    // (hypothetical) non-root owner.
+    if (acting_uid != ROOT_UID) {
+        if (fs_nodes[src].uid != (uint16_t)acting_uid) { vfs_lock_release(); return -8; }
+        char ap[MAX_PATH];
+        if (vfs_get_abs_path(src, ap, MAX_PATH) == 0 &&
+            strcmp(ap, PASSWD_PROTECT_PATH) == 0) { vfs_lock_release(); return -8; }
+    }
 
     char resolved[MAX_PATH];
     vfs_resolve_path(new_path, resolved, MAX_PATH);
@@ -2195,14 +2209,24 @@ int vfs_hardlink(const char* existing_path, const char* new_path) {
     // Both ends must be plain VFS (drive-0 ATA) files, so just check types.
     int n = vfs_create_node(lname, FS_FILE, cur);
     if (n < 0) { vfs_lock_release(); return -1; }
-    // Alias the storage: share the sector span and the size. uid/mode default
-    // from vfs_create_node (creator-owned 0644); hard links share content,
-    // not metadata, which is close enough for this single-user system.
+    // Alias the storage: share the sector span, the size, AND the
+    // ownership/mode — a hard link is the same inode under another name, so
+    // the alias must never end up more permissive than its source.
     fs_nodes[n].data_sector = fs_nodes[src].data_sector;
     fs_nodes[n].size = fs_nodes[src].size;
+    fs_nodes[n].uid = fs_nodes[src].uid;
+    fs_nodes[n].gid = fs_nodes[src].gid;
+    fs_nodes[n].mode = fs_nodes[src].mode;
     vfs_save();
     vfs_lock_release();
     return 0;
+}
+
+int vfs_hardlink(const char* existing_path, const char* new_path) {
+    // Legacy entry point: acts as the logged-in user (uid 1000), which is
+    // what shell builtins executing on a user's behalf mean. Kernel-internal
+    // or root-authorized callers use vfs_hardlink_as().
+    return vfs_hardlink_as(existing_path, new_path, USER_UID);
 }
 
 // Shared body: fill stat_k_t from a node index.
@@ -3011,11 +3035,10 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
     // Page-cache fast path: the first read of a file primes the whole-file
     // cache (pcache_insert below); every later read of the same file is then
     // served from RAM instead of one PIO transfer per sector.
-    char* cached = pcache_lookup(node, fs_nodes[node].size);
-    if (cached) {
-        memcpy(buf, cached, size);
-        if (size < max_size) buf[size] = '\0';
-        return size;
+    int cached = pcache_read(node, fs_nodes[node].size, buf, 0, size);
+    if (cached >= 0) {
+        if (cached < max_size) buf[cached] = '\0';
+        return cached;
     }
     
     int sector = fs_nodes[node].data_sector;
@@ -3116,12 +3139,11 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
 
     // Page-cache fast path (also serves the mmap fault path, which runs
     // without vfs_lock — pcache_lock is a leaf below vfs_lock, so this never
-    // re-enters the lock the fault may have interrupted).
-    char* cached = pcache_lookup(node, size);
-    if (cached) {
-        memcpy(buf, cached + offset, len);
-        return len;
-    }
+    // re-enters the lock the fault may have interrupted). The copy happens
+    // inside pcache_read: a concurrent evict can no longer free the buffer
+    // under this memcpy (Batch A UAF fix).
+    int got = pcache_read(node, size, buf, offset, len);
+    if (got >= 0) return got;
 
     // Cold miss at offset 0: read the WHOLE file into the cache once, then
     // serve the requested window from it. A subsequent read — even at a later
@@ -3155,11 +3177,10 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
                     memcpy(tmp + pfull * 512, t2, ptail);
                 }
                 pcache_insert(node, tmp, prime_size);
-                cached = pcache_lookup(node, prime_size);
-                if (cached) {
-                    memcpy(buf, cached + offset, len);
+                got = pcache_read(node, prime_size, buf, offset, len);
+                if (got >= 0) {
                     kfree(tmp);
-                    return len;
+                    return got;
                 }
             }
             kfree(tmp);

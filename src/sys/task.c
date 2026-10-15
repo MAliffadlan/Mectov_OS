@@ -124,6 +124,13 @@ typedef struct {
 } task_t;
 
 static task_t tasks[MAX_TASKS];
+
+// Address spaces that teardown could not free immediately (Batch A / C8):
+// when a task is killed while still mid-flight on another core, its CR3 is
+// loaded there and freeing the page tables would corrupt that core's page
+// walks. task_cleanup() parks the directory here instead of leaking it;
+// task_reap_zombies() frees it once no CPU runs that task slot anymore.
+static uint32_t deferred_pd[MAX_TASKS];
 static void mmap_free_dirty_bitmaps(int tid);  // defined in the mmap section
 static int current_task[16] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 // Set at the end of init_tasking(). Before that, APs boot with
@@ -974,6 +981,11 @@ static void task_cleanup(int tid) {
             if (!busy_elsewhere) {
                 extern void vmm_free_address_space(uint32_t);
                 vmm_free_address_space(tasks[tid].page_dir);
+            } else {
+                // Defer, don't leak (Batch A / C8): park the directory for the
+                // reaper, which runs on the BSP and can observe when no CPU
+                // runs this slot anymore.
+                deferred_pd[tid] = tasks[tid].page_dir;
             }
         }
         tasks[tid].page_dir = 0;
@@ -2865,6 +2877,25 @@ void task_reap_zombies(void) {
     uint32_t now = get_ticks();
     __asm__ volatile("cli");
     spin_lock(&task_lock);
+    // Free address spaces whose teardown had to be deferred because the dying
+    // task was still mid-flight on another core (Batch A / C8). The slot no
+    // longer runs anywhere and the state is FREE, so the page tables are
+    // unreachable — freeing them now cannot corrupt anybody's page walk.
+    // (A slot can still be busy if it was reused by a NEW task; the check
+    // below skips it and a later tick retires the old directory.)
+    for (int i = 1; i < MAX_TASKS; i++) {
+        if (deferred_pd[i] == 0) continue;
+        if (tasks[i].state != TASK_STATE_FREE) continue;
+        int busy = 0;
+        for (int c = 0; c < MAX_CPUS; c++) {
+            if (current_task[c] == i) busy = 1;
+        }
+        if (busy) continue;
+        uint32_t pd = deferred_pd[i];
+        deferred_pd[i] = 0;
+        extern void vmm_free_address_space(uint32_t);
+        vmm_free_address_space(pd);
+    }
     for (int i = 1; i < MAX_TASKS; i++) {
         if (tasks[i].state != TASK_STATE_ZOMBIE) continue;
         int p = tasks[i].parent;

@@ -29,21 +29,30 @@ void pcache_init(void) {
     memset(pcache, 0, sizeof(pcache));
 }
 
-char* pcache_lookup(int node, int size) {
-    if (node < 0 || size <= 0 || size > PCACHE_MAX_FILE) return NULL;
+int pcache_read(int node, int size, char* dst, int offset, int len) {
+    if (node < 0 || size <= 0 || size > PCACHE_MAX_FILE) return -1;
+    if (!dst || offset < 0 || len <= 0) return -1;
 
     uint32_t ef = spin_lock_irqsave(&pcache_lock);
     for (int i = 0; i < PCACHE_ENTRIES; i++) {
-        if (pcache[i].in_use && pcache[i].node_idx == node &&
-            pcache[i].size == size) {
-            pcache[i].last_tick = get_ticks();
-            char* d = pcache[i].data;
+        if (!pcache[i].in_use || pcache[i].node_idx != node ||
+            pcache[i].size != size) continue;
+        if (offset >= pcache[i].size) {
             spin_unlock_irqrestore(&pcache_lock, ef);
-            return d;
+            return -1;  // window starts past the cached data: fall back to disk
         }
+        pcache[i].last_tick = get_ticks();
+        int n = pcache[i].size - offset;
+        if (n > len) n = len;
+        // The copy happens under the lock: returning the pointer (the old
+        // pcache_lookup) let a concurrent insert/evict kfree the buffer while
+        // the caller memcpy'd from it — a ring 3 read of recycled kernel heap.
+        memcpy(dst, pcache[i].data + offset, n);
+        spin_unlock_irqrestore(&pcache_lock, ef);
+        return n;
     }
     spin_unlock_irqrestore(&pcache_lock, ef);
-    return NULL;
+    return -1;
 }
 
 static void pcache_drop_slot(int slot) {

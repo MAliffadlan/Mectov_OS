@@ -131,6 +131,30 @@ int get_win_index(int wid) {
     return -1;
 }
 
+// Owner-checked variant for the SYSCALL surface (Batch A / C5). A Ring 3
+// caller may only draw into, read events from, or present windows it
+// created; a fork'd child (parent chain) is the same app instance and stays
+// allowed, matching forkdemo which draws into the window its parent opened
+// before fork(). Kernel-internal paths (input pump, paint replay, WM
+// teardown) keep using get_win_index() — they are not reachable from user
+// registers. Kernel-created windows (owner_task == -1) never match a Ring 3
+// tid, so desktop/taskbar windows stay unreachable.
+int get_win_index_owned(int wid) {
+    int idx = get_win_index(wid);
+    if (idx < 0) return -1;
+    extern int get_current_task(void);
+    extern void wm_lock_acquire(void);
+    extern void wm_lock_release(void);
+    wm_lock_acquire();
+    int owner = wm_wins[idx].owner_task;
+    wm_lock_release();
+    int me = get_current_task();
+    if (owner == me) return idx;
+    extern int task_get_parent(int);
+    if (owner > 0 && task_get_parent(me) == owner) return idx;
+    return -1;
+}
+
 void push_event(int wid, int type, int x, int y, int key) {
     int idx = get_win_index(wid);
     if (idx < 0) return;
@@ -920,57 +944,29 @@ static void syscall_handler(registers_t* regs) {
             regs->eax = (uint32_t)-1;
             break;
 
-        // ----- SYS_VMM_ALLOC (30) -----
-        // Kept, but the caller no longer picks the flags and cannot name an
-        // address outside its own user window.
-        case SYS_VMM_ALLOC: {
-            uint32_t vaddr = (uint32_t)regs->ebx & 0xFFFFF000;
-            int tid = get_current_task();
-            if (task_in_kernel_space(tid) || vaddr < 0x08000000 || vaddr >= USER_STACK_BOTTOM) {
-                regs->eax = 0;
-                break;
-            }
-            // v38.164: this is a user DATA page, so PAGE_NX applies. uint64_t
-            // on purpose — PAGE_NX is bit 63 and a uint32_t would silently
-            // truncate it to 0, leaving the page executable. Gated on EFER.NXE
-            // because bit 63 is reserved without it.
-            uint64_t flags = PAGE_PRESENT | PAGE_RW | PAGE_USER;
-            if (paging_nx_enabled()) flags |= PAGE_NX;
-            regs->eax = vmm_alloc_page_at(task_get_page_dir(tid), vaddr, flags);
+        // ----- SYS_VMM_ALLOC (30) / SYS_VMM_FREE (31) -----
+        // DENIED outright (kernel hardening, Batch A / C1). The old range
+        // check (`vaddr >= 0x08000000 && vaddr < USER_STACK_BOTTOM`) only
+        // excluded the first 128 MB, but the boot identity map covers every
+        // byte of RAM — with the shipping -m 512 that includes
+        // [0x08000000, 0x1EFEFFFF). Ring 3 could therefore:
+        //   * SYS_VMM_FREE: frame_free() a live kernel frame behind an
+        //     identity PTE and unmap the kernel's own access path to it;
+        //   * SYS_VMM_ALLOC: replace the kernel's identity PTE for a
+        //     physical page with a fresh user page, so the kernel (touching
+        //     RAM through the identity map in this task's CR3) sees the
+        //     wrong memory. hardening_test reproduces both and the kernel
+        //     double-faults.
+        // No in-tree caller needs either number (only the syscall fuzzer
+        // pokes them and it ignores the result); SYS_MALLOC plus the demand
+        // pager already cover user allocation. The numbers stay reserved so
+        // the syscall ABI does not shift.
+        case SYS_VMM_ALLOC:
+            regs->eax = 0;
             break;
-        }
-
-        // ----- SYS_VMM_FREE (31) -----
-        case SYS_VMM_FREE: {
-            uint32_t vaddr = (uint32_t)regs->ebx & 0xFFFFF000;
-            int tid = get_current_task();
-            if (task_in_kernel_space(tid) || vaddr < 0x08000000 || vaddr >= USER_STACK_BOTTOM) {
-                regs->eax = (uint32_t)-1;
-                break;
-            }
-            uint32_t pd = task_get_page_dir(tid);
-            // vmm_unmap_page() frees the PTE but NOT the frame — release the
-            // frame first so unmap+free doesn't leak a physical page per call.
-            pte_t* pdpt = (pte_t*)(uintptr_t)pd;
-            if (pdpt[pdpt_index(vaddr)] & PAGE_PRESENT) {
-                pte_t* pd_ent = (pte_t*)(uintptr_t)(uint32_t)(pdpt[pdpt_index(vaddr)] & PTE_ADDR_MASK);
-                if (pd_ent[pd_index(vaddr)] & PAGE_PRESENT) {
-                    pte_t* pt = (pte_t*)(uintptr_t)(uint32_t)(pd_ent[pd_index(vaddr)] & PTE_ADDR_MASK);
-                    if (pt[pt_index(vaddr)] & PAGE_PRESENT) {
-                        extern void frame_free(uint32_t);
-                        frame_free((uint32_t)(pt[pt_index(vaddr)] & PTE_ADDR_MASK));
-                    }
-                }
-            }
-            regs->eax = (uint32_t)vmm_unmap_page(pd, vaddr);
-            // v38.66: sibling threads share this page_dir — a peer core's TLB
-            // may still map the just-freed page, and the frame is already
-            // released back to the allocator above. Flush peers so no stale
-            // mapping can ever touch the recycled frame.
-            extern void vmm_tlb_shootdown(uint32_t page_dir);
-            vmm_tlb_shootdown(pd);
+        case SYS_VMM_FREE:
+            regs->eax = (uint32_t)-1;
             break;
-        }
 
         // ----- SYS_CLIPBOARD_COPY (56) -----
         case SYS_CLIPBOARD_COPY: {

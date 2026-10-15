@@ -29,10 +29,14 @@
 
 void pcache_init(void);
 
-// Return a pointer to the cached copy of `node` iff an entry exists with a
-// matching size (the caller must hold vfs_lock or be in the no-lock offset
-// path). Returns NULL on miss. Touches the entry's LRU clock.
-char* pcache_lookup(int node, int size);
+// Copy up to `len` bytes of the cached copy of `node` (which must have size
+// `size` exactly) starting at `offset` into `dst`, under pcache_lock (Batch A
+// UAF fix: the old lookup() handed out a raw pointer with the lock dropped,
+// so a concurrent insert/evict could free the buffer mid-memcpy). Returns the
+// number of bytes copied (>= 1), or -1 when the node/size is not cached or
+// the window starts past the cached data — the caller falls back to disk.
+// Touches the entry's LRU clock.
+int pcache_read(int node, int size, char* dst, int offset, int len);
 
 // Store (or replace) the full contents of `node`. Called after a successful
 // disk write so the cache mirrors the disk, and after a first read so the

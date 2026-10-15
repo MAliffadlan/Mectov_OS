@@ -399,8 +399,12 @@ uint32_t handle_syscall_vfs(registers_t* regs) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
-            extern int vfs_hardlink(const char* existing_path, const char* new_path);
-            regs->eax = (uint32_t)vfs_hardlink(existing, newpath);
+            // uid-aware (Batch A / C4): non-root may only link files it owns
+            // and never /etc/passwd; the alias inherits the source metadata.
+            int ht = get_current_task();
+            int huid = task_in_kernel_space(ht) ? ROOT_UID : task_get_uid(ht);
+            extern int vfs_hardlink_as(const char*, const char*, int);
+            regs->eax = (uint32_t)vfs_hardlink_as(existing, newpath, huid);
             break;
         }
 

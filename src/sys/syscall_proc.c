@@ -489,6 +489,20 @@ uint32_t handle_syscall_proc(registers_t* regs) {
         // process group (the shell does this when it takes back the terminal).
         case SYS_TCSETPGRP: {
             int pgrp = (int)regs->ecx;
+            // Authorization (Batch A / C3): fg-pgrp membership is the sole key
+            // that grants the terminal — SYS_FB_MAP hands over the scanout and
+            // SYS_GET_KEY hands over every keystroke. Before this check any
+            // Ring 3 app could call tcsetpgrp(own pgrp) and keylog the user.
+            // Only the verified shell host (kernel-computed trust), root and
+            // kernel tasks may set it; plain apps get -1 (hardening_test).
+            int ctid = get_current_task();
+            if (!caller_shell_host(ctid)) {
+                write_serial_string("[SIG] tcsetpgrp DENIED tid=");
+                write_serial_hex(ctid);
+                write_serial_string("\n");
+                regs->eax = (uint32_t)-1;
+                break;
+            }
             extern void task_set_fg_pgrp(int);
             task_set_fg_pgrp(pgrp);
             write_serial_string("[SIG] tcsetpgrp fg=");

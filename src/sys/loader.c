@@ -16,6 +16,9 @@
 #define ET_DYN         3   // PIE: p_vaddr is an offset; loader adds a bias (ASLR)
 #define EM_386         3
 #define PT_LOAD        1
+#define PF_X           1   // segment is executable
+#define PF_W           2
+#define PF_R           4
 
 // i386 ABI relocation types (only needed for PIE images that carry a
 // .rel.dyn/.rel.plt — gcc -fPIE static links emit none, but a loader that
@@ -92,6 +95,26 @@ typedef struct {
 
 static int finish_loaded_task(const char* filename, const char* arg,
                               loader_image_t* img, int become_foreground);
+
+// Validate an MCT header against the actual file (kernel hardening, Batch A
+// / C2). All arithmetic is 64-bit on purpose: code_size and data_size are
+// attacker-controlled 32-bit fields, and a 32-bit sum wraps (code
+// 0xFFFFFFF0 + data 0x40 == 0x30), which used to slip past every bound and
+// make build_mct_image memcpy/memset ~4 GB at CPL 0 — a ring 3 kernel
+// crash. `check_entry` is set for executables (the entry is an offset into
+// code[]); libraries never use the field. Returns 0 when consistent,
+// otherwise a negative error.
+static int mct_validate(const mct_header_t* h, int file_size, int check_entry) {
+    uint64_t total = (uint64_t)h->code_size + (uint64_t)h->data_size;
+    if (total == 0 || total > 1024 * 1024) return -4;
+    // The file carries the header and the code[] payload; data_size is BSS,
+    // zero-filled by the loader. (16 + 0xFFFFFFF0 also wraps a 32-bit int —
+    // the whole point of doing this in 64-bit.)
+    if ((uint64_t)sizeof(mct_header_t) + (uint64_t)h->code_size > (uint64_t)file_size)
+        return -5;
+    if (check_entry && h->entry >= h->code_size) return -6;
+    return 0;
+}
 
 // Build the address space + copy the image. Returns 0 on success; on failure
 // returns a negative error and frees any partially built address space.
@@ -206,6 +229,12 @@ static int build_elf_image(const char* filename, const char* arg,
             write_serial_string("[LOADER] ELF segment too large\n");
             return -25;
         }
+        // A file size larger than the memory size would make the data copy
+        // below write past the mapped span (the map covers only memsz bytes).
+        if (ph->p_filesz > ph->p_memsz) {
+            write_serial_string("[LOADER] ELF p_filesz > p_memsz\n");
+            return -25;
+        }
         // Stay well below the 0x09000000 lib region (legacy bound, kept for
         // the absolute ET_EXEC case; for ET_DYN it caps the p_vaddr offset
         // space — the bias window then still lands far under the stack top).
@@ -261,10 +290,24 @@ static int build_elf_image(const char* filename, const char* arg,
 
     // Map every page the segments cover (one contiguous region; the legacy
     // per-segment loop left inter-segment gaps unmapped, which is equivalent
-    // for the loader's purposes and simpler to reason about).
+    // for the loader's purposes and simpler to reason about). W^X (Batch A /
+    // C2): a page is executable only when a PF_X PT_LOAD segment covers it;
+    // every other page gets PAGE_NX (gated on EFER.NXE — bit 63 is reserved
+    // without it). Data pages in an otherwise conventional image used to be
+    // executable too.
     write_serial_string("[LOADER] ELF mapping segments...\n");
     for (uint32_t a = map_first; a < map_last; a += 4096) {
-        if (!vmm_alloc_page_at(page_dir, a, PAGE_PRESENT | PAGE_RW | PAGE_USER)) {
+        int exec = 0;
+        for (int i = 0; i < eh->e_phnum && !exec; i++) {
+            elf32_phdr_t* ph = (elf32_phdr_t*)(buf + eh->e_phoff + i * eh->e_phentsize);
+            if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_X)) continue;
+            uint64_t s = (uint64_t)bias + ph->p_vaddr;
+            uint64_t e = s + ph->p_memsz;
+            if ((uint64_t)a < e && (uint64_t)a + 4096 > s) exec = 1;
+        }
+        uint64_t flags = PAGE_PRESENT | PAGE_RW | PAGE_USER;
+        if (!exec && paging_nx_enabled()) flags |= PAGE_NX;
+        if (!vmm_alloc_page_at(page_dir, a, flags)) {
             write_serial_string("[LOADER] ELF out of memory mapping segments\n");
             vmm_free_address_space(page_dir);
             return -26;
@@ -330,9 +373,12 @@ static int build_elf_image(const char* filename, const char* arg,
                     uint32_t type = rel->r_info & 0xFFu;
                     if (type == R_386_32 || type == R_386_GLOB_DAT ||
                         type == R_386_JMP_SLOT || type == R_386_RELATIVE) {
-                        uint32_t dest = bias + rel->r_offset;
-                        if (dest >= map_first && dest + 4 <= map_last) {
-                            *(uint32_t*)(uintptr_t)dest += bias;
+                        // 64-bit math: a crafted r_offset near 2^32 would
+                        // otherwise wrap `bias + r_offset` back into the
+                        // mapped span and fabricate a write there.
+                        uint64_t dest64 = (uint64_t)bias + rel->r_offset;
+                        if (dest64 >= map_first && dest64 + 4 <= map_last) {
+                            *(uint32_t*)(uintptr_t)(uint32_t)dest64 += bias;
                         }
                     }
                     // R_386_PC32 and unknown types: link-time resolved or
@@ -346,6 +392,24 @@ static int build_elf_image(const char* filename, const char* arg,
     __asm__ volatile("sti");
 
     uint32_t entry = bias + eh->e_entry;
+    // Entry sanity (Batch A / C2): the entry must land inside an executable
+    // PT_LOAD segment. Anything else is a jump into unmapped or data memory —
+    // and with the NX mapping above, into a page that cannot legally execute.
+    // The loader can reject that up front instead of handing the CPU a wild
+    // PC.
+    int entry_ok = 0;
+    for (int i = 0; i < eh->e_phnum; i++) {
+        elf32_phdr_t* ph = (elf32_phdr_t*)(buf + eh->e_phoff + i * eh->e_phentsize);
+        if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_X)) continue;
+        uint64_t s = (uint64_t)bias + ph->p_vaddr;
+        uint64_t e = s + ph->p_memsz;
+        if ((uint64_t)entry >= s && (uint64_t)entry < e) { entry_ok = 1; break; }
+    }
+    if (!entry_ok) {
+        write_serial_string("[LOADER] ELF entry outside executable segment\n");
+        vmm_free_address_space(page_dir);
+        return -28;
+    }
     write_serial_string("[LOADER] ELF entry=");
     write_serial_hex(entry);
     write_serial_string("\n");
@@ -417,14 +481,16 @@ int load_mct_app_fg(const char* filename, const char* arg, int become_foreground
         return -3;
     }
 
-    uint32_t total_size = header->code_size + header->data_size;
+    int mct_rc = mct_validate(header, sz, 1);
+    if (mct_rc < 0) {
+        write_serial_string("[LOADER] MCT header rejected (sizes/entry)\n");
+        kfree(buf);
+        return mct_rc;
+    }
+    uint32_t total_size = header->code_size + header->data_size;  // <= 1 MB (validated)
     write_serial_string("[LOADER] total_size=");
     write_serial_hex(total_size);
     write_serial_string("\n");
-
-    if (total_size == 0 || total_size > 1024 * 1024) { kfree(buf); return -4; }
-    // The file only contains the header and the code. data_size (BSS) is uninitialized memory.
-    if ((int)(sizeof(mct_header_t) + header->code_size) > sz) { kfree(buf); return -5; }
 
     rc = build_mct_image(filename, arg, buf, header, total_size, &img);
     kfree(buf);
@@ -560,9 +626,13 @@ int loader_build_image(const char* filename, const char* arg,
             kfree(buf);
             return -3;
         }
-        uint32_t total_size = header->code_size + header->data_size;
-        if (total_size == 0 || total_size > 1024 * 1024) { kfree(buf); return -4; }
-        if ((int)(sizeof(mct_header_t) + header->code_size) > sz) { kfree(buf); return -5; }
+        int mct_rc = mct_validate(header, sz, 1);
+        if (mct_rc < 0) {
+            write_serial_string("[LOADER] MCT header rejected (sizes/entry)\n");
+            kfree(buf);
+            return mct_rc;
+        }
+        uint32_t total_size = header->code_size + header->data_size;  // <= 1 MB (validated)
         rc = build_mct_image(filename, arg, buf, header, total_size, img);
     }
     kfree(buf);
@@ -589,12 +659,12 @@ void* load_mct_library(const char* filename) {
     mct_header_t* header = (mct_header_t*)lib_buf;
     if (header->magic != MCT_MAGIC) { kfree(lib_buf); return 0; }
 
-    uint32_t total_size = header->code_size + header->data_size;
-    if (total_size == 0 || total_size > 1024 * 1024) { kfree(lib_buf); return 0; }
     // The file only contains the header and the code — a forged header with a
-    // huge code_size would make the memcpy below read way past the small
-    // kmalloc'd buffer, leaking kernel heap into the caller's address space.
-    if ((int)(sizeof(mct_header_t) + header->code_size) > sz) { kfree(lib_buf); return 0; }
+    // huge (or wrapped) code_size would make the memcpy below read way past
+    // the small kmalloc'd buffer, leaking kernel heap into the caller's
+    // address space (and panic the kernel on the first unmapped page).
+    if (mct_validate(header, sz, 0) < 0) { kfree(lib_buf); return 0; }
+    uint32_t total_size = header->code_size + header->data_size;  // <= 1 MB (validated)
 
     uint32_t lib_base = 0x09000000;
     uint32_t num_pages = (total_size + 4095) / 4096;

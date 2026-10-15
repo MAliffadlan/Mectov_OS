@@ -180,12 +180,16 @@ def main():
     shutil.copy(args.disk, tdisk)
     shutil.copy(args.ext2, text2)
 
+    # QEMU RAM: 512 MB on purpose. With 128 MB the boot identity map ends
+    # exactly where the user VA window starts (0x08000000) and the
+    # SYS_VMM_FREE kernel-frame attack is unreachable; -m 512 makes
+    # 0x10000000 a live kernel-owned identity PTE (the shipping config).
     qemu_cmd = [
         "qemu-system-i386",
         "-cpu", "qemu32,+nx",
         "-vga", "std",
         "-cdrom", args.iso,
-        "-m", "128",
+        "-m", "512",
         "-smp", "4",
         "-display", "none",
         "-serial", f"file:{SERIAL_LOG}",
@@ -293,6 +297,16 @@ def main():
         time.sleep(0.4)
         if not run_app_cmd("hardening_test", "ALL TESTS PASSED", 60):
             print("[FAIL] hardening_test.mct did not report ALL TESTS PASSED")
+            # Surface the app's own verdict: the serial log carries a
+            # [FAIL] line per failed check (and [PANIC] when a check wedged
+            # the kernel), which is the actionable evidence here.
+            try:
+                with open(SERIAL_LOG, errors="replace") as f:
+                    for ln in f.read().splitlines():
+                        if "[FAIL]" in ln or "TESTS FAILED" in ln or "[PANIC]" in ln:
+                            print("  " + ln[:160])
+            except OSError:
+                pass
             return 1
         print("[OK] SYS_GETRANDOM + /dev/random + hashed passwd file verified from Ring 3")
 

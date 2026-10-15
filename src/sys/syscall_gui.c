@@ -57,6 +57,10 @@ typedef struct {
 extern win_event_queue_t win_queues[];
 extern win_canvas_t win_canvases[];
 
+// Owner-checked window lookup for syscall paths (Batch A / C5): the caller
+// must own the window (or be a fork'd child of the owner). See syscall.c.
+extern int get_win_index_owned(int wid);
+
 uint32_t handle_syscall_gui(registers_t* regs) {
     switch (regs->eax) {
         // ----- SYS_DRAW_RECT (11): Draw rectangle in window -----
@@ -68,7 +72,7 @@ uint32_t handle_syscall_gui(registers_t* regs) {
             int h = regs->esi & 0xFFFF;
             uint32_t color = (uint32_t)regs->edi;
             
-            int idx = get_win_index(wid);
+            int idx = get_win_index_owned(wid);
             if (idx >= 0) {
                 uint32_t g_ef = gui_lock();
                 if (win_canvases[idx].pending_count < MAX_DRAW_CMDS) {
@@ -78,16 +82,17 @@ uint32_t handle_syscall_gui(registers_t* regs) {
                     write_serial_string("SYS_DRAW_RECT: Full\n");
                 }
                 gui_unlock(g_ef);
+                regs->eax = 0;
             } else {
                 extern int get_current_task(void);
                 int tid = get_current_task();
                 write_serial_string("SYS_DRAW_RECT: Task ");
                 write_serial_hex(tid);
-                write_serial_string(" Invalid WID ");
+                write_serial_string(" Invalid/foreign WID ");
                 write_serial_hex(wid);
                 write_serial('\n');
+                regs->eax = (uint32_t)-1;
             }
-            regs->eax = 0;
             break;
         }
 
@@ -100,7 +105,7 @@ uint32_t handle_syscall_gui(registers_t* regs) {
             uint32_t color = (uint32_t)regs->edi;
             if (safe_strlen(text, 127) < 0) { regs->eax = (uint32_t)-1; break; }
             
-            int idx = get_win_index(wid);
+            int idx = get_win_index_owned(wid);
             if (idx >= 0) {
                 uint32_t g_ef = gui_lock();
                 if (win_canvases[idx].pending_count < MAX_DRAW_CMDS) {
@@ -112,7 +117,7 @@ uint32_t handle_syscall_gui(registers_t* regs) {
                 }
                 gui_unlock(g_ef);
             }
-            regs->eax = 0;
+            regs->eax = (idx >= 0) ? 0 : (uint32_t)-1;
             break;
         }
 
@@ -212,7 +217,7 @@ uint32_t handle_syscall_gui(registers_t* regs) {
         }
         case SYS_GET_EVENT: {
             int wid = (int)regs->ebx;
-            int idx = get_win_index(wid);
+            int idx = get_win_index_owned(wid);
             if (idx >= 0) {
                 if (!validate_user_ptr((void*)regs->ecx, sizeof(gui_event_t))) {
                     regs->eax = (uint32_t)-2;
@@ -238,7 +243,7 @@ uint32_t handle_syscall_gui(registers_t* regs) {
         // ----- SYS_UPDATE_WINDOW (17) -----
         case SYS_UPDATE_WINDOW: {
             int wid = (int)regs->ebx;
-            int idx = get_win_index(wid);
+            int idx = get_win_index_owned(wid);
             if (idx >= 0) {
                 // Swap pending display list to active display list!
                 // Locked against win_draw_cb() replay on the BSP (SMP).
@@ -262,7 +267,9 @@ uint32_t handle_syscall_gui(registers_t* regs) {
                 extern volatile int needs_redraw;
                 needs_redraw = 1;
             } else {
-                write_serial_string("UPD_WIN: Invalid WID\n");
+                write_serial_string("UPD_WIN: Invalid/foreign WID\n");
+                regs->eax = (uint32_t)-1;
+                break;
             }
             regs->eax = 0;
             break;

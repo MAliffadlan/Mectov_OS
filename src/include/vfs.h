@@ -70,6 +70,10 @@ int vfs_readlink(const char* path, char* buf, int size);
 // The kernel's sector allocator builds its map from in-use nodes, so the
 // shared sectors stay claimed until the LAST name is deleted.
 int vfs_hardlink(const char* existing_path, const char* new_path);
+// uid-aware variant (protected_hardlinks semantics): non-root callers may
+// only link files they own, never /etc/passwd, and the alias inherits the
+// source's uid/gid/mode.
+int vfs_hardlink_as(const char* existing_path, const char* new_path, int acting_uid);
 
 // v38.86: kernel stat struct — mirrors stat_t in syscall.h (kept separate to
 // avoid a header cycle; the syscall layer copies field by field).

@@ -127,18 +127,30 @@ uint32_t shm_at(int shmid) {
     if (pd == 0) return 0;
 
     shm_init();
-    __asm__ volatile("cli");
-    spin_lock(&shm_lock);
+    // irqsave, not cli/sti (Batch A / C7): these paths can already run with
+    // IF=0 (syscall context under task_lock), and a blind `sti` on the way
+    // out would re-enable interrupts inside a critical section — see the
+    // shm_task_exit() comment for the deadlock that causes.
+    uint32_t shm_ef = spin_lock_irqsave(&shm_lock);
 
     shm_segment_t* s = &segments[idx];
     if (s->key == 0) {
-        spin_unlock(&shm_lock);
-        __asm__ volatile("sti");
+        spin_unlock_irqrestore(&shm_lock, shm_ef);
         return 0;
     }
 
     // VA for this segment (fixed per id, clear of app image/heap/lib/stack).
     uint32_t va = SHM_BASE + (uint32_t)idx * SHM_REGION;
+
+    // Idempotent double attach (Batch A): a task that shmat()s the same
+    // segment twice used to map the frames again and bump attach_count twice,
+    // so after one detach/exit the count never reached 0 and the frames
+    // stayed allocated forever. POSIX shmat() on an already-attached segment
+    // returns the existing mapping; the fixed VA makes that exact.
+    if (task_get_shm_bits(tid) & (1u << idx)) {
+        spin_unlock_irqrestore(&shm_lock, shm_ef);
+        return va;
+    }
 
     // Map each frame user-accessible RW into THIS task's page directory.
     // Bump each frame's refcount: the task's address space now holds a
@@ -163,8 +175,7 @@ uint32_t shm_at(int shmid) {
                 }
                 frame_free(s->frames[j]);
             }
-            spin_unlock(&shm_lock);
-            __asm__ volatile("sti");
+            spin_unlock_irqrestore(&shm_lock, shm_ef);
             return 0;
         }
         if (frame_ref_count[s->frames[i] / 4096] < 255)
@@ -177,8 +188,7 @@ uint32_t shm_at(int shmid) {
     uint32_t bits = task_get_shm_bits(tid);
     task_set_shm_bits(tid, bits | (1u << idx));
 
-    spin_unlock(&shm_lock);
-    __asm__ volatile("sti");
+    spin_unlock_irqrestore(&shm_lock, shm_ef);
 
     write_serial_string("[SHM] tid=");
     write_serial_hex(tid);
@@ -202,13 +212,11 @@ int shm_dt(uint32_t addr) {
     uint32_t pd = task_get_page_dir(tid);
 
     shm_init();
-    __asm__ volatile("cli");
-    spin_lock(&shm_lock);
+    uint32_t shm_ef = spin_lock_irqsave(&shm_lock);
 
     shm_segment_t* s = &segments[idx];
     if (s->key == 0) {
-        spin_unlock(&shm_lock);
-        __asm__ volatile("sti");
+        spin_unlock_irqrestore(&shm_lock, shm_ef);
         return -1;
     }
 
@@ -242,8 +250,7 @@ int shm_dt(uint32_t addr) {
         free_now = 1;
     }
 
-    spin_unlock(&shm_lock);
-    __asm__ volatile("sti");
+    spin_unlock_irqrestore(&shm_lock, shm_ef);
 
     write_serial_string("[SHM] tid=");
     write_serial_hex(tid);
@@ -259,13 +266,11 @@ int shm_ctl(int shmid, int cmd) {
     if (cmd != SHM_IPC_RMID) return -1;
 
     shm_init();
-    __asm__ volatile("cli");
-    spin_lock(&shm_lock);
+    uint32_t shm_ef = spin_lock_irqsave(&shm_lock);
 
     shm_segment_t* s = &segments[idx];
     if (s->key == 0) {
-        spin_unlock(&shm_lock);
-        __asm__ volatile("sti");
+        spin_unlock_irqrestore(&shm_lock, shm_ef);
         return -1;
     }
 
@@ -277,8 +282,7 @@ int shm_ctl(int shmid, int cmd) {
         free_now = 1;
     }
 
-    spin_unlock(&shm_lock);
-    __asm__ volatile("sti");
+    spin_unlock_irqrestore(&shm_lock, shm_ef);
 
     write_serial_string("[SHM] ctl RMID id=");
     write_serial_hex(shmid);
@@ -295,8 +299,13 @@ void shm_task_exit(int tid) {
     task_set_shm_bits(tid, 0);
 
     shm_init();
-    __asm__ volatile("cli");
-    spin_lock(&shm_lock);
+    // CRITICAL (Batch A / C7): this runs from task_cleanup() — called by
+    // terminate_task() with task_lock held and IF=0. The old `sti` at the end
+    // re-enabled interrupts while task_lock was still held on this CPU: the
+    // very next timer tick could take the scheduler into task_lock again and
+    // self-deadlock (or another core would spin until the watchdog). Save and
+    // restore the caller's IF state instead.
+    uint32_t shm_ef = spin_lock_irqsave(&shm_lock);
 
     for (int idx = 0; idx < SHM_MAX_SEGMENTS; idx++) {
         if (!(bits & (1u << idx))) continue;
@@ -314,6 +323,5 @@ void shm_task_exit(int tid) {
         }
     }
 
-    spin_unlock(&shm_lock);
-    __asm__ volatile("sti");
+    spin_unlock_irqrestore(&shm_lock, shm_ef);
 }

@@ -39,11 +39,17 @@ void cmd_ln_arg(void) {
                 }
                 return;
         }
-        int res = vfs_hardlink(target, linkpath);
+        extern int get_current_task(void);
+        extern int task_get_uid(int);
+        extern int task_in_kernel_space(int);
+        int ctid = get_current_task();
+        int cuid = task_in_kernel_space(ctid) ? ROOT_UID : task_get_uid(ctid);
+        int res = vfs_hardlink_as(target, linkpath, cuid);
         if (res < 0) {
                 if (res == -2) print("ln: file exists\n", 0x0C);
                 else if (res == -3) print("ln: hard links only work on plain files (use -s)\n", 0x0C);
                 else if (res == -4) print("ln: target file is empty (nothing to link yet)\n", 0x0C);
+                else if (res == -8) print("ln: permission denied (not the file's owner)\n", 0x0C);
                 else print("ln: failed\n", 0x0C);
         }
 }
