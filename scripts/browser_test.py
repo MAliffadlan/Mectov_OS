@@ -48,17 +48,22 @@ URL_FIELD_Y0, URL_FIELD_Y1 = WIN_Y0 + 25, WIN_Y0 + 47   # client 4..26
 PAGE_Y0, PAGE_Y1 = WIN_Y0 + 61, WIN_Y0 + 363            # client 40..342
 STATUS_Y0, STATUS_Y1 = WIN_Y0 + 383, WIN_Y0 + 399       # client 362..378 (tab strip above)
 
-PAGE_HTML = b"""<html><head><title>Mectov Test Page</title></head>
+# A relative href at the parser's capture limit (URL_MAX=120). Resolved with
+# host+port prepended it exceeds URL_MAX, so the browser must refuse it (F2
+# review follow-up) instead of overflowing resolve_href()'s stack buffer.
+LONG_HREF = "/" + "A" * 119
+PAGE_HTML = ("""<html><head><title>Mectov Test Page</title></head>
 <body>
 <h1>Mectov HTTP Test</h1>
 <p>This paragraph is long enough to wrap into several display rows after the
 HTML tags are stripped by the mini browser renderer. ABCDEFG 0123456789.</p>
 <p>Entities: A &amp; B &lt;ok&gt;.</p>
-<a href="/">a link</a>
+<p><a href="%s">toolong</a></p>
+<p><a href="/">a link</a></p>
 <p><a href="/linked-target">CLICKME</a></p>
 </body>
 </html>
-"""
+""" % LONG_HREF).encode()
 
 
 class TestHandler(http.server.BaseHTTPRequestHandler):
@@ -522,17 +527,20 @@ def main():
         w, h, px = load_ppm(DUMP1)
         link_px = 0
         link_row = -1
+        link_rows = []
         # Scan bottom-up: the page's LAST link is CLICKME (/linked-target);
-        # the first one is "/", which would prove nothing new.
+        # "a link" (/) sits above it and TOOLONG (the over-long relative href
+        # exercised in section 7) above that, so link_rows[-1] is TOOLONG.
         for r in range(13, -1, -1):
             y0 = WIN_Y0 + 21 + 40 + 16 * r
             n = count_color(px, w, WIN_X0 + 12, y0, WIN_X1 - 20, y0 + 14,
                             (0x00, 0xA8, 0xD8), tol=30)
             if n > 8:
-                link_px = n
-                link_row = r
-                break
-        print(f"[*] link-coloured row: {link_row} (px={link_px})")
+                link_rows.append(r)
+                if link_row < 0:
+                    link_px = n
+                    link_row = r
+        print(f"[*] link-coloured rows: {link_rows} (bottom px={link_px})")
         if link_row < 0:
             print("FAIL: no link rendered in LINK_COLOR")
             return 1
@@ -563,6 +571,27 @@ def main():
             print(srv_log[-400:] or "(server saw no request)")
             return 1
         print("[OK] clicking a link fetched its target")
+
+        # ---- 7. Over-long relative href (review F2): the TOOLONG link's URL
+        # exceeds URL_MAX once host+port are prepended, so resolve_href() must
+        # refuse it. The click must print no "[BROWSER] link" line and must not
+        # navigate (pre-fix the unbounded concat smashed the stack and fetched
+        # a mangled URL), and the browser must still answer input afterwards
+        # (a stack smash kills the task at the click).
+        toolong_row = link_rows[-1] if len(link_rows) >= 3 else max(link_row - 2, 0)
+        before_links = read_file(SERIAL_LOG).count("[BROWSER] link ")
+        click(WIN_X0 + 1 + 20, WIN_Y0 + 21 + 40 + 16 * toolong_row + 6, wait=1.5)
+        after_links = read_file(SERIAL_LOG).count("[BROWSER] link ")
+        if after_links != before_links:
+            print(f"FAIL: over-long href navigated ({after_links - before_links} new link print(s))")
+            return 1
+        print("[OK] over-long relative href refused (no navigation)")
+        done_before5 = read_file(SERIAL_LOG).count("[BROWSER] done")
+        click(WIN_X0 + 1 + 19, TAB_Y, wait=0.5)  # Back
+        if not wait_for_done_count(done_before5 + 1, 30):
+            print("FAIL: browser unresponsive after over-long href click")
+            return 1
+        print("[OK] browser still responsive after the refused link")
         print("PASS: browser fetched + rendered over real HTTP")
         return 0
     finally:

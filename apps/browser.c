@@ -871,29 +871,47 @@ static int link_hit_at(int cx, int cy) {
     return -1;
 }
 
+// Bounded append for URL assembly: appends s to out[0..cap-1] and returns 0
+// (leaving a valid NUL-terminated prefix) if it cannot fit. The previous
+// unbounded my_strcat() chain let a long relative href walk right past
+// target[URL_MAX+1] on the stack and then into the global URL/history buffers.
+static int cat_cap(char* out, const char* s, int cap) {
+    int n = my_strlen(out);
+    while (*s) {
+        if (n + 1 >= cap) { out[n] = '\0'; return 0; }
+        out[n++] = *s++;
+    }
+    out[n] = '\0';
+    return 1;
+}
+
 // Relative href: same host AND same port, path resolved against the current
 // request path (last segment replaced). The port must be carried over: the
 // page's own host:port is what the link was served from, and dropping it
 // silently retargets the fetch at port 80.
-static void resolve_href(char* out, const char* href) {
+// Returns 1 with a complete URL in out, 0 (out = truncated prefix) when the
+// result does not fit URL_MAX — the caller refuses to navigate to a mangled
+// URL instead of overflowing or fetching the wrong page.
+static int resolve_href(char* out, const char* href) {
+    int cap = URL_MAX + 1;
+    out[0] = '\0';
     if (ci_starts_with(href, "http://") || ci_starts_with(href, "https://")) {
-        my_strcpy(out, href);
-        return;
+        return cat_cap(out, href, cap);
     }
-    my_strcpy(out, "http://");
-    my_strcat(out, req_host);
+    if (!cat_cap(out, "http://", cap)) return 0;
+    if (!cat_cap(out, req_host, cap)) return 0;
     if (req_port != 80) {
-        my_strcat(out, ":");
         char pb[8];
         my_itoa(req_port, pb);
-        my_strcat(out, pb);
+        if (!cat_cap(out, ":", cap)) return 0;
+        if (!cat_cap(out, pb, cap)) return 0;
     }
     if (href[0] != '/') {
-        my_strcat(out, req_path);
+        if (!cat_cap(out, req_path, cap)) return 0;
         for (int k = my_strlen(out); k > 0; k--)
             if (out[k - 1] == '/') { out[k - 1] = '\0'; break; }
     }
-    my_strcat(out, href);
+    return cat_cap(out, href, cap);
 }
 
 // Click a link under the cursor, if any. Returns 1 when one was followed.
@@ -904,7 +922,10 @@ static int link_click(int wid, int cx, int cy) {
     if (href[0] == '#') return 0;          // in-page anchor: nothing to do
     {
         char target[URL_MAX + 1];
-        resolve_href(target, href);
+        if (!resolve_href(target, href)) {
+            set_status("Link too long", 0);
+            return 1;                      // the click was on a link; it was refused
+        }
         sys_print("[BROWSER] link ", 0x0A);
         sys_print(target, 0x0A);
         sys_print("\n", 0x0A);
@@ -958,7 +979,11 @@ static void draw_browser(int wid) {
 
     for (int i = 0; i <= T->page_len; i++) {
         char c = (i < T->page_len) ? T->page_text[i] : '\n';
-        if (c == '\n' || line_len >= max_ch) {
+        // The hard sizeof(line) cap keeps this safe at any window width: the
+        // old test only compared against max_ch, which is derived from
+        // win_cw and exceeds the 128-byte buffers once a window is wider
+        // than ~1062 px (line[line_len] = '\0' then wrote past the end).
+        if (c == '\n' || line_len >= max_ch || line_len >= (int)sizeof(line) - 1) {
             line[line_len] = '\0';
             if (current_line >= T->scroll_offset) {
                 int run_start = 0;
@@ -969,6 +994,7 @@ static void draw_browser(int wid) {
                            link_at(line_base + run_end) == in_link) run_end++;
                     char run[128];
                     int n = run_end - run_start;
+                    if (n > (int)sizeof(run) - 1) n = (int)sizeof(run) - 1;
                     for (int k = 0; k < n; k++) run[k] = line[run_start + k];
                     run[n] = '\0';
                     int rx = lx + run_start * 8;
