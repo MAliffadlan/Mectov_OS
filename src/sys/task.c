@@ -130,7 +130,25 @@ static task_t tasks[MAX_TASKS];
 // loaded there and freeing the page tables would corrupt that core's page
 // walks. task_cleanup() parks the directory here instead of leaking it;
 // task_reap_zombies() frees it once no CPU runs that task slot anymore.
-static uint32_t deferred_pd[MAX_TASKS];
+// Deferred page-directory retirements (Batch A / C8). A per-tid slot was
+// overwritten whenever a slot was reused before the reaper ran (~1 s on the
+// BSP tick), leaking the first directory. The queue carries the ORIGINAL slot
+// each directory belonged to, so every entry retires independently.
+#define DEFERRED_PD_MAX 8
+static struct { uint32_t pd; int slot; } deferred_pd_q[DEFERRED_PD_MAX];
+static int deferred_pd_n;
+
+// Called under task_lock from terminate_task() when the dying slot is still
+// current on some CPU. Serial logging only in the (unexpected) full case.
+static void deferred_pd_push(uint32_t pd, int slot) {
+    if (deferred_pd_n < DEFERRED_PD_MAX) {
+        deferred_pd_q[deferred_pd_n].pd = pd;
+        deferred_pd_q[deferred_pd_n].slot = slot;
+        deferred_pd_n++;
+        return;
+    }
+    write_serial_string("[TASK] deferred page-dir queue full; leaking one directory\n");
+}
 static void mmap_free_dirty_bitmaps(int tid);  // defined in the mmap section
 static int current_task[16] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 // Set at the end of init_tasking(). Before that, APs boot with
@@ -985,7 +1003,7 @@ static void task_cleanup(int tid) {
                 // Defer, don't leak (Batch A / C8): park the directory for the
                 // reaper, which runs on the BSP and can observe when no CPU
                 // runs this slot anymore.
-                deferred_pd[tid] = tasks[tid].page_dir;
+                deferred_pd_push(tasks[tid].page_dir, tid);
             }
         }
         tasks[tid].page_dir = 0;
@@ -2883,16 +2901,19 @@ void task_reap_zombies(void) {
     // unreachable — freeing them now cannot corrupt anybody's page walk.
     // (A slot can still be busy if it was reused by a NEW task; the check
     // below skips it and a later tick retires the old directory.)
-    for (int i = 1; i < MAX_TASKS; i++) {
-        if (deferred_pd[i] == 0) continue;
-        if (tasks[i].state != TASK_STATE_FREE) continue;
+    for (int i = 0; i < deferred_pd_n; ) {
+        int slot = deferred_pd_q[i].slot;
+        if (tasks[slot].state != TASK_STATE_FREE) { i++; continue; }
         int busy = 0;
         for (int c = 0; c < MAX_CPUS; c++) {
-            if (current_task[c] == i) busy = 1;
+            if (current_task[c] == slot) busy = 1;
         }
-        if (busy) continue;
-        uint32_t pd = deferred_pd[i];
-        deferred_pd[i] = 0;
+        if (busy) { i++; continue; }
+        uint32_t pd = deferred_pd_q[i].pd;
+        // Compact: the last entry takes this position; do not advance i so it
+        // is examined on the next pass (it may be retireable too).
+        deferred_pd_q[i] = deferred_pd_q[deferred_pd_n - 1];
+        deferred_pd_n--;
         extern void vmm_free_address_space(uint32_t);
         vmm_free_address_space(pd);
     }

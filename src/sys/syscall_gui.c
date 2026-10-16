@@ -60,6 +60,13 @@ extern win_canvas_t win_canvases[];
 // Owner-checked window lookup for syscall paths (Batch A / C5): the caller
 // must own the window (or be a fork'd child of the owner). See syscall.c.
 extern int get_win_index_owned(int wid);
+// The four handlers that use it hold wm_lock across the owner check AND the
+// canvas/queue access (review follow-up F5): the check alone was a TOCTOU —
+// a concurrent close + slot reuse could retarget the access at a foreign
+// window. wm_lock is recursive (depth-counted per cpu+tid), so the nested
+// acquire inside get_win_index_owned()/get_win_index() is safe.
+extern void wm_lock_acquire(void);
+extern void wm_lock_release(void);
 
 uint32_t handle_syscall_gui(registers_t* regs) {
     switch (regs->eax) {
@@ -72,9 +79,10 @@ uint32_t handle_syscall_gui(registers_t* regs) {
             int h = regs->esi & 0xFFFF;
             uint32_t color = (uint32_t)regs->edi;
             
+            wm_lock_acquire();
             int idx = get_win_index_owned(wid);
             if (idx >= 0) {
-                uint32_t g_ef = gui_lock();
+                uint32_t g_ef = gui_lock();   // lock order: wm_lock > gui_lock
                 if (win_canvases[idx].pending_count < MAX_DRAW_CMDS) {
                     draw_cmd_t* cmd = &win_canvases[idx].pending_cmds[win_canvases[idx].pending_count++];
                     cmd->type = 1; cmd->x = x; cmd->y = y; cmd->w = w; cmd->h = h; cmd->color = color;
@@ -82,8 +90,10 @@ uint32_t handle_syscall_gui(registers_t* regs) {
                     write_serial_string("SYS_DRAW_RECT: Full\n");
                 }
                 gui_unlock(g_ef);
+                wm_lock_release();
                 regs->eax = 0;
             } else {
+                wm_lock_release();
                 extern int get_current_task(void);
                 int tid = get_current_task();
                 write_serial_string("SYS_DRAW_RECT: Task ");
@@ -105,9 +115,10 @@ uint32_t handle_syscall_gui(registers_t* regs) {
             uint32_t color = (uint32_t)regs->edi;
             if (safe_strlen(text, 127) < 0) { regs->eax = (uint32_t)-1; break; }
             
+            wm_lock_acquire();
             int idx = get_win_index_owned(wid);
             if (idx >= 0) {
-                uint32_t g_ef = gui_lock();
+                uint32_t g_ef = gui_lock();   // lock order: wm_lock > gui_lock
                 if (win_canvases[idx].pending_count < MAX_DRAW_CMDS) {
                     draw_cmd_t* cmd = &win_canvases[idx].pending_cmds[win_canvases[idx].pending_count++];
                     cmd->type = 2; cmd->x = x; cmd->y = y; cmd->color = color;
@@ -116,6 +127,9 @@ uint32_t handle_syscall_gui(registers_t* regs) {
                     cmd->text[i] = '\0';
                 }
                 gui_unlock(g_ef);
+                wm_lock_release();
+            } else {
+                wm_lock_release();
             }
             regs->eax = (idx >= 0) ? 0 : (uint32_t)-1;
             break;
@@ -217,24 +231,31 @@ uint32_t handle_syscall_gui(registers_t* regs) {
         }
         case SYS_GET_EVENT: {
             int wid = (int)regs->ebx;
+            wm_lock_acquire();
             int idx = get_win_index_owned(wid);
             if (idx >= 0) {
                 if (!validate_user_ptr((void*)regs->ecx, sizeof(gui_event_t))) {
+                    wm_lock_release();
                     regs->eax = (uint32_t)-2;
                     break;
                 }
+                // head/tail are read AND the pop happens inside one gui_lock
+                // section: two tasks that both own the window (parent + child)
+                // must not copy the same event twice and lose one.
+                uint32_t g_ef = gui_lock();   // lock order: wm_lock > gui_lock
                 int h = win_queues[idx].head;
                 if (h != win_queues[idx].tail) {
-                    uint32_t g_ef = gui_lock();
                     gui_event_t* ev_ptr = (gui_event_t*)regs->ecx;
                     *ev_ptr = win_queues[idx].events[h];
                     win_queues[idx].head = (h + 1) % MAX_EVENTS;
-                    gui_unlock(g_ef);
                     regs->eax = 1;
                 } else {
                     regs->eax = 0;
                 }
+                gui_unlock(g_ef);
+                wm_lock_release();
             } else {
+                wm_lock_release();
                 regs->eax = (uint32_t)-1;
             }
             break;
@@ -243,30 +264,28 @@ uint32_t handle_syscall_gui(registers_t* regs) {
         // ----- SYS_UPDATE_WINDOW (17) -----
         case SYS_UPDATE_WINDOW: {
             int wid = (int)regs->ebx;
+            wm_lock_acquire();
             int idx = get_win_index_owned(wid);
             if (idx >= 0) {
                 // Swap pending display list to active display list!
                 // Locked against win_draw_cb() replay on the BSP (SMP).
-                uint32_t g_ef = gui_lock();
+                uint32_t g_ef = gui_lock();   // lock order: wm_lock > gui_lock
                 for (int i = 0; i < win_canvases[idx].pending_count; i++) {
                     win_canvases[idx].cmds[i] = win_canvases[idx].pending_cmds[i];
                 }
                 win_canvases[idx].count = win_canvases[idx].pending_count;
                 win_canvases[idx].pending_count = 0; // Reset for next frame
                 gui_unlock(g_ef);
-                
+
                 // Composite WM: trigger a redraw for this window's buffer.
-                // wm_wins[] is shared with the main loop's draw/raise on other
-                // cores, so the dirty flag is set under wm_lock (kernel
-                // locking audit v38.19 — get_win_index already released it).
-                extern void wm_lock_acquire(void);
-                extern void wm_lock_release(void);
-                wm_lock_acquire();
+                // Still under the same wm_lock, so no close/reuse can have
+                // cleared or replaced this slot since the owner check.
                 wm_wins[idx].buffer_dirty = 1;
-                wm_lock_release();
                 extern volatile int needs_redraw;
                 needs_redraw = 1;
+                wm_lock_release();
             } else {
+                wm_lock_release();
                 write_serial_string("UPD_WIN: Invalid/foreign WID\n");
                 regs->eax = (uint32_t)-1;
                 break;
