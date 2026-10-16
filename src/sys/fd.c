@@ -409,7 +409,9 @@ static int fd_poll_events(int tid, int fd) {
             } else if (conn >= 0) {
                 int st = net_tcp_state(conn);
                 if (st == TCP_ESTABLISHED) {
-                    rev = POLLOUT;
+                    // Writable only while no segment is unacked, mirroring
+                    // net_tcp_send()'s backpressure.
+                    if (net_tcp_tx_ready(conn)) rev = POLLOUT;
                     if (net_tcp_rx_pending(conn)) rev |= POLLIN;
                 } else if (st == TCP_CLOSED) {
                     rev = POLLHUP;   // reset / never connected

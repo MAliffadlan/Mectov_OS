@@ -536,11 +536,20 @@ int net_tcp_accept_pending(int listener_id) {
 
 // Send app data over an established connection. Tracks the segment for
 // retransmission until the peer ACKs it.
+//
+// At most ONE segment is outstanding: the retransmit machinery keeps a single
+// unacked_seq/tx_pending pair, so a second send while the first is unacked
+// used to overwrite it — the lost first segment could then never be
+// retransmitted, the sweep resent only the newer bytes, and the peer sat
+// waiting for the gap. Returning 0 means "try later": callers already treat a
+// short write that way (tls_flush returns TLS_WANT_WRITE; the browser pump
+// retries), and poll(POLLOUT) reports not-writable until the ACK lands.
 int net_tcp_send(int id, uint8_t* payload, uint32_t len) {
     if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return -2;
     tcp_conn_t* c = &tcp_conns[id];
     if (c->state != TCP_ESTABLISHED) return -1;
     if (len > 1400) len = 1400;
+    if (c->unacked_len > 0) return 0;
 
     c->unacked_seq = c->seq;
     c->unacked_len = len;
@@ -617,6 +626,13 @@ int net_tcp_state(int id) {
 int net_tcp_rx_pending(int id) {
     if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return 0;
     return tcp_conns[id].rx_len > 0;
+}
+// 1 when net_tcp_send() would accept data right now (no segment waiting for
+// an ACK). POLLOUT is gated on this so a poll-driven writer that got a 0 back
+// waits instead of spinning.
+int net_tcp_tx_ready(int id) {
+    if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return 0;
+    return tcp_conns[id].state == TCP_ESTABLISHED && tcp_conns[id].unacked_len == 0;
 }
 int net_tcp_eof(int id) {
     if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return 0;
@@ -1152,8 +1168,14 @@ static void net_handle_tcp(ip_header_t* ip, uint8_t* tcp_data, uint32_t tcp_len)
             if (c->rx_len + (int)payload_len <= TCP_CONN_BUF) {
                 memcpy(c->rx + c->rx_len, tcp_data + header_len, payload_len);
                 c->rx_len += (int)payload_len;
+                // Only bytes actually stored advance the ACK. A segment that
+                // does not fit must NOT be acknowledged: the ACK below
+                // re-states the same c->ack with the now-zero window, and the
+                // peer retransmits once net_tcp_recv() drains the buffer and
+                // sends its window-update ACK. Advancing c->ack here used to
+                // ACK data that was thrown away — silent stream corruption.
+                c->ack = seg_seq + payload_len;
             }
-            c->ack = seg_seq + payload_len;
             net_send_tcp_segment(c, TCP_ACK, 0, 0);
         } else {
             net_send_tcp_segment(c, TCP_ACK, 0, 0); // stale/dup: refresh window

@@ -133,6 +133,7 @@ int  net_tcp_state(int id);
 // Poll helpers for the fd layer (v38.43): 1 when unread bytes are buffered /
 // when the peer closed its write side (EOF after drain).
 int  net_tcp_rx_pending(int id);
+int  net_tcp_tx_ready(int id);
 int  net_tcp_eof(int id);
 // State of the most recently created connection (for SYS_NET_STATUS compat).
 int  net_tcp_latest_state(void);
