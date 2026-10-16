@@ -3,6 +3,7 @@
 #include "../include/io.h"
 #include "../include/utils.h"
 #include "../include/serial.h"
+#include "../include/spinlock.h"
 
 // IDT registration
 extern void register_interrupt_handler(uint8_t n, void* handler);
@@ -30,6 +31,15 @@ static uint8_t* current_pcm_data = 0;
 static uint32_t current_pcm_length = 0;
 static uint32_t current_pcm_pos = 0;
 static int current_half = 0;
+
+// sb16_lock serializes the PCM state above across its two contexts: the
+// completion IRQ (fill_buffer + the half toggle) and task context
+// (sb16_set_audio_buffer, and the prefill in sb16_start_playback). Process
+// context takes it with spin_lock_irqsave, the IRQ handler with the plain
+// spin_lock/unlock (the interrupt gate already cleared IF — house rule in
+// spinlock.h); IRQ 5 is routed to one CPU, but the syscall can run on any.
+// The scalars (sb16_available, current_volume) are lockless by design.
+static spinlock_t sb16_lock = SPINLOCK_INIT;
 
 static int dsp_write(uint8_t value) {
     for (int i = 0; i < 100000; i++) {
@@ -85,13 +95,23 @@ static void fill_buffer(int half) {
 
 static void sb16_irq_handler(void* r) {
     (void)r;
-    
+
+    // IRQ context: the gate already cleared IF, so the plain spin_lock is
+    // the house rule (see spinlock.h). The lock is what makes fill_buffer
+    // read one coherent {pointer, length, pos} triple: without it a
+    // concurrent sb16_set_audio_buffer could publish the new pointer with
+    // the OLD length (up to the 2 MB SYS_PLAY_WAV cap) and the fill would
+    // walk off the end of the new — possibly much smaller — buffer.
+    spin_lock(&sb16_lock);
+
     // Acknowledge 8-bit interrupt
     inb(DSP_INT_ACK_8);
-    
+
     // Fill the half that just finished playing
     fill_buffer(current_half);
     current_half ^= 1;
+
+    spin_unlock(&sb16_lock);
 }
 
 void sb16_init(void) {
@@ -101,7 +121,6 @@ void sb16_init(void) {
         sb16_available = 0;
         return;
     }
-    sb16_available = 1;
     write_serial_string("[SB16] DSP Reset OK (0xAA received).\n");
     
     // Set IRQ 5 on the mixer
@@ -118,13 +137,23 @@ void sb16_init(void) {
     
     // Turn on the DSP speaker output
     dsp_write(0xD1);
+    // Publish "available" LAST (publish race, audit): anything that sees it
+    // may immediately drive the mixer/DMA/IRQ paths configured above, so the
+    // flag must not be visible while the card is still half-initialized.
+    sb16_available = 1;
     write_serial_string("[SB16] Speaker ON. Ready.\n");
 }
 
+// Publish a new PCM source for the completion IRQ. Under sb16_lock so the
+// fields cross the task/IRQ boundary as one unit — the syscall's ordering
+// guarantee ("point the IRQ at the new copy first, then free the old one")
+// only holds if the swap is atomic against the handler.
 void sb16_set_audio_buffer(uint8_t* pcm_data, uint32_t length) {
+    uint32_t nf = spin_lock_irqsave(&sb16_lock);
     current_pcm_data = pcm_data;
     current_pcm_length = length;
     current_pcm_pos = 0;
+    spin_unlock_irqrestore(&sb16_lock, nf);
 }
 
 void sb16_stop_playback() {
@@ -143,10 +172,14 @@ void sb16_start_playback(uint16_t sample_rate) {
     }
     write_serial_string("[SB16] Starting 8-bit mono playback...\n");
     
-    // Pre-fill both halves of the DMA buffer
+    // Pre-fill both halves of the DMA buffer. Under sb16_lock: fill_buffer
+    // advances current_pcm_pos, which a completion IRQ from a previous start
+    // also advances — prefill and IRQ must not interleave their cursors.
+    uint32_t nf = spin_lock_irqsave(&sb16_lock);
     fill_buffer(0);
     fill_buffer(1);
     current_half = 0;
+    spin_unlock_irqrestore(&sb16_lock, nf);
     
     // Program DMA Channel 1 for auto-init transfer
     // Mode: single, auto-init, increment, read from memory
