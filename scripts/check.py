@@ -78,6 +78,16 @@ SUITES = [
     ("mount",            "mount_test.py",             240),
     ("ahci",             "ahci_test.py",              360),
     ("usb",              "usb_test.py",               360),
+    # The CMOS RTC (v38.165) is TWO gates, because its two defects need two
+    # different kinds of evidence. The guest one proves the 0x70/0x71 index/
+    # value pair is serialized: four threads calling SYS_GET_TIME on four cores
+    # produced 32k-37k torn stamps per 48k samples before the lock (an hour of
+    # 40, a month of 26, a year of 1530) and zero after. The host one proves
+    # the decode rules and the update-straddle retry deterministically, with no
+    # QEMU at all: it compiles the shipped driver against a fake CMOS chip that
+    # can present binary mode, 12-hour mode and an update landing mid-burst.
+    ("rtc",              "rtc_test.py",               300),
+    ("rtc_decode",       "rtc_decode_test.py",         60),
     # ioquake3 engine-core port (v38.99). Needs the MECTOV_Q3=1 ISO variant,
     # so it never runs in the default battery — invoke via `make check-q3`
     # (or --only q3 after building that ISO); CI has a dedicated job.
@@ -231,7 +241,8 @@ SUITES = [
 # path that nxtest's NX half depends on. nxtest itself stays out of the fast
 # tier: it needs the Terminal, so it costs minutes rather than seconds.
 QUICK = {"boot", "fork", "procfs", "jobcontrol", "fputest", "fuzz",
-         "iocache", "app_smoke", "doom", "thread", "cond", "usb", "cpuid", "icmp"}
+         "iocache", "app_smoke", "doom", "thread", "cond", "usb", "cpuid", "icmp",
+         "rtc", "rtc_decode"}
 
 # debugfs is not needed to build the images, but scripts/doom_test.py's seed
 # pre-flight requires it (v38.161, audit F6) — list it here so a host without

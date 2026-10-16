@@ -225,6 +225,7 @@ $(OBJ_DIR)/nxtest_mct.o \
        $(OBJ_DIR)/pollselectdemo_mct.o \
        $(OBJ_DIR)/fat32demo_mct.o \
        $(OBJ_DIR)/wfiledemo_mct.o \
+       $(OBJ_DIR)/rtc_stress_mct.o \
        $(OBJ_DIR)/rusthello_mct.o \
        $(OBJ_DIR)/demandtest_mct.o \
        $(OBJ_DIR)/segvtest_mct.o \
@@ -439,6 +440,13 @@ fat32demo.mct: apps/fat32demo.c $(MCT_LIBC_H)
 wfiledemo.mct: apps/wfiledemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/wfiledemo.c wfiledemo.mct
 
+# v38.165: concurrent CMOS read-consistency detector — see scripts/rtc_test.py.
+# Four threads call SYS_GET_TIME on four cores; a driver that does not
+# serialize the 0x70/0x71 index/value pair hands back a time assembled from
+# registers another CPU selected, and the app prints torn= with examples.
+rtc_stress.mct: apps/rtc_stress.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/rtc_stress.c rtc_stress.mct
+
 # Rust Ring 3 app: freestanding no_std, built via rustc (build_rust_mct.py
 # finds rustc in ~/.cargo/bin when it is not on PATH).
 rusthello.mct: apps/rusthello.rs scripts/build_rust_mct.py
@@ -605,6 +613,9 @@ $(OBJ_DIR)/fat32demo_mct.o: fat32demo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/wfiledemo_mct.o: wfiledemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 wfiledemo.mct $(OBJ_DIR)/wfiledemo_mct.o
+
+$(OBJ_DIR)/rtc_stress_mct.o: rtc_stress.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 rtc_stress.mct $(OBJ_DIR)/rtc_stress_mct.o
 
 $(OBJ_DIR)/rusthello_mct.o: rusthello.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 rusthello.mct $(OBJ_DIR)/rusthello_mct.o

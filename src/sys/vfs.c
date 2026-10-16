@@ -747,6 +747,12 @@ void vfs_init() {
         extern uint8_t _binary_wfiledemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/wfiledemo.mct", (const char*)_binary_wfiledemo_mct_start, _binary_wfiledemo_mct_end - _binary_wfiledemo_mct_start);
 
+        // v38.165: concurrent CMOS read-consistency detector for
+        // scripts/rtc_test.py — four SYS_GET_TIME readers on four cores.
+        extern uint8_t _binary_rtc_stress_mct_start[];
+        extern uint8_t _binary_rtc_stress_mct_end[];
+        changed += vfs_update_file_if_needed("apps/rtc_stress.mct", (const char*)_binary_rtc_stress_mct_start, _binary_rtc_stress_mct_end - _binary_rtc_stress_mct_start);
+
         // first Rust Ring 3 app (no_std freestanding)
         extern uint8_t _binary_rusthello_mct_start[];
         extern uint8_t _binary_rusthello_mct_end[];
@@ -1085,6 +1091,11 @@ void vfs_init() {
     extern uint8_t _binary_wfiledemo_mct_end[];
     vfs_create_file("apps/wfiledemo.mct");
     vfs_write_file("apps/wfiledemo.mct", (const char*)_binary_wfiledemo_mct_start, _binary_wfiledemo_mct_end - _binary_wfiledemo_mct_start);
+
+    extern uint8_t _binary_rtc_stress_mct_start[];
+    extern uint8_t _binary_rtc_stress_mct_end[];
+    vfs_create_file("apps/rtc_stress.mct");
+    vfs_write_file("apps/rtc_stress.mct", (const char*)_binary_rtc_stress_mct_start, _binary_rtc_stress_mct_end - _binary_rtc_stress_mct_start);
 
     // first Rust Ring 3 app (no_std freestanding)
     extern uint8_t _binary_rusthello_mct_start[];
