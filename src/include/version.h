@@ -317,6 +317,36 @@
 // submitting the URL, stepping straight past a refusal it had just caused.
 // docs/architecture/tls.md gained the live-handshake section.
 // 162 is spoken for; 163 is the next free number.
-#define OS_VERSION "38.164"
+// v38.165: the CMOS RTC was reading a two-port transaction with nothing
+// holding it together, and decoding the chip as if it had one format.
+//
+//  1. A register read is outb(0x70, idx) then inb(0x71), and the chip's index
+//     register is shared by every reader. Four exist (SYS_GET_TIME from any
+//     core, the taskbar and login clocks, the timer's once-per-second rate
+//     calibration), so two CPUs interleave the pair and inb(0x71) returns the
+//     register the OTHER one selected — a time assembled from different
+//     instants. Measured by the new apps/rtc_stress.mct on four cores:
+//     32775-36755 torn stamps out of 48000 samples before the fix, 0 out of
+//     144000 after. cmos_read() is now reachable only with rtc_lock held.
+//  2. The update cycle can land inside the eight-register burst: UIP was
+//     checked once, before reading, and never after. The burst is bracketed by
+//     two Status-A reads and retried, with the UIP wait deliberately OUTSIDE
+//     the lock (holding it with IF=0 for milliseconds is the v38.157 failure).
+//  3. Status Register B was never read, so bcd2bin() was applied
+//     unconditionally: binary mode (DM) and 12-hour mode (bit 7 of hour = PM,
+//     12 AM = hour 0) both decoded to nonsense. QEMU/SeaBIOS is BCD+24h, so no
+//     guest suite could see it — which is why the decode is now a pure
+//     function of the register image (rtc_decode_regs, RTC_R_* in rtc.h).
+//
+// Two new gates, both able to fail, each covering what the other cannot:
+// scripts/rtc_test.py (guest, -smp 4; RED torn=32775/48000, GREEN 144000/0)
+// and scripts/rtc_decode_test.py (host, no QEMU: it compiles the SHIPPED
+// driver against a fake chip in scripts/rtc_host/ that can swap the image
+// mid-burst and raise UIP on a chosen Status-A read; RED 5/8, GREEN 8/8).
+// docs/drivers/rtc.md is new. (No v38.164 block appears above this one: that
+// release bumped the number in the commit that closed the NX holes, before
+// this file's convention was applied to it.)
+// 164 is spoken for; 165 is the next free number.
+#define OS_VERSION "38.165"
 
 #endif

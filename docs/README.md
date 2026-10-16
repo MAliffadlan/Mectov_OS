@@ -32,6 +32,7 @@ measurements that port produced, which are still a live to-do list.
 * **[Ring 3 Scanout Takeover](drivers/fbmap.md)** — `SYS_FB_MAP`/`RELEASE`, `PAGE_DEV` device memory, logind-style auth, desktop suppression.
 * **[RTL8139 Network Stack](drivers/network.md)** — PCI detection, RTL8139 packet polling, Ethernet/ARP/IPv4/ICMP/UDP/DNS stack, and Host Web Proxy integration.
 * **[Input & Audio Drivers](drivers/input_and_sound.md)** — PS/2 Keyboard and Mouse handlers, PC Speaker sound generation, and SB16 DAC support.
+* **[CMOS Real-Time Clock](drivers/rtc.md)** — the two-port 0x70/0x71 transaction (locked, with a UIP-bracketed burst), Status Register B's BCD/binary and 12/24-hour formats, and the two gates that cover them.
 
 ### 3. User Interface & Window Manager (`docs/gui/`)
 * **[Window Manager & Desktop Shell](gui/window_manager.md)** — Double-buffered window compositor, Z-order layering, Aero Snap window docking, desktop squircle icons, and taskbar.
