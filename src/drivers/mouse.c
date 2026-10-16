@@ -4,6 +4,7 @@
 #include "../include/vga.h"
 #include "../include/keyboard.h"   // ps2_drain()
 #include "../include/entropy.h"   // entropy_add() — kernel CSPRNG feed
+#include "../include/serial.h"    // ACK/RESEND failure diagnostics
 
 volatile int mouse_x = 400, mouse_y = 300;
 volatile uint8_t mouse_btn = 0;
@@ -62,12 +63,54 @@ static void mouse_write(uint8_t val) {
     mouse_wait_out(); outb(0x64, 0xD4);
     mouse_wait_out(); outb(0x60, val);
 }
-static uint8_t mouse_read() { mouse_wait_in(); return inb(0x60); }
 
-// Helper: set sample rate
+// Read one device byte with a bounded wait. Returns 1 when a byte arrived,
+// 0 on timeout — the old mouse_read() returned inb(0x60) unconditionally, so
+// a timeout became a garbage byte (0xFF) that was then consumed as the ACK.
+static int mouse_read_byte(uint8_t* out) {
+    mouse_wait_in();
+    if (!(inb(0x64) & 1)) return 0;
+    *out = inb(0x60);
+    return 1;
+}
+
+// Wait for the ACK (0xFA) of one command/parameter byte. 0xFE is RESEND —
+// the device did not execute the byte — so the caller sends it again. Any
+// other byte is a stray (a queued motion packet taken while data reporting
+// is on, or a reply left over from an earlier command): skip it instead of
+// consuming it as the ACK, which is exactly how the command stream desynced
+// (audit: PS/2 mouse ACK/RESEND).
+#define MOUSE_ACK        0xFA
+#define MOUSE_RESEND     0xFE
+#define MOUSE_CMD_TRIES  3
+
+static int mouse_wait_ack(void) {
+    for (int i = 0; i < 4; i++) {
+        uint8_t b;
+        if (!mouse_read_byte(&b)) return 0;   // timeout
+        if (b == MOUSE_ACK) return 1;
+        if (b == MOUSE_RESEND) return 0;      // caller resends
+    }
+    return 0;
+}
+
+// Send one command/parameter byte and confirm its ACK, resending on RESEND.
+// Returns 1 when the device executed the byte.
+static int mouse_cmd(uint8_t val) {
+    for (int attempt = 0; attempt < MOUSE_CMD_TRIES; attempt++) {
+        mouse_write(val);
+        if (mouse_wait_ack()) return 1;
+    }
+    write_serial_string("[MOUSE] command 0x");
+    write_serial_hex(val);
+    write_serial_string(": no ACK after retries\n");
+    return 0;
+}
+
+// Helper: set sample rate (used by the IntelliMouse magic sequence)
 static void mouse_set_sample_rate(uint8_t rate) {
-    mouse_write(0xF3); mouse_read(); // ACK
-    mouse_write(rate); mouse_read(); // ACK
+    (void)mouse_cmd(0xF3);
+    (void)mouse_cmd(rate);
 }
 
 // ---- PS/2 packet state machine ----
@@ -176,7 +219,7 @@ void init_mouse() {
     mouse_wait_out(); outb(0x60, status);
 
     // Set defaults
-    mouse_write(0xF6); mouse_read();  // ACK
+    (void)mouse_cmd(0xF6);
 
     // ---- Enable IntelliMouse scroll wheel ----
     // Magic sequence: set sample rate 200, 100, 80
@@ -184,15 +227,20 @@ void init_mouse() {
     mouse_set_sample_rate(100);
     mouse_set_sample_rate(80);
 
-    // Read device ID to check if IntelliMouse mode activated
-    mouse_write(0xF2); mouse_read(); // ACK
-    uint8_t dev_id = mouse_read();
+    // Read device ID to check if IntelliMouse mode activated. The ID byte is
+    // a reply, not an ACK: consume the command's ACK first (with resend on
+    // RESEND), then read exactly one byte for the ID.
+    uint8_t dev_id = 0;
+    if (mouse_cmd(0xF2)) {
+        uint8_t b;
+        if (mouse_read_byte(&b)) dev_id = b;
+    }
     if (dev_id == 3) {
         mouse_has_wheel = 1;  // IntelliMouse mode! 4-byte packets
     }
 
     // Enable data reporting
-    mouse_write(0xF4); mouse_read();  // ACK
+    (void)mouse_cmd(0xF4);
 
     __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
 
