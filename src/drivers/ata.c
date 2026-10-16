@@ -577,6 +577,11 @@ int ata_read_sector(unsigned int lba, unsigned char* b) {
     return ata_read_sector_drive(0, lba, b);
 }
 static int ata_write_sector_drive_io(int drive, unsigned int lba, unsigned char* b) {
+    // Same backend ladder as the read side (ata.c:98) and the multi-sector
+    // write (ata.c:291): virtio first — the USB branch below matches every
+    // drive >= 8, so without this check a virtio drive (12+) routed to the
+    // USB backend's device table and the write was refused.
+    if (drive >= VIRTIO_BLK_BASE) return virtio_blk_write_sectors(drive, lba, 1, b);
     if (drive >= USB_DRIVE_BASE) return usb_write_sectors(drive, lba, 1, b);
     if (drive >= AHCI_DRIVE_BASE) return ahci_write_sectors(drive, lba, 1, b);
     uint16_t base = ata_base_port(drive);

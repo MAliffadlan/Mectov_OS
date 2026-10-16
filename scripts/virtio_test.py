@@ -2,9 +2,9 @@
 """
 scripts/virtio_test.py — regression for the virtio-blk driver (v38.78).
 
-Boots mectov.iso in QEMU with a FAT32 disk behind a TRANSITIONAL
-virtio-blk-pci controller (`disable-modern=on`, legacy 1AF4:1001 interface,
-drive 12), then verifies a full READ+WRITE round trip through the new
+Boots mectov.iso in QEMU with FAT32 + ext2 disks behind TRANSITIONAL
+virtio-blk-pci controllers (`disable-modern=on`, legacy 1AF4:1001 interface,
+drives 12 and 13), then verifies full READ+WRITE round trips through the new
 driver, end to end, using the runtime mount table:
 
   1. the legacy interface came up               ("[VIRTIO] blk ... io=..."
@@ -19,7 +19,16 @@ driver, end to end, using the runtime mount table:
      fat32 volume (drive 3) — the backend must switch back from drive 12.
      The host reads F32.TXT off fat32.img and byte-compares it. Under the
      old single-global backend this silently hit the wrong disk.
-  6. the OS stayed alive afterwards, zero [PANIC].
+  6. ext2 on the SECOND virtio disk (drive 13, audit: "ata single-sector
+     write"): `mount /vext2 ext2 13`, then `mkdir /vext2/D1` allocates an
+     inode and a block, and every allocation syncs the superblock —
+     sectors 2+3 through the SINGLE-sector write entry point, which must
+     route drive 13 to virtio-blk instead of falling through to the USB/
+     AHCI branches. It used to fall through: the USB backend refused the
+     write, the guest logged "[EXT2] superblock/group-descriptor write
+     refused", and the allocation failed. The host's debugfs is the proof
+     that /D1 reached the image.
+  7. the OS stayed alive afterwards, zero [PANIC].
 
 Usage:
     python3 scripts/virtio_test.py [--timeout 240]
@@ -43,6 +52,8 @@ LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 KEYS_MOUNT = list("mount /vblk fat32 12") + ["ret"]
 KEYS_CP = list("cp /vblk/HELLO.TXT /vblk/COPY.TXT") + ["ret"]
 KEYS_CP_FAT32 = list("cp /vblk/HELLO.TXT /fat32/F32.TXT") + ["ret"]
+KEYS_MOUNT_EXT2 = list("mount /vext2 ext2 13") + ["ret"]
+KEYS_MKDIR_EXT2 = list("mkdir /vext2/D1") + ["ret"]
 
 
 def wait_for_in_file(path, needle, timeout):
@@ -112,6 +123,21 @@ def ensure_fat_image(path, hello_name):
     return 0
 
 
+def ensure_ext2_image(path):
+    # Fresh, empty ext2 volume for the second virtio disk. Phase 6's mkdir
+    # inside it is what exercises the single-sector write path.
+    steps = [
+        ["dd", "if=/dev/zero", f"of={path}", "bs=1M", "count=16", "status=none"],
+        ["mkfs.ext2", "-F", path],
+    ]
+    for s in steps:
+        r = subprocess.run(s, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if r.returncode != 0:
+            print(f"[FAIL] image step failed: {' '.join(s)}")
+            return 1
+    return 0
+
+
 def ensure_boot_images(disk, ext2, fat32):
     # Fresh slate every run: the runtime mount points (plus populated
     # children) are persisted by vfs_save, so repeated runs would hit
@@ -152,13 +178,16 @@ def main():
     ap.add_argument("--ext2", default="ext2.img")
     ap.add_argument("--fat32", default="fat32.img")
     ap.add_argument("--virtio", default="virtio.img")
+    ap.add_argument("--virtio-ext2", default="virtio_ext2.img")
     args = ap.parse_args()
 
     if ensure_boot_images(args.disk, args.ext2, args.fat32) != 0:
         return 1
     if ensure_fat_image(args.virtio, "HELLO.TXT") != 0:
         return 1
-    print("[OK] virtio FAT32 image ready")
+    if ensure_ext2_image(args.virtio_ext2) != 0:
+        return 1
+    print("[OK] virtio FAT32 + ext2 images ready")
 
     for p in (SERIAL_LOG, MON_SOCK):
         try:
@@ -176,7 +205,7 @@ def main():
         "-display", "none",
         "-serial", f"file:{SERIAL_LOG}",
         "-net", "none",
-        # IDE fleet (drives 0-3) + one virtio-blk disk (drive 12).
+        # IDE fleet (drives 0-3) + two virtio-blk disks (drives 12 and 13).
         # disable-modern=on exposes the LEGACY 1AF4:1001 interface the
         # kernel driver targets (no modern caps, no MSI-X).
         "-drive", f"file={args.disk},format=raw,index=0,media=disk",
@@ -184,6 +213,8 @@ def main():
         "-drive", f"file={args.fat32},format=raw,index=3,media=disk",
         "-drive", f"file={args.virtio},format=raw,if=none,id=vd0",
         "-device", "virtio-blk-pci,drive=vd0,disable-modern=on",
+        "-drive", f"file={args.virtio_ext2},format=raw,if=none,id=vd1",
+        "-device", "virtio-blk-pci,drive=vd1,disable-modern=on",
         "-monitor", f"unix:{MON_SOCK},server,nowait",
     ]
     qemu = subprocess.Popen(qemu_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -202,7 +233,10 @@ def main():
            not wait_for_in_file(SERIAL_LOG, "[VIRTIO] ready", 15):
             print("[FAIL] virtio-blk disk did not register as drive 12")
             return 1
-        print("[OK] virtio-blk controller + disk as drive 12")
+        if not wait_for_in_file(SERIAL_LOG, "-> drive 0x0000000D", 15):
+            print("[FAIL] second virtio-blk disk did not register as drive 13")
+            return 1
+        print("[OK] virtio-blk controller + disks as drives 12 and 13")
 
         for k in LOGIN_KEYS:
             mon_cmd("sendkey " + k)
@@ -259,6 +293,23 @@ def main():
             type_line(KEYS_CP_FAT32)
             time.sleep(8)
 
+        # ext2 on the second virtio disk (audit: "ata single-sector write").
+        # mkdir allocates an inode + a block, and every ext2 allocation
+        # syncs the superblock (sectors 2+3) through the single-sector
+        # write entry point. With its virtio branch missing, drive 13 fell
+        # through to the USB backend, which refused the write — so the
+        # guest logs the refusal and nothing lands on the image. This runs
+        # LAST: ext2.c keeps one global drive, so after mounting /vext2
+        # the boot /ext2 volume is no longer addressable.
+        if not run_shell_cmd(KEYS_MOUNT_EXT2, "[MOUNT] mounted /vext2",
+                             "mount /vext2 ext2 13 (superblock read via virtqueue)"):
+            return 1
+        for _ in range(3):
+            for _ in range(48):
+                mon_cmd("sendkey backspace")
+            type_line(KEYS_MKDIR_EXT2)
+            time.sleep(8)
+
         if qemu.poll() is not None:
             print(f"[FAIL] QEMU exited early with code {qemu.returncode}")
             return 1
@@ -295,11 +346,27 @@ def main():
     if check_image(args.fat32, "F32.TXT", "fat32.img via auto-select") != 0:
         return 1
 
+    # ext2-on-virtio proof: the directory the guest created must be in the
+    # image, which required ext2_sync_super's single-sector writes (sectors
+    # 2+3) to reach drive 13. debugfs reports rc=0 even for a missing path,
+    # so the TEXT is the assertion.
+    dbg = subprocess.run(["debugfs", "-R", "stat /D1", args.virtio_ext2],
+                         capture_output=True, text=True)
+    if "Type: directory" not in dbg.stdout:
+        print("[FAIL] the guest's mkdir did not reach the virtio ext2 disk "
+              f"(debugfs stat /D1: {dbg.stdout.strip()!r})")
+        return 1
+    print("[OK] ext2 metadata writes (superblock sync) landed on the virtio disk")
+
     with open(SERIAL_LOG, "r", errors="replace") as f:
-        if "[PANIC]" in f.read():
-            print("[FAIL] kernel panicked during the virtio run")
-            return 1
-    print("[OK] no kernel panic in the whole virtio run")
+        log = f.read()
+    if "[EXT2] superblock/group-descriptor write refused" in log:
+        print("[FAIL] ext2 refused a metadata write on the virtio disk")
+        return 1
+    if "[PANIC]" in log:
+        print("[FAIL] kernel panicked during the virtio run")
+        return 1
+    print("[OK] no refused ext2 writes, no kernel panic in the whole virtio run")
     return 0
 
 
