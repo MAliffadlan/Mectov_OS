@@ -43,15 +43,17 @@ int shm_get(uint32_t key, uint32_t size) {
     if (key == 0 || size == 0) return -1;
     shm_init();
 
-    __asm__ volatile("cli");
-    spin_lock(&shm_lock);
+    // irqsave, not cli/sti (review follow-up): a blind `sti` on the way out
+    // would re-enable interrupts inside a critical section if this is ever
+    // reached from a path that already runs with IF=0 (the deadlock class C7
+    // fixed for every other entry point).
+    uint32_t shm_ef = spin_lock_irqsave(&shm_lock);
 
     // Existing segment with this key?
     for (int i = 0; i < SHM_MAX_SEGMENTS; i++) {
         if (segments[i].key == key) {
             int id = i + 1;
-            spin_unlock(&shm_lock);
-            __asm__ volatile("sti");
+            spin_unlock_irqrestore(&shm_lock, shm_ef);
             write_serial_string("[SHM] get key=");
             write_serial_hex(key);
             write_serial_string(" -> existing id=");
@@ -63,8 +65,7 @@ int shm_get(uint32_t key, uint32_t size) {
 
     uint32_t pages = (size + 4095) / 4096;
     if (pages > SHM_MAX_PAGES) {
-        spin_unlock(&shm_lock);
-        __asm__ volatile("sti");
+        spin_unlock_irqrestore(&shm_lock, shm_ef);
         return -1;
     }
 
@@ -81,8 +82,7 @@ int shm_get(uint32_t key, uint32_t size) {
         }
         if (got < pages) {
             for (uint32_t j = 0; j < got; j++) frame_free(frames[j]);
-            spin_unlock(&shm_lock);
-            __asm__ volatile("sti");
+            spin_unlock_irqrestore(&shm_lock, shm_ef);
             write_serial_string("[SHM] out of frames\n");
             return -1;
         }
@@ -99,8 +99,7 @@ int shm_get(uint32_t key, uint32_t size) {
         segments[i].attach_count = 0;
 
         int id = i + 1;
-        spin_unlock(&shm_lock);
-        __asm__ volatile("sti");
+        spin_unlock_irqrestore(&shm_lock, shm_ef);
         write_serial_string("[SHM] created id=");
         write_serial_hex(id);
         write_serial_string(" key=");
@@ -111,8 +110,7 @@ int shm_get(uint32_t key, uint32_t size) {
         return id;
     }
 
-    spin_unlock(&shm_lock);
-    __asm__ volatile("sti");
+    spin_unlock_irqrestore(&shm_lock, shm_ef);
     return -1;
 }
 
@@ -216,6 +214,16 @@ int shm_dt(uint32_t addr) {
 
     shm_segment_t* s = &segments[idx];
     if (s->key == 0) {
+        spin_unlock_irqrestore(&shm_lock, shm_ef);
+        return -1;
+    }
+    // Only a task that actually attached to THIS segment may detach it.
+    // Without this, any task could call shmdt() on a foreign segment: the
+    // attach_count below would be decremented for a task that never held a
+    // reference, and on a destroyed segment (IPC_RMID) the count reaching 0
+    // freed frames another task still had mapped — a cross-ring use-after-
+    // free / read-into-someone-else's-memory primitive.
+    if (!(task_get_shm_bits(tid) & (1u << idx))) {
         spin_unlock_irqrestore(&shm_lock, shm_ef);
         return -1;
     }

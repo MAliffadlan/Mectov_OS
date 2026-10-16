@@ -181,7 +181,12 @@ void _start(void) {
         CHECK(denied != 0,
               "hardening_test: [FAIL] hardlink(/etc/passwd) succeeded as user\n");
 
-        // Positive control: a file the caller owns must still link.
+        // Positive control: a file the caller owns must still link. Delete any
+        // leftovers first: the harness retries the app in the same boot after
+        // a failure, and /hl_dst surviving from the previous run would make
+        // the hardlink fail with EEXIST (and confuse the retry's diagnosis).
+        sys_delete_file("/hl_src");
+        sys_delete_file("/hl_dst");
         int ok = -1;
         if (put_bytes("/hl_src", "HL", 2) == 0) {
             ok = syscall(SYS_HARDLINK, (int)(uintptr_t)"/hl_src",
@@ -271,6 +276,18 @@ void _start(void) {
                       "hardening_test: [FAIL] DRAW_RECT into a foreign window accepted\n");
                 if (foreign == -1 && dr != 0)
                     sys_print("hardening_test: [OK] window ownership enforced (events + draw)\n", 0x0A);
+                // Foreign shmdt (review F1): the parent never attached to the
+                // child's segment, so the detach must be refused. Before the
+                // fix it returned 0 and decremented attach_count for a task
+                // that held no reference — on a destroyed segment that freed
+                // frames the real holder still had mapped.
+                if (rec[2] != 0) {
+                    int fdt = sys_shmdt((void*)(uintptr_t)rec[2]);
+                    CHECK(fdt != 0,
+                          "hardening_test: [FAIL] foreign shmdt accepted (attach_count corrupted)\n");
+                    if (fdt != 0)
+                        sys_print("hardening_test: [OK] foreign shmdt refused\n", 0x0A);
+                }
             }
             sys_kill(pid, 9);
             int st = 0;
