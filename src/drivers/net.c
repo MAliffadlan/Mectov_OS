@@ -4,6 +4,7 @@
 #include "../include/timer.h"
 #include "../include/serial.h"
 #include "../include/entropy.h"   // get_random_u32() — unpredictable TCP ISN
+#include "../include/spinlock.h"
 
 
 // Static defaults (QEMU slirp layout). A successful DHCP exchange overwrites
@@ -67,9 +68,36 @@ static uint16_t tcp_port_counter = 49152;
 #define TCP_RETRANS_MAX  5
 #define TCP_CONNECT_TIMEOUT_MS 10000
 
+// net_lock serializes ALL shared net state — tcp_conns[], the UDP datagram
+// buffer, the DHCP/ping/DNS state machines and the pending-dispatch queue —
+// against the three contexts that touch it: the IRQ 11 RX handler, net_poll()
+// (task context), and the public send/recv/connect APIs (task context).
+//
+// cli/sti is NOT sufficient here (audit: "cli/sti vs BSP IRQ11"): IRQ 11 is
+// routed to the BSP, so an AP's cli-disabled section does not exclude the
+// handler — only cli on the BSP would, and net_poll() runs on whichever core
+// the calling shell/app task happens to be on. Process context takes the lock
+// with spin_lock_irqsave (IF stays 0 for the section, so no local IRQ can
+// observe half-updated state); IRQ context uses the plain spin_lock/unlock
+// (the interrupt gate already cleared IF; the house rule in spinlock.h).
+//
+// Lock order: net_lock > rtl_lock (the RTL ring's own lock) — TX helpers are
+// only ever reached from inside a net_lock section, and the RTL code never
+// calls back into net.c. The scalar status getters (net_tcp_state/rx_pending/
+// tx_ready/eof/latest_state) deliberately read WITHOUT the lock: callers use
+// them as poll hints and re-check through the real APIs.
+//
+// The *_nl suffix marks the lock-free core of a public function; internal
+// callers that already hold net_lock must use it (never the public wrapper).
+static spinlock_t net_lock = SPINLOCK_INIT;
+
 // Forward: kicks off the handshake on a reserved slot (also used by the
 // queued-connect dispatch in net_handle_arp, which appears earlier in the file).
 static void tcp_start_conn(tcp_conn_t* c, uint8_t* target_ip, uint16_t port);
+
+// Forward: lock-free DNS core, dispatched from net_handle_arp (IRQ context,
+// net_lock already held) before its full definition below.
+static void net_send_dns_query_nl(const char* domain);
 
 // TCP Pseudo-header for checksum
 typedef struct __attribute__((packed)) {
@@ -114,8 +142,11 @@ static void net_send_eth(uint8_t* dst_mac, uint16_t ethertype, void* payload, ui
     rtl8139_send_packet(frame, total);
 }
 
-// Send ARP request: "Who has target_ip? Tell my_ip"
-void net_send_arp_request(uint8_t* target_ip_addr) {
+// Send ARP request: "who has target_ip? tell my_ip". The _nl core is
+// lock-free for net.c's own locked paths (connect/DNS/DHCP); the public
+// wrapper locks for external callers (shell commands), whose unlocked read
+// of my_ip/rtl_mac could otherwise tear against a DHCP update.
+static void net_send_arp_request_nl(uint8_t* target_ip_addr) {
     write_serial_string("[NET] Sending ARP request to gateway...\n");
     arp_packet_t arp;
     uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -131,6 +162,12 @@ void net_send_arp_request(uint8_t* target_ip_addr) {
     memcpy(arp.target_ip, target_ip_addr, 4);
 
     net_send_eth(broadcast, ETH_TYPE_ARP, &arp, sizeof(arp));
+}
+
+void net_send_arp_request(uint8_t* target_ip_addr) {
+    uint32_t nf = spin_lock_irqsave(&net_lock);
+    net_send_arp_request_nl(target_ip_addr);
+    spin_unlock_irqrestore(&net_lock, nf);
 }
 
 // Send ARP reply
@@ -170,7 +207,7 @@ static void net_handle_arp(arp_packet_t* arp) {
             // Dispatch pending DNS query if queued
             if (pending_dns_domain[0] != '\0') {
                 write_serial_string("[NET] Dispatching pending DNS query from queue...\n");
-                net_send_dns_query(pending_dns_domain);
+                net_send_dns_query_nl(pending_dns_domain);
                 pending_dns_domain[0] = '\0';
             }
             
@@ -255,14 +292,14 @@ static uint16_t udp_last_src_port = 0;
 // Bind a local UDP port for receiving. Returns 0 on success, -1 if busy.
 int net_udp_bind(uint16_t port) {
     if (port == 0) return -1;
-    __asm__ volatile("cli");
+    uint32_t nf = spin_lock_irqsave(&net_lock);
     if (udp_bind_port != 0 && udp_bind_port != port) {
-        __asm__ volatile("sti");
+        spin_unlock_irqrestore(&net_lock, nf);
         return -1; // another port already bound (single-socket design)
     }
     udp_bind_port = port;
     udp_rx_len = 0;
-    __asm__ volatile("sti");
+    spin_unlock_irqrestore(&net_lock, nf);
     return 0;
 }
 
@@ -270,28 +307,32 @@ int net_udp_bind(uint16_t port) {
 int net_udp_send(uint8_t* target_ip, uint16_t dst_port, void* payload, uint32_t payload_len) {
     if (!rtl_present) return -1;
     if (payload_len > 1400) payload_len = 1400; // fits 1500-byte frame
+    uint32_t nf = spin_lock_irqsave(&net_lock);
     uint16_t src = udp_bind_port;
     if (src == 0) src = (uint16_t)(50000 + (get_ticks() % 1000));
     net_send_udp(target_ip, src, dst_port, payload, payload_len);
+    spin_unlock_irqrestore(&net_lock, nf);
     return 0;
 }
 
 // Copy received datagram into caller buffer. Returns bytes copied, 0 if none.
 int net_udp_recv(uint8_t* out, uint32_t max_len) {
     if (udp_rx_len <= 0) return 0;
-    __asm__ volatile("cli");
+    uint32_t nf = spin_lock_irqsave(&net_lock);
     int copy = udp_rx_len;
     if (copy > (int)max_len) copy = (int)max_len;
     if (copy > 0) memcpy(out, udp_rx_buf, copy);
     udp_rx_len = 0; // single datagram per recv (datagram semantics)
-    __asm__ volatile("sti");
+    spin_unlock_irqrestore(&net_lock, nf);
     return copy;
 }
 
 // Sender info for the last received datagram (IP+port).
 void net_udp_peer(uint8_t* ip_out, uint16_t* port_out) {
+    uint32_t nf = spin_lock_irqsave(&net_lock);
     memcpy(ip_out, udp_last_src_ip, 4);
     *port_out = udp_last_src_port;
+    spin_unlock_irqrestore(&net_lock, nf);
 }
 
 // Raw UDP send with arbitrary source/destination IPs and an explicit
@@ -439,12 +480,14 @@ static void tcp_start_conn(tcp_conn_t* c, uint8_t* target_ip, uint16_t port) {
 // Reserve a connection slot and start (or queue) the handshake.
 // Returns the connection id (0..TCP_MAX_CONNS-1) or -1 on failure.
 int net_tcp_connect(uint8_t* target_ip, uint16_t port) {
+    uint32_t nf = spin_lock_irqsave(&net_lock);
     int id = -1;
     for (int i = 0; i < TCP_MAX_CONNS; i++) {
         if (!tcp_conns[i].in_use) { id = i; break; }
     }
     if (id < 0) {
         write_serial_string("[TCP] no free connection slot\n");
+        spin_unlock_irqrestore(&net_lock, nf);
         return -1;
     }
 
@@ -462,10 +505,12 @@ int net_tcp_connect(uint8_t* target_ip, uint16_t port) {
         memcpy(pending_tcp_ip, target_ip, 4);
         pending_tcp_port = port;
         pending_tcp_id = id;
-        net_send_arp_request(gateway_ip);
+        net_send_arp_request_nl(gateway_ip);
+        spin_unlock_irqrestore(&net_lock, nf);
         return id;
     }
     tcp_start_conn(c, target_ip, port);
+    spin_unlock_irqrestore(&net_lock, nf);
     return id;
 }
 
@@ -474,12 +519,14 @@ int net_tcp_connect(uint8_t* target_ip, uint16_t port) {
 // matching SYN and to ESTABLISHED on the final ACK. Server apps then use
 // net_tcp_recv/send/close identically to a client connection.
 int net_tcp_listen(uint16_t port) {
+    uint32_t nf = spin_lock_irqsave(&net_lock);
     int id = -1;
     for (int i = 0; i < TCP_MAX_CONNS; i++) {
         if (!tcp_conns[i].in_use) { id = i; break; }
     }
     if (id < 0) {
         write_serial_string("[TCP] listen: no free slot\n");
+        spin_unlock_irqrestore(&net_lock, nf);
         return -1;
     }
 
@@ -504,33 +551,40 @@ int net_tcp_listen(uint16_t port) {
     write_serial_string(" id=");
     write_serial_hex(id);
     write_serial_string("\n");
+    spin_unlock_irqrestore(&net_lock, nf);
     return id;
 }
 
 // Server accept (v38.43): hand out one ESTABLISHED child of this listener.
 int net_tcp_accept(int listener_id) {
     if (listener_id < 0 || listener_id >= TCP_MAX_CONNS) return -1;
+    uint32_t nf = spin_lock_irqsave(&net_lock);
     for (int i = 0; i < TCP_MAX_CONNS; i++) {
         if (tcp_conns[i].in_use && !tcp_conns[i].accepted &&
             tcp_conns[i].listen_parent == listener_id &&
             tcp_conns[i].state == TCP_ESTABLISHED) {
             tcp_conns[i].accepted = 1;
+            spin_unlock_irqrestore(&net_lock, nf);
             return i;
         }
     }
+    spin_unlock_irqrestore(&net_lock, nf);
     return -1;
 }
 
 // Non-destructive poll variant (POLLIN on a listening socket).
 int net_tcp_accept_pending(int listener_id) {
     if (listener_id < 0 || listener_id >= TCP_MAX_CONNS) return 0;
+    uint32_t nf = spin_lock_irqsave(&net_lock);
     for (int i = 0; i < TCP_MAX_CONNS; i++) {
         if (tcp_conns[i].in_use && !tcp_conns[i].accepted &&
             tcp_conns[i].listen_parent == listener_id &&
             tcp_conns[i].state == TCP_ESTABLISHED) {
+            spin_unlock_irqrestore(&net_lock, nf);
             return 1;
         }
     }
+    spin_unlock_irqrestore(&net_lock, nf);
     return 0;
 }
 
@@ -545,11 +599,21 @@ int net_tcp_accept_pending(int listener_id) {
 // short write that way (tls_flush returns TLS_WANT_WRITE; the browser pump
 // retries), and poll(POLLOUT) reports not-writable until the ACK lands.
 int net_tcp_send(int id, uint8_t* payload, uint32_t len) {
-    if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return -2;
+    uint32_t nf = spin_lock_irqsave(&net_lock);
+    if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) {
+        spin_unlock_irqrestore(&net_lock, nf);
+        return -2;
+    }
     tcp_conn_t* c = &tcp_conns[id];
-    if (c->state != TCP_ESTABLISHED) return -1;
+    if (c->state != TCP_ESTABLISHED) {
+        spin_unlock_irqrestore(&net_lock, nf);
+        return -1;
+    }
     if (len > 1400) len = 1400;
-    if (c->unacked_len > 0) return 0;
+    if (c->unacked_len > 0) {
+        spin_unlock_irqrestore(&net_lock, nf);
+        return 0;
+    }
 
     c->unacked_seq = c->seq;
     c->unacked_len = len;
@@ -560,16 +624,28 @@ int net_tcp_send(int id, uint8_t* payload, uint32_t len) {
     }
     net_send_tcp_segment(c, TCP_ACK | TCP_PSH, payload, len);
     c->seq += len;
+    spin_unlock_irqrestore(&net_lock, nf);
     return (int)len;
 }
 
 // Copy received bytes into the caller's buffer. Returns bytes copied, 0 if
 // nothing new yet, -1 when the connection is closed/EOF, -2 for a bad id.
 int net_tcp_recv(int id, uint8_t* out, uint32_t max_len) {
-    if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return -2;
+    uint32_t nf = spin_lock_irqsave(&net_lock);
+    if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) {
+        spin_unlock_irqrestore(&net_lock, nf);
+        return -2;
+    }
     tcp_conn_t* c = &tcp_conns[id];
-    if (c->state == TCP_CLOSED) return -1;
-    if (c->rx_len <= 0) return c->eof ? -1 : 0;
+    if (c->state == TCP_CLOSED) {
+        spin_unlock_irqrestore(&net_lock, nf);
+        return -1;
+    }
+    if (c->rx_len <= 0) {
+        int r = c->eof ? -1 : 0;
+        spin_unlock_irqrestore(&net_lock, nf);
+        return r;
+    }
 
     // Window-update ACK (v38.83): the peer stops sending once our advertised
     // window hits 0, and it only learns the window reopened from an ACK —
@@ -592,6 +668,7 @@ int net_tcp_recv(int id, uint8_t* out, uint32_t max_len) {
         (c->state == TCP_ESTABLISHED || c->state == TCP_CLOSE_WAIT)) {
         net_send_tcp_segment(c, TCP_ACK, 0, 0);
     }
+    spin_unlock_irqrestore(&net_lock, nf);
     return copy;
 }
 
@@ -599,6 +676,7 @@ int net_tcp_recv(int id, uint8_t* out, uint32_t max_len) {
 // peer acknowledges. FIN_WAIT_1 -> (ACK) -> FIN_WAIT_2 -> (FIN) -> free.
 void net_tcp_close(int id) {
     if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return;
+    uint32_t nf = spin_lock_irqsave(&net_lock);
     tcp_conn_t* c = &tcp_conns[id];
 
     if (c->state == TCP_ESTABLISHED) {
@@ -614,9 +692,11 @@ void net_tcp_close(int id) {
         c->state = TCP_CLOSED;
         c->in_use = 0;
     }
+    spin_unlock_irqrestore(&net_lock, nf);
 }
 
 // State of one connection (for callers that need to poll a specific id).
+// Lockless by design (see the net_lock note): poll hint, re-check via APIs.
 int net_tcp_state(int id) {
     if (id < 0 || id >= TCP_MAX_CONNS || !tcp_conns[id].in_use) return TCP_CLOSED;
     return tcp_conns[id].state;
@@ -668,7 +748,9 @@ static int format_dns_name(char* qname, const char* domain) {
 }
 
 // Send DNS Query
-void net_send_dns_query(const char* domain) {
+// Lock-free core: net_handle_arp (IRQ context) dispatches queued domains from
+// inside its own net_lock section, so it must not use the public wrapper.
+static void net_send_dns_query_nl(const char* domain) {
     if (!net_ready) {
         write_serial_string("[NET] net_send_dns_query: Network not ready. Queuing domain: ");
         write_serial_string(domain);
@@ -676,7 +758,7 @@ void net_send_dns_query(const char* domain) {
         int i = 0;
         for (; i < 127 && domain[i]; i++) pending_dns_domain[i] = domain[i];
         pending_dns_domain[i] = '\0';
-        net_send_arp_request(gateway_ip);
+        net_send_arp_request_nl(gateway_ip);
         return;
     }
     write_serial_string("[NET] Sending DNS query for domain: ");
@@ -704,6 +786,12 @@ void net_send_dns_query(const char* domain) {
     // DNS server: the configured one (DHCP option 6, else the QEMU slirp
     // default 10.0.2.3) which proxies to the host resolver.
     net_send_udp(dns_server_ip, 12345, 53, payload, qpos);
+}
+
+void net_send_dns_query(const char* domain) {
+    uint32_t nf = spin_lock_irqsave(&net_lock);
+    net_send_dns_query_nl(domain);
+    spin_unlock_irqrestore(&net_lock, nf);
 }
 
 static void net_handle_dns(uint8_t* data, uint32_t len) {
@@ -805,8 +893,8 @@ static void net_handle_dns(uint8_t* data, uint32_t len) {
 // is overwritten and the gateway MAC is re-resolved via ARP (which is what
 // sets net_ready). If no server answers after a few retries we fall back to
 // the static defaults, so networking still works without a DHCP server.
-// The state machine is driven from net_poll() (main loop, inside its cli
-// window); the IRQ path only parses and records OFFER/ACK data.
+// The state machine is driven from net_poll() (main loop, inside its
+// net_lock window); the IRQ path only parses and records OFFER/ACK data.
 
 typedef struct __attribute__((packed)) {
     uint8_t  op;            // 1 = BOOTREQUEST, 2 = BOOTREPLY
@@ -977,7 +1065,9 @@ static void dhcp_handle(uint8_t* data, uint32_t len) {
         write_serial_string("\n");
         // Resolve the (possibly new) gateway MAC — its ARP reply is what
         // flips net_ready and dispatches any queued DNS/TCP operations.
-        net_send_arp_request(gateway_ip);
+        // (_nl: this ACK handler runs from net_poll/net_irq_handler under
+        // net_lock already.)
+        net_send_arp_request_nl(gateway_ip);
     } else if (msg_type == DHCP_NAK && dhcp_state == DHCP_STATE_REQUEST) {
         write_serial_string("[DHCP] NAK — restarting discovery\n");
         dhcp_state = DHCP_STATE_IDLE;
@@ -992,11 +1082,14 @@ static void dhcp_fallback_static(void) {
     write_serial_hex(DHCP_MAX_RETRIES + 1);
     write_serial_string(" tries — static config\n");
     dhcp_state = DHCP_STATE_BOUND;   // stop the retry loop
-    net_send_arp_request(gateway_ip);
+    // _nl: dhcp_tick/net_poll already hold net_lock (a public call here
+    // self-deadlocked CPU 0 in the first run of this change).
+    net_send_arp_request_nl(gateway_ip);
 }
 
-// Drive the client state machine. Called from net_poll() inside its cli
-// window so the IRQ RX path can never interleave a parse with a retry.
+// Drive the client state machine. Called from net_poll() inside its
+// net_lock window so the IRQ RX path can never interleave a parse with a
+// retry. Runs with net_lock already held: never take it here.
 static void dhcp_tick(void) {
     if (!rtl_present) return;
     if (dhcp_state == DHCP_STATE_IDLE) {
@@ -1254,9 +1347,9 @@ static void net_handle_udp(ip_header_t* ip, uint8_t* udp_data, uint32_t udp_len)
     }
 
     // Application datagram: deliver to the bound UDP socket, if any.
-    // NOTE: no cli/sti here — this runs inside net_irq_handler (IF already
-    // cleared by the interrupt gate) or net_poll (which we wrap in cli/sti).
-    // Re-enabling IF mid-IRQ would allow nested re-entrant net processing.
+    // NOTE: no locking here — both callers (net_irq_handler, net_poll) run
+    // this under net_lock already; it is not recursive, so taking it again
+    // would self-deadlock.
     if (dst_port == udp_bind_port && udp_bind_port != 0) {
         if ((int)payload_len <= UDP_RX_BUF_SIZE) {
             memcpy(udp_rx_buf, udp_data + sizeof(udp_header_t), payload_len);
@@ -1346,21 +1439,24 @@ static void net_handle_frame(uint8_t* frame, uint32_t len) {
 // defaults take over exactly as before (ARP -> net_ready).
 void net_init(void) {
     if (!rtl_present) return;
+    uint32_t nf = spin_lock_irqsave(&net_lock);
     write_serial_string("[NET] init: starting DHCP client\n");
     dhcp_xid = (uint32_t)get_ticks() * 2654435761u + 0x4D4354u; // odd-ish xid
     dhcp_state = DHCP_STATE_IDLE;
     dhcp_tick();
+    spin_unlock_irqrestore(&net_lock, nf);
 }
 
 // Poll for incoming packets (call from main loop — fallback for the shell's
 // busy-waits; the IRQ path is the primary driver now).
-// Interrupts are disabled around the drain so the IRQ handler (same CPU) can
-// never interleave its rtl_rx_offset/CAPR updates with ours.
+// net_lock — not cli (see its declaration): IRQ 11 is BSP-routed, so only a
+// lock excludes the handler when this runs on an AP. The RTL ring keeps its
+// own lock, and net_lock nests above it.
 void net_poll(void) {
     if (!rtl_present) return;
     uint8_t buf[1520];
     int len;
-    __asm__ volatile("cli");
+    uint32_t nf = spin_lock_irqsave(&net_lock);
     // Process up to 4 packets per poll
     for (int i = 0; i < 4; i++) {
         len = rtl8139_poll_rx(buf, sizeof(buf));
@@ -1373,12 +1469,12 @@ void net_poll(void) {
         net_handle_frame(buf, (uint32_t)len);
     }
 
-    // DHCP state machine (retries/fallback). Same cli window: a DISCOVER/REQUEST
-    // retry must not race the IRQ path parsing an OFFER/ACK.
+    // DHCP state machine (retries/fallback). Same net_lock window: a DISCOVER/
+    // REQUEST retry must not race the IRQ path parsing an OFFER/ACK.
     dhcp_tick();
 
-    // TCP retransmit + connect timeout sweep. Runs inside the same cli/sti
-    // window as the RX drain so the IRQ path can never interleave.
+    // TCP retransmit + connect timeout sweep. Same net_lock window as the RX
+    // drain so the IRQ path can never interleave.
     uint32_t now = get_ticks();
     for (int i = 0; i < TCP_MAX_CONNS; i++) {
         tcp_conn_t* c = &tcp_conns[i];
@@ -1403,14 +1499,17 @@ void net_poll(void) {
             c->seq = saved;
         }
     }
-    __asm__ volatile("sti");
+    spin_unlock_irqrestore(&net_lock, nf);
 }
 
-// IRQ-driven RX: called from the IRQ 11 handler. Interrupts are already
-// disabled, so no re-entrancy against net_poll() is possible.
+// IRQ-driven RX: called from the IRQ 11 handler. The interrupt gate already
+// cleared IF, so the plain spin_lock/unlock is the house rule here (no IF
+// restore). IRQ 11 is BSP-routed, but net_poll() and the task-context APIs can
+// hold net_lock on any core — exactly the case cli/sti could not cover.
 void net_irq_handler(registers_t* r) {
     (void)r;
     if (!rtl_present) return;
+    spin_lock(&net_lock);
     uint16_t isr = rtl8139_irq_clear();
     if (isr & 0x01) { // ROK — packets available
         uint8_t buf[1520];
@@ -1432,19 +1531,22 @@ void net_irq_handler(registers_t* r) {
         // instead of waiting for the next 10 ms tick (see take_resched).
         if (drained > 0) {
             extern void request_resched(void);
-            request_resched();
+            request_resched(); // lock-free flag write, safe under net_lock
         }
     }
+    spin_unlock(&net_lock);
 }
 
 
 // Send ICMP Echo Request (ping)
 void net_send_ping(uint8_t* target_ip) {
     if (!rtl_present) return;
+    uint32_t nf = spin_lock_irqsave(&net_lock);
 
     // If we don't know gateway MAC yet, send another ARP
     if (!net_ready) {
-        net_send_arp_request(gateway_ip);
+        net_send_arp_request_nl(gateway_ip);
+        spin_unlock_irqrestore(&net_lock, nf);
         return;
     }
 
@@ -1483,4 +1585,5 @@ void net_send_ping(uint8_t* target_ip) {
     memcpy(ping_target_ip, target_ip, 4); // replies must come from this host
 
     net_send_eth(gateway_mac, ETH_TYPE_IP, pkt, total);
+    spin_unlock_irqrestore(&net_lock, nf);
 }
