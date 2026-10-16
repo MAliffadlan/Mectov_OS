@@ -121,7 +121,11 @@ uint16_t rtl8139_irq_clear(void) {
 }
 
 void rtl8139_send_packet(void* data, uint32_t len) {
-    if (!rtl_present || len > 1500) return;
+    // 1514 = the standard untagged Ethernet frame (14 + IP's 1500 MTU). The
+    // old 1500 bound silently dropped EVERY full-size IP packet: a maximum
+    // echo reply (frame 1514) and full 1460-byte-payload TCP segments never
+    // left the NIC. RTL_TX_BUF_SIZE (1536) covers 1514 with room to spare.
+    if (!rtl_present || len > 1514) return;
 
     uint32_t flags = rtl_enter();
 

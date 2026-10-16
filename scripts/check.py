@@ -175,6 +175,10 @@ SUITES = [
     ("virtiogpu",        "virtiogpu_test.py",         360, [], "gpu"),
     ("virtio",           "virtio_test.py",            360),
     ("socktest",         "socktest.py",               300),
+    # ICMP under a raw-frame injector (audit C6): a UDP-tunnel netdev replaces
+    # slirp so the test can inject malformed/off-gateway echoes slirp cannot
+    # produce. No login needed — the DHCP static fallback readies the stack.
+    ("icmp",             "icmp_test.py",              240),
     ("poweroff",         "poweroff_test.py",          240),
     ("pollselect",       "pollselect_test.py",        240),
     ("fuzz",             "fuzz_test.py",              300),
@@ -227,7 +231,7 @@ SUITES = [
 # path that nxtest's NX half depends on. nxtest itself stays out of the fast
 # tier: it needs the Terminal, so it costs minutes rather than seconds.
 QUICK = {"boot", "fork", "procfs", "jobcontrol", "fputest", "fuzz",
-         "iocache", "app_smoke", "doom", "thread", "cond", "usb", "cpuid"}
+         "iocache", "app_smoke", "doom", "thread", "cond", "usb", "cpuid", "icmp"}
 
 # debugfs is not needed to build the images, but scripts/doom_test.py's seed
 # pre-flight requires it (v38.161, audit F6) — list it here so a host without

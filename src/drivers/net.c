@@ -25,6 +25,7 @@ int     ping_replied    = 0;
 uint32_t ping_rtt       = 0;
 static uint32_t ping_sent_tick = 0;
 static uint16_t ping_seq = 0;
+static uint8_t  ping_target_ip[4] = {0, 0, 0, 0}; // host of the outstanding ping
 
 int     dns_resolved    = 0;
 uint8_t dns_resolved_ip[4] = {0, 0, 0, 0};
@@ -186,12 +187,25 @@ static void net_handle_arp(arp_packet_t* arp) {
 
 }
 
-// Handle incoming ICMP (inside an IP packet)
-static void net_handle_icmp(ip_header_t* ip, uint8_t* icmp_data, uint32_t icmp_len) {
+// Handle incoming ICMP (inside an IP packet). src_mac is the Ethernet source
+// of the frame being answered: a reply MUST go back to the sender, not to the
+// gateway — an off-gateway pinger would never see it (and before this, an
+// unresolved gateway_mac sent the reply to 00:00:00:00:00:00).
+static void net_handle_icmp(ip_header_t* ip, uint8_t* icmp_data, uint32_t icmp_len, uint8_t* src_mac) {
     if (icmp_len < sizeof(icmp_header_t)) return;
     icmp_header_t* icmp = (icmp_header_t*)icmp_data;
 
     if (icmp->type == ICMP_ECHO_REQUEST) {
+        // A conforming echo cannot exceed the path MTU: IP total 1500 =
+        // 20 + 8 + 1472. Anything longer cannot be answered inside a standard
+        // frame, and previously flowed into pkt[1500]/net_send_eth's
+        // frame[1514] past their ends.
+        if (icmp_len > 1480) return;
+        // RFC 792: silently discard a request whose checksum does not verify.
+        // A ones-complement sum over the ICMP message, checksum included,
+        // comes to 0xFFFF — ip_checksum() returns the complement, 0.
+        if (ip_checksum(icmp, icmp_len) != 0) return;
+
         // Reply to ping — build response
         uint8_t pkt[1500];
         ip_header_t* rip = (ip_header_t*)pkt;
@@ -216,16 +230,16 @@ static void net_handle_icmp(ip_header_t* ip, uint8_t* icmp_data, uint32_t icmp_l
         ricmp->checksum = 0;
         ricmp->checksum = ip_checksum(ricmp, icmp_len);
 
-        // Determine destination MAC — if src IP is gateway, use gateway_mac
-        uint8_t* dst_mac = gateway_mac;
-        // Simple: always send to the MAC that sent us the original packet
-        // We can extract it from the ethernet header, but for simplicity use gateway
-        net_send_eth(dst_mac, ETH_TYPE_IP, pkt, sizeof(ip_header_t) + icmp_len);
+        // Back to the frame's sender, on its MAC (see src_mac above).
+        net_send_eth(src_mac, ETH_TYPE_IP, pkt, sizeof(ip_header_t) + icmp_len);
 
     } else if (icmp->type == ICMP_ECHO_REPLY) {
-        // We got a pong!
-        ping_replied = 1;
-        ping_rtt = get_ticks() - ping_sent_tick;
+        // Accept only a reply that matches the outstanding request: our id and
+        // the host we actually pinged. Anything else must not satisfy waiters.
+        if (icmp->id == htons(0xBEEF) && memcmp(ip->src_ip, ping_target_ip, 4) == 0) {
+            ping_replied = 1;
+            ping_rtt = get_ticks() - ping_sent_tick;
+        }
     }
 }
 
@@ -1236,7 +1250,7 @@ static void net_handle_udp(ip_header_t* ip, uint8_t* udp_data, uint32_t udp_len)
 
 
 // Handle incoming IP packet
-static void net_handle_ip(uint8_t* data, uint32_t len) {
+static void net_handle_ip(uint8_t* data, uint32_t len, uint8_t* src_mac) {
     if (len < sizeof(ip_header_t)) return;
     ip_header_t* ip = (ip_header_t*)data;
     
@@ -1273,7 +1287,7 @@ static void net_handle_ip(uint8_t* data, uint32_t len) {
 
 
     if (ip->protocol == IP_PROTO_ICMP) {
-        net_handle_icmp(ip, data + ihl, total - ihl);
+        net_handle_icmp(ip, data + ihl, total - ihl, src_mac);
     } else if (ip->protocol == IP_PROTO_UDP) {
         net_handle_udp(ip, data + ihl, total - ihl);
     } else if (ip->protocol == IP_PROTO_TCP) {
@@ -1301,7 +1315,7 @@ static void net_handle_frame(uint8_t* frame, uint32_t len) {
             net_handle_arp((arp_packet_t*)payload);
         }
     } else if (type == ETH_TYPE_IP) {
-        net_handle_ip(payload, payload_len);
+        net_handle_ip(payload, payload_len, eth->src);
     }
 }
 
@@ -1444,6 +1458,7 @@ void net_send_ping(uint8_t* target_ip) {
 
     ping_replied = 0;
     ping_sent_tick = get_ticks();
+    memcpy(ping_target_ip, target_ip, 4); // replies must come from this host
 
     net_send_eth(gateway_mac, ETH_TYPE_IP, pkt, total);
 }
