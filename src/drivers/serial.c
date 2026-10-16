@@ -78,6 +78,28 @@ static int serial_drain_blocking_locked(void) {
     return moved;
 }
 
+// Synchronous flush for VM-ending paths (ACPI S5, 8042 reset, panic reboot).
+// The transmit ring is drained asynchronously by timer IRQs; once SLP_EN /
+// the reset command reaches the chipset those IRQs stop, and whatever was
+// still queued never reaches the backend — the serial log then ends
+// mid-string (observed: "[ACPI] S5 powe" instead of the full line). Drain
+// the ring, then wait for TEMT so the FIFO + shift register are empty too.
+void serial_flush(void) {
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&serial_lock);
+    serial_drain_blocking_locked();
+    int timeout = 100000;
+    while (timeout > 0) {
+        uint8_t lsr = inb(MODEM_PORT + 5);
+        if (lsr == 0xFF) break;      // dead/unmapped port: nothing to wait for
+        if (lsr & 0x40) break;       // TEMT: transmitter fully empty
+        timeout--;
+    }
+    spin_unlock(&serial_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+}
+
 // Raw single-char write (no lock) — only call while holding serial_lock.
 // Every byte is also captured in the kernel log ring buffer (dmesg). Append
 // to the transmit ring; the timer IRQ (or the string-level kick after a

@@ -3,6 +3,7 @@
 #include "../include/vga.h"
 #include "../include/rtc.h"
 #include "../include/acpi.h"   // acpi_poweroff (v38.84: kills implicit-declaration warning)
+#include "../include/serial.h" // serial_flush before VM-ending port writes
 
 char cpu_brand[49];
 unsigned char boot_sec, boot_min, boot_hour;
@@ -47,6 +48,9 @@ void shutdown() {
     // when there is no usable FADT or the write did not take, in which case
     // the legacy hardcoded ports below still cover QEMU/VirtualBox.
     acpi_poweroff();
+    // The fallback port writes below also end the VM: drain anything the
+    // early-return path of acpi_poweroff queued (and "Shutting down...").
+    serial_flush();
     outw(0xB004, 0x2000);   // ACPI PM1a_CNT (QEMU PIIX4)
     outw(0x604, 0x2000);    // QEMU isa-debug-exit
     outw(0x4004, 0x3400);   // VirtualBox fallback
@@ -60,6 +64,8 @@ void reboot() {
     extern int task_sync_all(void);
     task_sync_all();
     __asm__ volatile("cli");
+    // VM-ending write ahead: flush the ring first (see serial_flush).
+    serial_flush();
     // Keyboard controller 8042 reset
     unsigned char g;
     do { g = inb(0x64); } while (g & 0x02);

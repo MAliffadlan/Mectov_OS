@@ -213,6 +213,11 @@ void acpi_poweroff(void) {
         return;
     }
     write_serial_string("[ACPI] S5 poweroff (PM1a write)\n");
+    // The line above only queued into the serial transmit ring, which timer
+    // IRQs drain asynchronously — and the SLP_EN write below stops them.
+    // Flush now or the serial log ends mid-string and the poweroff test's
+    // "[ACPI] S5 poweroff" needle never lands in the file.
+    serial_flush();
     // SLP_TYP lives at bits 12:10, SLP_EN at bit 13 of the PM1 control reg.
     if (fadt_pm1a_cnt) outw(fadt_pm1a_cnt, (uint16_t)((s5_typa << 10) | 0x2000));
     if (fadt_pm1b_cnt) outw(fadt_pm1b_cnt, (uint16_t)((s5_typb << 10) | 0x2000));

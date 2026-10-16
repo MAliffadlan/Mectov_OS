@@ -23,5 +23,10 @@ int  write_serial_if_free(const char* buf, int size);
 // tick (see serial.c). Pushes queued log bytes into the UART FIFO without
 // waiting, so a writer never stalls the frame it is logging from.
 void serial_poll(void);
+// Block until the transmit ring AND the UART are empty. MUST be called before
+// any write that ends the VM (ACPI S5, 8042 reset, ...): the ring is normally
+// drained asynchronously by timer IRQs, so without this the last line before
+// the machine stops is cut mid-string in the serial log.
+void serial_flush(void);
 
 #endif
