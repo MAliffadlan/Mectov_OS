@@ -66,6 +66,11 @@ int vmm_map_page(uint32_t page_dir, uint32_t vaddr, uint32_t paddr, uint64_t fla
 
 // Unmap a virtual address in a specific address space
 int vmm_unmap_page(uint32_t page_dir, uint32_t vaddr);
+// Clear a present PTE and return the frame it referenced (0 if absent). The
+// caller frees the frame; used when a fixed user mapping is replaced (the
+// shared-library loader) so the old frames are not leaked. Call with the
+// target address space active if the invlpg must cover the current CPU.
+uint32_t vmm_unmap_page_free(uint32_t page_dir, uint32_t vaddr);
 
 // Allocate a physical frame and map it at vaddr in the given address space
 uint32_t vmm_alloc_page_at(uint32_t page_dir, uint32_t vaddr, uint64_t flags);

@@ -104,6 +104,9 @@ void wm_track_mouse(int mx, int my); // Pure-move hover tracking (titlebar butto
 int wm_handle_mouse(int mx, int my, int btn, int pbtn);
 void wm_handle_scroll(int mx, int my, int delta);
 void wm_handle_key(char c, uint8_t sc);
+/* Run a wm_close() that was requested from inside a wm_lock-held callback.
+ * Safe to call with no WM lock held; the desktop loop calls it every pass. */
+void wm_drain_deferred_close(void);
 
 // ---- v38.103: game input (raw scancodes + mouse capture) ----
 // A window can ask for raw scancode delivery: while it holds focus, the

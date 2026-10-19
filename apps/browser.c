@@ -539,11 +539,19 @@ static int chunk_walk(int from, int end, char* dst, int* out_len) {
         while (r + 1 < end && raw_buf[r] == '\r' && raw_buf[r+1] == '\n') r += 2;
         if (r >= end) break;
 
-        int sz = 0, digits = 0;
+        uint32_t sz = 0;
+        int digits = 0;
         while (r < end) {
             int d = hexval(raw_buf[r]);
             if (d < 0) break;
-            sz = sz * 16 + d; r++; digits++;
+            // Reject a digit that would wrap the 32-bit size before doing the
+            // multiply. The old signed int let 7FFFFFFF overflow r+sz, skip
+            // the truncation check and copy gigabytes into raw_buf.
+            if (sz > (0xFFFFFFFFu - (uint32_t)d) / 16u) {
+                if (out_len) *out_len = w;
+                return 0;
+            }
+            sz = sz * 16 + (uint32_t)d; r++; digits++;
             if (digits > 8) { if (out_len) *out_len = w; return 0; }
         }
         if (digits == 0) { if (out_len) *out_len = w; return 0; }
@@ -553,14 +561,14 @@ static int chunk_walk(int from, int end, char* dst, int* out_len) {
         r++;
 
         if (sz == 0) { if (out_len) *out_len = w; return 1; }
-        if (r + sz > end) {                          // truncated final chunk
+        if (sz > (uint32_t)(end - r)) {              // truncated final chunk
             if (dst) for (int i = 0; i < end - r; i++) dst[w + i] = raw_buf[r + i];
             w += end - r;
             break;
         }
-        if (dst) for (int i = 0; i < sz; i++) dst[w + i] = raw_buf[r + i];
-        w += sz;
-        r += sz;
+        if (dst) for (uint32_t i = 0; i < sz; i++) dst[w + i] = raw_buf[r + i];
+        w += (int)sz;
+        r += (int)sz;
     }
     if (out_len) *out_len = w;
     return 0;

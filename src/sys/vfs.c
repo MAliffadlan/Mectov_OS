@@ -426,7 +426,8 @@ void vfs_clear_children(int node) {
             if (!fs_nodes[i].in_use) continue;
             int p = fs_nodes[i].parent;
             int is_descendant = 0;
-            while (p >= 0) {
+            int hops = 0;
+            while (p >= 0 && hops++ < MAX_NODES) {
                 if (p == node) { is_descendant = 1; break; }
                 if (!fs_nodes[p].in_use) break;
                 p = fs_nodes[p].parent;
@@ -1534,6 +1535,20 @@ static int vfs_load_unlocked() {
             fs_nodes[i].parent = 0;
         }
     }
+    // A range-checked parent is not necessarily an ACYCLIC parent: a node
+    // whose parent is itself (or A->B->A) made every ancestor walk spin
+    // forever at boot. Break cycles here, at the trust boundary.
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (!fs_nodes[i].in_use) continue;
+        int p = fs_nodes[i].parent;
+        int steps = 0;
+        while (p >= 0 && p < MAX_NODES && steps++ <= MAX_NODES) {
+            if (p == i) { fs_nodes[i].parent = 0; break; }
+            if (!fs_nodes[p].in_use) break;
+            p = fs_nodes[p].parent;
+        }
+        if (steps > MAX_NODES) fs_nodes[i].parent = 0;
+    }
     
     // Restore current_dir
     int loaded_cd = meta[16] | (meta[17] << 8);
@@ -2377,7 +2392,8 @@ static int vfs_delete_node_unlocked(const char* path, int acting_uid) {
                 // Check if this node is a descendant of target
                 int p = fs_nodes[i].parent;
                 int is_descendant = 0;
-                while (p >= 0) {
+                int hops = 0;
+                while (p >= 0 && hops++ < MAX_NODES) {
                     if (p == node) { is_descendant = 1; break; }
                     if (!fs_nodes[p].in_use) break;
                     p = fs_nodes[p].parent;
@@ -2487,9 +2503,11 @@ static int vfs_rename_unlocked(const char* old_path, const char* new_path,
     // own descendants would make it unreachable and duplicate the whole subtree
     // in listings. Walk the parent chain of new_parent.
     if (new_parent == node) return -4;
-    for (int p = new_parent; p > 0; p = fs_nodes[p].parent) {
+    int hops = 0;
+    for (int p = new_parent; p > 0 && hops++ <= MAX_NODES; p = fs_nodes[p].parent) {
         if (p == node) return -4;
     }
+    if (hops > MAX_NODES) return -4;    // parent chain cycle
     
     // Delete existing target if any (same acting uid as the rename itself)
     int existing = vfs_find_in_dir(new_filename, new_parent);

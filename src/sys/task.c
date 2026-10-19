@@ -1688,6 +1688,18 @@ int task_kill(int tid) {
     return task_signal(tid, SIGKILL);
 }
 
+// Same as task_kill(SIGKILL), but the caller already holds task_lock with
+// interrupts disabled. Kept separate so a caller that must establish the
+// documented task_lock > wm_lock order does not re-acquire task_lock through
+// task_signal() (self-deadlock) or invert it (ABBA against task teardown).
+int task_kill_locked(int tid) {
+    if (tid <= 0 || tid >= MAX_TASKS) return -1;
+    if (tasks[tid].state == TASK_STATE_FREE) return -1;
+    if (tasks[tid].state == TASK_STATE_ZOMBIE) return 0;  // already dead
+    terminate_task(tid, 128 + SIGKILL);
+    return 0;
+}
+
 // Send a signal to a task and every descendant still alive (POSIX process-
 // group semantics for Ctrl+C: interrupting the foreground job must reach the
 // whole job tree, not just the job leader). Used by the terminal's Ctrl+C.

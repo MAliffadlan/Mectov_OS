@@ -148,12 +148,18 @@ void sb16_init(void) {
 // fields cross the task/IRQ boundary as one unit — the syscall's ordering
 // guarantee ("point the IRQ at the new copy first, then free the old one")
 // only holds if the swap is atomic against the handler.
-void sb16_set_audio_buffer(uint8_t* pcm_data, uint32_t length) {
+uint8_t* sb16_swap_audio_buffer(uint8_t* pcm_data, uint32_t length) {
     uint32_t nf = spin_lock_irqsave(&sb16_lock);
+    uint8_t* old = current_pcm_data;
     current_pcm_data = pcm_data;
     current_pcm_length = length;
     current_pcm_pos = 0;
     spin_unlock_irqrestore(&sb16_lock, nf);
+    return old;
+}
+
+void sb16_set_audio_buffer(uint8_t* pcm_data, uint32_t length) {
+    (void)sb16_swap_audio_buffer(pcm_data, length);
 }
 
 void sb16_stop_playback() {

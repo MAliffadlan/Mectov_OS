@@ -612,41 +612,70 @@ static int fat32_write_dirent(uint32_t parent_cluster, const char* name, int is_
     }
 
     static unsigned char cbuf[FAT32_MAX_SPC * 512];
-    fat32_read_cluster(slot_cluster, cbuf);
-    int off = slot_off;
     uint8_t ck = fat32_checksum((const unsigned char*)sfn);
     int namelen = 0;
     while (name[namelen]) namelen++;
+    int cluster_bytes = fat32_spc * 512;
+    int need = nlfn + 1;
+    int written = 0;
+    uint32_t cur = slot_cluster;
+    int off = slot_off;
 
-    // LFN entries first (entry i holds chunk (nlfn-1-i), sequence nlfn-i).
-    // The 0x40 bit marks the FIRST entry of the chain (farthest from the
-    // SFN, holding the last chunk, highest sequence); every other entry is a
-    // plain sequence number — mtools/Windows walk the chain from the SFN and
-    // stop when they hit the 0x40 terminator, so setting it everywhere would
-    // truncate the name after the first entry.
-    for (int i = 0; i < nlfn; i++) {
-        unsigned char* le = cbuf + off;
-        memset(le, 0, 32);
-        le[0] = (unsigned char)(((i == 0) ? 0x40 : 0x00) | (nlfn - i));
-        int chunk_start = (nlfn - 1 - i) * 13;
-        int remaining = namelen - chunk_start;
-        fat32_put_lfn_chars(name + chunk_start, remaining, le);
-        le[11] = FAT32_ATTR_LFN;
-        le[12] = 0;
-        le[13] = ck;
-        off += 32;
+    // Write the LFN chain + SFN across the cluster boundary. A run that starts
+    // at the end marker in the last slot and needs more than one entry used to
+    // write past cbuf; walking to the next cluster (and allocating it when the
+    // chain ends) keeps every write inside a cluster. The end marker itself is
+    // replaced by the first entry, so the scanner can follow the chain.
+    //
+    // LFN entry i holds chunk (nlfn-1-i), sequence nlfn-i. The 0x40 bit marks
+    // the FIRST entry of the chain (farthest from the SFN, holding the last
+    // chunk, highest sequence); every other entry is a plain sequence number —
+    // mtools/Windows walk the chain from the SFN and stop when they hit the
+    // 0x40 terminator, so setting it everywhere would truncate the name after
+    // the first entry.
+    while (written < need) {
+        fat32_read_cluster(cur, cbuf);
+        while (written < need && off + 32 <= cluster_bytes) {
+            unsigned char* e = cbuf + off;
+            if (written < nlfn) {
+                memset(e, 0, 32);
+                e[0] = (unsigned char)(((written == 0) ? 0x40 : 0x00) | (nlfn - written));
+                int chunk_start = (nlfn - 1 - written) * 13;
+                int remaining = namelen - chunk_start;
+                fat32_put_lfn_chars(name + chunk_start, remaining, e);
+                e[11] = FAT32_ATTR_LFN;
+                e[12] = 0;
+                e[13] = ck;
+            } else {
+                fat32_dirent_t* d = (fat32_dirent_t*)e;
+                memset(d, 0, sizeof(fat32_dirent_t));
+                memcpy(d->name, sfn, 11);
+                d->attr = is_dir ? FAT32_ATTR_DIR : FAT32_ATTR_ARCHIVE;
+                d->cluster_low = (uint16_t)(cluster & 0xFFFF);
+                d->cluster_high = (uint16_t)((cluster >> 16) & 0xFFFF);
+                d->size = size;
+            }
+            off += 32;
+            written++;
+        }
+        // v38.159: the dirent is what makes the file exist — a refused write
+        // here fails the create instead of reporting a name not on the medium.
+        if (fat32_write_cluster(cur, cbuf) != 0) return -1;
+        if (written < need) {
+            uint32_t next = fat32_get_next(cur);
+            if (next < FAT32_ROOT_CLUSTER || next > fat32_max_cluster ||
+                next >= FAT32_EOC_MIN) {
+                next = fat32_alloc_cluster();
+                if (next < FAT32_ROOT_CLUSTER) return -1;
+                if (fat32_set_next(cur, next) != 0) return -1;
+                static unsigned char zbuf[FAT32_MAX_SPC * 512];
+                memset(zbuf, 0, cluster_bytes);
+                if (fat32_write_cluster(next, zbuf) != 0) return -1;
+            }
+            cur = next;
+            off = 0;
+        }
     }
-    // SFN entry.
-    fat32_dirent_t* e = (fat32_dirent_t*)(cbuf + off);
-    memset(e, 0, sizeof(fat32_dirent_t));
-    memcpy(e->name, sfn, 11);
-    e->attr = is_dir ? FAT32_ATTR_DIR : FAT32_ATTR_ARCHIVE;
-    e->cluster_low = (uint16_t)(cluster & 0xFFFF);
-    e->cluster_high = (uint16_t)((cluster >> 16) & 0xFFFF);
-    e->size = size;
-    // v38.159: the dirent is what makes the file exist — a refused write here
-    // fails the create instead of reporting a name that is not on the medium.
-    if (fat32_write_cluster(slot_cluster, cbuf) != 0) return -1;
     return 0;
 }
 

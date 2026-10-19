@@ -9,7 +9,8 @@ char cpu_brand[49];
 unsigned char boot_sec, boot_min, boot_hour;
 unsigned int rand_seed = 0;
 
-// Legacy CMOS read — NMI-safe version (bit 7 set to disable NMI)
+// Legacy CMOS read — NMI-safe version (bit 7 set to disable NMI); deprecated: use rtc.c CMOS functions instead
+// __attribute__((deprecated)) // C11: not supported in gnu99
 unsigned char read_cmos(unsigned char reg) { outb(0x70, reg | 0x80); return inb(0x71); }
 unsigned char bcd_to_bin(unsigned char bcd) { return ((bcd & 0xF0) >> 1) + ((bcd & 0xF0) >> 3) + (bcd & 0x0F); }
 

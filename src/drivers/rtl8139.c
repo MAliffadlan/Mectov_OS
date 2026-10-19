@@ -77,7 +77,9 @@ void init_rtl8139(void) {
 
     // 5. Software Reset
     outb(rtl_io_base + RTL_CMD, 0x10);
-    while (inb(rtl_io_base + RTL_CMD) & 0x10) {}
+    // wait for reset to complete, with timeout to avoid hanging forever
+    int _rtl_reset_wait = 100000;
+    while (_rtl_reset_wait-- > 0 && (inb(rtl_io_base + RTL_CMD) & 0x10)) {}
 
     // 6. Read MAC Address
     for (int i = 0; i < 6; i++) {

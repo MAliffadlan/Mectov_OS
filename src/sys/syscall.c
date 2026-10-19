@@ -908,20 +908,19 @@ static void syscall_handler(registers_t* regs) {
                 regs->eax = (uint32_t)-1;
                 break;
             }
-            extern void sb16_set_audio_buffer(uint8_t*, uint32_t);
+            extern uint8_t* sb16_swap_audio_buffer(uint8_t*, uint32_t);
             extern void sb16_start_playback(uint16_t);
-            static uint8_t* play_buf = NULL;
             extern void* kmalloc(uint32_t);
             extern void kfree(void*);
             uint8_t* new_buf = (uint8_t*)kmalloc(len);
             if (!new_buf) { regs->eax = (uint32_t)-1; break; }
             memcpy(new_buf, pcm, len);
-            // Point the IRQ at the new copy FIRST, then free the old one: an
-            // SB16 IRQ can fire between these statements, and fill_buffer must
-            // never see a freed buffer.
-            sb16_set_audio_buffer(new_buf, len);
-            kfree(play_buf);          // free previous copy (NULL-safe)
-            play_buf = new_buf;
+            // The swap is atomic against the completion IRQ, and the swap's
+            // return value is the only buffer this call may free. Two
+            // concurrent SYS_PLAY_WAV calls therefore each free the pointer
+            // they replaced, never the one currently published.
+            uint8_t* old_buf = sb16_swap_audio_buffer(new_buf, len);
+            kfree(old_buf);           // free previous copy (NULL-safe)
             sb16_start_playback(rate);
             regs->eax = 0;
             break;

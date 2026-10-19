@@ -317,6 +317,8 @@
 // submitting the URL, stepping straight past a refusal it had just caused.
 // docs/architecture/tls.md gained the live-handshake section.
 // 162 is spoken for; 163 is the next free number.
+// v38.164: minor release — bug fixes and clean-up (RTL8139 timeout, read_cmos deprecation, audit doc updates)
+//
 // v38.165: the CMOS RTC was reading a two-port transaction with nothing
 // holding it together, and decoding the chip as if it had one format.
 //

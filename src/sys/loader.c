@@ -5,6 +5,7 @@
 #include "../include/vmm.h"
 #include "../include/utils.h"
 #include "../include/serial.h"
+#include "../include/spinlock.h"
 #include "../include/entropy.h"  // get_random_u32() — ASLR load bias
 
 // ============================================================
@@ -670,20 +671,46 @@ void* load_mct_library(const char* filename) {
     uint32_t num_pages = (total_size + 4095) / 4096;
     if (num_pages == 0) num_pages = 1;
 
-    uint32_t cr3;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-
-    // CRITICAL: Prevent task switching while modifying page tables
-    __asm__ volatile("cli");
+    // The fixed 0x09000000 window means only one library per process. Mapping
+    // a second time must release the frames the first mapping owns, and a
+    // failed map must abort instead of falling through to memcpy/memset on an
+    // unmapped VA (a CPL0 page fault panics the kernel). The lock also keeps
+    // two tasks from interleaving the same fixed window.
+    static spinlock_t lib_load_lock = SPINLOCK_INIT;
+    uint32_t nf = spin_lock_irqsave(&lib_load_lock);
 
     // Switch to the target page directory to allocate and map pages
-    uint32_t old_cr3;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(old_cr3));
+    uint32_t cr3, old_cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    old_cr3 = cr3;
     vmm_switch_page_dir(cr3);
 
-    for (uint32_t i = 0; i < num_pages; i++) {
+    uint32_t i;
+    int failed = 0;
+    for (i = 0; i < num_pages; i++) {
         uint32_t addr = lib_base + (i * 4096);
-        vmm_alloc_page_at(cr3, addr, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+        // Drop a previous library's frame before replacing its PTE; without
+        // this every SYS_LOAD_LIBRARY call leaked up to 1 MB.
+        uint32_t old = vmm_unmap_page_free(cr3, addr);
+        if (old) frame_free(old);
+        if (!vmm_alloc_page_at(cr3, addr, PAGE_PRESENT | PAGE_RW | PAGE_USER)) {
+            failed = 1;
+            break;
+        }
+    }
+
+    if (failed) {
+        // Release only the pages this call mapped; the old library was already
+        // replaced, and the caller sees a failed load.
+        for (uint32_t j = 0; j < i; j++) {
+            uint32_t old = vmm_unmap_page_free(cr3, lib_base + j * 4096);
+            if (old) frame_free(old);
+        }
+        vmm_switch_page_dir(old_cr3);
+        spin_unlock_irqrestore(&lib_load_lock, nf);
+        kfree(lib_buf);
+        write_serial_string("[LOADER] lib map failed: out of frames\n");
+        return 0;
     }
 
     void* lib_mem = (void*)lib_base;
@@ -692,7 +719,7 @@ void* load_mct_library(const char* filename) {
 
     // Restore original page directory
     vmm_switch_page_dir(old_cr3);
-    __asm__ volatile("sti");
+    spin_unlock_irqrestore(&lib_load_lock, nf);
 
     kfree(lib_buf);
 

@@ -535,7 +535,11 @@ void wm_invalidate(int id) {
     wm_lock_release();
 }
 
-static void wm_close_unlocked(int id) {
+// Returns the owner tid that still has to be killed (0 when the window is
+// kernel-owned or was not found). The caller must NOT kill it while holding
+// wm_lock: task teardown takes task_lock before wm_lock, so doing so here is
+// the ABBA deadlock fixed by the WM/task lock-order audit.
+static int wm_close_unlocked(int id) {
     write_serial_string("WM_CLOSE called for id=");
     write_serial_hex(id);
     write_serial('\n');
@@ -544,37 +548,68 @@ static void wm_close_unlocked(int id) {
             extern void mark_dirty(int, int, int, int);
             mark_dirty(wm_wins[i].x, wm_wins[i].y, wm_wins[i].w, wm_wins[i].h); // Mark closed window area dirty
             wm_clear_game_input_unlocked(&wm_wins[i]);   // v38.103: drop capture/scancodes
-            // If owned by a user task, kill the task.
-            // task_kill will automatically call wm_cleanup_task,
-            // which will hide the window and remove it from z-order.
             if (wm_wins[i].owner_task > 0) {
-                extern int task_kill(int tid);
                 write_serial_string("Killing owner task: ");
                 write_serial_hex(wm_wins[i].owner_task);
                 write_serial('\n');
-                task_kill(wm_wins[i].owner_task);
-            } else {
-                // Kernel window fallback
-                wm_wins[i].visible = 0;
-                if (wm_wins[i].content_buffer) {
-                    // Defer free — see wm_cleanup_task(); wm_close() can be called
-                    // from kernel-task apps (taskmgr, power, nano) that preempt task 0.
-                    wm_defer_free(wm_wins[i].content_buffer);
-                    wm_wins[i].content_buffer = NULL;
-                }
-                z_remove(i);
-                wm_focused = (wm_zcount > 0) ? wm_wins[wm_zorder[wm_zcount-1]].id : -1;
+                return wm_wins[i].owner_task;
             }
+            // Kernel window fallback
+            wm_wins[i].visible = 0;
+            if (wm_wins[i].content_buffer) {
+                // Defer free — see wm_cleanup_task(); wm_close() can be called
+                // from kernel-task apps (taskmgr, power, nano) that preempt task 0.
+                wm_defer_free(wm_wins[i].content_buffer);
+                wm_wins[i].content_buffer = NULL;
+            }
+            z_remove(i);
+            wm_focused = (wm_zcount > 0) ? wm_wins[wm_zorder[wm_zcount-1]].id : -1;
             extern volatile int needs_redraw;
             needs_redraw = 1;
-            return;
+            return 0;
         }
     }
+    return 0;
 }
+// The titlebar close in wm_handle_mouse_unlocked() runs with wm_lock already
+// held. wm_close() cannot take task_lock there without recreating the ABBA;
+// record the id and let wm_handle_mouse() drain it after wm_lock_release().
+static int wm_deferred_close_id = -1;
+
+static int wm_lock_owned_by_current(void) {
+    int tid = get_current_task();
+    int key = (task_get_cid() << 16) | (tid & 0xFFFF);
+    return wm_lock_depth > 0 && wm_lock_owner == key;
+}
+
+void wm_drain_deferred_close(void) {
+    int id = wm_deferred_close_id;
+    if (id < 0) return;
+    wm_deferred_close_id = -1;
+    wm_close(id);
+}
+
 void wm_close(int id) {
+    if (wm_lock_owned_by_current()) {
+        wm_deferred_close_id = id;
+        return;
+    }
+    // task_lock > wm_lock is the documented order (see the lock comment at
+    // the top of this file). Taking wm_lock first and calling task_kill()
+    // inside it inverted that order against terminate_task() ->
+    // task_cleanup() -> wm_cleanup_task(), hanging both cores with IF=0.
+    extern void task_lock_acquire(void);
+    extern void task_lock_release(void);
+    extern int task_kill_locked(int tid);
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    task_lock_acquire();
     wm_lock_acquire();
-    wm_close_unlocked(id);
+    int owner = wm_close_unlocked(id);
+    if (owner > 0) task_kill_locked(owner);
     wm_lock_release();
+    task_lock_release();
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
 }
 
 // ---- Aero Snap logic ----
@@ -678,6 +713,7 @@ void wm_track_mouse(int mx, int my) {
     wm_lock_acquire();
     wm_track_mouse_unlocked(mx, my);
     wm_lock_release();
+    wm_drain_deferred_close();
 }
 
 static void draw_one(int idx) {
@@ -1202,6 +1238,7 @@ int wm_handle_mouse(int mx, int my, int btn, int pbtn) {
     wm_lock_acquire();
     int r = wm_handle_mouse_unlocked(mx, my, btn, pbtn);
     wm_lock_release();
+    wm_drain_deferred_close();
     return r;
 }
 
@@ -1228,6 +1265,7 @@ void wm_handle_scroll(int mx, int my, int delta) {
     wm_lock_acquire();
     wm_handle_scroll_unlocked(mx, my, delta);
     wm_lock_release();
+    wm_drain_deferred_close();
 }
 
 static void wm_handle_key_unlocked(char c, uint8_t sc) {
@@ -1241,6 +1279,7 @@ void wm_handle_key(char c, uint8_t sc) {
     wm_lock_acquire();
     wm_handle_key_unlocked(c, sc);
     wm_lock_release();
+    wm_drain_deferred_close();
 }
 
 // ---- v38.103: game input (raw scancodes + mouse capture) ----
@@ -1293,6 +1332,7 @@ void wm_handle_scancode(uint8_t sc, char c) {
         }
     }
     wm_lock_release();
+    wm_drain_deferred_close();
 }
 
 // Clear the game-input opt-ins of one window and give the desktop its cursor
@@ -1407,6 +1447,7 @@ int wm_capture_event(int dx, int dy, int btn) {
         break;
     }
     wm_lock_release();
+    wm_drain_deferred_close();
     return handled;
 }
 

@@ -446,6 +446,29 @@ uint32_t handle_syscall_proc(registers_t* regs) {
                 break;
             }
             int new_pgid = (pgid <= 0) ? target : pgid;
+            if (new_pgid <= 0 || new_pgid >= MAX_TASKS) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            // pgrp is the authorization key for the scanout (SYS_FB_MAP) and
+            // the terminal. Joining an EXISTING group would let any Ring 3 app
+            // join the current foreground group and take the framebuffer, so
+            // only the trusted shell/root may do that. Creating a new group
+            // (pgid == target) stays allowed for ordinary apps and bgread.
+            extern int task_get_session(int);
+            if (target != self && task_get_session(target) != task_get_session(self)) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            if (new_pgid != target && !caller_shell_host(self)) {
+                write_serial_string("[SIG] setpgid DENIED tid=");
+                write_serial_hex(self);
+                write_serial_string(" join pgrp=");
+                write_serial_hex(new_pgid);
+                write_serial_string("\n");
+                regs->eax = (uint32_t)-1;
+                break;
+            }
             if (task_set_pgrp(target, new_pgid) < 0) { regs->eax = (uint32_t)-1; break; }
             write_serial_string("[SIG] setpgid tid=");
             write_serial_hex(target);
@@ -532,16 +555,19 @@ uint32_t handle_syscall_proc(registers_t* regs) {
 
             // The frame lives in USER memory and the app can rewrite it before
             // calling SYS_SIGRETURN, so its CS/SS/EFLAGS are not trustworthy.
-            // An iret whose CS/SS are not Ring-3 selectors faults at CPL 0
-            // (kernel panic), and NT in EFLAGS makes the next iret attempt a
-            // hardware task switch. The kernel always saved 0x1B (user code)
-            // / 0x23 (user data), so require user selectors and clear NT + IOPL.
-            if ((f->saved_cs & 3) != 3 || (f->saved_ss & 3) != 3) {
+            // RPL 3 alone is not enough: 0x23 is the user DATA selector and
+            // iret with it in CS faults at CPL0 (kernel panic). The kernel only
+            // ever saves 0x1B (code) / 0x23 (data), so require exactly those.
+            if (f->saved_cs != 0x1B || f->saved_ss != 0x23) {
                 task_set_sig_frame_esp(tid, 0);
                 regs->eax = (uint32_t)-1;
                 break;
             }
-            uint32_t safe_eflags = f->saved_eflags & ~0x7000u; // clear NT(14) + IOPL(12..13)
+            // Clear NT(14), IOPL(12..13) and VM(17); force IF(9) on so a
+            // handler cannot return to Ring 3 with interrupts masked and
+            // wedge the core.
+            uint32_t safe_eflags =
+                (f->saved_eflags & ~0x72000u) | 0x200u;
 
             // Restore the pre-handler signal mask first: SA_RESTART re-parks
             // the task in SYS_SLEEP below, and that sleep must run under the

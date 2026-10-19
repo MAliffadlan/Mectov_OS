@@ -496,6 +496,19 @@ int vmm_unmap_page(uint32_t page_dir, uint32_t vaddr) {
     return 0;
 }
 
+uint32_t vmm_unmap_page_free(uint32_t page_dir, uint32_t vaddr) {
+    if (page_dir == 0) return 0;   // boot identity map: not owned here
+    pte_t* pt = space_pt(page_dir, vaddr, 0, 0);
+    if (!pt) return 0;
+    uint32_t idx = pt_index(vaddr);
+    uint64_t pte = pt[idx];
+    if (!(pte & PAGE_PRESENT)) return 0;
+    uint32_t paddr = (uint32_t)(pte & PTE_ADDR_MASK);
+    pt[idx] = 0;
+    __asm__ __volatile__("invlpg (%0)" : : "r"(vaddr));
+    return paddr;
+}
+
 uint32_t vmm_alloc_page_at(uint32_t page_dir, uint32_t vaddr, uint64_t flags) {
     uint32_t paddr = frame_alloc();
     if (paddr == 0) {

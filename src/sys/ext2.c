@@ -548,9 +548,17 @@ static uint32_t ext2_alloc_inode(void) {
 
 static void ext2_free_inode(uint32_t inode_num) {
     if (!bgd_table || inode_num < 1) return;
+    // The inode number can come from a directory entry in a crafted image;
+    // ext2_read_inode() rejects it, but the VFS node still carries it, so the
+    // unlink path must repeat the same bounds. The bitmap buffer is 4096 bytes
+    // and s_inodes_per_group is an untrusted on-disk field: idx >= 32768 used
+    // to index past it (heap OOB read-modify-write).
+    if (inode_num > sb.s_inodes_count) return;
+    if (sb.s_inodes_per_group == 0 || sb.s_inodes_per_group > 32768) return;
     uint32_t bg = (inode_num - 1) / sb.s_inodes_per_group;
     if (bg >= ext2_max_groups) return;
     uint32_t idx = (inode_num - 1) % sb.s_inodes_per_group;
+    if (idx >= 32768) return;
     uint32_t bmp_block = bgd_table[bg].bg_inode_bitmap;
     unsigned char* bmp = (unsigned char*)kmalloc(4096);
     if (!bmp) return;

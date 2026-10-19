@@ -200,6 +200,10 @@ int do_sys_write(int fd, const char* buf, int size) {
         int off = global_fds[gfd].offset;
         int oldsz = fs_nodes[global_fds[gfd].vfs_node].size;
         if (oldsz < 0) oldsz = 0;
+        // The node size is disk-controlled on native images. Cap it to the
+        // same limit as the buffer below: an oldsz above the cap used to make
+        // the short-read zero-fill loop write oldsz-r bytes past `whole`.
+        if (oldsz > VFS_FD_MAX_FILE) oldsz = VFS_FD_MAX_FILE;
         // O_APPEND: every write lands at the end of the file, regardless of
         // the descriptor offset (POSIX).
         if (global_fds[gfd].flags & O_APPEND) off = oldsz;
@@ -218,24 +222,18 @@ int do_sys_write(int fd, const char* buf, int size) {
         if (off < 0 || size < 0 || off > VFS_FD_MAX_FILE || size > VFS_FD_MAX_FILE) {
             fd_lock_release(); return -1;
         }
-        int64_t off_plus = (int64_t)off + (int64_t)size;
-        if (off_plus < 0 || off_plus > VFS_FD_MAX_FILE) {
-            // Clamp to cap if it would exceed, otherwise overflow -> deny
-            if (off_plus > VFS_FD_MAX_FILE) {
-                // Partial write up to cap, like below
-                off_plus = VFS_FD_MAX_FILE;
-            } else {
-                fd_lock_release(); return -1;
-            }
-        }
-        int newsz = (off_plus > oldsz) ? (int)off_plus : oldsz;
-        if (newsz > VFS_FD_MAX_FILE) {
-            // Partial write up to the cap (POSIX-style short write), never
-            // truncation of what already exists.
-            newsz = VFS_FD_MAX_FILE;
-            size = newsz - off;
+        // Clamp the bytes copied out of the caller's buffer to the cap. `size`
+        // may only shrink: inflating it from oldsz made a one-byte write read
+        // megabytes past the user buffer (and past `whole`) when the node
+        // claimed a huge size. off/size are both <= cap here, so this cannot
+        // overflow.
+        if (off + size > VFS_FD_MAX_FILE) {
+            size = VFS_FD_MAX_FILE - off;
             if (size <= 0) { fd_lock_release(); return -1; }   // offset beyond cap: EFBIG-ish
         }
+        int newsz = off + size;
+        if (newsz < oldsz) newsz = oldsz;
+        if (newsz > VFS_FD_MAX_FILE) newsz = VFS_FD_MAX_FILE;
         char* whole = (char*)kmalloc((uint32_t)newsz + 1);
         if (!whole) { fd_lock_release(); return -1; }
         if (oldsz > 0) {

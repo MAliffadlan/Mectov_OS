@@ -3,6 +3,10 @@
 
 #include "types.h"
 
+// Task slot count. Keep TLS_MAX_TASKS in gdt.h in sync (one FS+GS pair per
+// slot). Public so pid/pgid validation can use the same bound as the table.
+#define MAX_TASKS 64
+
 // Current CPU id (LAPIC id & 15); used by per-CPU code and lock ownership keys.
 int task_get_cid(void);
 
@@ -295,6 +299,11 @@ int task_is_alive(int tid);
 
 // Kill a specific task by ID (from kernel, e.g. Ctrl+C)
 int task_kill(int tid);
+// Caller already holds task_lock with interrupts disabled. Used by paths that
+// must take task_lock before another subsystem lock (wm_close).
+int task_kill_locked(int tid);
+void task_lock_acquire(void);
+void task_lock_release(void);
 
 // File Descriptor accessors
 int task_get_fd(int tid, int local_fd);

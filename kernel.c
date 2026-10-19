@@ -566,6 +566,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         extern void xhci_hid_poll(void);
         xhci_hid_poll();
 
+        // A wm_close() requested from inside a wm_lock-held callback (titlebar,
+        // app key/mouse handlers) is executed here, outside every WM/task lock.
+        wm_drain_deferred_close();
+
         // v38.55: drain deferred sem/futex waiter cleanups for dead tasks.
         // Teardown only sets a pending bit (see sync.c for why it cannot take
         // sync_lock under task_lock); the BSP main loop is the lock-free
