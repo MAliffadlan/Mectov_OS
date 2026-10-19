@@ -69,6 +69,10 @@ PLAIN_BODY = ("plain control page -- content-length framing.\n"
               "second line of the control body.\n")
 CHUNK_BODY = ("chunked control page -- de-chunked before render.\n"
               "second line of the chunked body.\n")
+# A chunk size of 7fffffff is larger than the rest of the response. The old
+# signed-int decoder computed r+sz, wrapped negative, skipped the truncation
+# check and copied ~2 GB; the fixed decoder copies only what arrived.
+BAD_CHUNK_BODY = "oversized chunk size must not be copied.\n"
 
 LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 # Start menu panel top (START_MENU_H = 404 since Pixel Paint); row 3 is
@@ -282,7 +286,16 @@ def serve_plain(sock, log_path, stop):
                 req += chunk
             first = req.split(b"\r\n", 1)[0].decode("latin1", "replace")
             log.write("[SRV] %s\n" % first)
-            if "/chunked" in first:
+            if "/chunkbad" in first:
+                body = BAD_CHUNK_BODY.encode()
+                head = (b"HTTP/1.1 200 OK\r\n"
+                        b"Content-Type: text/html\r\n"
+                        b"Transfer-Encoding: chunked\r\n\r\n")
+                # 8 hex digits, the maximum the parser accepts, but far more
+                # than the bytes that follow. Closing after it makes the
+                # browser take the truncated-final-chunk path.
+                out = head + b"7fffffff\r\n" + body + b"\r\n0\r\n\r\n"
+            elif "/chunked" in first:
                 body = CHUNK_BODY.encode()
                 head = (b"HTTP/1.1 200 OK\r\n"
                         b"Content-Type: text/html\r\n"
@@ -572,6 +585,27 @@ def main():
             else:
                 print(f"[OK] chunked reply de-framed: wire {m.group(2)} bytes "
                       f"-> body {m.group(3)} bytes")
+
+        # ---- 4. Oversized chunk size: no signed overflow, no huge copy -----
+        if failure is None:
+            out = browse(f"http://{HOST_ALIAS}:{PLAIN_PORT}/chunkbad", 40)
+            m = re.search(r"\[BROWSER\] done tls=0 code=(\d+) bytes=(\d+) "
+                          r"body=(\d+)", out)
+            # The truncated branch copies the bytes that did arrive plus the
+            # "\r\n0\r\n\r\n" trailer (7 bytes). A ~2 GiB value means the
+            # signed-size overflow is back.
+            expected = len(BAD_CHUNK_BODY) + 7
+            if not m:
+                print("[FAIL] the oversized-chunk page never completed")
+                print("       browser said:\n" + (out or "(nothing)"))
+                failure = "oversized chunk completion"
+            elif int(m.group(3)) != expected:
+                print(f"[FAIL] oversized chunk decoded to {m.group(3)} bytes, "
+                      f"expected {expected} (copied past the response?)")
+                failure = "oversized chunk copy"
+            else:
+                print(f"[OK] oversized chunk (7fffffff) copied only "
+                      f"{m.group(3)} bytes, no overflow")
 
         if failure is None and "[PANIC]" in read_log(SERIAL_LOG):
             print("[FAIL] kernel panic on the run")

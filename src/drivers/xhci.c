@@ -1253,7 +1253,10 @@ static int usb_enumerate(usb_dev_t* d, int port, int speed) {
         write_serial_string(" IN mps ");
         write_serial_hex((uint32_t)d->hid_intr_mps);
         write_serial_string(")\n");
-        xhci_hid_arm(d);
+        // The caller publishes in_use=1 after enumeration; arming here raced
+        // a report that arrived before that flag was set: event_wait consumed
+        // it, xhci_hid_dispatch discarded it because in_use was still 0, and
+        // nothing re-armed the endpoint. The caller arms after in_use=1.
         return kind;
     }
 
@@ -1500,6 +1503,10 @@ void xhci_init(void) {
                 continue;
             }
             d->in_use = 1;
+            // Arm only after in_use is visible: a completion consumed between
+            // the arm and the publish used to be dropped without re-arming.
+            if (kind == USB_KIND_HID_KBD || kind == USB_KIND_HID_MOUSE)
+                xhci_hid_arm(d);
             if (kind == USB_KIND_STORAGE) {
                 if (xhci_ndrives >= USB_MAX_DRIVES) {
                     write_serial_string("[XHCI] too many storage drives\n");

@@ -19,6 +19,7 @@ Usage:
 """
 import argparse
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -224,6 +225,41 @@ def main():
             print(f"[FAIL] LFN content mismatch: {data!r}")
             return 1
         print("[OK] mtools reads the OS-written LFN file by its long name")
+
+        # Boundary gate: the directory's end marker sat in the last slot of a
+        # cluster, and the four-slot LFN+SFN run had to continue into a new
+        # cluster. The app uses a fresh directory per run and logs its guest
+        # path; strip the /fat32 mount prefix for mtools on the raw image.
+        with open(SERIAL_LOG, "r", errors="replace") as f:
+            slog = f.read()
+        m = re.search(r"fat32demo: boundary dir=(/fat32/\S+)", slog)
+        if not m:
+            print("[FAIL] fat32demo never logged its boundary directory")
+            return 1
+        bdir = m.group(1)
+        if not bdir.startswith("/fat32/"):
+            print(f"[FAIL] boundary dir is not under /fat32: {bdir!r}")
+            return 1
+        disk_dir = bdir[len("/fat32/"):]
+        bdst = os.path.join(tempfile.gettempdir(), "boundary_out.txt")
+        try:
+            os.unlink(bdst)
+        except FileNotFoundError:
+            pass
+        mc = subprocess.run(
+            ["mcopy", "-i", args.fat32,
+             f"::/{disk_dir}/boundary long file test.txt", bdst],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if mc.returncode != 0:
+            print("[FAIL] mtools cannot read the boundary LFN file "
+                  "(dirent run did not cross the cluster)")
+            return 1
+        with open(bdst, "rb") as f:
+            bdata = f.read()
+        if bdata != b"BOUNDARY OK\n":
+            print(f"[FAIL] boundary LFN content mismatch: {bdata!r}")
+            return 1
+        print("[OK] mtools reads the boundary LFN file across the cluster edge")
 
         time.sleep(5)
         if qemu.poll() is not None:

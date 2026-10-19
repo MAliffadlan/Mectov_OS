@@ -31,8 +31,14 @@ static void ext2_read_block(uint32_t block, unsigned char* buf) {
     uint32_t done = 0;
     while (done < sectors_per_block) {
         int batch = ata_batch_limit(start_sector + done, sectors_per_block - done);
-        ata_read_sectors_drive(ext2_drive, start_sector + done, batch,
-                               buf + done * 512);
+        // A refused read leaves the destination untouched. Callers parse
+        // metadata and tail data straight out of this buffer (some of them on
+        // the stack), so zero the failed run instead of exposing whatever was
+        // there before.
+        if (ata_read_sectors_drive(ext2_drive, start_sector + done, batch,
+                                   buf + done * 512) != 0) {
+            memset(buf + done * 512, 0, (uint32_t)batch * 512);
+        }
         done += batch;
     }
 }
@@ -78,8 +84,12 @@ static void ext2_read_blocks_run(uint32_t block, uint32_t count,
         uint32_t done = 0;
         while (done < total) {
             int batch = ata_batch_limit(start_sector + done, (int)(total - done));
-            ata_read_sectors_drive(ext2_drive, start_sector + done, batch,
-                                   buf + done * 512);
+            // Same rule as ext2_read_block: a refused run reads as zeros, not
+            // as the caller's previous (possibly stack) contents.
+            if (ata_read_sectors_drive(ext2_drive, start_sector + done, batch,
+                                       buf + done * 512) != 0) {
+                memset(buf + done * 512, 0, (uint32_t)batch * 512);
+            }
             done += (uint32_t)batch;
         }
     }

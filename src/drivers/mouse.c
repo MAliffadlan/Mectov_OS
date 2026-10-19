@@ -52,7 +52,8 @@ int mouse_take_delta(int *dx, int *dy) {
 }
 
 static uint8_t mouse_cycle = 0;
-static int8_t  mouse_bytes[4];     // 4 bytes for IntelliMouse
+static uint8_t mouse_bytes[4];     // raw PS/2 bytes; deltas are 9-bit sign+byte
+
 static uint8_t mouse_has_wheel = 0; // 1 = IntelliMouse mode active
 
 // ---- PS/2 controller helpers ----
@@ -122,15 +123,15 @@ void mouse_feed_byte(uint8_t data) {
     entropy_add(data);
     switch (mouse_cycle) {
         case 0:
-            mouse_bytes[0] = (int8_t)data;
+            mouse_bytes[0] = data;
             if (data & 0x08) mouse_cycle++;   // alignment bit must be set
             break;
         case 1:
-            mouse_bytes[1] = (int8_t)data;
+            mouse_bytes[1] = data;
             mouse_cycle++;
             break;
         case 2:
-            mouse_bytes[2] = (int8_t)data;
+            mouse_bytes[2] = data;
             if (mouse_has_wheel) {
                 mouse_cycle++;
                 break; // wait for 4th byte
@@ -138,7 +139,7 @@ void mouse_feed_byte(uint8_t data) {
             // Fall through for 3-byte mode (no wheel)
             goto process_packet;
         case 3:
-            mouse_bytes[3] = (int8_t)data;
+            mouse_bytes[3] = data;
             // Fall through to process
         process_packet:
             mouse_cycle = 0;
@@ -149,12 +150,15 @@ void mouse_feed_byte(uint8_t data) {
             // Bits 6/7 of byte 0 are the X/Y overflow flags. When either is set
             // the deltas in bytes 1/2 are meaningless, so keep the button state
             // but drop the movement instead of teleporting the cursor.
-            if (!((uint8_t)mouse_bytes[0] & 0xC0)) {
-                // Update position (Y is inverted in PS/2)
-                int dx = mouse_bytes[1];
-                int dy = mouse_bytes[2];
-                if (mouse_bytes[0] & 0x10) dx |= (int)0xFFFFFF00;
-                if (mouse_bytes[0] & 0x20) dy |= (int)0xFFFFFF00;
+            if (!(mouse_bytes[0] & 0xC0)) {
+                // Update position (Y is inverted in PS/2). The byte is an
+                // unsigned magnitude; the packet's sign bit selects the
+                // negative range. Casting the byte to int8_t first turned
+                // +128..+255 into negative motion.
+                int dx = (int)mouse_bytes[1];
+                int dy = (int)mouse_bytes[2];
+                if (mouse_bytes[0] & 0x10) dx -= 256;
+                if (mouse_bytes[0] & 0x20) dy -= 256;
 
                 /* v38.150: lock-prefixed add — the drain side xchg's these from
                  * another core, so a plain += can interleave with it and
@@ -173,7 +177,7 @@ void mouse_feed_byte(uint8_t data) {
 
             // Update scroll wheel (4th byte, only in IntelliMouse mode)
             if (mouse_has_wheel) {
-                int8_t sz = mouse_bytes[3];
+                int8_t sz = (int8_t)mouse_bytes[3];
                 // Only the low 4 bits are the Z-axis delta (signed nibble)
                 // But in basic IntelliMouse it's a full signed byte
                 if (sz != 0) {

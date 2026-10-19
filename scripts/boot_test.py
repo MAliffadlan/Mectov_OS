@@ -102,6 +102,9 @@ def main():
                     help="guest RAM in MB (config matrix: 64 / 256)")
     ap.add_argument("--smp", type=int, default=4,
                     help="guest CPU count (config matrix: 1 / 2 / 4)")
+    ap.add_argument("--write-disk", action="store_true",
+                    help="omit -snapshot (fixture preparation only: the run "
+                         "persists the VFS node table into --disk)")
     args = ap.parse_args()
 
     for p in (SERIAL_LOG, MON_SOCK):
@@ -120,7 +123,9 @@ def main():
         "-display", "none",
         "-serial", f"file:{SERIAL_LOG}",
         "-net", "none",
-        "-snapshot",   # never write the drive images (a run.sh instance may hold them)
+        # Never write the drive images (a run.sh instance may hold them),
+        # except when a fixture explicitly asks for the initialization boot.
+        *([] if args.write_disk else ["-snapshot"]),
         "-drive", f"file={args.disk},format=raw,index=0,media=disk",
         "-drive", f"file={args.ext2},format=raw,index=1,media=disk",
         "-monitor", f"unix:{MON_SOCK},server,nowait",

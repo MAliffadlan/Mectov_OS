@@ -164,6 +164,75 @@ void _start(void) {
     // the image with host mtools afterwards to prove OS-written LFN entries
     // are visible to real tools. The next run starts from a clean slate.
 
+    // --- 9. dirent boundary: end marker in the LAST slot of a 512-byte
+    //         cluster (the test image uses spc=1). "." and ".." take slots
+    //         0-1; 13 short 8.3 entries fill 2-14; the marker is at 15. The
+    //         27-character LFN needs four slots, so a writer that does not
+    //         cross into a new cluster loses the SFN (and used to write past
+    //         its cluster buffer). Host mtools checks the medium, not the VFS
+    //         node table, because sys_open() would resolve the in-memory node.
+    // A fresh directory per run: the mount suite runs this same app on the
+    // same FAT32 image afterwards, so a fixed /boundary would already hold
+    // entries and fail. pid + letter gives a fresh slot layout every time
+    // ("."/".." at 0-1, 13 shorts at 2-14, end marker at 15) with no host
+    // cleanup; the host test reads the logged dir to find the LFN on disk.
+    char bdir[32];
+    const char* bbase = "/fat32/b";
+    int bpid = sys_getpid();
+    int made = 0;
+    for (char sfx = 'a'; sfx <= 'f' && !made; sfx++) {
+        int k = 0;
+        while (bbase[k]) { bdir[k] = bbase[k]; k++; }
+        char digits[8]; int dn = 0; int pv = bpid;
+        if (pv == 0) digits[dn++] = '0';
+        while (pv > 0) { digits[dn++] = (char)('0' + pv % 10); pv /= 10; }
+        for (int m = dn - 1; m >= 0; m--) bdir[k++] = digits[m];
+        bdir[k++] = sfx;
+        bdir[k] = '\0';
+        if (sys_mkdir(bdir) >= 0) made = 1;
+    }
+    if (!made) {
+        sys_print("fat32demo: FAIL create boundary dir\n", 0x0C);
+        fails++;
+    } else {
+        sys_print("fat32demo: boundary dir=", 0x0A);
+        sys_print(bdir, 0x0A);
+        sys_print("\n", 0x0A);
+        for (int i = 0; i < 13; i++) {
+            char p[64];
+            int k = 0;
+            while (bdir[k]) { p[k] = bdir[k]; k++; }
+            p[k++] = '/'; p[k++] = 'B';
+            p[k++] = (char)('0' + (i / 10));
+            p[k++] = (char)('0' + (i % 10));
+            p[k++] = '.'; p[k++] = 'T'; p[k++] = 'X'; p[k++] = 'T'; p[k] = '\0';
+            if (sys_create_file(p) < 0) {
+                sys_print("fat32demo: FAIL create boundary short file\n", 0x0C);
+                fails++;
+            }
+        }
+        char bfile[64];
+        int k = 0;
+        while (bdir[k]) { bfile[k] = bdir[k]; k++; }
+        const char* tail = "/boundary long file test.txt";
+        for (int m = 0; tail[m]; m++) bfile[k++] = tail[m];
+        bfile[k] = '\0';
+        if (sys_create_file(bfile) < 0) {
+            sys_print("fat32demo: FAIL create boundary LFN file\n", 0x0C);
+            fails++;
+        } else {
+            const char* bpayload = "BOUNDARY OK\n";  // 12 bytes
+            int bn = slen(bpayload);
+            fd = sys_open(bfile);
+            if (fd < 0 || sys_write(fd, bpayload, bn) != bn) {
+                sys_print("fat32demo: FAIL write boundary LFN file\n", 0x0C);
+                fails++;
+            }
+            if (fd >= 0) sys_close(fd);
+            sys_print("fat32demo: [OK] boundary LFN dirent written\n", 0x0A);
+        }
+    }
+
     if (fails == 0) {
         sys_print("fat32demo: ALL TESTS PASSED\n", 0x0A);
         sys_exit_with_code(0);

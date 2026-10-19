@@ -38,6 +38,11 @@ ISO = os.path.join(ROOT, "mectov.iso")
 # sequence is part of the contract.
 SUITES = [
     ("boot",             "boot_test.py",              240),
+    # Audit H6: a crafted native node table with a parent cycle made the
+    # ancestor walk spin forever at boot. This suite patches a COPY of
+    # disk.img (home<->user) and requires the normal boot/login path to
+    # survive; the pre-fix binary hangs before the login screen.
+    ("vfs_cycle",        "vfs_cycle_test.py",         240),
     ("login",            "login_redesign_test.py",    300),
     ("lock",             "lock_test.py",              480),
     ("autolock",         "autolock_test.py",          480),
@@ -61,6 +66,11 @@ SUITES = [
     ("fork",             "fork_test.py",              240),
     ("procfs",           "procfs_test.py",            240),
     ("jobcontrol",       "jobcontrol_test.py",        240),
+    # Audit H9: a UID-1000 child must not be able to join the foreground
+    # process group (the SYS_FB_MAP authorization key) or map the scanout.
+    # apps/bgread.mct performs both attempts and also keeps the SIGTTIN
+    # control, so a refusal that broke background-group semantics fails too.
+    ("setpgid",          "setpgid_test.py",           240),
     ("fputest",          "fputest.py",                240),
     ("nxtest",           "nxtest.py",                 240),
     # The feature-probe path: NX really active, and the SMEP state definite and

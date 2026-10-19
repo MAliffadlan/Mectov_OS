@@ -171,6 +171,13 @@ jobs:
         run: |
           python3 scripts/boot_test.py --timeout 240
 
+      - name: VFS parent-cycle boot regression (TCG)
+        run: |
+          # Audit H6: boot a COPY of disk.img whose native node table has a
+          # home<->user parent cycle. The pre-fix kernel spins in
+          # vfs_clear_children() before login; the fixed one logs in.
+          python3 scripts/vfs_cycle_test.py --timeout 240
+
       - name: Ring 3 syscall fuzzer regression (TCG)
         run: |
           # ~2000 random syscalls with garbage pointers/sizes/fds from Ring 3:
@@ -195,6 +202,13 @@ jobs:
         run: |
           python3 scripts/fork_test.py --timeout 240
           python3 scripts/jobcontrol_test.py --timeout 240
+
+      - name: Process-group / framebuffer authorization regression (TCG)
+        run: |
+          # Audit H9: a UID-1000 background child must be refused when it
+          # tries to join the foreground group or map the scanout. The same
+          # app keeps the SIGTTIN/SIGCONT control.
+          python3 scripts/setpgid_test.py --timeout 240
 
       - name: FPU/SSE context-switch regression (TCG)
         run: |

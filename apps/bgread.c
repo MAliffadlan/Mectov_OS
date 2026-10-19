@@ -49,6 +49,21 @@ void _start() {
         int sid = sys_setpgid(0, 0);
         log_line("[BGREAD] child setpgid=%d new pgrp=%d", sid, sys_getpgrp());
 
+        // Regression (audit H9): joining an EXISTING group is the key that
+        // grants SYS_FB_MAP and terminal input, so a plain UID-1000 app must
+        // be refused. The parent is the foreground app; its pgrp is fg.
+        int fg = sys_tcgetpgrp(0);
+        int join = sys_setpgid(0, fg);
+        // log_line has no negative-number support; 1 = the gate let us in.
+        log_line("[BGREAD] child join_ok=%d fg=%d", join == 0, fg);
+
+        // The pgrp check must also keep us out of the scanout. If this ever
+        // succeeds, hand it straight back so the harness still gets a desktop.
+        fb_info_t fb;
+        int fm = sys_fb_map(&fb);
+        log_line("[BGREAD] child fb_ok=%d", fm == 0, 0);
+        if (fm == 0) sys_fb_release();
+
         // Reading the terminal as a background group must stop us with SIGTTIN
         // (default action) — the single sys_get_key() below blocks us at the
         // first read. SIGCONT (from the parent) resumes us right here; we then

@@ -60,12 +60,14 @@ void cmd_fetch_arg(void) {
             net_tcp_send(id, (uint8_t*)req, n);
             print("Connected! Response:\n", 0x0A);
 
-            // Drain until EOF (peer FIN), 15s idle cap plus the spin bound
-            char rbuf[1024];
+            // Drain until EOF (peer FIN), 15s idle cap plus the spin bound.
+            // One extra byte: net_tcp_recv can return the full 1024, and the
+            // NUL below used to land one past the array on the kernel stack.
+            char rbuf[1025];
             uint32_t start = get_ticks();
             uint32_t spins = 0;
             for (;;) {
-                int r = net_tcp_recv(id, (uint8_t*)rbuf, 1024);
+                int r = net_tcp_recv(id, (uint8_t*)rbuf, sizeof(rbuf) - 1);
                 if (r == -1) break; // EOF: gateway closed after the body
                 if (r == -2) {      // connection reset / slot freed
                     print("\n[fetch] connection lost.\n", 0x0C);

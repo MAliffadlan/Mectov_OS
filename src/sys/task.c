@@ -2082,6 +2082,12 @@ static int fork_common(void (*kern_entry)(void), const char* child_arg) {
         tasks[i].exit_code = 0;
         tasks[i].pgrp = tasks[parent].pgrp;          // POSIX: group is inherited
         tasks[i].session = tasks[parent].session;
+        // POSIX: the child inherits the parent's Unix identity. This block
+        // used to leave uid/gid at the slot's stale value (usually ROOT_UID),
+        // so a UID-1000 app's fork child became root and bypassed every
+        // pgrp/uid gate — including the SYS_FB_MAP authorization key.
+        tasks[i].uid = tasks[parent].uid;
+        tasks[i].gid = tasks[parent].gid;
         tasks[i].waiting = 0;
         tasks[i].pending_signals = 0;
         tasks[i].blocked_signals = tasks[parent].blocked_signals;  // mask inherits
