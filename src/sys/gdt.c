@@ -32,7 +32,8 @@ uint32_t user_stack[1024]; // 4KB user stack
 // hardware-switches to this dedicated TSS (own stack + own CR3 + own EIP),
 // never touching the corrupt stack, and runs df_task_handler which prints a
 // clean panic and halts. The gate is only entered on a real double fault.
-static uint8_t df_stack[4096] __attribute__((aligned(16)));
+#define DF_STACK_SIZE 4096
+static uint8_t df_stack[DF_STACK_SIZE] __attribute__((aligned(16)));
 tss_entry_t df_tss;
 
 static inline int get_cid() { 
@@ -138,8 +139,14 @@ void init_gdt() {
     if (cid == 0) {
         memset(&df_tss, 0, sizeof(df_tss));
         df_tss.ss0 = 0x10;
-        df_tss.esp0 = (uint32_t)(uintptr_t)&df_stack[4096];
-        df_tss.esp = (uint32_t)(uintptr_t)&df_stack[4096];
+        // v38.166: `df_stack + DF_STACK_SIZE` (pointer arithmetic) instead of
+        // `&df_stack[DF_STACK_SIZE]`. The subscript form is formally UB —
+        // `&a[N]` is defined as `*(a + N)`, a dereference of a one-past-the-end
+        // pointer. The arithmetic form yields the very same address but is
+        // well-defined, and the value is only ever used as a stack pointer
+        // (x86 grows down, so the first push lands on df_stack[4095]).
+        df_tss.esp0 = (uint32_t)(uintptr_t)(df_stack + DF_STACK_SIZE);
+        df_tss.esp = (uint32_t)(uintptr_t)(df_stack + DF_STACK_SIZE);
         df_tss.eip = (uint32_t)(uintptr_t)&df_task_handler;
         df_tss.eflags = 0x2;
         df_tss.cs = 0x08;

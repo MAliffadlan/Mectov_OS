@@ -35,13 +35,26 @@ static uint8_t kstacks[MAX_TASKS][KERNEL_STACK_SLOT] __attribute__((aligned(4096
 
 // Top of task tid's kernel stack (one past the last byte, i.e. the initial
 // ESP for iret / the TSS.esp0 value).
+// v38.166: `kstacks[tid] + KERNEL_STACK_SLOT` (pointer arithmetic) instead of
+// `&kstacks[tid][KERNEL_STACK_GUARD] + KERNEL_STACK_SIZE`. The subscript form
+// is formally UB — `&a[N]` is `*(a + N)`, a dereference of a one-past-the-end
+// pointer. The arithmetic form yields the same address and is well-defined.
+//
+// Both helpers BOUND tid themselves. Callers include paths that turn a tid
+// from per-CPU / runqueue state straight into an array index (frame_is_park,
+// kstack_top(cur), kstack_top(child), …), and an out-of-range tid there reads
+// and writes outside kstacks[]. Returning 0 for an invalid tid makes those
+// callers see "no stack": frame_is_park's range test turns false and the
+// scheduler refuses to treat a bogus frame as a park loop.
 static inline uint32_t kstack_top(int tid) {
-    return (uint32_t)(uintptr_t)&kstacks[tid][KERNEL_STACK_GUARD] + KERNEL_STACK_SIZE;
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
+    return (uint32_t)(uintptr_t)(kstacks[tid] + KERNEL_STACK_SLOT);
 }
 
 void task_install_stack_guards(uint32_t page_dir);  // defined below init_tasking
 // Address of task tid's guard page (first 4KB of its slot).
 static inline uint32_t kstack_guard(int tid) {
+    if (tid < 0 || tid >= MAX_TASKS) return 0;
     return (uint32_t)(uintptr_t)&kstacks[tid][0];
 }
 // USER_STACK_SIZE now lives in vmm.h — the Ring 3 stack is mapped into the
@@ -820,15 +833,20 @@ int create_task(void (*entry)()) {
     // CRITICAL: Disable interrupts BEFORE taking the lock to prevent scheduler deadlocks!
     __asm__ volatile("cli");
     spin_lock(&task_lock);
+    // v38.166: bound the tid, not just "not negative". current_task[cid] is
+    // per-CPU state that a corrupted slot can push past MAX_TASKS, and
+    // tasks[current_task[cid]] would then read outside the table.
+    int cur_tid = current_task[cid];
+    int cur_valid = (cur_tid >= 0 && cur_tid < MAX_TASKS);
     for (int i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].state == 0) {
-            
+
             tasks[i].ring = 0;
             tasks[i].priority = PRIORITY_INTERACTIVE;
-            tasks[i].nice = (current_task[cid] >= 0) ? tasks[current_task[cid]].nice : 0;
+            tasks[i].nice = cur_valid ? tasks[cur_tid].nice : 0;
             tasks[i].cpu_ticks = 0;
             tasks[i].wait_ticks = 0;
-            tasks[i].current_dir = (current_task[cid] >= 0) ? tasks[current_task[cid]].current_dir : 0;
+            tasks[i].current_dir = cur_valid ? tasks[cur_tid].current_dir : 0;
             tasks[i].parent = 0;
             tasks[i].exit_code = 0;
             tasks[i].pgrp = 0;
@@ -1093,7 +1111,12 @@ uint32_t schedule(uint32_t esp) {
                      tasks[cur].state == TASK_STATE_FREE));
     if (cur_dead) watch_log(1, "dead-cur", cur, tasks[cur].state, esp);
 
-    if (cur >= 0 && !cur_dead) {
+    // v38.166: the upper bound matters here. `cur_dead` is only true when
+    // cur is inside [1, MAX_TASKS), so a corrupted current_task[cid] >= 64
+    // made `cur >= 0 && !cur_dead` true and this block then indexed
+    // tasks[cur] and kstacks[cur] out of bounds. Bound it like every other
+    // reader of the tid slot does.
+    if (cur >= 0 && cur < MAX_TASKS && !cur_dead) {
         tasks[cur].esp = esp;
         if (esp >= kstack_guard(cur) + KERNEL_STACK_GUARD && esp <= kstack_top(cur)) {
             uint32_t used = kstack_top(cur) - esp;
@@ -1180,6 +1203,19 @@ uint32_t schedule(uint32_t esp) {
     if (next > 0 && next < MAX_TASKS &&
         (tasks[next].state == TASK_STATE_ZOMBIE || tasks[next].state == TASK_STATE_FREE)) {
         watch_log(2, "commit-dead", next, tasks[next].state, (uint32_t)tasks[next].esp);
+        spin_unlock(&task_lock);
+        return esp;
+    }
+    // Defence in depth. Every producer of `next` above returns a slot in
+    // [0, MAX_TASKS) — rq_pick/rq_steal hand back an index out of a runqueue
+    // capped at MAX_TASKS, `cur` and `idle` are valid slots — but the two
+    // guards above explicitly contemplate a corrupted runqueue, and the
+    // commit below indexes tasks[next] and kstacks[next] with no bound of
+    // its own. Refuse an out-of-range tid instead of walking off both
+    // arrays: same "refuse the switch" contract the dead-tid and
+    // foreign-idle guards use. On every reachable path this is a no-op.
+    if (next < 0 || next >= MAX_TASKS) {
+        watch_log(2, "commit-bad-tid", next, 0, 0);
         spin_unlock(&task_lock);
         return esp;
     }
