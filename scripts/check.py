@@ -224,6 +224,11 @@ SUITES = [
     ("cond",             "cond_test.py",              480),
     ("rlimit",           "rlimit_test.py",            360),
     ("ulimit",           "ulimit_test.py",            360),
+    # v38.166: `wc` used to count only the first 2047 bytes (vfs_read_file
+    # clamps to max_size) while printing a clean-looking row, and held a
+    # stack-use-after-scope pointer to its read buffer. The suite checks a
+    # small file, a 55169-byte file, and the missing-file path.
+    ("wc",               "wc_test.py",                360),
     ("bigread",          "bigread_test.py",           420),
     ("aslr",             "aslr_test.py",              300),
     # TLS 1.3 engine (v38.162): boots, opens the Terminal and runs
