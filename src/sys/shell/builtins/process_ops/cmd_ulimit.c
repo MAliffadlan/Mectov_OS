@@ -42,23 +42,30 @@ static void ulimit_print_line(int res, uint32_t cur, uint32_t max) {
     extern void write_serial_string(const char*);
     char b[64];
     int n = 0;
+    // v38.166: `WC_PUT` is the only writer. The old code bounded the two
+    // string copies at `n < 62` but then appended " cur=" with five unguarded
+    // stores — fine only while rlimit_name() stayed short and the numbers
+    // stayed small, and an overflow of b[64] the moment either grew.
+    #define WC_PUT(ch) do { if (n < (int)sizeof(b) - 1) b[n++] = (ch); } while (0)
     const char* s = "[ULIMIT] get ";
-    while (*s && n < 62) b[n++] = *s++;
+    while (*s) WC_PUT(*s++);
     s = rlimit_name(res);
-    while (*s && n < 62) b[n++] = *s++;
-    b[n++] = ' '; b[n++] = 'c'; b[n++] = 'u'; b[n++] = 'r'; b[n++] = '=';
+    while (*s) WC_PUT(*s++);
+    WC_PUT(' '); WC_PUT('c'); WC_PUT('u'); WC_PUT('r'); WC_PUT('=');
     unsigned v = cur;
     char tmp[12]; int t = 0;
     if (v == 0) tmp[t++] = '0';
-    while (v > 0) { tmp[t++] = '0' + (v % 10); v /= 10; }
-    while (t > 0 && n < 62) b[n++] = tmp[--t];
+    while (v > 0 && t < (int)sizeof(tmp)) { tmp[t++] = '0' + (v % 10); v /= 10; }
+    while (t > 0) WC_PUT(tmp[--t]);
     s = " max=";
-    while (*s && n < 62) b[n++] = *s++;
+    while (*s) WC_PUT(*s++);
     v = max; t = 0;
     if (v == 0) tmp[t++] = '0';
-    while (v > 0) { tmp[t++] = '0' + (v % 10); v /= 10; }
-    while (t > 0 && n < 62) b[n++] = tmp[--t];
-    b[n++] = '\n'; b[n] = '\0';
+    while (v > 0 && t < (int)sizeof(tmp)) { tmp[t++] = '0' + (v % 10); v /= 10; }
+    while (t > 0) WC_PUT(tmp[--t]);
+    WC_PUT('\n');
+    b[n] = '\0';
+    #undef WC_PUT
     write_serial_string(b);
 }
 
