@@ -832,6 +832,18 @@ static void syscall_handler(registers_t* regs) {
             break;
         }
 
+        // ----- SYS_PTY_ALLOC (120) / SYS_PTY_OPEN (121): pseudo-terminal -----
+        case SYS_PTY_ALLOC: {
+            extern int do_sys_pty_alloc(void);
+            regs->eax = (uint32_t)do_sys_pty_alloc();
+            break;
+        }
+        case SYS_PTY_OPEN: {
+            extern int do_sys_pty_open(int);
+            regs->eax = (uint32_t)do_sys_pty_open((int)regs->ebx);
+            break;
+        }
+
         // ----- SYS_GET_PCI_INFO (36) -----
         case SYS_GET_PCI_INFO: {
             pci_device_t* array = (pci_device_t*)regs->ebx;
@@ -1037,6 +1049,10 @@ static void syscall_handler(registers_t* regs) {
 // ============================================================
 void init_syscalls(void) {
     fd_init();
+    extern void pty_init(void);
+    pty_init();
+    extern void pty_selftest(void);
+    pty_selftest();   // boot-time ring round-trip proof (serial only)
     extern void sync_init(void);
     sync_init();
     register_interrupt_handler(0x80, syscall_handler);

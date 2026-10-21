@@ -231,6 +231,10 @@ static inline int syscall4(int num, int arg1, int arg2, int arg3, int arg4) {
 // background job is refused.
 #define SYS_FB_MAP       118 // EBX=fb_info_t* -> 0 or -1
 #define SYS_FB_RELEASE   119 // (no args) -> 0 or -1; only the current owner
+// Pseudo-terminal (v38.168): SYS_PTY_ALLOC creates a PTY and returns the
+// master as a local fd; SYS_PTY_OPEN(master_fd) opens the slave end.
+#define SYS_PTY_ALLOC    131 // (no args) -> master local fd or -1
+#define SYS_PTY_OPEN     132 // EBX=master_fd -> slave local fd or -1
 
 // fb_info_t is defined in types.h (the common base of kernel task.h and this
 // Ring 3 ABI header) so both sides share one definition.
@@ -507,6 +511,16 @@ static inline int sys_fb_release(void) {
     return syscall(SYS_FB_RELEASE, 0, 0, 0);
 }
 
+// Pseudo-terminal (v38.168). sys_pty_alloc() returns the MASTER as a local fd;
+// sys_pty_open(master_fd) returns the SLAVE. Both ends are ordinary fds — use
+// read()/write()/close() on them. Reading the master yields the slave's
+// output; writing to the master feeds the slave's input (and vice-versa).
+static inline int sys_pty_alloc(void) {
+    return syscall(SYS_PTY_ALLOC, 0, 0, 0);
+}
+static inline int sys_pty_open(int master_fd) {
+    return syscall(SYS_PTY_OPEN, master_fd, 0, 0);
+}
 
 // POSIX sockets (v38.43) — fd-integrated: read()/write()/close()/poll()
 // work on the returned descriptors. accept() is non-blocking (poll first);

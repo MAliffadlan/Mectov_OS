@@ -22,8 +22,10 @@ typedef enum {
     FD_TYPE_PIPE_READ,
     FD_TYPE_PIPE_WRITE,
     FD_TYPE_DEV,
-    FD_TYPE_SOCKET      // v38.43: POSIX socket API — sock_conn is the conn id
+    FD_TYPE_SOCKET,     // v38.43: POSIX socket API — sock_conn is the conn id
                         // (TCP) or -1 (UDP, which uses the single global bind)
+    FD_TYPE_PTY         // pseudo-terminal — pipe_id is the pty index
+                        // (into pty.c's ptys[]); flags bit0 = master (0 = slave)
 } fd_type_t;
 
 typedef struct {
@@ -66,5 +68,10 @@ int sock_bind(int lfd, uint16_t port);
 int sock_get_conn(int lfd);           // TCP conn id or -1
 int sock_set_conn(int lfd, int conn);
 int sock_accept(int lfd);             // -> fd of one completed inbound conn
+
+// Pseudo-terminal (v38.168). do_sys_pty_alloc creates a PTY and maps its
+// MASTER end to a local fd; do_sys_pty_open(master_lfd) maps the SLAVE end.
+int do_sys_pty_alloc(void);
+int do_sys_pty_open(int master_lfd);
 
 #endif

@@ -1,4 +1,5 @@
 #include "../include/fd.h"
+#include "../include/pty.h"
 #include "../include/task.h"
 #include "../include/vfs.h"
 #include "../include/mem.h"
@@ -151,6 +152,13 @@ int do_sys_read(int fd, char* buf, int size) {
         }
         fd_lock_release();
         return read_bytes;
+    } else if (global_fds[gfd].type == FD_TYPE_PTY) {
+        // Pseudo-terminal (v38.168). Master reads slave output, slave reads
+        // master input. Non-blocking: returns what's in the ring now.
+        fd_lock_release();
+        int r = pty_read(gfd, buf, size);
+        fd_lock_acquire();
+        return r;
     } else if (global_fds[gfd].type == FD_TYPE_SOCKET) {
         // Sockets (v38.43). TCP: poll-style recv (0 = nothing yet, -1 = EOF).
         // UDP: the single global binding. Plain read() works on both so
@@ -173,7 +181,16 @@ int do_sys_write(int fd, const char* buf, int size) {
     fd_lock_acquire();
     int gfd = task_get_fd(tid, fd);
     if (gfd < 0 || !global_fds[gfd].in_use) { fd_lock_release(); return -1; }
-    
+
+    if (global_fds[gfd].type == FD_TYPE_PTY) {
+        // Pseudo-terminal (v38.168): master writes to the slave's input,
+        // slave writes to the master's output. Non-blocking partial write.
+        fd_lock_release();
+        int r = pty_write(gfd, buf, size);
+        fd_lock_acquire();
+        return r;
+    }
+
     if (global_fds[gfd].type == FD_TYPE_FILE || global_fds[gfd].type == FD_TYPE_DEV) {
         // Permission check (v38.23): writing a regular file requires write
         // access on its node. Per-call (not just at open) because a file can
@@ -546,6 +563,9 @@ static void fd_release_global(int gfd) {
                    global_fds[gfd].sock_conn >= 0) {
             // Last reference to a socket: tear the connection down too.
             net_tcp_close(global_fds[gfd].sock_conn);
+        } else if (global_fds[gfd].type == FD_TYPE_PTY) {
+            // Last reference to a PTY end: orphan/reclaim the pty slot.
+            pty_close(gfd);
         }
         global_fds[gfd].in_use = 0;
     }
@@ -787,4 +807,53 @@ int do_sys_pipe(int pipefd[2]) {
     }
     fd_lock_release();
     return 0;
+}
+
+// ---- Pseudo-terminal syscalls (v38.168) ----
+// do_sys_pty_alloc: create a fresh PTY and map its MASTER end into the calling
+// task. Returns the local fd, or -1. The slave end is opened later with
+// do_sys_pty_open(master_lfd).
+int do_sys_pty_alloc(void) {
+    fd_lock_acquire();
+    int gfd = pty_alloc_fd();
+    if (gfd < 0) { fd_lock_release(); return -1; }
+    int lfd = task_map_fd(gfd);
+    if (lfd < 0) {
+        // mapping failed: pty_close reads the fd's pipe_id, so call it while
+        // the slot is still valid, then release the global slot.
+        pty_close(gfd);
+        global_fds[gfd].in_use = 0;
+        global_fds[gfd].type = FD_TYPE_NONE;
+        fd_lock_release();
+        return -1;
+    }
+    fd_lock_release();
+    return lfd;
+}
+
+// do_sys_pty_open: open the SLAVE end of the PTY whose master is `master_lfd`.
+// Returns a new local fd, or -1.
+int do_sys_pty_open(int master_lfd) {
+    int tid = get_current_task();
+    if (tid < 0) return -1;
+    fd_lock_acquire();
+    int mgfd = task_get_fd(tid, master_lfd);
+    if (mgfd < 0 || !global_fds[mgfd].in_use ||
+        global_fds[mgfd].type != FD_TYPE_PTY ||
+        (global_fds[mgfd].flags & 1) == 0) {
+        fd_lock_release();
+        return -1;
+    }
+    int gfd = pty_open_slave(mgfd);
+    if (gfd < 0) { fd_lock_release(); return -1; }
+    int lfd = task_map_fd(gfd);
+    if (lfd < 0) {
+        pty_close(gfd);
+        global_fds[gfd].in_use = 0;
+        global_fds[gfd].type = FD_TYPE_NONE;
+        fd_lock_release();
+        return -1;
+    }
+    fd_lock_release();
+    return lfd;
 }

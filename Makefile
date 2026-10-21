@@ -374,6 +374,12 @@ volume.mct: apps/volume.c $(MCT_LIBC_H)
 mplayer.mct: apps/mplayer.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/mplayer.c mplayer.mct
 
+pty_test.mct: apps/pty_test.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/pty_test.c pty_test.mct
+
+terminal_pty.mct: apps/terminal_pty.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/terminal_pty.c terminal_pty.mct
+
 forkdemo.mct: apps/forkdemo.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/forkdemo.c forkdemo.mct
 
