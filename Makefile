@@ -199,6 +199,7 @@ OBJS = $(OBJ_DIR)/src/sys/interrupt_entry.o \
        $(OBJ_DIR)/pci_mct.o \
        $(OBJ_DIR)/explorer_mct.o \
        $(OBJ_DIR)/browser_mct.o \
+       $(OBJ_DIR)/fetch_mct.o \
        $(OBJ_DIR)/paint_mct.o \
        $(OBJ_DIR)/terminal_mct.o \
        $(OBJ_DIR)/taskmgr_mct.o \
@@ -338,6 +339,9 @@ TLS_LIB_HDRS = apps/lib/tls/tls.h apps/lib/tls/test_vectors.h
 # accepts https://.
 browser.mct: apps/browser.c $(MCT_LIBC_H) $(TLS_LIB_SRCS) $(TLS_LIB_HDRS)
 	python3 scripts/build_mct.py apps/browser.c $(TLS_LIB_SRCS) browser.mct
+
+fetch.mct: apps/fetch.c $(MCT_LIBC_H) $(TLS_LIB_SRCS) $(TLS_LIB_HDRS)
+	python3 scripts/build_mct.py apps/fetch.c $(TLS_LIB_SRCS) fetch.mct
 
 paint.mct: apps/paint.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/paint.c paint.mct
@@ -528,6 +532,11 @@ $(OBJ_DIR)/explorer_mct.o: explorer.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
 $(OBJ_DIR)/browser_mct.o: browser.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 $< $@
+
+# fetch.mct (v38.169): the TLS 1.3 https client, embedded like browser.mct so
+# `run fetch.mct https://host` works from the shell on a fresh install.
+$(OBJ_DIR)/fetch_mct.o: fetch.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 $< $@
 
 $(OBJ_DIR)/paint_mct.o: paint.mct | $(OBJ_DIR)

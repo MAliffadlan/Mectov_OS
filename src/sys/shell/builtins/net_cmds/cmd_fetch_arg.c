@@ -4,6 +4,21 @@
 
 void cmd_fetch_arg(void) {
         char* domain = cmd_b + 6;
+
+        // v38.169: the kernel-side fetch is plain HTTP on port 80 only. A
+        // https:// URL would otherwise be fetched as plaintext against port
+        // 80 — silently wrong, and it would leak the request. TLS lives in
+        // user space (apps/lib/tls), so the https client is the fetch.mct
+        // app; point the user at it instead of doing the wrong thing.
+        if (domain[0] == 'h' && domain[1] == 't' && domain[2] == 't' &&
+            domain[3] == 'p' && domain[4] == 's' && domain[5] == ':' &&
+            domain[6] == '/' && domain[7] == '/') {
+                print("fetch: https needs the TLS client app — try: run fetch.mct ", 0x0C);
+                print(domain, 0x0C);
+                print("\n", 0x0C);
+                return;
+        }
+
         if (!rtl_present) {
             print("No network card detected.\n", 0x0C);
         } else {

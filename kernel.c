@@ -33,6 +33,86 @@ volatile int pending_logout = 0;
 volatile int needs_redraw = 1;
 static int fps_val = 0;
 static int fps_frames = 0;
+
+// v38.169: the GRUB command line, kept so the boot-time HTTPS self-test can
+// read its URL long after the multiboot struct is gone (cmdline sits in low
+// physical memory, so it is copied out before paging is enabled).
+#define KCMD_MAX 256
+static char kcmdline[KCMD_MAX];
+
+// Parse "key=value" out of the command line. Returns the value (a pointer
+// into a static buffer) or 0 when the key is absent. The value ends at the
+// next space.
+static const char* kcmd_value(const char* key) {
+    if (!kcmdline[0] || !key) return 0;
+    int klen = 0;
+    while (key[klen]) klen++;
+    const char* p = kcmdline;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        int i = 0;
+        while (p[i] && p[i] != ' ' && key[i] && p[i] == key[i]) i++;
+        if (i == klen && p[i] == '=') {
+            const char* v = p + i + 1;
+            const char* end = v;
+            while (*end && *end != ' ') end++;
+            static char val[KCMD_MAX];
+            int n = 0;
+            while (v < end && n < KCMD_MAX - 1) val[n++] = *v++;
+            val[n] = 0;
+            return val;
+        }
+        while (*p && *p != ' ') p++;
+    }
+    return 0;
+}
+
+// The URL for the boot-time HTTPS self-test, or 0 when it was not requested
+// on the command line (https_self_test=<url>).
+const char* net_selftest_url(void) {
+    return kcmd_value("https_self_test");
+}
+
+// v38.169: launch a boot-time app from the GRUB command line. The general
+// form is `boot_app=<path>[:arg]`, e.g.
+//
+//     multiboot /boot/myos.bin boot_app=/apps/fetch.mct:https://example.com
+//
+// The app runs as a normal Ring 3 task in the background; whatever it prints
+// lands on the serial log (SYS_PRINT writes there), so a headless boot can
+// drive it. This is how the HTTPS self-test is triggered, and how the CI
+// harness runs a .mct without a GUI.
+//
+// Called after init_tasking() so the app lands in a real task slot (see the
+// call site in kernel_main for why the ordering matters).
+void net_autotest_launch(void) {
+    const char* spec = kcmd_value("boot_app");
+    if (!spec || !spec[0]) return;
+
+    // Split "path:arg" at the first colon that follows the path.
+    char path[128];
+    char arg[256];
+    int n = 0, i = 0;
+    while (spec[i] && spec[i] != ':' && n < (int)sizeof(path) - 1) path[n++] = spec[i++];
+    path[n] = 0;
+    arg[0] = 0;
+    if (spec[i] == ':') {
+        i++;
+        int a = 0;
+        while (spec[i] && a < (int)sizeof(arg) - 1) arg[a++] = spec[i++];
+        arg[a] = 0;
+    }
+    if (n == 0) return;
+
+    write_serial_string("[K] boot_app: ");
+    write_serial_string(path);
+    if (arg[0]) { write_serial_string(" arg="); write_serial_string(arg); }
+    write_serial_string("\n");
+
+    extern int load_mct_app_with_arg(const char*, const char*);
+    load_mct_app_with_arg(path, arg);
+}
 /* v38.146: present-rate readout for the render task (taskbar HUD value =
  * full_redraw+swap completions per second). Logged in the perf line as
  * pres_fps; ~10 bytes per 100 frames, kept permanently for tuning. */
@@ -323,6 +403,15 @@ void kernel_main(uint32_t magic, uint32_t addr) {
         panic_parse_cmdline((const char*)mbi->cmdline);
         watchdog_parse_cmdline((const char*)mbi->cmdline);
         vmm_parse_cmdline((const char*)mbi->cmdline);
+        // v38.169: remember the command line so the boot-time HTTPS
+        // self-test can read its URL later (the self-test runs long after
+        // paging is up and the multiboot struct is no longer around).
+        {
+            const char* src = (const char*)mbi->cmdline;
+            int i = 0;
+            while (src[i] && i < KCMD_MAX - 1) { kcmdline[i] = src[i]; i++; }
+            kcmdline[i] = '\0';
+        }
     }
 
     write_serial_string("1\n");
@@ -487,6 +576,29 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] vfs\n");
     vfs_init();
 
+    // v38.169: boot-time HTTPS self-test. The TLS 1.3 client lives in user
+    // space (apps/fetch.mct, linked with apps/lib/tls), so the kernel cannot
+    // speak TLS itself -- but it CAN launch the app and watch what it prints
+    // on the serial log. This is the same shape as the pty selftest: the
+    // kernel proves the whole path (DNS -> TCP 443 -> TLS handshake ->
+    // certificate verification -> HTTP response) works on this machine.
+    //
+    // Enabled from the GRUB command line, like the other self-tests:
+    //     multiboot /boot/myos.bin https_self_test=https://example.com
+    // Off by default: a boot that depends on the internet is a boot that
+    // hangs on a bad network, so this stays an explicit opt-in.
+    //
+    // The launch happens LATER, after init_tasking() -- see the call site
+    // below. Two ordering rules matter:
+    //   * after vfs_init(), which injects the embedded .mct apps into the
+    //     tree (launching before that finds no /apps/fetch.mct);
+    //   * after init_tasking(), because the task table must exist: a task
+    //     created before init_tasking() lands in slot 0, which is the BSP's
+    //     own kernel task, and then the app runs with the kernel's identity
+    //     page directory -- every user-pointer check in the syscall layer
+    //     then rejects it, and the app dies on its first syscall.
+    extern void net_autotest_launch(void);
+
     write_serial_string("[K] clipboard\n");
     extern void clipboard_init(void);
     clipboard_init();
@@ -495,6 +607,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     init_double_buffer();
     write_serial_string("[K] tasking\n");
     init_tasking();
+
+    // v38.169: the boot-time HTTPS self-test is launched HERE -- after
+    // init_tasking() (so the app gets a real task slot with its own page
+    // directory, not the BSP's kernel slot 0) and after vfs_init() (so the
+    // embedded /apps/fetch.mct exists). The app runs in the background; the
+    // boot continues to the desktop while it fetches.
+    net_autotest_launch();
 
     __asm__ __volatile__ ("sti");
     

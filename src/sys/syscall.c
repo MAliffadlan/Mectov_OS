@@ -262,19 +262,56 @@ static int user_page_ok(uint32_t pd_paddr, uint32_t va, uint32_t heap_top) {
 
     // Not mapped. The only addresses we will fault in on the caller's behalf
     // are inside its own reserved heap window.
-    if (va < 0x08000000 || va >= heap_top) return 0;
-
-    uint32_t phys = frame_alloc();
-    if (phys == 0) return 0;
-    memset((void*)(uintptr_t)phys, 0, 4096);  // zero via the kernel identity map
-    uint64_t flags = PAGE_PRESENT | PAGE_RW | PAGE_USER;
-    if (paging_nx_enabled()) flags |= PAGE_NX;
-    if (vmm_map_page(pd_paddr, va, phys, flags) != 0) {
-        frame_free(phys);
-        return 0;
+    if (va >= 0x08000000 && va < heap_top) {
+        uint32_t phys = frame_alloc();
+        if (phys == 0) return 0;
+        memset((void*)(uintptr_t)phys, 0, 4096);  // zero via the kernel identity map
+        uint64_t flags = PAGE_PRESENT | PAGE_RW | PAGE_USER;
+        if (paging_nx_enabled()) flags |= PAGE_NX;
+        if (vmm_map_page(pd_paddr, va, phys, flags) != 0) {
+            frame_free(phys);
+            return 0;
+        }
+        __asm__ __volatile__("invlpg (%0)" : : "r"(va));
+        return 1;
     }
-    __asm__ __volatile__("invlpg (%0)" : : "r"(va));
-    return 1;
+
+    // v38.169: the Ring 3 stack is demand-paged too (vmm_setup_user_stack maps
+    // nothing eagerly; the #PF handler backs a page on first touch). So a
+    // perfectly valid buffer on a task's own stack can be UNMAPPED at the
+    // moment the kernel validates it -- and the walk below then rejected a
+    // pointer it should have accepted, which broke every syscall that takes
+    // a stack buffer (sys_get_launch_arg with a fresh stack page, for one).
+    //
+    // The stack range is per-task and fixed, so the fault-in is bounded to
+    // that window: USER_STACK_TOP - (tid+1)*USER_STACK_SIZE .. USER_STACK_TOP.
+    // The page just below it stays unmapped (the guard page the #PF handler
+    // relies on), so this cannot extend the task's stack past its limit.
+    {
+        // Stack window constants come from vmm.h (USER_STACK_TOP /
+        // USER_STACK_SIZE) so this stays in step with the #PF handler's
+        // guard-page math.
+        int tid = get_current_task();
+        if (tid < 0) return 0;
+        uint32_t s_top = USER_STACK_TOP - ((uint32_t)tid + 1) * USER_STACK_SIZE;
+        uint32_t s_bottom = s_top - USER_STACK_SIZE;
+        if (va >= s_bottom && va < s_top) {
+            // Materialise the page: a private zeroed frame, exactly like the
+            // #PF handler's write-fault path (a stack page is written to).
+            uint32_t phys = frame_alloc();
+            if (phys == 0) return 0;
+            memset((void*)(uintptr_t)phys, 0, 4096);
+            uint64_t flags = PAGE_PRESENT | PAGE_RW | PAGE_USER;
+            if (paging_nx_enabled()) flags |= PAGE_NX;
+            if (vmm_map_page(pd_paddr, va, phys, flags) != 0) {
+                frame_free(phys);
+                return 0;
+            }
+            __asm__ __volatile__("invlpg (%0)" : : "r"(va));
+            return 1;
+        }
+    }
+    return 0;
 }
 
 int validate_user_array_ptr(const void* ptr, uint32_t elem_size, int count) {

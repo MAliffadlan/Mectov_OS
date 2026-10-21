@@ -172,6 +172,17 @@ int tls_x509_match_host(const tls_cert_t* c, const char* host);
 // parseable validity is accepted, so an unusual-but-valid encoding cannot lock
 // the client out of an otherwise good chain.
 int tls_x509_time_valid(const tls_cert_t* c, uint32_t now);
+// Are two certificates the SAME trust anchor in different encodings (a
+// self-signed root where the store holds the cross-signed one)? True when the
+// Common Name AND the SubjectPublicKeyInfo match. v38.169.
+int tls_x509_is_same_anchor(const uint8_t* a_der, uint32_t a_len,
+                            const uint8_t* b_der, uint32_t b_len,
+                            const tls_cert_t* b_parsed);
+// Convert a DER ECDSA signature (SEQUENCE { INTEGER r, INTEGER s }) into the
+// flat r||s form the verifier takes. `flen` is the curve size in bytes
+// (32 for P-256, 48 for P-384); `out` must hold flen*2 bytes. v38.169.
+int tls_ecdsa_sig_to_flat(const uint8_t* sig, uint32_t siglen,
+                           uint32_t flen, uint8_t* out);
 // Is the cert allowed to sign other certificates (basicConstraints CA + the
 // keyCertSign bit when a keyUsage extension is present)?
 int tls_x509_is_ca(const tls_cert_t* c);

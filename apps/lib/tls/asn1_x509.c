@@ -15,6 +15,7 @@
 
 #include "tls.h"
 
+
 // ------------------------------------------------------------------ DER reader
 
 // A TLV as it appears in the buffer: tag byte, body pointer, body length.
@@ -467,6 +468,41 @@ int tls_x509_is_ca(const tls_cert_t* c) {
     return 1;   // keyUsage, when present, is enforced during parsing
 }
 
+// v38.169: are these two certificates the SAME trust anchor, presented in
+// different encodings? A root certificate is identified by its (subject,
+// public key) pair -- not by its bytes. The same root is routinely shipped
+// in more than one form: self-signed where a server sends it, cross-signed
+// by another CA where the trust store carries that variant (SSL.com's "TLS
+// ECC Root CA 2022" is exactly this case -- the server sends the
+// self-signed form, the store carries the Comodo cross-sign). A byte-for-
+// byte anchor match rejects the second form, so the chain never reaches an
+// anchor and the fetch fails with "certificate not trusted" even though the
+// server's chain is perfectly valid.
+//
+// The check is deliberately strict: the Common Name AND the whole
+// SubjectPublicKeyInfo must match. A same-CN certificate with a DIFFERENT
+// key is a different anchor (the classic "same name, other key" attack) and
+// is NOT accepted. The store's own signature is still not checked -- these
+// entries are trust anchors by construction.
+int tls_x509_is_same_anchor(const uint8_t* a_der, uint32_t a_len,
+                            const uint8_t* b_der, uint32_t b_len,
+                            const tls_cert_t* b_parsed) {
+    (void)b_der; (void)b_len;
+    tls_cert_t a;
+    if (tls_x509_parse(a_der, a_len, &a) != TLS_OK) return 0;
+
+    // Common Name must be present on both and equal.
+    if (!a.cn || !b_parsed->cn) return 0;
+    if (a.cn_len != b_parsed->cn_len) return 0;
+    if (tls_memcmp(a.cn, b_parsed->cn, a.cn_len) != 0) return 0;
+
+    // The public key must be byte-identical: same anchor, same key.
+    if (a.pub_len != b_parsed->pub_len) return 0;
+    if (tls_memcmp(a.pub, b_parsed->pub, a.pub_len) != 0) return 0;
+
+    return 1;
+}
+
 // ------------------------------------------------------------------ parse
 
 int tls_x509_parse(const uint8_t* der, uint32_t len, tls_cert_t* out) {
@@ -653,18 +689,33 @@ int tls_x509_verify_signed_by(const uint8_t* child_der, uint32_t child_len,
         // BIT STRING's first body byte is the "unused bits" count, so the
         // signature itself starts one byte in -- handing body[] straight to the
         // verifier checks a signature with a zero prepended to it.
+        // The ECDSA signature is SEQUENCE { INTEGER r, INTEGER s }. The two
+        // INTEGERs live INSIDE that SEQUENCE, so each parse starts at offset 0
+        // of the sequence's body -- `so` is not shared with the parse that
+        // found the SEQUENCE itself.
         uint32_t so = 0;
         der_tlv seq, r, sv;
         if (der_expect(sig_bits.body + 1, sig_bits.len - 1, &so, 0x30, &seq) != TLS_OK)
             return TLS_ERR_PROTOCOL;
+        so = 0;
         if (der_expect(seq.body, seq.len, &so, 0x02, &r) != TLS_OK) return TLS_ERR_PROTOCOL;
         if (der_expect(seq.body, seq.len, &so, 0x02, &sv) != TLS_OK) return TLS_ERR_PROTOCOL;
         uint32_t flen = (uint32_t)(outer.curve == 1 ? 32 : 48);
-        if (r.len > flen || sv.len > flen) return TLS_ERR_VERIFY;
+        // A DER INTEGER is signed, so a value whose top bit is set carries a
+        // leading 0x00 to keep it positive -- one byte MORE than the curve
+        // size. P-384 signatures hit this routinely (r and s are 48-byte
+        // values about half the time, 49 bytes with the pad), and rejecting
+        // the 49-byte form refused every such certificate outright.
+        // Strip that pad; anything longer than flen+1 is malformed.
+        const uint8_t* rb = r.body; uint32_t rl = r.len;
+        if (rl == flen + 1 && rb[0] == 0x00) { rb++; rl--; }
+        const uint8_t* sb = sv.body; uint32_t sl = sv.len;
+        if (sl == flen + 1 && sb[0] == 0x00) { sb++; sl--; }
+        if (rl > flen || sl > flen) return TLS_ERR_VERIFY;
         uint8_t flat[96];
         tls_memset(flat, 0, sizeof(flat));
-        tls_memcpy(flat + (flen - r.len), r.body, r.len);
-        tls_memcpy(flat + flen + (flen - sv.len), sv.body, sv.len);
+        tls_memcpy(flat + (flen - rl), rb, rl);
+        tls_memcpy(flat + flen + (flen - sl), sb, sl);
         return tls_ecdsa_verify(outer.curve, pt, ptlen, digest, dlen, flat, flen * 2) == 0
                    ? TLS_OK : TLS_ERR_VERIFY;
     }
@@ -678,6 +729,38 @@ int tls_x509_verify_signed_by(const uint8_t* child_der, uint32_t child_len,
                    ? TLS_OK : TLS_ERR_VERIFY;
     return tls_rsa_pss_verify(n_buf, nlen2, e_buf, elen2, sig_bits.body + 1, digest, dlen) == 0
                ? TLS_OK : TLS_ERR_VERIFY;
+}
+
+
+// v38.169: convert a DER-encoded ECDSA signature (SEQUENCE { INTEGER r,
+// INTEGER s }) into the flat r||s form the verifier works on. The CertificateVerify
+// message carries the DER form -- handing it straight to the verifier made
+// every ECDSA handshake fail with "certificate not trusted", because the
+// verifier expected the two big integers side by side.
+//
+// A DER INTEGER is signed, so a value whose top bit is set carries a leading
+// 0x00 pad: r and s come out as flen+1 bytes about half the time, and the
+// pad is stripped here so the result is exactly flen bytes per component.
+int tls_ecdsa_sig_to_flat(const uint8_t* sig, uint32_t siglen,
+                           uint32_t flen, uint8_t* out) {
+    if (!sig || !out || flen == 0 || flen > 48) return TLS_ERR_PROTOCOL;
+    uint32_t off = 0;
+    der_tlv seq, r, sv;
+    if (der_expect(sig, siglen, &off, 0x30, &seq) != TLS_OK) return TLS_ERR_PROTOCOL;
+    off = 0;
+    if (der_expect(seq.body, seq.len, &off, 0x02, &r) != TLS_OK) return TLS_ERR_PROTOCOL;
+    if (der_expect(seq.body, seq.len, &off, 0x02, &sv) != TLS_OK) return TLS_ERR_PROTOCOL;
+
+    const uint8_t* rb = r.body; uint32_t rl = r.len;
+    if (rl == flen + 1 && rb[0] == 0x00) { rb++; rl--; }
+    const uint8_t* sb = sv.body; uint32_t sl = sv.len;
+    if (sl == flen + 1 && sb[0] == 0x00) { sb++; sl--; }
+    if (rl > flen || sl > flen) return TLS_ERR_PROTOCOL;
+
+    tls_memset(out, 0, flen * 2);
+    tls_memcpy(out + (flen - rl), rb, rl);
+    tls_memcpy(out + flen + (flen - sl), sb, sl);
+    return TLS_OK;
 }
 
 // ------------------------------------------------------------------ hostname
@@ -790,13 +873,14 @@ int tls_verify_chain(const uint8_t* certs, const uint32_t* lens, int count,
                      const char* host, uint32_t now,
                      const tls_root_t* roots, int root_count,
                      uint32_t* leaf_not_after) {
+
     if (count < 1 || count > TLS_CHAIN_MAX) return TLS_ERR_PROTOCOL;
 
     tls_cert_t chain[TLS_CHAIN_MAX];
     uint32_t off = 0;
     for (int i = 0; i < count; i++) {
-        if (tls_x509_parse(certs + off, lens[i], &chain[i]) != TLS_OK)
-            return TLS_ERR_PROTOCOL;
+        { int pr = tls_x509_parse(certs + off, lens[i], &chain[i]);
+          if (pr != TLS_OK) return TLS_ERR_PROTOCOL; }
         if (!tls_x509_time_valid(&chain[i], now)) return TLS_ERR_VERIFY;
         off += lens[i];
     }
@@ -806,19 +890,35 @@ int tls_verify_chain(const uint8_t* certs, const uint32_t* lens, int count,
     if (leaf_not_after) *leaf_not_after = chain[0].not_after;
 
     // Walk up the chain as presented. The last certificate may itself be the
-    // anchor -- matched byte for byte against the store, whose own signature is
-    // then not checked, because that is what a trust anchor means.
+    // anchor -- matched against the store, whose own signature is then not
+    // checked, because that is what a trust anchor means.
+    //
+    // v38.169: the anchor is matched by IDENTITY, not by bytes. A byte-for-byte
+    // comparison only accepts the one encoding of a root that happens to be in
+    // the store, and real servers routinely send a DIFFERENT encoding of the
+    // same root: the self-signed form where the store holds the cross-signed
+    // one (SSL.com's "TLS ECC Root CA 2022" is the textbook case -- the server
+    // sends the self-signed variant, the store carries the Comodo cross-sign).
+    // A trust anchor is the (subject, public key) pair, so that is what we
+    // compare: same subject AND same SPKI == same anchor. A root that only
+    // matches by subject but carries a DIFFERENT key is a different anchor and
+    // must not be trusted.
     uint32_t base = 0;
     for (int i = 0; i < count; i++) {
         for (int r = 0; r < root_count; r++) {
-            if (roots[r].len != lens[i]) continue;
-            if (tls_memcmp(roots[r].der, certs + base, lens[i]) != 0) continue;
-            return TLS_OK;                 // trust anchor reached
+            if (roots[r].len == lens[i] &&
+                tls_memcmp(roots[r].der, certs + base, lens[i]) == 0)
+                return TLS_OK;                 // exact copy: trust anchor reached
+            // Same anchor, different encoding: parse the store's copy and
+            // compare the subject and the public key.
+            if (tls_x509_is_same_anchor((const uint8_t*)roots[r].der, roots[r].len,
+                                        certs + base, lens[i], &chain[i]))
+                return TLS_OK;
         }
         if (i + 1 >= count) break;
-        if (tls_x509_verify_signed_by(certs + base, lens[i], &chain[i + 1]) != TLS_OK)
-            return TLS_ERR_VERIFY;
+        { int sr = tls_x509_verify_signed_by(certs + base, lens[i], &chain[i + 1]);
+if (sr != TLS_OK) return TLS_ERR_VERIFY; }
         base += lens[i];
     }
-    return TLS_ERR_VERIFY;                  // chain did not reach an anchor
+    return TLS_ERR_VERIFY;       // chain did not reach an anchor
 }

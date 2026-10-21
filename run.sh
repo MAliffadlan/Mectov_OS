@@ -21,9 +21,24 @@ if [ "${MECTOV_SKIP_BUILD:-0}" != "1" ]; then
 fi
 
 # Cek apakah disk.img ada
+# v38.169: the image holds the embedded .mct apps (the node table takes the
+# first 2049 sectors, so only the rest is file data). 2 MB left ~1 MB of
+# usable data, and the app set is already ~690 KB — adding the TLS-linked
+# fetch.mct (180 KB) pushed it past the limit, so seeding failed with
+# "Disk Full" and the boot kept running the PREVIOUS copy of the app.
+# 4 MB (8192 sectors, matching VFS_DISK_SECTORS in src/include/vfs.h) gives
+# ~3 MB of file data, which fits every embedded app with room for the
+# staged assets.
 if [ ! -f "disk.img" ]; then
     echo "[!] Membuat disk.img baru..."
-    dd if=/dev/zero of=disk.img bs=512 count=4096 2>/dev/null
+    dd if=/dev/zero of=disk.img bs=512 count=8192 2>/dev/null
+fi
+# A pre-v38.169 image is 2 MB and cannot hold the current app set. Grow it
+# in place (the extra space is zeros) rather than leaving a boot that
+# silently keeps stale app copies.
+if [ -f disk.img ] && [ "$(stat -c%s disk.img)" -lt 4194304 ]; then
+    echo "[!] disk.img < 4MB: diperbesar (app set grown, v38.169)"
+    truncate -s 4M disk.img
 fi
 
 # Volume size follows the staged Q3 payload (v38.107). One retail map's

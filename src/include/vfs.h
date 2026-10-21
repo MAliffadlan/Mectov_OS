@@ -29,10 +29,16 @@
 // (kernel heap); per-file cap lives in vfs.c and matches the fd write path.
 #define VFS_TMPFS_MAX_BYTES (2 * 1024 * 1024)   // 2MB
 #define VFS_DATA_START    (VFS_NODE_START + VFS_NODE_SECTORS)
-#define VFS_DISK_SECTORS  4096 // total sectors on the 2MB image (v4: the node
-                               // table grew to 512KB, so the data area keeps
-                               // its pre-v4 size — run.sh and check.py create
-                               // the image with the same count)
+// v38.169: 8192 sectors = a 4 MB image (was 4096 = 2 MB). The embedded app
+// set grew past the old data area: the TLS-linked apps alone (browser.mct,
+// tlsselftest.mct, fetch.mct — each carrying the engine and the 121-CA
+// trust store) are ~570 KB, and with the rest of the apps plus music.wav
+// and bench.big the seeding ran out of room ("Disk Full / Out of contiguous
+// space") and the boot silently kept the PREVIOUS copy of every app. The
+// sector map that vfs_alloc_sectors builds on the stack grows to 8 KB with
+// this, which fits the 32 KB kernel stack.
+#define VFS_DISK_SECTORS  8192 // total sectors on the 4MB image (run.sh and
+                               // check.py create the image with the same count)
 // v3 (v38.23): node table gained uid/gid/mode (ownership + permissions). An
 // image written by an older layout is rejected so the table is rebuilt with
 // the new fields instead of reading garbage ownership into every node.

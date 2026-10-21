@@ -725,7 +725,10 @@ static int verify_certificate_verify(tls_conn_t* c, const uint8_t* b, uint32_t l
         int curve;
         if (tls_spki_ec(leaf.pub, leaf.pub_len, pt, &ptlen, &curve) != TLS_OK)
             return TLS_ERR_UNSUPPORTED;
-        rc = tls_ecdsa_verify(curve, pt, ptlen, d256, 32, sig, siglen) == 0
+        uint8_t flat[64];
+        if (tls_ecdsa_sig_to_flat(sig, siglen, 32, flat) != TLS_OK)
+            return TLS_ERR_PROTOCOL;
+        rc = tls_ecdsa_verify(curve, pt, ptlen, d256, 32, flat, 64) == 0
              ? TLS_OK : TLS_ERR_VERIFY;
     } else if (alg == 0x0503 && leaf.ec_curve == 2) {
         uint8_t pt[128];
@@ -733,7 +736,10 @@ static int verify_certificate_verify(tls_conn_t* c, const uint8_t* b, uint32_t l
         int curve;
         if (tls_spki_ec(leaf.pub, leaf.pub_len, pt, &ptlen, &curve) != TLS_OK)
             return TLS_ERR_UNSUPPORTED;
-        rc = tls_ecdsa_verify(curve, pt, ptlen, d384, 48, sig, siglen) == 0
+        uint8_t flat[96];
+        if (tls_ecdsa_sig_to_flat(sig, siglen, 48, flat) != TLS_OK)
+            return TLS_ERR_PROTOCOL;
+        rc = tls_ecdsa_verify(curve, pt, ptlen, d384, 48, flat, 96) == 0
              ? TLS_OK : TLS_ERR_VERIFY;
     } else {
         return TLS_ERR_UNSUPPORTED;
@@ -1055,13 +1061,23 @@ int tls_step(tls_conn_t* c) {
     }
 }
 
+// v38.169: the handshake pump used to spin a fixed 2000 times with no wait
+// between them. A server that needs a moment to answer -- which every real
+// one does, and the ECDSA chain of a modern site especially -- had its
+// "try later" answered by the loop running out, so the fetch failed with
+// "TLS transport closed" at random. The deadline is what bounds the wait;
+// the loop just keeps pumping until it passes.
 int tls_handshake(tls_conn_t* c, tls_now_fn now_ms, void* now_ctx, uint32_t timeout_ms) {
     uint32_t start = now_ms ? now_ms(now_ctx) : 0;
-    for (uint32_t tries = 0; tries < 2000; tries++) {
+    for (uint32_t tries = 0; tries < 200000; tries++) {
         int rc = tls_step(c);
         if (rc == TLS_OK || (rc < 0 && rc != TLS_WANT_READ && rc != TLS_WANT_WRITE))
             return rc;
         if (now_ms && (now_ms(now_ctx) - start) > timeout_ms) return TLS_ERR_IO;
+        // Nothing to do until the peer answers: give it a moment instead of
+        // burning the CPU on a tight loop (and give the scheduler a chance
+        // to run the network poller that feeds us).
+        sys_sleep(2);
     }
     return TLS_ERR_IO;
 }

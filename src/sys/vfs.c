@@ -190,17 +190,31 @@ static int vfs_update_file_if_needed(const char* path, const char* data, int siz
             vfs_write_file(path, data, size);
             return 1;
         }
-        // If it is an MCT file, check if disk has the correct magic
-        if (size >= 4 && data[0] == '1' && data[1] == 'T' && data[2] == 'C' && data[3] == 'M') {
+        // Same size, possibly different bytes: compare the CONTENT, not
+        // just the length. v38.169: the size-only check meant an app whose
+        // rebuild happened to land on the same length was never replaced,
+        // so the boot kept running a stale copy (the TLS client kept its old
+        // verify code even though the kernel had the new one embedded).
+        // The read is bounded by the file's own size.
+        if (size > 0) {
             extern int vfs_read_file(const char* path, char* buf, int max_size);
-            char disk_magic[4];
-            int rd = vfs_read_file(path, disk_magic, 4);
-            if (rd < 4 || disk_magic[0] != '1' || disk_magic[1] != 'T' || disk_magic[2] != 'C' || disk_magic[3] != 'M') {
-                write_serial_string("[VFS] magic mismatch, rewriting: ");
-                write_serial_string(path);
-                write_serial_string("\n");
-                vfs_write_file(path, data, size);
-                return 1;
+            char* cur = (char*)kmalloc((uint32_t)size);
+            if (cur) {
+                int rd = vfs_read_file(path, cur, size);
+                int same = (rd == size);
+                if (same) {
+                    for (int i = 0; i < size; i++) {
+                        if (cur[i] != data[i]) { same = 0; break; }
+                    }
+                }
+                kfree(cur);
+                if (!same) {
+                    write_serial_string("[VFS] content differs, rewriting: ");
+                    write_serial_string(path);
+                    write_serial_string("\n");
+                    vfs_write_file(path, data, size);
+                    return 1;
+                }
             }
         }
     }
@@ -650,6 +664,12 @@ void vfs_init() {
         extern uint8_t _binary_browser_mct_start[];
         extern uint8_t _binary_browser_mct_end[];
         changed += vfs_update_file_if_needed("apps/browser.mct", (const char*)_binary_browser_mct_start, _binary_browser_mct_end - _binary_browser_mct_start);
+
+        // v38.169: the TLS 1.3 https client (linked with apps/lib/tls, like
+        // browser.mct). `run fetch.mct https://host` fetches over TLS.
+        extern uint8_t _binary_fetch_mct_start[];
+        extern uint8_t _binary_fetch_mct_end[];
+        changed += vfs_update_file_if_needed("apps/fetch.mct", (const char*)_binary_fetch_mct_start, _binary_fetch_mct_end - _binary_fetch_mct_start);
 
         extern uint8_t _binary_paint_mct_start[];
         extern uint8_t _binary_paint_mct_end[];
@@ -1271,6 +1291,12 @@ void vfs_init() {
     extern uint8_t _binary_browser_mct_end[];
     vfs_create_file("apps/browser.mct");
     vfs_write_file("apps/browser.mct", (const char*)_binary_browser_mct_start, _binary_browser_mct_end - _binary_browser_mct_start);
+
+    // Inject fetch.mct (v38.169) — the TLS 1.3 https client.
+    extern uint8_t _binary_fetch_mct_start[];
+    extern uint8_t _binary_fetch_mct_end[];
+    vfs_create_file("apps/fetch.mct");
+    vfs_write_file("apps/fetch.mct", (const char*)_binary_fetch_mct_start, _binary_fetch_mct_end - _binary_fetch_mct_start);
 
     // Inject paint.mct
     extern uint8_t _binary_paint_mct_start[];
