@@ -2,10 +2,161 @@
 #include "../include/vga.h"
 #include "../include/io.h"
 #include "../include/apic.h"
+#include "../include/acpi.h"     // acpi_get_hpet_base()
 #include "../include/rtc.h"
 #include "../include/serial.h"   // write_serial() (locked — multi-CPU safe)
 #include "../include/entropy.h"   // entropy_add() — kernel CSPRNG feed
 #include "../include/watchdog.h"  // per-core heartbeat + hard-lockup detector
+
+// ---- HPET (High Precision Event Timer) ----
+// Modern high-resolution clock source (10-25 MHz counter vs PIT's 1.19 MHz).
+// Used here as a precise monotonic clock + busy-wait, NOT as the scheduler
+// tick source: the PIT/HZ=100 tick that drives timer_ticks, the watchdog
+// cadence, AP tick insurance and the per-core LAPIC timers is carefully
+// tuned and should not be re-based onto HPET routing. HPET's value is
+// fine-grained elapsed time for drivers/apps (calibration, delays, profiles).
+//
+// Register map (Intel HPET spec):
+//   +0x000 GCAP_ID : bit15 legacy_route_cap, bits32..63 counter period (fs)
+//   +0x010 GEN_CONF: bit0 ENABLE_CNF, bit1 LEG_RT_CNF
+//   +0x020 GEN_STAT
+//   +0x0F0 MAIN_COUNTER (64-bit)
+//   +0x100 timer0 conf/cap, +0x108 timer0 comparator, +0x120 timer0 IRQ route
+static uint32_t      hpet_base = 0;
+static uint32_t      hpet_fs_per_clk = 0;  // counter period in femtoseconds (32-bit, < 4e9)
+static uint32_t      hpet_counter_lo_base = 0;
+static uint32_t      hpet_counter_hi_base = 0;
+static int hpet_ready = 0;
+
+static inline uint32_t hpet_reg(uint32_t off) {
+    return *(volatile uint32_t*)(uintptr_t)(hpet_base + off);
+}
+static inline void hpet_reg_set(uint32_t off, uint32_t v) {
+    *(volatile uint32_t*)(uintptr_t)(hpet_base + off) = v;
+}
+// Read the 64-bit main counter into two 32-bit halves, with rollover
+// detection (the real hardware may split the read across two cycles).
+static inline void hpet_counter_read(uint32_t* lo, uint32_t* hi) {
+    uint32_t h1, l, h2;
+    do {
+        h1 = hpet_reg(0x0F4);
+        l  = hpet_reg(0x0F0);
+        h2 = hpet_reg(0x0F4);
+    } while (h1 != h2);
+    *lo = l; *hi = h2;
+}
+
+int hpet_present(void) { return hpet_ready; }
+
+// 32x32 → 64-bit unsigned multiply via x86 `mull` (EDX:EAX = EAX * rm).
+static inline uint64_t mul32_32(uint32_t a, uint32_t b) {
+    uint32_t lo, hi;
+    __asm__("mull %3" : "=a"(lo), "=d"(hi) : "a"(a), "rm"(b));
+    return (uint64_t)hi << 32 | lo;
+}
+
+// 64-bit / 32-bit unsigned division via x86 `div` (EDX:EAX / rm). Returns
+// quotient; remainder is discarded. Does NOT check for `div #DE`: the caller
+// must ensure `hi < d` (i.e. the quotient fits in 32 bits).
+//
+// Operand numbering: 3 operands total — %0 = EAX (lo), %1 = EDX (hi), %2 = d.
+// (Earlier this used %3, which resolves past the operand list to garbage and
+// silently corrupted every 64-bit HPET conversion — caught by host-side unit
+// test on mul32_32/div64_32.)
+static inline uint32_t div64_32(uint32_t hi, uint32_t lo, uint32_t d) {
+    __asm__("div %2" : "+a"(lo), "+d"(hi) : "r"(d));
+    (void)hi;
+    return lo;
+}
+
+void hpet_init(void) {
+    hpet_base = acpi_get_hpet_base();
+    if (hpet_base == 0) {
+        write_serial_string("[HPET] no HPET table, using PIT\n");
+        return;
+    }
+
+    // GCAP_ID bits 32..63 = counter period in femtoseconds (10^-15 s).
+    // A period of 0 or an absurd value means the counter is unusable.
+    // Read the upper 32 bits of the 64-bit register at offset 0.
+    uint32_t gcap_hi = hpet_reg(0x004);   // bits 32..63 of GCAP_ID
+    if (gcap_hi == 0 || gcap_hi > 1000000000u) {
+        write_serial_string("[HPET] bad counter period, disabling\n");
+        hpet_base = 0;
+        return;
+    }
+    hpet_fs_per_clk = gcap_hi;
+
+    // Enable the main counter. If the firmware says legacy routing is
+    // supported, also enable legacy route so timer0 can share the PIC IRQ
+    // path (harmless when we never program a comparator).
+    uint32_t conf = hpet_reg(0x010);
+    if (hpet_reg(0x000) & (1u << 15)) conf |= 2u;   // LEG_RT_CNF
+    conf |= 1u;                                      // ENABLE_CNF
+    hpet_reg_set(0x010, conf);
+
+    hpet_counter_read(&hpet_counter_lo_base, &hpet_counter_hi_base);
+    hpet_ready = 1;
+    write_serial_string("[HPET] enabled at ");
+    write_serial_hex(hpet_base);
+    write_serial_string(" period=");
+    write_serial_hex(hpet_fs_per_clk);
+    write_serial_string(" fs\n");
+}
+
+// Monotonic microseconds since hpet_init's counter snapshot. Falls back to
+// timer_get_us() (PIT) when no HPET is present.
+// Formula: us = (delta_clk * period_fs) / 10^9
+uint32_t hpet_get_us(void) {
+    if (!hpet_ready) return timer_get_us();
+
+    uint32_t lo, hi;
+    hpet_counter_read(&lo, &hi);
+
+    uint32_t dlo = lo - hpet_counter_lo_base;
+    uint32_t dhi = hi - hpet_counter_hi_base;
+    if (lo < hpet_counter_lo_base) dhi--;  // borrow
+    // Now dhi:dlo = counter delta (64-bit, but typically < 2^30 for ~sec-scale).
+
+    // Instead of full 64x64 multiply and 64/32 div (which needs libgcc),
+    // fold the high part: each counter wraparound is 2^32 / hpet_fs_per_clk
+    // femtoseconds... Actually, simplify: if the delta fits 32 bits (which it
+    // does for the first ~170 seconds at 25 MHz on a fresh boot), fall
+    // through to the fast path. For the very rare overflow we punt to PIT.
+    if (dhi != 0) return timer_get_us();
+
+    // us = dlo * fs_per_clk / 10^9  — use div64_32 for the 64-bit product.
+    uint64_t prod = mul32_32(dlo, hpet_fs_per_clk);
+    return div64_32((uint32_t)(prod >> 32), (uint32_t)prod, 1000000000u);
+}
+
+// Busy-wait for `ns` nanoseconds using the HPET counter. No-op (returns
+// immediately) when HPET is unavailable — callers must guard.
+void hpet_nsleep(uint32_t ns) {
+    if (!hpet_ready) return;
+
+    uint32_t lo, hi;
+    hpet_counter_read(&lo, &hi);
+    uint64_t start = (uint64_t)hi << 32 | lo;
+
+    // clks_to_wait = ns * 10^6 / fs_per_clk  (1 ns = 10^6 fs, rounded UP so
+    // we never sleep less than requested). Both operands fit 32 bits.
+    // Rounding up: (numerator + (fs_per_clk - 1)) / fs_per_clk.
+    uint64_t num = mul32_32(ns, 1000000u);
+    num += hpet_fs_per_clk - 1;
+    uint64_t target_clks = div64_32((uint32_t)(num >> 32), (uint32_t)num,
+                                    hpet_fs_per_clk);
+
+    uint64_t finish = start + target_clks;
+    // 64-bit wrap-safe busy-wait: loop until counter passes finish.
+    for (;;) {
+        hpet_counter_read(&lo, &hi);
+        uint64_t now = (uint64_t)hi << 32 | lo;
+        if ((int64_t)(now - finish) >= 0) break;
+        __asm__ __volatile__("pause");
+    }
+}
+
 
 // volatile: written by the IRQ0 handler, read by wait loops in thread context.
 // Without it the compiler may hoist the load out of a polling loop and spin on

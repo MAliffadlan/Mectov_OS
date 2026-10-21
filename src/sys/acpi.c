@@ -5,6 +5,14 @@
 #include "../include/mem.h"   // mem_identity_tables / PT_ENTRIES: the mapped ceiling
 #include "../include/io.h"    // outw for the S5 PM1a/b control writes
 
+// Shared RSDP data cached by acpi_init so later table lookups (HPET, etc.)
+// don't need to re-locate it. We cache the RSDT and XSDT base + entry count;
+// both are identity-mapped physical addresses the kernel can dereference.
+static uint32_t acpi_rsdt_base = 0;      // physical address of the RSDT (or 0)
+static uint32_t acpi_rsdt_entries = 0;
+static uint32_t acpi_xsdt_base = 0;      // physical address of the XSDT (or 0)
+static uint32_t acpi_xsdt_entries = 0;
+
 uint32_t smp_bsp_lapic_id = 0;
 uint32_t smp_cpu_count = 0;
 uint8_t smp_lapic_ids[MAX_CORES];
@@ -250,6 +258,7 @@ void acpi_init(void) {
 
     if (xsdt_addr64 != 0 && (xsdt_addr64 >> 32) == 0 && (uint32_t)xsdt_addr64 < acpi_phys_max()) {
         uint32_t addr = (uint32_t)xsdt_addr64;
+        acpi_xsdt_base = addr;
         write_serial_string("[ACPI] XSDT Addr: ");
         write_serial_hex(addr);
         write_serial_string("\n");
@@ -257,6 +266,7 @@ void acpi_init(void) {
         acpi_header_t* xsdt = (acpi_header_t*)addr;
         if (!validate_table(xsdt, 1024 * 1024)) {
             write_serial_string("[ACPI] XSDT checksum failed!\n");
+            acpi_xsdt_base = 0;
             return;
         }
         write_serial_string("[ACPI] XSDT sig/len OK\n");
@@ -265,7 +275,8 @@ void acpi_init(void) {
         // live in the same table list and their relative order varies by
         // firmware, so an early return after the MADT could miss the FADT.
         uint32_t len = xsdt->length;
-        int entries = (len - sizeof(acpi_header_t)) / 8;
+        acpi_xsdt_entries = (len - sizeof(acpi_header_t)) / 8;
+        int entries = acpi_xsdt_entries;
         uint64_t* xptrs = (uint64_t*)((uint8_t*)xsdt + sizeof(acpi_header_t));
         int madt_done = 0, fadt_done = 0;
         for (int i = 0; i < entries; i++) {
@@ -291,6 +302,7 @@ void acpi_init(void) {
 
     // ---- Legacy RSDT path (ACPI 1.0) ----
     uint32_t addr = rsdp->rsdt_address;
+    acpi_rsdt_base = addr;
     write_serial_string("[ACPI] RSDT Addr: ");
     write_serial_hex(addr);
     write_serial_string("\n");
@@ -298,12 +310,14 @@ void acpi_init(void) {
     acpi_header_t* rsdt = (acpi_header_t*)addr;
     if (!validate_table(rsdt, 1024 * 1024)) {
         write_serial_string("[ACPI] RSDT checksum failed!\n");
+        acpi_rsdt_base = 0;
         return;
     }
     write_serial_string("[ACPI] RSDT sig/len OK\n");
 
     uint32_t len = rsdt->length;
-    int entries = (len - sizeof(acpi_header_t)) / 4;
+    acpi_rsdt_entries = (len - sizeof(acpi_header_t)) / 4;
+    int entries = acpi_rsdt_entries;
     uint32_t* rptrs = (uint32_t*)((uint8_t*)rsdt + sizeof(acpi_header_t));
     int madt_done = 0, fadt_done = 0;
     for (int i = 0; i < entries; i++) {
@@ -324,4 +338,62 @@ void acpi_init(void) {
     }
     if (!madt_done) write_serial_string("[ACPI] MADT not found in RSDT!\n");
     if (!fadt_done) write_serial_string("[ACPI] FADT not found in RSDT\n");
+}
+
+// Locate an ACPI table by its 4-char signature from whichever description
+// table (XSDT preferred, RSDT fallback) acpi_init cached. Returns the table's
+// physical (identity-mapped) address, or 0 if absent. Legacy RSDT entries are
+// 4-byte pointers, XSDT entries are 8-byte.
+static uint32_t acpi_find_table(const char* sig) {
+    uint32_t result = 0;
+    if (acpi_xsdt_base != 0 && acpi_xsdt_entries > 0) {
+        acpi_header_t* xsdt = (acpi_header_t*)acpi_xsdt_base;
+        uint64_t* xptrs = (uint64_t*)((uint8_t*)xsdt + sizeof(acpi_header_t));
+        for (uint32_t i = 0; i < acpi_xsdt_entries; i++) {
+            uint64_t ptr = xptrs[i];
+            if ((ptr >> 32) != 0 || ptr == 0 || ptr >= acpi_phys_max()) continue;
+            acpi_header_t* header = (acpi_header_t*)(uint32_t)ptr;
+            if (string_starts_with(header->signature, sig) &&
+                validate_table(header, 1024 * 1024)) {
+                result = (uint32_t)ptr;
+                break;
+            }
+        }
+        if (result) return result;
+    }
+    if (acpi_rsdt_base != 0 && acpi_rsdt_entries > 0) {
+        acpi_header_t* rsdt = (acpi_header_t*)acpi_rsdt_base;
+        uint32_t* rptrs = (uint32_t*)((uint8_t*)rsdt + sizeof(acpi_header_t));
+        for (uint32_t i = 0; i < acpi_rsdt_entries; i++) {
+            uint32_t ptr = rptrs[i];
+            if (ptr == 0 || ptr >= acpi_phys_max()) continue;
+            acpi_header_t* header = (acpi_header_t*)ptr;
+            if (string_starts_with(header->signature, sig) &&
+                validate_table(header, 1024 * 1024)) {
+                result = ptr;
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+// Return the MMIO base address of the HPET (from the HPET table's
+// generic-address block), or 0 when no valid HPET table is present. Callers
+// must still probe the HPET's own GCAP_ID to confirm it is live before use.
+uint32_t acpi_get_hpet_base(void) {
+    uint32_t tbl = acpi_find_table("HPET");
+    if (tbl == 0) return 0;
+
+    // The HPET table's base-address block starts 36 bytes in (after the
+    // 36-byte header) and is an ACPI generic-address structure: byte 0 is the
+    // address space id (0 = system memory), bytes 4..11 the 64-bit address.
+    uint8_t* b = (uint8_t*)tbl + 36;
+    if (b[0] != 0) return 0;   // must be memory-mapped, not IO
+    uint32_t base = (uint32_t)((uintptr_t)b[4] |
+                               ((uintptr_t)b[5] << 8) |
+                               ((uintptr_t)b[6] << 16) |
+                               ((uintptr_t)b[7] << 24));
+    if (base == 0 || base >= 0x10000000u) return 0;   // sanity: sane MMIO range
+    return base;
 }

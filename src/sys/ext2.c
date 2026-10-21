@@ -12,6 +12,60 @@ static uint32_t bgd_block = 2; // Usually block 2 for 1024-byte blocks
 static ext2_bg_descriptor_t* bgd_table = NULL;
 static uint32_t ext2_max_groups = 0; // capped at MAX below; read_inode bounds-checks against it
 
+// ---- Ext4 extent-tree read support ----
+// ext4 stores file block mappings in an extent tree rooted at i_block[0..2]
+// (instead of ext2's direct/indirect pointer array). This driver is read-mostly
+// (writes still go through the legacy ext2 allocation paths); for an inode that
+// carries the EXT4_EXTENTS_FL, we walk the tree to resolve a logical block.
+// Feature flag: an ext4 volume sets EXT4_FEATURE_INCOMPAT_EXTENTS in the
+// superblock's s_feature_incompat. Inode flag: EXT4_EXTENTS_FL (0x80000).
+#define EXT4_FEATURE_INCOMPAT_EXTENTS  0x0040
+#define EXT4_EXTENTS_FL                0x00080000
+#define EXT4_EXT_MAGIC                 0xF30A
+// Unwritten extent marker: ee_len & this bit means the extent is unwritten
+// (reads as zeros, no disk data).
+#define EXT4_EXT_UNWRITTEN             0x8000
+// Max extent tree depth to follow before giving up (guards corruption/cycles).
+#define EXT4_MAX_DEPTH                 5
+
+// Extent tree node header (in i_block[0]): 12 bytes followed by leaf or index.
+// On-disk layout (ext4_extent_header): eh_magic is a __le16 (2 bytes), then
+// eh_entries/eh_max/eh_depth are __le16 each, and eh_generation a __le32.
+// Using uint32 for eh_magic would shift entries/max/depth right by 2 bytes and
+// corrupt every extent lookup (caught by host-side unit test against a real
+// mkfs.ext4 image: it read entries=4 for a 1-extent file and resolved blk 0).
+typedef struct {
+    uint16_t eh_magic;      // EXT4_EXT_MAGIC (0xF30A), little-endian (x86)
+    uint16_t eh_entries;    // number of valid entries
+    uint16_t eh_max;        // capacity (entries)
+    uint16_t eh_depth;      // 0 == leaf, >0 == index nodes
+    uint32_t eh_generation;
+} __attribute__((packed)) ext4_ext_header_t;
+
+// Leaf: one contiguous physical run [ee_start_lo, ee_start_hi] of ee_len
+// blocks, starting at logical block ee_block.
+typedef struct {
+    uint32_t ee_block;
+    uint16_t ee_len;
+    uint16_t ee_start_hi;
+    uint32_t ee_start_lo;
+} __attribute__((packed)) ext4_extent_t;
+
+// Index node: points to a child block (the next level's header).
+typedef struct {
+    uint32_t ei_block;
+    uint32_t ei_leaf_lo;
+    uint16_t ei_leaf_hi;
+    uint16_t ei_unused;
+} __attribute__((packed)) ext4_extent_idx_t;
+
+// True when this volume mounted as ext4 (superblock advertises extents).
+static int ext4_volume = 0;
+// True when a specific inode stores its block map as an extent tree.
+static int inode_uses_extents(const ext2_inode_t* inode) {
+    return ext4_volume && (inode->i_flags & EXT4_EXTENTS_FL);
+}
+
 // Drive the global state currently targets (mount-layer auto-select).
 int ext2_current_drive(void) { return ext2_drive; }
 
@@ -145,7 +199,14 @@ int ext2_init(int drive) {
     }
     
     write_serial_string("[EXT2] Superblock found!\n");
-    
+
+    // Detect an ext4 volume: it advertises the extents incompat feature. Root,
+    // directory and data inodes on such a volume use the extent tree, which the
+    // read path below walks instead of ext2's direct/indirect pointers.
+    ext4_volume = (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) != 0;
+    write_serial_string(ext4_volume ? "[EXT2] ext4 extent volume detected\n"
+                                    : "[EXT2] classic ext2 volume\n");
+
     // Superblock fields come from a disk image the user controls: sanitize them
     // before using them in arithmetic or indexes.
     // - block_size up to 4096 is what the driver's fixed 4KB buffers support;
@@ -585,9 +646,118 @@ static void ext2_free_inode(uint32_t inode_num) {
 
 // --- Inode block-pointer helpers (direct + singly indirect) ---
 
+// Resolve a logical block `lb` of an extent-tree inode to its on-disk block,
+// or 0 for a hole / out-of-range / unwritten extent. The extent tree is
+// rooted in the inode's i_block[0..2] (first 12 bytes = header). A leaf
+// extent covers [ee_block, ee_block+ee_len) logical blocks mapped to
+// contiguous on-disk blocks; index nodes (depth>0) point at child blocks.
+// Read-only: extent allocation/write is not supported, so `alloc` is ignored
+// and a caller requesting allocation gets 0 (no block).
+static uint32_t ext4_get_block(const ext2_inode_t* inode, uint32_t lb, int alloc) {
+    (void)alloc;   // extent writes not supported: this is a read path
+
+    // Root header lives in i_block[0..2] (12 bytes). The packed struct means
+    // the first three uint32s alias the header on a little-endian x86 host,
+    // which is exactly ext4's on-disk byte order.
+    const ext4_ext_header_t* hdr = (const ext4_ext_header_t*)&inode->i_block[0];
+    if (hdr->eh_magic != EXT4_EXT_MAGIC) return 0;
+    uint16_t depth = hdr->eh_depth;
+    if (depth > EXT4_MAX_DEPTH) depth = EXT4_MAX_DEPTH;
+
+    // Recursive descent: parse `level` (0 = the block we descend FROM).
+    // `base_block` is the on-disk block number of the node to inspect; the
+    // root node is the inode itself (no disk block). We use a small loop with
+    // a stack of child blocks to avoid unbounded recursion on crafted images.
+    // Only one intermediate buffer is live at a time.
+    int is_root = 1;
+    unsigned char* buf = NULL;
+    uint16_t cur_depth = depth;
+
+    for (;;) {
+        // Load the header + records for the current node.
+        unsigned char* rec;         // points at the records (after the 12-byte header)
+        uint16_t entries;
+        uint16_t node_depth;
+        if (is_root) {
+            rec = (unsigned char*)&inode->i_block[0] + 12;
+            entries = hdr->eh_entries;
+            node_depth = hdr->eh_depth;
+        } else {
+            const ext4_ext_header_t* ch = (const ext4_ext_header_t*)(void*)buf;
+            if (ch->eh_magic != EXT4_EXT_MAGIC) { if (buf) kfree(buf); return 0; }
+            rec = buf + 12;
+            entries = ch->eh_entries;
+            node_depth = ch->eh_depth;
+        }
+
+        // Leaf node: linear scan of extents.
+        if (node_depth == 0) {
+            const ext4_extent_t* ex = (const ext4_extent_t*)(void*)rec;
+            for (uint16_t i = 0; i < entries; i++, ex++) {
+                if (lb < ex->ee_block) continue;
+                uint32_t len = ex->ee_len & ~EXT4_EXT_UNWRITTEN;
+                if (len == 0 || (lb - ex->ee_block) >= len) continue;
+                if (ex->ee_len & EXT4_EXT_UNWRITTEN) { if (buf) kfree(buf); return 0; }
+                uint32_t start = ex->ee_start_lo | ((uint32_t)ex->ee_start_hi << 16);
+                uint32_t blk = start + (lb - ex->ee_block);
+                if (buf) kfree(buf);
+                return blk;
+            }
+            if (buf) kfree(buf);
+            return 0;   // no extent covers lb (hole / past EOF)
+        }
+
+        // Index node: pick the last index whose ei_block <= lb.
+        const ext4_extent_idx_t* idx = (const ext4_extent_idx_t*)(void*)rec;
+        uint32_t chosen_block = 0;
+        for (uint16_t i = 0; i < entries; i++, idx++) {
+            // An index node's ei_block is the first logical block of the
+            // child subtree; the next sibling's ei_block ends it. Pick the
+            // LAST index whose ei_block <= lb.
+            if (idx->ei_block <= lb)
+                chosen_block = idx->ei_leaf_lo | ((uint32_t)idx->ei_leaf_hi << 16);
+        }
+        if (chosen_block == 0) { if (buf) kfree(buf); return 0; }
+
+        // Descend one level.
+        unsigned char* nb = (unsigned char*)kmalloc(block_size);
+        if (!nb) { if (buf) kfree(buf); return 0; }
+        ext2_read_block(chosen_block, nb);
+        if (buf) kfree(buf);
+        buf = nb;
+        is_root = 0;
+        cur_depth--;
+        if (cur_depth == 0) {
+            // We just loaded the leaf block — re-scan it as a leaf.
+            const ext4_ext_header_t* ch = (const ext4_ext_header_t*)(void*)buf;
+            if (ch->eh_magic != EXT4_EXT_MAGIC) { kfree(buf); return 0; }
+            const ext4_extent_t* ex = (const ext4_extent_t*)(void*)(buf + 12);
+            for (uint16_t i = 0; i < ch->eh_entries; i++, ex++) {
+                if (lb < ex->ee_block) continue;
+                uint32_t len = ex->ee_len & ~EXT4_EXT_UNWRITTEN;
+                if (len == 0 || (lb - ex->ee_block) >= len) continue;
+                if (ex->ee_len & EXT4_EXT_UNWRITTEN) { kfree(buf); return 0; }
+                uint32_t start = ex->ee_start_lo | ((uint32_t)ex->ee_start_hi << 16);
+                uint32_t blk = start + (lb - ex->ee_block);
+                kfree(buf);
+                return blk;
+            }
+            kfree(buf);
+            return 0;
+        }
+        // More index levels remain: continue the loop with buf as the node.
+    }
+}
+
 // Return the on-disk block for logical block lb; allocate it if alloc is set.
 // 0 means "no block / allocation failed".
 static uint32_t ext2_get_block(ext2_inode_t* inode, uint32_t lb, int alloc) {
+    // Extent-tree inodes resolve through the extent tree instead of the
+    // legacy direct/indirect pointer array. Write-allocation on an ext4
+    // extent inode falls back to "no block" (unsupported), which the callers
+    // treat as a failed/short write.
+    if (inode_uses_extents(inode))
+        return ext4_get_block(inode, lb, alloc);
     if (lb < 12) {
         if (inode->i_block[lb] == 0 && alloc) inode->i_block[lb] = ext2_alloc_block();
         return inode->i_block[lb];

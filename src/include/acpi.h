@@ -96,6 +96,21 @@ typedef struct {
     uint32_t pm1b_cnt_blk;     // 68
 } __attribute__((packed)) fadt_t;
 
+// HPET (High Precision Event Timer) description table. We only need the
+// prefix through the base-address block: the counter period is read from the
+// HPET's own GCAP_ID register, not from this table.
+typedef struct {
+    acpi_header_t header;        // 0
+    uint8_t  hardware_rev_id;    // 36
+    uint8_t  comparator_count;   // 37 (number of timers, minus 1)
+    uint16_t counter_size;       // 38 (bit 0: 64-bit counter capability)
+    uint16_t reserved;           // 40
+    uint16_t granularity;        // 42 (clock resolution)
+    uint8_t  legacy_route;       // 44 (bit 0: supports legacy replacement routing)
+    uint8_t  pci_vendor_id;      // 45 (low byte)
+    uint8_t  hpet_address[8];    // 46 .. 53 (ACPI generic-address structure, base)
+} __attribute__((packed)) hpet_t;
+
 #define MAX_CORES 16
 
 extern uint32_t smp_bsp_lapic_id;
@@ -106,6 +121,10 @@ extern uint32_t smp_ioapic_addr;
 extern uint32_t smp_pit_gsi;
 
 void acpi_init(void);
+
+// Locate the HPET description table's base address (the MMIO location of the
+// HPET registers). Returns 0 when no valid HPET table is present.
+uint32_t acpi_get_hpet_base(void);
 
 // S5 soft-off (v38.45): write the \_S5 sleeping type + SLP_EN into the
 // FADT's PM1a/b control blocks. Never returns on success (the machine is

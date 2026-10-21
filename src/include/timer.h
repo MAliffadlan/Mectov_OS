@@ -11,6 +11,13 @@ void timer_calibrate_ticks_per_sec(void);
 void timer_update_rate_if_second(void);
 extern volatile uint32_t ticks_per_sec;
 
+// HPET high-precision clock (probed from ACPI; PIT is the fallback when the
+// platform has no HPET). hpet_init() must be called after acpi_init().
+void     hpet_init(void);
+int      hpet_present(void);
+uint32_t hpet_get_us(void);    // monotonic microseconds since init
+void     hpet_nsleep(uint32_t ns);  // busy-wait ns (HPET only; no-op if absent)
+
 // System tick rate (v38.80, Linux-HZ style): 100 Hz instead of 1000 Hz.
 // timer_ticks counts MILLISECONDS (advanced by TIMER_MS_PER_TICK per IRQ),
 // so every ms-based consumer — timeouts, sleeps, uptime, blink rates,

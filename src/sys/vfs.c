@@ -384,6 +384,26 @@ static int tmpfs_write_whole(int node, const char* data, int size) {
     return size;
 }
 
+// Free the RAM buffers of a tmpfs mount point and every node under it, and
+// drop those nodes. Called by umount of a MOUNT_TMPFS; /tmp shutdown reuses
+// it. Caller holds vfs_lock.
+void vfs_tmpfs_free_subtree(int mount_node) {
+    if (mount_node < 0 || mount_node >= MAX_NODES) return;
+    for (int i = 1; i < MAX_NODES; i++) {
+        if (fs_nodes[i].in_use && vfs_is_ram_type(fs_nodes[i].type) &&
+            fs_nodes[i].parent == mount_node) {
+            tmpfs_free_node(i);
+            pcache_invalidate(i);
+            fs_nodes[i].in_use = 0;
+            fs_nodes[i].size = 0;
+            fs_nodes[i].data_sector = 0;
+        }
+    }
+    // The mount point itself keeps its type (restored by umount), but any
+    // residual buffer on it (a tmpfs whose root was written as a file) frees.
+    tmpfs_free_node(mount_node);
+}
+
 // v38.96: offset-aware write into a tmpfs file. Called from the fd write
 // fast path with fd_lock held — takes only vfs_lock (leaf below fd_lock in
 // the established ordering). append=1 forces the write at EOF (O_APPEND).

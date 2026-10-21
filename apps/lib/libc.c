@@ -23,9 +23,12 @@ char* impl_strcat(char* dest, const char* src) {
 
 void impl_itoa(int n, char* buf) {
     if (n == 0) { buf[0] = '0'; buf[1] = '\0'; return; }
-    int i = 0, sign = 0;
-    if (n < 0) { sign = 1; n = -n; }
-    while (n > 0) { buf[i++] = (n % 10) + '0'; n /= 10; }
+    // Convert with unsigned arithmetic after stripping the sign. Negating
+    // INT_MIN directly (`n = -n`) overflows and loops forever / returns only
+    // '-' — INT_MIN's magnitude does not fit in a signed int.
+    unsigned int un = (n < 0) ? -(unsigned int)n : (unsigned int)n;
+    int i = 0, sign = (n < 0) ? 1 : 0;
+    while (un > 0) { buf[i++] = (un % 10) + '0'; un /= 10; }
     if (sign) buf[i++] = '-';
     buf[i] = '\0';
     for (int j = 0; j < i / 2; j++) {
@@ -36,6 +39,10 @@ void impl_itoa(int n, char* buf) {
 void impl_itoa_pad(int n, char* buf, int pad) {
     impl_itoa(n, buf);
     int len = impl_strlen(buf);
+    // Clamp `pad` to a sane ceiling. A caller-controlled width (e.g. %050d in
+    // impl_sprintf, which uses a 32-byte temp) must never shift past the
+    // buffer's practical extent.
+    if (pad > 31) pad = 31;
     if (len < pad) {
         int diff = pad - len;
         for (int i = len; i >= 0; i--) {

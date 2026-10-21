@@ -17,6 +17,7 @@ typedef enum {
     MOUNT_NONE = 0,
     MOUNT_EXT2,     // backend ext2.c, root key = root inode number (2)
     MOUNT_FAT32,    // backend fat32.c, root key = root cluster
+    MOUNT_TMPFS,    // RAM-backed tmpfs (vfs.c), drive = -1 sentinel
 } mount_kind_t;
 
 typedef struct {

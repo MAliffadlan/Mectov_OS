@@ -77,6 +77,7 @@ int mount_select_for_node(int node) {
     mount_kind_t kind;
     if (t == FS_EXT2_FILE || t == FS_EXT2_DIR) kind = MOUNT_EXT2;
     else if (t == FS_FAT32_FILE || t == FS_FAT32_DIR) kind = MOUNT_FAT32;
+    else if (t == FS_RAM_DIR || t == FS_RAM_FILE) kind = MOUNT_TMPFS;
     else return 0;   // not a backend node: nothing to select.
 
     // Walk up to the enclosing mount point (root's parent is -1, so this
@@ -87,6 +88,9 @@ int mount_select_for_node(int node) {
         int m = mount_lookup(n);
         if (m >= 0) {
             if (mounts[m].kind != kind) return -1;  // stale node: type/mount disagree
+            // tmpfs has no per-drive backend: a MOUNT_TMPFS resolves to itself
+            // (no drive re-init). ext2/fat32 pin the volume.
+            if (kind == MOUNT_TMPFS) return 0;
             return mount_select_drive(kind, mounts[m].drive);
         }
         int p = fs_nodes[n].parent;
@@ -97,7 +101,7 @@ int mount_select_for_node(int node) {
 }
 
 void mount_dump(void) {
-    static const char* names[] = { "none", "ext2", "fat32" };
+    static const char* names[] = { "none", "ext2", "fat32", "tmpfs" };
     for (int i = 0; i < MAX_MOUNTS; i++) {
         if (!mounts[i].in_use) continue;
         char path[MAX_PATH];
@@ -133,10 +137,14 @@ int vfs_mount_path(const char* path, const char* fstype, int drive) {
     if (!path || !fstype) return -1;
 
     mount_kind_t kind;
-    if (str_eq(fstype, "ext2")) {
+    if (str_eq(fstype, "ext2") || str_eq(fstype, "ext4")) {
+        // ext2.c resolves both: it detects the ext4 superblock's extents flag
+        // and walks extent trees when present, else classic ext2 pointers.
         kind = MOUNT_EXT2;
     } else if (str_eq(fstype, "fat32")) {
         kind = MOUNT_FAT32;
+    } else if (str_eq(fstype, "tmpfs")) {
+        kind = MOUNT_TMPFS;
     } else {
         write_serial_string("[MOUNT] unknown fstype\n");
         return -1;
@@ -144,8 +152,10 @@ int vfs_mount_path(const char* path, const char* fstype, int drive) {
     // Drives 0-3 are IDE; 4..7 are AHCI ports (v38.50); 8..11 are USB
     // mass-storage units (v38.56); 12..15 are virtio-blk disks (v38.78) —
     // all routed through the same sector API, so ext2/fat32 mount on any
-    // of them unchanged.
-    if (drive < 0 || drive >= VIRTIO_BLK_BASE + VIRTIO_BLK_MAX) return -1;
+    // of them unchanged. tmpfs is RAM-backed: no drive, accept any sentinel
+    // (the caller passes -1, or any value for convenience).
+    if (kind != MOUNT_TMPFS && (drive < 0 || drive >= VIRTIO_BLK_BASE + VIRTIO_BLK_MAX))
+        return -1;
 
     vfs_lock_acquire();
 
@@ -207,7 +217,7 @@ int vfs_mount_path(const char* path, const char* fstype, int drive) {
         fs_nodes[node].ext2_inode = 2;   // ext2 root directory inode
         root_key = 2;
         ext2_populate_vfs(2, node);
-    } else {
+    } else if (kind == MOUNT_FAT32) {
         if (fat32_init(drive) != 0) {
             write_serial_string("[MOUNT] fat32_init failed\n");
             vfs_lock_release();
@@ -217,6 +227,16 @@ int vfs_mount_path(const char* path, const char* fstype, int drive) {
         root_key = fat32_root_cluster();
         fs_nodes[node].data_sector = (int)root_key;
         fat32_populate_vfs(root_key, node);
+    } else {
+        // MOUNT_TMPFS: RAM-backed, no drive init. The mount point (an empty
+        // directory from above) becomes an FS_RAM_DIR whose children will be
+        // FS_RAM_FILE nodes backed by the shared tmpfs side table in vfs.c.
+        // Must be an empty directory with no leftover ext2/fat32 fields.
+        fs_nodes[node].type = FS_RAM_DIR;
+        fs_nodes[node].ext2_inode = 0;
+        fs_nodes[node].data_sector = 0;
+        fs_nodes[node].size = 0;
+        root_key = 0;
     }
 
     if (mount_register(node, kind, drive, root_key) < 0) {
@@ -258,14 +278,20 @@ int vfs_umount_path(const char* path) {
         return -1;
     }
 
-    // Drop the subtree (the data lives on the real filesystem, untouched)
-    // and restore a plain directory node so the type dispatch stops
-    // routing into the backend. The node table is persisted so a reboot
-    // after umount boots with a plain directory at this path too.
-    vfs_clear_children(node);
+    // Drop the subtree and restore a plain directory node so the type
+    // dispatch stops routing into the backend. For ext2/fat32 the data lives
+    // on the real filesystem, untouched. For tmpfs the RAM buffers must be
+    // freed (the content is volatile by design, so umount discards it).
+    if (mounts[m].kind == MOUNT_TMPFS) {
+        extern void vfs_tmpfs_free_subtree(int);
+        vfs_tmpfs_free_subtree(node);
+    } else {
+        vfs_clear_children(node);
+    }
     fs_nodes[node].type = FS_DIR;
     fs_nodes[node].ext2_inode = 0;
     fs_nodes[node].data_sector = 0;
+    fs_nodes[node].size = 0;
     mounts[m].in_use = 0;
     vfs_save();
 

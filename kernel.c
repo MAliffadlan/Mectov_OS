@@ -416,6 +416,12 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     entropy_init();
     write_serial_string("[K] timer\n");
     init_timer(TIMER_HZ); // 100 Hz PIT (Linux-HZ style); timer_ticks counts ms
+    // HPET high-precision clock (probed from the ACPI tables acpi_init found).
+    // Optional: when no HPET exists, hpet_get_us()/hpet_nsleep() fall back to
+    // the PIT. Must run after acpi_init() (line 372) and init_timer().
+    write_serial_string("[K] hpet\n");
+    extern void hpet_init(void);
+    hpet_init();
     write_serial_string("[K] kbd\n");
     init_keyboard();
     write_serial_string("[K] cpu\n");

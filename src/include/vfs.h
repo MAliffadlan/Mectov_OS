@@ -174,6 +174,9 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len);
 // writes at EOF (O_APPEND). Grows the RAM buffer on demand, honors the
 // tmpfs budget; returns bytes written or <0.
 int vfs_write_file_offset(int node, int offset, const char* buf, int len, int append);
+// v38.x: free the RAM buffers + drop the nodes of a tmpfs mount subtree
+// (called by umount of a MOUNT_TMPFS, and /tmp teardown). Takes vfs_lock.
+void vfs_tmpfs_free_subtree(int mount_node);
 
 // Resolusi path
 void vfs_resolve_path(const char* path, char* resolved, int buf_size);

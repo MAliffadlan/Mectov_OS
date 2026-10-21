@@ -32,6 +32,10 @@ static uint32_t current_pcm_length = 0;
 static uint32_t current_pcm_pos = 0;
 static int current_half = 0;
 
+// Extended playback state
+static int playback_state = 0;  // SB16_STATE_STOPPED, PLAYING, PAUSED
+static sb16_format_t current_format = {8, 1, 0, 22050};  // Default: 8-bit mono unsigned 22kHz
+
 // sb16_lock serializes the PCM state above across its two contexts: the
 // completion IRQ (fill_buffer + the half toggle) and task context
 // (sb16_set_audio_buffer, and the prefill in sb16_start_playback). Process
@@ -81,14 +85,26 @@ static int dsp_reset(void) {
 // Fill half of the DMA buffer with PCM data
 static void fill_buffer(int half) {
     uint8_t* dest = dma_buffer + (half * HALF_BUFFER);
+    // Silence byte varies by format: 8-bit unsigned = 0x80, 16-bit unsigned =
+    // 0x00 0x80, 16-bit signed = 0x00 0x00. Writing 0x80 into every byte of a
+    // 16-bit sample yields 0x8080 — a full-scale DC buzz, not silence.
+    uint8_t sil_lo, sil_hi;
+    if (current_format.bits == 16) {
+        if (current_format.is_signed) { sil_lo = 0x00; sil_hi = 0x00; }
+        else                          { sil_lo = 0x00; sil_hi = 0x80; }
+    } else {
+        sil_lo = 0x80; sil_hi = 0x80;
+    }
     for (int i = 0; i < HALF_BUFFER; i++) {
         if (current_pcm_data && current_pcm_length > 0) {
             dest[i] = current_pcm_data[current_pcm_pos++];
             if (current_pcm_pos >= current_pcm_length) {
                 current_pcm_pos = 0; // Loop
             }
+        } else if (current_format.bits == 16) {
+            dest[i] = (i & 1) ? sil_hi : sil_lo; // high/low byte of 16-bit sample
         } else {
-            dest[i] = 128; // Silence (8-bit unsigned center)
+            dest[i] = sil_lo; // 8-bit
         }
     }
 }
@@ -104,8 +120,15 @@ static void sb16_irq_handler(void* r) {
     // walk off the end of the new — possibly much smaller — buffer.
     spin_lock(&sb16_lock);
 
-    // Acknowledge 8-bit interrupt
-    inb(DSP_INT_ACK_8);
+    // Acknowledge the completion interrupt. The ack port differs by width:
+    // 8-bit auto-init asserts on DSP_INT_ACK_8 (0xE), 16-bit on DSP_INT_ACK_16
+    // (0xF). Acknowledging the wrong port leaves the IRQ asserted so the card
+    // keeps re-firing and the fill runs out of phase with DMA.
+    if (current_format.bits == 16) {
+        inb(DSP_INT_ACK_16);
+    } else {
+        inb(DSP_INT_ACK_8);
+    }
 
     // Fill the half that just finished playing
     fill_buffer(current_half);
@@ -164,11 +187,16 @@ void sb16_set_audio_buffer(uint8_t* pcm_data, uint32_t length) {
 
 void sb16_stop_playback() {
     if (!sb16_available) return;
-    // Halt 8-bit DMA
-    dsp_write(0xD0);
-    // Unmask DMA channel just to be safe
-    // Actually D0 just pauses it
-    write_serial_string("[SB16] Playback stopped/paused.\n");
+
+    // Exit auto-init mode and stop DMA
+    if (current_format.bits == 16) {
+        dsp_write(0xD9);  // Exit 16-bit auto-init mode
+    } else {
+        dsp_write(0xDA);  // Exit 8-bit auto-init mode
+    }
+
+    playback_state = 0; // SB16_STATE_STOPPED
+    write_serial_string("[SB16] Playback stopped.\n");
 }
 
 void sb16_start_playback(uint16_t sample_rate) {
@@ -177,7 +205,15 @@ void sb16_start_playback(uint16_t sample_rate) {
         return;
     }
     write_serial_string("[SB16] Starting 8-bit mono playback...\n");
-    
+
+    // Keep the active format in sync: if a prior sb16_start_playback_ex left
+    // current_format as 16-bit, pause/stop would emit the 16-bit exit command
+    // (0xD9/0xD5) against an 8-bit transfer and fail to stop it.
+    current_format.bits = 8;
+    current_format.channels = 1;
+    current_format.is_signed = 0;
+    current_format.sample_rate = sample_rate;
+
     // Pre-fill both halves of the DMA buffer. Under sb16_lock: fill_buffer
     // advances current_pcm_pos, which a completion IRQ from a previous start
     // also advances — prefill and IRQ must not interleave their cursors.
@@ -198,7 +234,10 @@ void sb16_start_playback(uint16_t sample_rate) {
     
     dma_set_channel(1, 0x58, buf_addr, BUFFER_SIZE);
     write_serial_string("[SB16] DMA channel 1 configured.\n");
-    
+
+    // Turn on DSP speaker output (required before playback)
+    dsp_write(0xD1);
+
     // Set output sample rate (SB16 command 0x41)
     dsp_write(0x41);
     dsp_write((sample_rate >> 8) & 0xFF);
@@ -212,6 +251,8 @@ void sb16_start_playback(uint16_t sample_rate) {
     dsp_write(blk_len & 0xFF);
     dsp_write((blk_len >> 8) & 0xFF);
     
+    playback_state = 1; // SB16_STATE_PLAYING
+
     write_serial_string("[SB16] Playback started at ");
     write_serial_hex(sample_rate);
     write_serial_string(" Hz.\n");
@@ -220,11 +261,15 @@ void sb16_start_playback(uint16_t sample_rate) {
 // --- Volume Control ---
 // SB16 master volume: register 0x22, format: left[7:4] | right[3:0] (each 0-15)
 static uint8_t current_volume = 80; // Default 80%
+static sb16_mixer_t current_mixer = {80, 50, 50, 80}; // Default mixer settings
 
 void sb16_set_volume(uint8_t vol) {
     if (vol > 100) vol = 100;
     current_volume = vol;
-    
+    // Keep the mixer cache coherent with the master-volume view so
+    // sb16_get_mixer() does not report a stale master after set_volume().
+    current_mixer.master = vol;
+
     if (!sb16_available) return;
     
     // Map 0-100 to 0-15 for SB16 mixer
@@ -245,4 +290,191 @@ uint8_t sb16_get_volume(void) {
 
 int sb16_is_available(void) {
     return sb16_available;
+}
+
+// --- Extended Playback Functions ---
+
+void sb16_pause_playback(void) {
+    if (!sb16_available || playback_state != 1) return;
+
+    // Pause DMA transfer (0xD0 for 8-bit, 0xD5 for 16-bit)
+    if (current_format.bits == 16) {
+        dsp_write(0xD5);
+    } else {
+        dsp_write(0xD0);
+    }
+
+    playback_state = 2; // SB16_STATE_PAUSED
+    write_serial_string("[SB16] Playback paused.\n");
+}
+
+void sb16_resume_playback(void) {
+    if (!sb16_available || playback_state != 2) return;
+
+    // Resume DMA transfer (0xD4 for 8-bit, 0xD6 for 16-bit)
+    if (current_format.bits == 16) {
+        dsp_write(0xD6);
+    } else {
+        dsp_write(0xD4);
+    }
+
+    playback_state = 1; // SB16_STATE_PLAYING
+    write_serial_string("[SB16] Playback resumed.\n");
+}
+
+int sb16_get_state(void) {
+    return playback_state;
+}
+
+uint32_t sb16_get_position(void) {
+    return current_pcm_pos;
+}
+
+// Start playback with extended format support (16-bit, stereo)
+void sb16_start_playback_ex(sb16_format_t* format) {
+    if (!sb16_available) {
+        write_serial_string("[SB16] Cannot play: no sound card.\n");
+        return;
+    }
+
+    if (!format) {
+        // Fall back to default format
+        sb16_start_playback(22050);
+        return;
+    }
+
+    // Validate into a local copy: the DSP state machine (current_format) and
+    // the caller's struct are kept distinct, so a malformed format never
+    // mutates the caller's data as a side effect.
+    sb16_format_t fmt = *format;
+    if (fmt.bits != 8 && fmt.bits != 16) {
+        write_serial_string("[SB16] Invalid bit depth, using 8-bit.\n");
+        fmt.bits = 8;
+    }
+    if (fmt.channels != 1 && fmt.channels != 2) {
+        write_serial_string("[SB16] Invalid channels, using mono.\n");
+        fmt.channels = 1;
+    }
+
+    // Save current format
+    current_format = fmt;
+
+    write_serial_string("[SB16] Starting playback: ");
+    write_serial_hex(fmt.bits);
+    write_serial_string("-bit, ");
+    write_serial_string(fmt.channels == 2 ? "stereo" : "mono");
+    write_serial_string(", ");
+    write_serial_hex(fmt.sample_rate);
+    write_serial_string(" Hz\n");
+
+    // Pre-fill both halves of the DMA buffer
+    uint32_t nf = spin_lock_irqsave(&sb16_lock);
+    fill_buffer(0);
+    fill_buffer(1);
+    current_half = 0;
+    spin_unlock_irqrestore(&sb16_lock, nf);
+
+    uint32_t buf_addr = (uint32_t)dma_buffer;
+
+    if (fmt.bits == 16) {
+        // 16-bit playback uses DMA channel 5
+        write_serial_string("[SB16] Using 16-bit DMA (channel 5)\n");
+        dma_set_channel(5, 0x58, buf_addr, BUFFER_SIZE);
+
+        // Turn on DSP speaker
+        dsp_write(0xD1);
+
+        // Set sample rate (command 0x41)
+        dsp_write(0x41);
+        dsp_write((fmt.sample_rate >> 8) & 0xFF);
+        dsp_write(fmt.sample_rate & 0xFF);
+
+        // Start 16-bit auto-init DMA playback (command 0xB6). The mode byte
+        // bits per the SB16 spec: 0x08 = signed, 0x10 = 16-bit (required),
+        // 0x20 = stereo. Setting 0x10 for the signed flag would be a no-op
+        // (the 16-bit bit is already set) — the dead flag bug.
+        dsp_write(0xB6);
+        uint8_t mode = 0x10; // 16-bit
+        if (fmt.channels == 2) mode |= 0x20; // Stereo
+        if (fmt.is_signed) mode |= 0x08;     // Signed
+        dsp_write(mode);
+
+        uint16_t blk_len = (HALF_BUFFER / 2) - 1; // 16-bit transfers
+        dsp_write(blk_len & 0xFF);
+        dsp_write((blk_len >> 8) & 0xFF);
+    } else {
+        // 8-bit playback (existing code path)
+        dma_set_channel(1, 0x58, buf_addr, BUFFER_SIZE);
+
+        // Turn on DSP speaker
+        dsp_write(0xD1);
+
+        // Set sample rate
+        dsp_write(0x41);
+        dsp_write((fmt.sample_rate >> 8) & 0xFF);
+        dsp_write(fmt.sample_rate & 0xFF);
+
+        // Start 8-bit auto-init DMA playback
+        dsp_write(0xC6);
+        uint8_t mode = 0x00; // 8-bit mono unsigned
+        if (fmt.channels == 2) mode |= 0x20; // Stereo
+        dsp_write(mode);
+
+        uint16_t blk_len = HALF_BUFFER - 1;
+        dsp_write(blk_len & 0xFF);
+        dsp_write((blk_len >> 8) & 0xFF);
+    }
+
+    playback_state = 1; // SB16_STATE_PLAYING
+    write_serial_string("[SB16] Playback started.\n");
+}
+
+// --- Mixer Control Functions ---
+
+void sb16_set_mixer(sb16_mixer_t* mixer) {
+    if (!sb16_available || !mixer) return;
+
+    current_mixer = *mixer;
+    // Keep the master-volume cache coherent: sb16_get_volume() must reflect
+    // the mixer master it just applied, not a stale value.
+    current_volume = (mixer->master > 100) ? 100 : mixer->master;
+
+    // Master volume (0x22)
+    uint8_t master_hw = (mixer->master * 15) / 100;
+    uint8_t master_val = (master_hw << 4) | master_hw;
+    outb(DSP_MIXER_ADDR, 0x22);
+    outb(DSP_MIXER_DATA, master_val);
+
+    // Bass (0x46)
+    uint8_t bass_hw = (mixer->bass * 15) / 100;
+    uint8_t bass_val = (bass_hw << 4) | bass_hw;
+    outb(DSP_MIXER_ADDR, 0x46);
+    outb(DSP_MIXER_DATA, bass_val);
+
+    // Treble (0x44)
+    uint8_t treble_hw = (mixer->treble * 15) / 100;
+    uint8_t treble_val = (treble_hw << 4) | treble_hw;
+    outb(DSP_MIXER_ADDR, 0x44);
+    outb(DSP_MIXER_DATA, treble_val);
+
+    // PCM volume (0x04)
+    uint8_t pcm_hw = (mixer->pcm * 15) / 100;
+    uint8_t pcm_val = (pcm_hw << 4) | pcm_hw;
+    outb(DSP_MIXER_ADDR, 0x04);
+    outb(DSP_MIXER_DATA, pcm_val);
+
+    write_serial_string("[SB16] Mixer updated: Master=");
+    write_serial_hex(mixer->master);
+    write_serial_string(", Bass=");
+    write_serial_hex(mixer->bass);
+    write_serial_string(", Treble=");
+    write_serial_hex(mixer->treble);
+    write_serial_string(", PCM=");
+    write_serial_hex(mixer->pcm);
+    write_serial_string("\n");
+}
+
+void sb16_get_mixer(sb16_mixer_t* mixer) {
+    if (!mixer) return;
+    *mixer = current_mixer;
 }

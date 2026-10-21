@@ -17,7 +17,8 @@ void cmd_mount(void) {
                 return;
         }
 
-        // <path> <fstype> <drive>
+        // <path> <fstype> [<drive>]  — the drive is required for ext2/fat32,
+        // optional for tmpfs (RAM-backed).
         char* path = arg;
         char* fstype = arg;
         while (*fstype && *fstype != ' ') fstype++;
@@ -28,12 +29,18 @@ void cmd_mount(void) {
         if (*drive_s) { *drive_s = '\0'; drive_s++; }
         while (*drive_s == ' ') drive_s++;
 
-        if (path[0] == '\0' || fstype[0] == '\0' || drive_s[0] == '\0') {
-                print("mount: usage: mount <path> <ext2|fat32> <drive>\n", 0x0C);
+        int is_tmpfs = (fstype[0] == 't' && fstype[1] == 'm' && fstype[2] == 'p' &&
+                        fstype[3] == 'f' && fstype[4] == 's' && fstype[5] == '\0');
+        if (path[0] == '\0' || fstype[0] == '\0') {
+                print("mount: usage: mount <path> <ext2|ext4|fat32|tmpfs> [<drive>]\n", 0x0C);
+                return;
+        }
+        if (!is_tmpfs && drive_s[0] == '\0') {
+                print("mount: <drive> required for ext2/fat32\n", 0x0C);
                 return;
         }
 
-        int drive = 0;
+        int drive = is_tmpfs ? -1 : 0;   // tmpfs is RAM-backed: drive sentinel
         for (int i = 0; drive_s[i]; i++) {
                 if (drive_s[i] < '0' || drive_s[i] > '9') {
                         print("mount: bad drive number\n", 0x0C);
