@@ -4,6 +4,42 @@
 #include "types.h"
 #include "idt.h"  // registers_t (for net_irq_handler)
 
+// v38.169: NIC driver abstraction. net.c is hard-wired to the rtl8139
+// (send_packet, poll_rx, irq_clear, rtl_mac). A live e1000e, virtio-net,
+// or any other NIC has to re-implement the entire stack just to register
+// with net_init. A small vtable lets each NIC provide its own frame I/O
+// without touching the protocol layer; net.c dispatches through it.
+//
+// Each NIC driver builds one of these and calls net_register_backend()
+// from its init once its hardware is alive (see rtl8139.c). Only the first
+// registration wins. Until then net_backend points at an internal no-op
+// backend (present=0), so the protocol code always has a safe object to
+// dispatch through — it never dereferences a NULL pointer.
+//
+// Apps in user space keep depending on the existing symbols (rtl_present,
+// net_udp_*, ...). rtl8139.c still owns rtl_present/rtl_mac as its compat
+// source of truth; the vtable is internal to the kernel.
+typedef struct net_backend {
+    int   (*send)(const uint8_t* frame, uint32_t len);
+    // Returns the number of bytes copied into out_buf (>=1), 0 if nothing
+    // available yet, or -1 on closed / error.
+    int   (*poll_rx)(uint8_t* out_buf, uint32_t max_len);
+    // Reads and clears the NIC's interrupt-status register in one step.
+    // Returns the raw ISR value so the caller can inspect the interrupt
+    // cause (e.g. bit 0 = ROK, receive ring has frames to drain).
+    uint16_t (*irq_clear)(void);
+    void  (*get_mac)(uint8_t mac[6]);
+    int   present;             // 1 once init succeeded, 0 if no NIC
+    const char* name;
+} net_backend_t;
+
+extern net_backend_t* net_backend;
+
+// NIC drivers call this from their init to become the active backend.
+// First registration wins; a later one is ignored (keeps a hot-plug race
+// from silently swapping drivers under the protocol layer).
+void net_register_backend(net_backend_t* be);
+
 // Ethernet frame header (14 bytes)
 typedef struct __attribute__((packed)) {
     uint8_t  dst[6];

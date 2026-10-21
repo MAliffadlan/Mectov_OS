@@ -6,6 +6,56 @@
 #include "../include/entropy.h"   // get_random_u32() — unpredictable TCP ISN
 #include "../include/spinlock.h"
 
+// v38.169: the active NIC backend. net.c used to call the rtl8139 driver
+// directly (rtl8139_send_packet, rtl8139_poll_rx, rtl_mac), so adding any
+// other NIC meant re-implementing the whole stack. The backend object lets
+// the same protocol code drive an e1000e, a virtio-net, or anything else
+// by swapping send/poll_rx/irq_clear/get_mac. A no-op "no NIC" backend fills
+// the slot when PCI scan finds nothing, so the protocol code can run
+// unchanged on headless or "no network" boots.
+//
+// rtl_present/rtl_mac stay owned by rtl8139.c (see rtl8139.h) — apps read
+// them to decide whether to attempt network ops, and the driver is the
+// source of truth for "the card is alive".
+//
+// `net_backend` itself is defined below, pointed at the no-op backend, so
+// the protocol layer can dispatch through it safely before any NIC is up.
+
+// No-op backend: present=0, every op is a safe failure. This is what
+// net_backend points at until a driver registers a live NIC (or forever,
+// if PCI scan found nothing), so callers that do not check return codes
+// just see "no network" without taking a fault.
+static int noop_send(const uint8_t* f, uint32_t l) { (void)f; (void)l; return -1; }
+static int noop_poll_rx(uint8_t* b, uint32_t l) { (void)b; (void)l; return 0; }
+static uint16_t noop_irq_clear(void) { return 0; }
+static void noop_get_mac(uint8_t m[6]) { for (int i = 0; i < 6; i++) m[i] = 0; }
+
+static net_backend_t noop_backend = {
+    .send = noop_send, .poll_rx = noop_poll_rx,
+    .irq_clear = noop_irq_clear, .get_mac = noop_get_mac,
+    .present = 0, .name = "none",
+};
+
+// The active NIC backend. It points at the no-op above until a driver
+// registers a live NIC, so it is never NULL — the protocol gates
+// (net_backend->present) are safe to evaluate before any card is up.
+net_backend_t* net_backend = &noop_backend;
+
+// A NIC driver calls this from its init to become the active backend.
+// First registration wins — a late or racing second card is ignored rather
+// than silently replacing the driver the protocol layer is already using.
+void net_register_backend(net_backend_t* be) {
+    if (be == NULL) return;
+    if (net_backend != NULL && net_backend != &noop_backend) {
+        write_serial_string("[NET] warning: backend '");
+        write_serial_string(be->name);
+        write_serial_string("' ignored, '");
+        write_serial_string(net_backend->name);
+        write_serial_string("' already active\n");
+        return;
+    }
+    net_backend = be;
+}
 
 // Static defaults (QEMU slirp layout). A successful DHCP exchange overwrites
 // all of these at runtime — see the DHCP client section below. `net_ready` is
@@ -131,7 +181,7 @@ static void net_send_eth(uint8_t* dst_mac, uint16_t ethertype, void* payload, ui
     eth_header_t* eth = (eth_header_t*)frame;
 
     memcpy(eth->dst, dst_mac, 6);
-    memcpy(eth->src, rtl_mac, 6);
+    net_backend->get_mac(eth->src);
     eth->ethertype = htons(ethertype);
 
     memcpy(frame + sizeof(eth_header_t), payload, payload_len);
@@ -139,13 +189,13 @@ static void net_send_eth(uint8_t* dst_mac, uint16_t ethertype, void* payload, ui
     uint32_t total = sizeof(eth_header_t) + payload_len;
     if (total < 60) total = 60; // Minimum Ethernet frame size
 
-    rtl8139_send_packet(frame, total);
+    net_backend->send(frame, total);
 }
 
 // Send ARP request: "who has target_ip? tell my_ip". The _nl core is
 // lock-free for net.c's own locked paths (connect/DNS/DHCP); the public
 // wrapper locks for external callers (shell commands), whose unlocked read
-// of my_ip/rtl_mac could otherwise tear against a DHCP update.
+// of my_ip/net_backend->get_mac() could otherwise tear against a DHCP update.
 static void net_send_arp_request_nl(uint8_t* target_ip_addr) {
     write_serial_string("[NET] Sending ARP request to gateway...\n");
     arp_packet_t arp;
@@ -156,7 +206,7 @@ static void net_send_arp_request_nl(uint8_t* target_ip_addr) {
     arp.hw_len     = 6;
     arp.proto_len  = 4;
     arp.opcode     = htons(ARP_REQUEST);
-    memcpy(arp.sender_mac, rtl_mac, 6);
+    net_backend->get_mac(arp.sender_mac);
     memcpy(arp.sender_ip, my_ip, 4);
     memset(arp.target_mac, 0, 6);
     memcpy(arp.target_ip, target_ip_addr, 4);
@@ -178,7 +228,7 @@ static void net_send_arp_reply(uint8_t* target_mac, uint8_t* target_ip_addr) {
     arp.hw_len     = 6;
     arp.proto_len  = 4;
     arp.opcode     = htons(ARP_REPLY);
-    memcpy(arp.sender_mac, rtl_mac, 6);
+    net_backend->get_mac(arp.sender_mac);
     memcpy(arp.sender_ip, my_ip, 4);
     memcpy(arp.target_mac, target_mac, 6);
     memcpy(arp.target_ip, target_ip_addr, 4);
@@ -305,7 +355,7 @@ int net_udp_bind(uint16_t port) {
 
 // Send a UDP datagram from the bound port (or ephemeral if unbound).
 int net_udp_send(uint8_t* target_ip, uint16_t dst_port, void* payload, uint32_t payload_len) {
-    if (!rtl_present) return -1;
+    if (!net_backend->present) return -1;
     if (payload_len > 1400) payload_len = 1400; // fits 1500-byte frame
     uint32_t nf = spin_lock_irqsave(&net_lock);
     uint16_t src = udp_bind_port;
@@ -342,7 +392,7 @@ void net_udp_peer(uint8_t* ip_out, uint16_t* port_out) {
 static void net_send_udp_raw(uint8_t* src_ip, uint8_t* dst_ip, uint8_t* dst_mac,
                              uint16_t src_port, uint16_t dst_port,
                              void* payload, uint32_t payload_len) {
-    if (!rtl_present || payload_len > 1400) return;
+    if (!net_backend->present || payload_len > 1400) return;
 
     uint8_t pkt[1500];
     ip_header_t* ip = (ip_header_t*)pkt;
@@ -961,7 +1011,7 @@ static void dhcp_send_msg(uint8_t msg_type, const uint8_t* requested_ip, const u
     d->hlen  = 6;
     d->xid   = htonl(dhcp_xid);
     d->flags = htons(0x8000); // server must broadcast its reply
-    memcpy(d->chaddr, rtl_mac, 6);
+    { uint8_t mac[6]; net_backend->get_mac(mac); memcpy(d->chaddr, mac, 6); }
     d->magic[0] = 0x63; d->magic[1] = 0x82; d->magic[2] = 0x53; d->magic[3] = 0x63;
 
     int o = sizeof(dhcp_packet_t);
@@ -1022,7 +1072,7 @@ static void dhcp_handle(uint8_t* data, uint32_t len) {
     if (d->magic[0] != 0x63 || d->magic[1] != 0x82 ||
         d->magic[2] != 0x53 || d->magic[3] != 0x63) return;
     if (ntohl(d->xid) != dhcp_xid) return;         // not our transaction
-    if (memcmp(d->chaddr, rtl_mac, 6) != 0) return; // for another client
+    { uint8_t mac[6]; net_backend->get_mac(mac); if (memcmp(d->chaddr, mac, 6) != 0) return; }
 
     // Walk the options.
     uint8_t msg_type = 0;
@@ -1091,7 +1141,7 @@ static void dhcp_fallback_static(void) {
 // net_lock window so the IRQ RX path can never interleave a parse with a
 // retry. Runs with net_lock already held: never take it here.
 static void dhcp_tick(void) {
-    if (!rtl_present) return;
+    if (!net_backend->present) return;
     if (dhcp_state == DHCP_STATE_IDLE) {
         dhcp_state = DHCP_STATE_DISCOVER;
         dhcp_retries = 0;
@@ -1438,7 +1488,7 @@ static void net_handle_frame(uint8_t* frame, uint32_t len) {
 // net_poll) sends the first DISCOVER; if no server answers, the static
 // defaults take over exactly as before (ARP -> net_ready).
 void net_init(void) {
-    if (!rtl_present) return;
+    if (!net_backend->present) return;
     uint32_t nf = spin_lock_irqsave(&net_lock);
     write_serial_string("[NET] init: starting DHCP client\n");
     dhcp_xid = (uint32_t)get_ticks() * 2654435761u + 0x4D4354u; // odd-ish xid
@@ -1453,13 +1503,13 @@ void net_init(void) {
 // lock excludes the handler when this runs on an AP. The RTL ring keeps its
 // own lock, and net_lock nests above it.
 void net_poll(void) {
-    if (!rtl_present) return;
+    if (!net_backend->present) return;
     uint8_t buf[1520];
     int len;
     uint32_t nf = spin_lock_irqsave(&net_lock);
     // Process up to 4 packets per poll
     for (int i = 0; i < 4; i++) {
-        len = rtl8139_poll_rx(buf, sizeof(buf));
+        len = net_backend->poll_rx(buf, sizeof(buf));
         if (len <= 0) break;
         if (net_rx_debug) {
             write_serial_string("[NET] rtl8139_poll_rx: packet received, len=");
@@ -1508,15 +1558,15 @@ void net_poll(void) {
 // hold net_lock on any core — exactly the case cli/sti could not cover.
 void net_irq_handler(registers_t* r) {
     (void)r;
-    if (!rtl_present) return;
+    if (!net_backend->present) return;
     spin_lock(&net_lock);
-    uint16_t isr = rtl8139_irq_clear();
+    uint16_t isr = net_backend->irq_clear();
     if (isr & 0x01) { // ROK — packets available
         uint8_t buf[1520];
         int len;
         int drained = 0;
         for (int i = 0; i < 8; i++) { // drain up to 8 frames per IRQ
-            len = rtl8139_poll_rx(buf, sizeof(buf));
+            len = net_backend->poll_rx(buf, sizeof(buf));
             if (len <= 0) break;
             drained++;
             if (net_rx_debug) {
@@ -1540,7 +1590,7 @@ void net_irq_handler(registers_t* r) {
 
 // Send ICMP Echo Request (ping)
 void net_send_ping(uint8_t* target_ip) {
-    if (!rtl_present) return;
+    if (!net_backend->present) return;
     uint32_t nf = spin_lock_irqsave(&net_lock);
 
     // If we don't know gateway MAC yet, send another ARP

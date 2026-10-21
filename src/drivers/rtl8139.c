@@ -1,4 +1,5 @@
 #include "../include/rtl8139.h"
+#include "../include/net.h"       // net_backend_t / net_register_backend()
 #include "../include/pci.h"
 #include "../include/io.h"
 #include "../include/mem.h"
@@ -45,6 +46,33 @@ static void rtl_exit(uint32_t flags) {
     if (flags & 0x200) __asm__ __volatile__("sti");
 }
 
+// v38.169: the net_backend-facing adapters. The public rtl8139_* entry points
+// keep their historical signatures (some callers copy frames straight in) —
+// these thin wrappers match the vtable's const-correct / positional types so
+// the function pointers line up without casts or warnings.
+static int rtl_backend_send(const uint8_t* frame, uint32_t len) {
+    rtl8139_send_packet((void*)frame, len);
+    return 0; // rtl8139_send_packet is fire-and-forget; presence checked inside
+}
+static int rtl_backend_poll_rx(uint8_t* out_buf, uint32_t max_len) {
+    return rtl8139_poll_rx(out_buf, max_len);
+}
+static uint16_t rtl_backend_irq_clear(void) {
+    return rtl8139_irq_clear();
+}
+static void rtl_backend_get_mac(uint8_t mac[6]) {
+    for (int i = 0; i < 6; i++) mac[i] = rtl_mac[i];
+}
+
+net_backend_t rtl8139_backend = {
+    .send = rtl_backend_send,
+    .poll_rx = rtl_backend_poll_rx,
+    .irq_clear = rtl_backend_irq_clear,
+    .get_mac = rtl_backend_get_mac,
+    .present = 0,            // set to 1 below once init_rtl8139 finds the card
+    .name = "rtl8139",
+};
+
 void init_rtl8139(void) {
     uint8_t bus = 0, slot = 0, func = 0;
     int found = 0;
@@ -62,6 +90,7 @@ void init_rtl8139(void) {
 
     if (!found) return;
     rtl_present = 1;
+    rtl8139_backend.present = 1;
 
     // 2. Read BAR0 to get IO port base
     uint32_t bar0 = pci_read(bus, slot, func, 0x10);
@@ -110,6 +139,11 @@ void init_rtl8139(void) {
     outw(rtl_io_base + RTL_IMR, 0x000F);
 
     rtl_rx_offset = 0;
+
+    // Become the active NIC backend. net.c dispatches all frame I/O through
+    // the net_backend vtable; rtl_present/rtl_mac above remain the compat
+    // symbols the protocol layer and apps read.
+    net_register_backend(&rtl8139_backend);
 }
 
 // IRQ entry: read + clear the NIC's interrupt status. Returns the raw ISR
