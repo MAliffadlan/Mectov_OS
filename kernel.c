@@ -562,6 +562,13 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] rtl\n");
     extern void init_rtl8139();
     init_rtl8139();
+    // v38.170: Intel e1000/e1000e — the second NIC backend. Whichever of the
+    // two registers with the higher priority becomes the protocol layer's
+    // active backend (e1000e wins so a machine with both uses the Intel card;
+    // rtl8139 is the fallback when no Intel NIC is present).
+    write_serial_string("[K] e1000e\n");
+    extern void e1000e_init(void);
+    e1000e_init();
     write_serial_string("[K] net\n");
     extern void net_init();
     net_init();

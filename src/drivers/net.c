@@ -41,18 +41,51 @@ static net_backend_t noop_backend = {
 // (net_backend->present) are safe to evaluate before any card is up.
 net_backend_t* net_backend = &noop_backend;
 
+// Backend priority: a higher number wins the protocol layer's dispatch when
+// more than one NIC is alive. e1000e outranks rtl8139 so a machine with both
+// uses the Intel card; anything unknown ranks equal to rtl8139 (first wins
+// among equals, preserving the old behavior for one-NIC machines).
+static int net_backend_priority(const char* name) {
+    if (name && name[0] == 'e' && name[1] == '1' && name[2] == '0' &&
+        name[3] == '0' && name[4] == '0' && name[5] == 'e' && name[6] == '\0')
+        return 2;
+    return 1;
+}
+
 // A NIC driver calls this from its init to become the active backend.
-// First registration wins — a late or racing second card is ignored rather
-// than silently replacing the driver the protocol layer is already using.
+// Priority wins: a lower-priority registration is rejected, and a
+// higher-priority one silently replaces the lower (both cards attached and
+// initialized before either protocol op runs, so the swap is invisible —
+// boot order is init_rtl8139() then e1000e_init(), and both init before
+// net_init() touches hardware). Equal priority keeps first-wins.
 void net_register_backend(net_backend_t* be) {
     if (be == NULL) return;
+    int mp = net_backend_priority(be->name);
     if (net_backend != NULL && net_backend != &noop_backend) {
-        write_serial_string("[NET] warning: backend '");
-        write_serial_string(be->name);
-        write_serial_string("' ignored, '");
+        int cp = net_backend_priority(net_backend->name);
+        if (mp < cp) {
+            write_serial_string("[NET] backend '");
+            write_serial_string(be->name);
+            write_serial_string("' below '");
+            write_serial_string(net_backend->name);
+            write_serial_string("', not used\n");
+            return;
+        }
+        if (mp == cp) {
+            // First among equals wins (the one-NIC case, and any machine
+            // with two cards of the same kind).
+            write_serial_string("[NET] backend '");
+            write_serial_string(be->name);
+            write_serial_string("' ignored, '");
+            write_serial_string(net_backend->name);
+            write_serial_string("' already active\n");
+            return;
+        }
+        write_serial_string("[NET] backend switch: '");
         write_serial_string(net_backend->name);
-        write_serial_string("' already active\n");
-        return;
+        write_serial_string("' -> '");
+        write_serial_string(be->name);
+        write_serial_string("'\n");
     }
     net_backend = be;
 }
