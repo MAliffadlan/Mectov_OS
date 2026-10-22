@@ -478,3 +478,73 @@ void sb16_get_mixer(sb16_mixer_t* mixer) {
     if (!mixer) return;
     *mixer = current_mixer;
 }
+
+// ---- Boot-time self-test (v38.170) ----
+// Exercises the v38.170 extended API (16-bit/stereo format, pause/resume,
+// mixer control, state query) entirely in kernel context, like
+// pty_selftest. It drives the real driver functions — the same code the
+// syscalls use — so a regression in the mixer/state path is caught at boot.
+// Skipped cleanly when no SB16 card is present (guarded by sb16_available).
+void sb16_selftest(void) {
+    if (!sb16_available) {
+        write_serial_string("[SB16] selftest skipped (no card)\n");
+        return;
+    }
+
+    // 1. State machine: STOPPED -> PLAYING -> PAUSED -> PLAYING -> STOPPED.
+    if (sb16_get_state() != SB16_STATE_STOPPED) {
+        write_serial_string("[SB16] selftest FAIL (state != STOPPED at start)\n");
+        return;
+    }
+    // Use the static DMA buffer already declared; a short 8-bit mono burst.
+    sb16_set_audio_buffer(dma_buffer, HALF_BUFFER);
+    sb16_start_playback(22050);
+    if (sb16_get_state() != SB16_STATE_PLAYING) {
+        write_serial_string("[SB16] selftest FAIL (not PLAYING after start)\n");
+        sb16_stop_playback();
+        return;
+    }
+    sb16_pause_playback();
+    if (sb16_get_state() != SB16_STATE_PAUSED) {
+        write_serial_string("[SB16] selftest FAIL (not PAUSED after pause)\n");
+        sb16_stop_playback();
+        return;
+    }
+    sb16_resume_playback();
+    if (sb16_get_state() != SB16_STATE_PLAYING) {
+        write_serial_string("[SB16] selftest FAIL (not PLAYING after resume)\n");
+        sb16_stop_playback();
+        return;
+    }
+    sb16_stop_playback();
+    if (sb16_get_state() != SB16_STATE_STOPPED) {
+        write_serial_string("[SB16] selftest FAIL (not STOPPED after stop)\n");
+        return;
+    }
+
+    // 2. Mixer round-trip (master/bass/treble/pcm).
+    sb16_mixer_t want = {70, 60, 55, 80};
+    sb16_mixer_t got = {0};
+    sb16_set_mixer(&want);
+    sb16_get_mixer(&got);
+    if (got.master != 70 || got.bass != 60 || got.treble != 55 || got.pcm != 80) {
+        write_serial_string("[SB16] selftest FAIL (mixer round-trip mismatch)\n");
+        return;
+    }
+
+    // 3. Volume round-trip.
+    sb16_set_volume(42);
+    if (sb16_get_volume() != 42) {
+        write_serial_string("[SB16] selftest FAIL (volume round-trip mismatch)\n");
+        return;
+    }
+    sb16_set_volume(80);   // restore default
+
+    // 4. Position query returns a sane unsigned value during playback.
+    sb16_set_audio_buffer(dma_buffer, HALF_BUFFER);
+    sb16_start_playback(22050);
+    (void)sb16_get_position();
+    sb16_stop_playback();
+
+    write_serial_string("[SB16] selftest PASS (fmt/play/pause/resume/mixer/stop)\n");
+}

@@ -559,6 +559,10 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] sb16\n");
     extern void sb16_init(void);
     sb16_init();
+    // v38.170: boot-time proof the extended SB16 API (play/pause/resume/
+    // mixer/state) works — runs right after init, guarded by sb16_available.
+    extern void sb16_selftest(void);
+    sb16_selftest();
     write_serial_string("[K] rtl\n");
     extern void init_rtl8139();
     init_rtl8139();

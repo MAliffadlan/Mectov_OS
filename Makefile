@@ -224,6 +224,7 @@ $(OBJ_DIR)/nxtest_mct.o \
        $(OBJ_DIR)/syncfiledemo_mct.o \
        $(OBJ_DIR)/lseekfiledemo_mct.o \
        $(OBJ_DIR)/pollselectdemo_mct.o \
+       $(OBJ_DIR)/pty_test_mct.o \
        $(OBJ_DIR)/fat32demo_mct.o \
        $(OBJ_DIR)/wfiledemo_mct.o \
        $(OBJ_DIR)/rtc_stress_mct.o \
@@ -622,6 +623,9 @@ $(OBJ_DIR)/lseekfiledemo_mct.o: lseekfiledemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/pollselectdemo_mct.o: pollselectdemo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 pollselectdemo.mct $(OBJ_DIR)/pollselectdemo_mct.o
+
+$(OBJ_DIR)/pty_test_mct.o: pty_test.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 pty_test.mct $(OBJ_DIR)/pty_test_mct.o
 
 $(OBJ_DIR)/fat32demo_mct.o: fat32demo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 fat32demo.mct $(OBJ_DIR)/fat32demo_mct.o

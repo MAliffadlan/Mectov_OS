@@ -155,9 +155,12 @@ int do_sys_read(int fd, char* buf, int size) {
     } else if (global_fds[gfd].type == FD_TYPE_PTY) {
         // Pseudo-terminal (v38.168). Master reads slave output, slave reads
         // master input. Non-blocking: returns what's in the ring now.
-        fd_lock_release();
+        // NOTE: pty_read expects fd_lock held (it serializes ring access), so
+        // hold it across the call and release ONCE before returning — the
+        // original release/re-acquire/return leaked the lock, deadlocking the
+        // next fd syscall (watchdog: CPU spinning in spin_lock, IF=0).
         int r = pty_read(gfd, buf, size);
-        fd_lock_acquire();
+        fd_lock_release();
         return r;
     } else if (global_fds[gfd].type == FD_TYPE_SOCKET) {
         // Sockets (v38.43). TCP: poll-style recv (0 = nothing yet, -1 = EOF).
@@ -185,9 +188,11 @@ int do_sys_write(int fd, const char* buf, int size) {
     if (global_fds[gfd].type == FD_TYPE_PTY) {
         // Pseudo-terminal (v38.168): master writes to the slave's input,
         // slave writes to the master's output. Non-blocking partial write.
-        fd_lock_release();
+        // NOTE: pty_write expects fd_lock held (serializes ring access); hold
+        // it across the call and release ONCE before returning (the original
+        // release/re-acquire/return leaked the lock — same deadlock as read).
         int r = pty_write(gfd, buf, size);
-        fd_lock_acquire();
+        fd_lock_release();
         return r;
     }
 
@@ -409,6 +414,14 @@ static int fd_poll_events(int tid, int fd) {
             int p = global_fds[gfd].pipe_id;
             int next = (pipes[p].write_pos + 1) % PIPE_BUF_SIZE;
             if (next != pipes[p].read_pos) rev |= POLLOUT; // space left
+            break;
+        }
+        case FD_TYPE_PTY: {
+            // v38.170: PTY fds participate in poll/select like pipes do —
+            // without this case the default arm reported no events ever, so a
+            // terminal app polling its master fd blocked even with data ready.
+            rev = pty_poll_events(global_fds[gfd].pipe_id,
+                                  global_fds[gfd].flags & 1);
             break;
         }
         case FD_TYPE_SOCKET: {

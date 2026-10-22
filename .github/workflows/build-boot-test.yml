@@ -12,9 +12,10 @@ on:
 # (feature areas / hardware emulations), so jobs cannot interfere through
 # shared ports or persistent disk state (freshly created per job):
 #   build          -> compile + artifact upload (prerequisite)
-#   boot-core      -> boot/login, fuzzer, procfs, fork, job control, fs, sync, limits
+#   boot-core      -> boot/login, fuzzer, procfs, fork, job control, fs, sync, limits, pty, sb16
 #   gui            -> login/lock/paint/taskbar/startmenu/explorer/fbmap/hardening
 #   browser-net    -> browser HTTP + hostname/gateway + POSIX socket + poll/select
+#   browser-net-e1000e -> same network stack on the Intel e1000e NIC (v38.170)
 #   doom-rust      -> windowed DOOM, Rust app, ASLR (2 boots), fsync/mmap/lseek
 #   quake3         -> ioquake3 engine core on the MECTOV_Q3=1 ISO variant
 #   storage        -> FAT32/mount/AHCI/xHCI/VirtIO/bigread-DMA/iocache/write-failure
@@ -273,6 +274,20 @@ jobs:
         run: |
           python3 scripts/ulimit_test.py --timeout 360
 
+      - name: PTY subsystem round-trip regression (TCG)
+        run: |
+          # v38.170: runs /apps/pty_test.mct (alloc/open/read/write/reclaim)
+          # and asserts ALL PTY TESTS PASSED. This test caught a real fd_lock
+          # leak that watchdog-panicked the kernel on the first PTY syscall.
+          python3 scripts/pty_test.py --timeout 300
+
+      - name: SB16 audio driver upgrade selftest (TCG)
+        run: |
+          # v38.170: boots with a SB16 card (driver=none audio backend) and
+          # asserts the in-kernel sb16_selftest() passed — 16-bit/stereo
+          # format, pause/resume, mixer + volume round-trips, state query.
+          python3 scripts/sb16_selftest.py --timeout 180
+
   gui:
     needs: build
     runs-on: ubuntu-latest
@@ -381,6 +396,41 @@ jobs:
       - name: POSIX socket regression (user-net + hostfwd, TCG)
         run: |
           python3 scripts/socktest.py --timeout 300
+
+  browser-net-e1000e:
+    # v38.170: boot the SAME networking stack on the Intel 82574 e1000e NIC
+    # instead of the RTL8139 (QEMU `-device e1000e`). DHCP proves TX, RX,
+    # ARP and the slirp exchange all work through the new driver; socktest
+    # proves full 4-way TCP both directions. The RTL8139 jobs above stay as
+    # the fallback regression.
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil \
+            dosfstools
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mectov-artifacts
+          path: .
+
+      - name: DHCP over e1000e (TX/RX/ARP/slirp, TCG)
+        run: |
+          python3 scripts/dhcp_test.py --nic e1000e --timeout 300
+
+      - name: POSIX socket regression over e1000e (user-net + hostfwd, TCG)
+        run: |
+          python3 scripts/socktest.py --nic e1000e --timeout 300
 
   doom-rust:
     needs: build

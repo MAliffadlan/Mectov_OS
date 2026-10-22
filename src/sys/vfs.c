@@ -778,6 +778,11 @@ void vfs_init() {
         extern uint8_t _binary_pollselectdemo_mct_end[];
         changed += vfs_update_file_if_needed("apps/pollselectdemo.mct", (const char*)_binary_pollselectdemo_mct_start, _binary_pollselectdemo_mct_end - _binary_pollselectdemo_mct_start);
 
+        // PTY round-trip test (v38.170)
+        extern uint8_t _binary_pty_test_mct_start[];
+        extern uint8_t _binary_pty_test_mct_end[];
+        changed += vfs_update_file_if_needed("apps/pty_test.mct", (const char*)_binary_pty_test_mct_start, _binary_pty_test_mct_end - _binary_pty_test_mct_start);
+
         // FAT32 demo app (exercises the drive-3 FAT32 filesystem)
         extern uint8_t _binary_fat32demo_mct_start[];
         extern uint8_t _binary_fat32demo_mct_end[];
@@ -1122,6 +1127,12 @@ void vfs_init() {
     extern uint8_t _binary_pollselectdemo_mct_end[];
     vfs_create_file("apps/pollselectdemo.mct");
     vfs_write_file("apps/pollselectdemo.mct", (const char*)_binary_pollselectdemo_mct_start, _binary_pollselectdemo_mct_end - _binary_pollselectdemo_mct_start);
+
+    // PTY round-trip test (v38.170)
+    extern uint8_t _binary_pty_test_mct_start[];
+    extern uint8_t _binary_pty_test_mct_end[];
+    vfs_create_file("apps/pty_test.mct");
+    vfs_write_file("apps/pty_test.mct", (const char*)_binary_pty_test_mct_start, _binary_pty_test_mct_end - _binary_pty_test_mct_start);
 
     extern uint8_t _binary_fat32demo_mct_start[];
     extern uint8_t _binary_fat32demo_mct_end[];

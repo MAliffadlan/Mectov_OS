@@ -394,6 +394,14 @@ uint32_t acpi_get_hpet_base(void) {
                                ((uintptr_t)b[5] << 8) |
                                ((uintptr_t)b[6] << 16) |
                                ((uintptr_t)b[7] << 24));
-    if (base == 0 || base >= 0x10000000u) return 0;   // sanity: sane MMIO range
+    // v38.170: the old 0x10000000 (256 MB) cap rejected every REAL HPET base:
+    // the spec puts the HPET at 0xFED00000, inside the PCI MMIO window, which
+    // the caller (hpet_init) maps on demand exactly like the APIC MMIO pages.
+    // The cap is replaced by the checks that actually describe valid HPET
+    // placement: nonzero, 4KB-aligned (the register block is 1KB but the
+    // generic-address struct in the ACPI spec requires 32-bit-wide space at
+    // page granularity) and inside the mapped 4GB space.
+    if (base == 0) return 0;
+    if (base & 0xFFFu) return 0;                      // must be page-aligned
     return base;
 }

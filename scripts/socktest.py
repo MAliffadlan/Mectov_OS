@@ -96,6 +96,7 @@ def main():
     ap.add_argument("--iso", default="mectov.iso")
     ap.add_argument("--disk", default="disk.img")
     ap.add_argument("--ext2", default="ext2.img")
+    ap.add_argument("--nic", default="rtl8139", help="NIC model (rtl8139|e1000e)")
     args = ap.parse_args()
 
     for p in (SERIAL_LOG, MON_SOCK):
@@ -120,7 +121,7 @@ def main():
         # user networking: the guest reaches the host at 10.0.2.2; the host
         # reaches guest :8080 through the forwarded local port.
         "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{HOSTFWD_PORT}-:8080",
-        "-device", "rtl8139,netdev=n0",
+        "-device", f"{args.nic},netdev=n0",
         "-drive", f"file={args.disk},format=raw,index=0,media=disk",
         "-drive", f"file={args.ext2},format=raw,index=1,media=disk",
         "-monitor", f"unix:{MON_SOCK},server,nowait",

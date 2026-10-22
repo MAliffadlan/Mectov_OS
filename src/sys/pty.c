@@ -193,9 +193,28 @@ void pty_selftest(void) {
     pty_close(mg);
     int reclaimed = 1;
     for (int i = 0; i < MAX_PTYS; i++) {
-        if (ptys[0].in_use) { reclaimed = 0; break; }
+        if (ptys[i].in_use) { reclaimed = 0; break; }
     }
     if (!reclaimed) { write_serial_string("[PTY] selftest FAIL (leak: pty still in_use)\n"); return; }
 
     write_serial_string("[PTY] selftest PASS (m2s ok, s2m ok, reclaim ok)\n");
+}
+
+// poll/select participation (v38.170): same predicate family the pipe cases
+// use in fd.c — readable when the ring we read from is non-empty, writable
+// when the ring we write to has space. Caller holds fd_lock.
+int pty_poll_events(int pty_idx, int is_master) {
+    if (pty_idx < 0 || pty_idx >= MAX_PTYS || !ptys[pty_idx].in_use) return 0;
+    const pty_t* t = &ptys[pty_idx];
+    int rev = 0;
+    if (is_master) {
+        if (t->s2m_r != t->s2m_w) rev |= 0x0001;          // POLLIN
+        int nw = (t->m2s_w + 1) % PTY_BUF_SIZE;
+        if (nw != t->m2s_r) rev |= 0x0004;                // POLLOUT
+    } else {
+        if (t->m2s_r != t->m2s_w) rev |= 0x0001;          // POLLIN
+        int nw = (t->s2m_w + 1) % PTY_BUF_SIZE;
+        if (nw != t->s2m_r) rev |= 0x0004;                // POLLOUT
+    }
+    return rev;
 }

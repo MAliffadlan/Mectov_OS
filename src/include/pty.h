@@ -43,6 +43,9 @@ int  pty_alloc_fd(void);
 // fd for the slave side, or -1.
 int  pty_open_slave(int master_fd);
 
+// poll/select participation: returns POLLIN/POLLOUT bits for one end.
+int pty_poll_events(int pty_idx, int is_master);
+
 // Read/write/close a PTY descriptor. `is_master` selects which ring: reading
 // from the master consumes the slave's output; writing to the master feeds the
 // slave.

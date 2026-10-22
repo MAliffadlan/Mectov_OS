@@ -349,6 +349,11 @@
 // release bumped the number in the commit that closed the NX holes, before
 // this file's convention was applied to it.)
 // 164 is spoken for; 165 is the next free number.
-#define OS_VERSION "38.165"
+//
+// v38.166–v38.170: the working tree has been carrying source-tagged work past
+// 165 — task.c (166), fetch https (169), and the e1000e NIC + HPET MMIO +
+// PTY poll/select + SB16 upgrade (170). This bump brings the OS_VERSION string
+// in line with that release train and its changelog row in the README.
+#define OS_VERSION "38.170"
 
 #endif

@@ -248,6 +248,9 @@ esac
 #   MECTOV_DISPLAY=sdl MECTOV_Q3=1 ./run.sh
 # (passes through ./quake.sh too, which execs run.sh with the environment).
 DISPLAY_ARGS="-display ${MECTOV_DISPLAY:-gtk}"
+# NIC model (v38.170, opt-in): MECTOV_NIC=e1000e attaches the Intel e1000e
+# device (the kernel's e1000e driver probes device 0x10D3). Default rtl8139
+# keeps plain boots exactly as before.
 run_qemu() {
     qemu-system-i386 $KVM_FLAGS \
     -vga std \
@@ -256,7 +259,7 @@ run_qemu() {
     -smp "$SMP" \
     $DISPLAY_ARGS \
     $AUDIO_ARGS \
-    -net nic,model=rtl8139 -net user \
+    -net nic,model=${MECTOV_NIC:-rtl8139} -net user \
     -chardev socket,id=char0,host=127.0.0.1,port=45454,server=on,wait=off,logfile=serial_debug.log -serial chardev:char0 \
     -drive file=disk.img,format=raw,index=0,media=disk \
     -drive file=ext2.img,format=raw,index=1,media=disk \

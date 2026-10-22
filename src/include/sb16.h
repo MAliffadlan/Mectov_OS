@@ -34,6 +34,7 @@ typedef struct {
 
 // Core functions
 void sb16_init(void);
+void sb16_selftest(void);   // boot-time v38.170 API self-test (serial only)
 void sb16_start_playback(uint16_t sample_rate);
 void sb16_start_playback_ex(sb16_format_t* format);
 void sb16_stop_playback(void);

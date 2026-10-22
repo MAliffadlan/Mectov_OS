@@ -3,6 +3,7 @@
 #include "../include/io.h"
 #include "../include/apic.h"
 #include "../include/acpi.h"     // acpi_get_hpet_base()
+#include "../include/mem.h"      // PAGE_PRESENT/PAGE_RW (the HPET MMIO map)
 #include "../include/rtc.h"
 #include "../include/serial.h"   // write_serial() (locked — multi-CPU safe)
 #include "../include/entropy.h"   // entropy_add() — kernel CSPRNG feed
@@ -74,6 +75,31 @@ void hpet_init(void) {
     if (hpet_base == 0) {
         write_serial_string("[HPET] no HPET table, using PIT\n");
         return;
+    }
+
+    // The HPET MMIO page is NOT in the RAM identity map (real platforms put
+    // the HPET at 0xFED00000, inside the PCI MMIO window that page_map owns
+    // and acpi.c's old 256 MB sanity cap wrongly rejected). Map it
+    // identity-style kernel-only (the APIC does exactly this), then verify
+    // before the first register read — a page_map that refuses the region
+    // leaves base unmapped, and dereferencing THAT is a #PF.
+    {
+        extern void page_map(uint32_t vaddr, uint32_t paddr, uint32_t flags);
+        extern void write_serial_hex(uint32_t);
+        page_map(hpet_base, hpet_base, PAGE_PRESENT | PAGE_RW);
+        __asm__ __volatile__("invlpg (%0)" : : "r"(hpet_base) : "memory");
+        volatile uint32_t* probe = (volatile uint32_t*)(uintptr_t)(hpet_base + 0x004);
+        uint32_t per = *probe;   // GCAP_ID bits 32..63 (the period field)
+        if (per == 0xFFFFFFFFu) {
+            // All-ones on a first read usually means the page did not land
+            // (bad mapping) — treat as absent rather than a nonsense period.
+            write_serial_string("[HPET] MMIO probe failed, disabling\n");
+            hpet_base = 0;
+            return;
+        }
+        write_serial_string("[HPET] MMIO mapped at ");
+        write_serial_hex(hpet_base);
+        write_serial_string("\n");
     }
 
     // GCAP_ID bits 32..63 = counter period in femtoseconds (10^-15 s).

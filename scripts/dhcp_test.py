@@ -61,6 +61,7 @@ def main():
     ap.add_argument("--iso", default="mectov.iso")
     ap.add_argument("--disk", default="disk.img")
     ap.add_argument("--ext2", default="ext2.img")
+    ap.add_argument("--nic", default="rtl8139", help="NIC model (rtl8139|e1000e)")
     args = ap.parse_args()
 
     for p in (SERIAL_LOG, MON_SOCK):
@@ -81,7 +82,7 @@ def main():
         "-smp", "4",
         "-display", "none",
         "-serial", f"file:{SERIAL_LOG}",
-        "-net", "nic,model=rtl8139", "-net", "user",
+        "-net", f"nic,model={args.nic}", "-net", "user",
         "-drive", f"file={args.disk},format=raw,index=0,media=disk",
         "-drive", f"file={args.ext2},format=raw,index=1,media=disk",
         "-monitor", f"unix:{MON_SOCK},server,nowait",
