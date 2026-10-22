@@ -24,13 +24,21 @@ on:
 #   config-matrix  -> unchanged 12-combo boot+fork matrix on the artifacts
 #   ram-sweep      -> 6-combo guest-RAM sweep on the artifacts
 #
+# Least-privilege (v38.171): no job writes to the repo — they only checkout,
+# build, and upload/download artifacts between jobs — so `contents: read` is
+# the entire token scope needed. This silences the CodeQL "Workflow does not
+# contain permissions" alerts. Upload/download-artifact work within a run with
+# the default token and need no extra scope.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -87,7 +95,7 @@ jobs:
           mkfs.fat -F 32 -S 512 fat32.img > /dev/null 2>&1
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: mectov-artifacts
           path: |
@@ -119,7 +127,7 @@ jobs:
           test -f build/vm/qagame.qvm && echo "qagame.qvm built OK"
 
       - name: Upload Q3 build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: mectov-q3-artifacts
           path: |
@@ -151,7 +159,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -163,7 +171,7 @@ jobs:
             mtools
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: mectov-artifacts
           path: .
@@ -294,7 +302,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -305,7 +313,7 @@ jobs:
             dosfstools
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: mectov-artifacts
           path: .
@@ -364,7 +372,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -375,7 +383,7 @@ jobs:
             dosfstools
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: mectov-artifacts
           path: .
@@ -408,7 +416,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -419,7 +427,7 @@ jobs:
             dosfstools
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: mectov-artifacts
           path: .
@@ -438,7 +446,7 @@ jobs:
     timeout-minutes: 40
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -459,7 +467,7 @@ jobs:
             dosfstools
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: mectov-artifacts
           path: .
@@ -542,7 +550,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -553,7 +561,7 @@ jobs:
             dosfstools
 
       - name: Download Q3 build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: mectov-q3-artifacts
           path: .
@@ -726,7 +734,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -738,7 +746,7 @@ jobs:
             mtools
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: mectov-artifacts
           path: .
@@ -822,7 +830,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -836,7 +844,7 @@ jobs:
             mtools
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: mectov-artifacts
           path: .
@@ -872,7 +880,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -883,7 +891,7 @@ jobs:
             dosfstools
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: mectov-artifacts
           path: .
@@ -930,7 +938,7 @@ jobs:
     name: "config ${{ matrix.cpu }} / ${{ matrix.mem }}MB / SMP ${{ matrix.smp }}"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Fresh ubuntu runner: QEMU is NOT installed by default and does not
       # come with the downloaded artifacts. The build job installs it for its
@@ -944,7 +952,7 @@ jobs:
             python3-pil
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: mectov-artifacts
           path: .
@@ -995,7 +1003,7 @@ jobs:
     name: "ram ${{ matrix.cpu }} / ${{ matrix.mem }}MB / SMP ${{ matrix.smp }}"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install toolchain
         run: |
@@ -1005,7 +1013,7 @@ jobs:
             python3-pil
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: mectov-artifacts
           path: .
