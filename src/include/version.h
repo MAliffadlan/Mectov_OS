@@ -354,6 +354,12 @@
 // 165 — task.c (166), fetch https (169), and the e1000e NIC + HPET MMIO +
 // PTY poll/select + SB16 upgrade (170). This bump brings the OS_VERSION string
 // in line with that release train and its changelog row in the README.
-#define OS_VERSION "38.170"
+//
+// v38.171: CI least-privilege workflow permissions + actions v5 (no kernel
+// change). v38.172: static device registry + initcalls replace the driver list
+// in kernel.c; the new block HAL routes ATA/AHCI/USB/virtio by drive range and
+// VFS/ext2/FAT32 move to block_read/block_write. iocache's verdict is now
+// 2.5x with one fresh-boot retry for TCG timing noise.
+#define OS_VERSION "38.172"
 
 #endif
