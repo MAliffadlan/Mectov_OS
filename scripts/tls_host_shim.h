@@ -25,6 +25,17 @@ static inline int syscall(int num, int a, int b, int c) {
     return getrandom((void*)(uintptr_t)a, (size_t)b, 0) == (ssize_t)b ? 0 : -1;
 }
 
+// tls13.c's tls_handshake() calls sys_sleep(2) between peer polls (added in
+// the v38.169 fetch work) — the kernel sleeps in 10 ms ticks, so 2 ticks = 20
+// ms. The host stub sleeps the same amount via nanosleep.
+static inline int sys_sleep(int ticks) {
+    struct timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = (long)ticks * 10000000L;   // 10 ms per tick
+    nanosleep(&ts, NULL);
+    return 0;
+}
+
 // Mirrors the kernel's rtc_time_t field names, so the civil-from-days conversion
 // in tls13.c's now_unix() is exercised rather than bypassed.
 typedef struct {
