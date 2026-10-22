@@ -360,6 +360,11 @@
 // in kernel.c; the new block HAL routes ATA/AHCI/USB/virtio by drive range and
 // VFS/ext2/FAT32 move to block_read/block_write. iocache's verdict is now
 // 2.5x with one fresh-boot retry for TCG timing noise.
-#define OS_VERSION "38.172"
+//
+// v38.173: kernel stack protector — -fstack-protector-strong with a global
+// guard (-mstack-protector-guard=global; this kernel sets up no i386 TLS).
+// boot.asm seeds __stack_chk_guard from RDTSC before kernel_main, and
+// __stack_chk_fail runs the normal multi-core panic tail.
+#define OS_VERSION "38.173"
 
 #endif

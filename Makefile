@@ -2,7 +2,7 @@ CC = gcc
 AS = nasm
 LD = ld
 
-CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g -msoft-float -mno-80387 -mno-sse -mno-mmx -march=i686 -fno-pie -fno-pic -MMD -MP
+CFLAGS = -m32 -std=gnu99 -ffreestanding -O2 -Wall -Wextra -g -msoft-float -mno-80387 -mno-sse -mno-mmx -march=i686 -fno-pie -fno-pic -fstack-protector-strong -mstack-protector-guard=global -MMD -MP
 # -march=i686: this GCC's -m32 default is already i686 (Ubuntu builds with
 # --with-arch-32=i686), but pin it so a toolchain whose default is plain
 # i386 (cmov-less, no scheduling for P6) can't silently downgrade the

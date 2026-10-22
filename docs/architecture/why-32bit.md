@@ -114,8 +114,8 @@ Recorded here because the port was the thing that surfaced them:
 | protection | 32-bit state |
 |---|---|
 | SMEP | yes — `sys/mem.c` `paging_enable_smep()`, CR4 bit 20 |
-| SMAP | **no** |
+| SMAP | **no** — SMAP is not available in 32-bit mode (Intel SDM); the i386 line cannot set CR4.SMAP |
 | KASLR (user PIE) | yes — ASLR window in `sys/loader.c` |
 | KASLR (the kernel itself) | **no** — linked at a fixed 1 MB (`linker.ld`), never relocated |
-| stack canary | heap only (`sys/mem.c`), not kernel stacks |
+| stack canary | yes — kernel C is built with `-fstack-protector-strong -mstack-protector-guard=global`; `boot.asm` seeds `__stack_chk_guard` from RDTSC, and `__stack_chk_fail` runs the panic tail |
 | swap / page-out | **none** — exhaustion is an OOM, never a page-out |

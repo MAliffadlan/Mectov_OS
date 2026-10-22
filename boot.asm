@@ -24,9 +24,22 @@ stack_top:
 section .text
 global _start
 extern kernel_main
+extern __stack_chk_guard
 
 _start:
     mov esp, stack_top
+    push eax                     ; save multiboot magic
+    push ebx                     ; save multiboot info
+    rdtsc                        ; seed the stack canary before any C frame
+    xor eax, 0x4D454354          ; 'MECT'
+    xor edx, 0x5A5A5A5A
+    add eax, edx
+    jnz .seed_ok
+    mov eax, 0x4D454354
+.seed_ok:
+    mov [__stack_chk_guard], eax
+    pop ebx
+    pop eax
     push ebx
     push eax
     call kernel_main
