@@ -2,6 +2,9 @@
 #define ATA_H
 
 #include "idt.h"  // registers_t (for the IRQ entry points)
+#include "block.h"
+
+#define ATA_DRIVE_COUNT 4
 
 extern volatile int hdd_activity;
 
@@ -37,11 +40,9 @@ int ata_write_sectors_drive(int drive, unsigned int lba, int count, const unsign
 // clamped to ATA_BATCH_MAX and to the 128-sector LBA boundary (a
 // multi-sector transfer may not cross it). Callers MUST advance by the
 // value returned, not by the raw count they asked for.
+#define ATA_BATCH_MAX BLOCK_BATCH_MAX
 static inline int ata_batch_limit(unsigned int lba, int count) {
-    if (count > ATA_BATCH_MAX) count = ATA_BATCH_MAX;
-    int boundary = 128 - (int)(lba & 127);
-    if (count > boundary) count = boundary;
-    return (count < 1) ? 1 : count;
+    return block_batch_limit(lba, count);
 }
 
 #endif

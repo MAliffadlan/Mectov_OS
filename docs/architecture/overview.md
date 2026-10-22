@@ -57,8 +57,24 @@ Mectov OS is an x86 (i386) 32-bit monolithic operating system kernel written fro
 
 * `kernel.c` — Main kernel entry point and initialization loop.
 * `boot.asm` — Multiboot assembly entry and stack allocation.
-* `src/sys/` — System management (GDT, IDT, Task Scheduler, VMM, PMM, ACPI, APIC, SMP, Syscalls, VFS, Ext2, FAT32, FB_MAP).
+* `src/sys/` — System management (GDT, IDT, Task Scheduler, VMM, PMM, ACPI, APIC, SMP, Syscalls, VFS, Ext2, FAT32, FB_MAP, device/block core).
 * `src/drivers/` — Hardware device drivers (VGA/VBE, Keyboard, Mouse, PIT Timer, RTL8139 NIC, ATA, AHCI, xHCI, SB16, Serial).
 * `src/gui/` — Graphical user interface (Window Manager, Desktop, Taskbar, Login Screen).
 * `src/apps/` — Built-in Ring 0 & Ring 3 wrapper applications.
 * `apps/` — Userland Ring 3 executable sources (`.c`) compiled to `.mct` binaries.
+
+---
+
+## 🔌 Device model
+
+Drivers register themselves through `device_register()` from a linker-section
+initcall (`INITCALL(fn, level)`), so `kernel.c` contains one
+`device_init_all()` call instead of a driver list. Levels preserve the old
+bring-up order (10 ATA DMA, 11 AHCI, 12 xHCI, 13 virtio-blk, 14 virtio-gpu,
+15 SB16, 16 rtl8139, 17 e1000e, 20 net). Boot prints `[DEV] initcalls=<n>` and
+one `[DEV] block|net <name> ...` line per registered device.
+
+Block devices register a drive range and `block_ops_t`; VFS/ext2/FAT32 call
+`block_read()` / `block_write()` and the core routes by drive:
+0–3 ATA, 4–7 AHCI, 8–11 USB, 12–15 virtio-blk. NICs keep the existing
+priority-based `net_backend` and additionally appear as NET devices.

@@ -1,13 +1,13 @@
 #include "../include/ata.h"
+#include "../include/block.h"
+#include "../include/device.h"
+#include "../include/initcall.h"
 #include "../include/io.h"
 #include "../include/spinlock.h"
 #include "../include/pci.h"
 #include "../include/mem.h"
 #include "../include/serial.h"
 #include "../include/utils.h"   // memcpy for the DMA bounce path
-#include "../include/ahci.h"    // drives >= AHCI_DRIVE_BASE route to SATA
-#include "../include/xhci.h"    // drives >= USB_DRIVE_BASE route to USB
-#include "../include/virtio_blk.h" // drives >= VIRTIO_BLK_BASE route to virtio-blk
 #include "../include/blkcache.h" // sector cache + readahead commit/gen APIs
 
 // ata_lock serializes the shared IDE controller: two cores issuing command
@@ -95,9 +95,6 @@ int ata_wait_drq() { return ata_wait_drq_drive(0); }
 volatile int hdd_activity = 0;
 
 static int ata_read_sector_drive_io(int drive, unsigned int lba, unsigned char* b) {
-    if (drive >= VIRTIO_BLK_BASE) return virtio_blk_read_sectors(drive, lba, 1, b);
-    if (drive >= USB_DRIVE_BASE) return usb_read_sectors(drive, lba, 1, b);
-    if (drive >= AHCI_DRIVE_BASE) return ahci_read_sectors(drive, lba, 1, b);
     uint16_t base = ata_base_port(drive);
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10;
@@ -123,6 +120,7 @@ static int ata_read_sector_drive_io(int drive, unsigned int lba, unsigned char* 
 // v38.62 sector cache wrapper: the real I/O below is only reached on a cache
 // miss; hits are a memcpy from static .bss. See blkcache.h for coherence.
 int ata_read_sector_drive(int drive, unsigned int lba, unsigned char* b) {
+    if (drive < 0 || drive >= ATA_DRIVE_COUNT) return -1;
     extern int blkcache_read(int drive, uint32_t lba, int count,
                              unsigned char* buf, uint32_t* gen_out);
     extern void blkcache_commit(int drive, uint32_t lba, int count,
@@ -149,9 +147,6 @@ volatile uint32_t ata_ra_fills = 0;   // readahead prefetch batches filled
 
 static int ata_read_sectors_drive_io(int drive, unsigned int lba, int count, unsigned char* b) {
     ata_multi_rd_cmds++;
-    if (drive >= VIRTIO_BLK_BASE) return virtio_blk_read_sectors(drive, lba, count, b);
-    if (drive >= USB_DRIVE_BASE) return usb_read_sectors(drive, lba, count, b);
-    if (drive >= AHCI_DRIVE_BASE) return ahci_read_sectors(drive, lba, count, b);
     uint16_t base = ata_base_port(drive);
     if (count < 1) return -1;
     count = ata_batch_limit(lba, count);
@@ -266,6 +261,7 @@ static void ata_ra_maybe_prefetch(int drive, uint32_t lba, int count, uint32_t g
 // v38.62 sector cache wrapper (v38.65 + sequential readahead) — see the
 // single-sector wrapper above.
 int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char* b) {
+    if (drive < 0 || drive >= ATA_DRIVE_COUNT) return -1;
     extern int blkcache_read(int drive, uint32_t lba, int count,
                              unsigned char* buf, uint32_t* gen_out);
     extern void blkcache_commit(int drive, uint32_t lba, int count,
@@ -288,9 +284,6 @@ int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char
 // Multi-sector PIO write — the mirror of ata_read_sectors_drive: one
 // command, DRQ pulses per sector, data written in count*512-byte chunks.
 static int ata_write_sectors_drive_io(int drive, unsigned int lba, int count, const unsigned char* b) {
-    if (drive >= VIRTIO_BLK_BASE) return virtio_blk_write_sectors(drive, lba, count, b);
-    if (drive >= USB_DRIVE_BASE) return usb_write_sectors(drive, lba, count, b);
-    if (drive >= AHCI_DRIVE_BASE) return ahci_write_sectors(drive, lba, count, b);
     uint16_t base = ata_base_port(drive);
     if (count < 1) return -1;
     count = ata_batch_limit(lba, count);
@@ -332,6 +325,7 @@ static int ata_write_sectors_drive_io(int drive, unsigned int lba, int count, co
 // drop any stale cached copy of the range AFTER the write (and bump the
 // write generation so an in-flight reader cannot insert bytes older than it).
 int ata_write_sectors_drive(int drive, unsigned int lba, int count, const unsigned char* b) {
+    if (drive < 0 || drive >= ATA_DRIVE_COUNT) return -1;
     extern void blkcache_invalidate(int drive, uint32_t lba, int count);
     int rc = ata_write_sectors_drive_io(drive, lba, count, b);
     if (rc == 0) blkcache_invalidate(drive, lba, count);
@@ -577,13 +571,6 @@ int ata_read_sector(unsigned int lba, unsigned char* b) {
     return ata_read_sector_drive(0, lba, b);
 }
 static int ata_write_sector_drive_io(int drive, unsigned int lba, unsigned char* b) {
-    // Same backend ladder as the read side (ata.c:98) and the multi-sector
-    // write (ata.c:291): virtio first — the USB branch below matches every
-    // drive >= 8, so without this check a virtio drive (12+) routed to the
-    // USB backend's device table and the write was refused.
-    if (drive >= VIRTIO_BLK_BASE) return virtio_blk_write_sectors(drive, lba, 1, b);
-    if (drive >= USB_DRIVE_BASE) return usb_write_sectors(drive, lba, 1, b);
-    if (drive >= AHCI_DRIVE_BASE) return ahci_write_sectors(drive, lba, 1, b);
     uint16_t base = ata_base_port(drive);
     ata_eflags = spin_lock_irqsave(&ata_lock);
     hdd_activity = 10; // set activity frames
@@ -611,6 +598,7 @@ static int ata_write_sector_drive_io(int drive, unsigned int lba, unsigned char*
 // v38.62 sector cache wrapper (single-sector writes) — same contract as the
 // multi-sector wrapper: invalidate AFTER the data reached the disk.
 int ata_write_sector_drive(int drive, unsigned int lba, unsigned char* b) {
+    if (drive < 0 || drive >= ATA_DRIVE_COUNT) return -1;
     extern void blkcache_invalidate(int drive, uint32_t lba, int count);
     int rc = ata_write_sector_drive_io(drive, lba, b);
     if (rc == 0) blkcache_invalidate(drive, lba, 1);
@@ -619,3 +607,26 @@ int ata_write_sector_drive(int drive, unsigned int lba, unsigned char* b) {
 int ata_write_sector(unsigned int lba, unsigned char* b) {
     return ata_write_sector_drive(0, lba, b);
 }
+
+static const block_ops_t ata_block_ops = {
+    .read = ata_read_sectors_drive,
+    .write = ata_write_sectors_drive,
+};
+
+static device_t ata_block_device = {
+    .name = "ata",
+    .cls = DEV_CLASS_BLOCK,
+    .present = 1,
+    .irq = -1,
+    .drive_base = 0,
+    .drive_count = ATA_DRIVE_COUNT,
+    .ops = &ata_block_ops,
+};
+
+static void ata_boot_init(void) {
+    ata_dma_init();
+    register_interrupt_handler(46, ata_dma_irq_primary);
+    register_interrupt_handler(47, ata_dma_irq_secondary);
+    block_register(&ata_block_device);
+}
+INITCALL(ata_boot_init, 10);

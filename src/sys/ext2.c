@@ -1,5 +1,5 @@
 #include "../include/ext2.h"
-#include "../include/ata.h"
+#include "../include/block.h"
 #include "../include/utils.h"
 #include "../include/vfs.h"
 #include "../include/mem.h"
@@ -84,12 +84,12 @@ static void ext2_read_block(uint32_t block, unsigned char* buf) {
     // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
     uint32_t done = 0;
     while (done < sectors_per_block) {
-        int batch = ata_batch_limit(start_sector + done, sectors_per_block - done);
+        int batch = block_batch_limit(start_sector + done, sectors_per_block - done);
         // A refused read leaves the destination untouched. Callers parse
         // metadata and tail data straight out of this buffer (some of them on
         // the stack), so zero the failed run instead of exposing whatever was
         // there before.
-        if (ata_read_sectors_drive(ext2_drive, start_sector + done, batch,
+        if (block_read(ext2_drive, start_sector + done, batch,
                                    buf + done * 512) != 0) {
             memset(buf + done * 512, 0, (uint32_t)batch * 512);
         }
@@ -109,7 +109,7 @@ static uint32_t ext2_get_block(ext2_inode_t* inode, uint32_t lb, int alloc);
 // is ~800 command latencies — each ~1 ms on a quiet host but 10-20 ms on a
 // busy one, which is exactly how a 3.7 s texture phase becomes 23-47 s while
 // nothing about the work changed. ata_read_sectors_drive already accepts up to
-// ATA_BATCH_MAX (128) sectors per command, so a run of up to 16 blocks fits in
+// BLOCK_BATCH_MAX (128) sectors per command, so a run of up to 16 blocks fits in
 // ONE command.
 //
 // Out-of-range blocks keep ext2_read_block's contract: they read as zeros
@@ -137,10 +137,10 @@ static void ext2_read_blocks_run(uint32_t block, uint32_t count,
         uint32_t total = usable * sectors_per_block;
         uint32_t done = 0;
         while (done < total) {
-            int batch = ata_batch_limit(start_sector + done, (int)(total - done));
+            int batch = block_batch_limit(start_sector + done, (int)(total - done));
             // Same rule as ext2_read_block: a refused run reads as zeros, not
             // as the caller's previous (possibly stack) contents.
-            if (ata_read_sectors_drive(ext2_drive, start_sector + done, batch,
+            if (block_read(ext2_drive, start_sector + done, batch,
                                        buf + done * 512) != 0) {
                 memset(buf + done * 512, 0, (uint32_t)batch * 512);
             }
@@ -184,9 +184,9 @@ int ext2_init(int drive) {
     // Superblock is at offset 1024 (block 1 if block_size is 1024)
     // Read 2 sectors starting from sector 2
     write_serial_string("[EXT2] reading sector 2...\n");
-    ata_read_sector_drive(ext2_drive, 2, buf);
+    block_read(ext2_drive, 2, 1, buf);
     write_serial_string("[EXT2] reading sector 3...\n");
-    ata_read_sector_drive(ext2_drive, 3, buf + 512);
+    block_read(ext2_drive, 3, 1, buf + 512);
     write_serial_string("[EXT2] sectors read ok\n");
     
     memcpy(&sb, buf, sizeof(ext2_superblock_t));
@@ -403,7 +403,7 @@ int ext2_read_file_data(uint32_t inode_num, char* buf, int max_size) {
 // ============================================================
 
 // v38.159: returns 0 on success, -1 when the medium refused any part of the
-// block. It used to be void and dropped ata_write_sectors_drive()'s result, so
+// block. It used to be void and dropped block_write()'s result, so
 // a disk error turned into "the filesystem accepted your data" — while the
 // in-memory superblock/bitmaps went on describing media that never changed.
 static int ext2_write_block(uint32_t block, unsigned char* buf) {
@@ -418,8 +418,8 @@ static int ext2_write_block(uint32_t block, unsigned char* buf) {
     // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
     uint32_t done = 0;
     while (done < sectors_per_block) {
-        int batch = ata_batch_limit(start_sector + done, sectors_per_block - done);
-        if (ata_write_sectors_drive(ext2_drive, start_sector + done, batch,
+        int batch = block_batch_limit(start_sector + done, sectors_per_block - done);
+        if (block_write(ext2_drive, start_sector + done, batch,
                                     buf + done * 512) != 0) {
             write_serial_string("[EXT2] block write refused at block ");
             write_serial_hex(block);
@@ -446,8 +446,8 @@ static int ext2_sync_super(void) {
     memset(buf, 0, sizeof(buf));
     memcpy(buf, &sb, sizeof(ext2_superblock_t));
     int failed = 0;
-    if (ata_write_sector_drive(ext2_drive, 2, buf) != 0) failed = 1;
-    if (ata_write_sector_drive(ext2_drive, 3, buf + 512) != 0) failed = 1;
+    if (block_write(ext2_drive, 2, 1, buf) != 0) failed = 1;
+    if (block_write(ext2_drive, 3, 1, buf + 512) != 0) failed = 1;
     // Heap-allocated: keeps this function's stack footprint small — it is
     // called from the allocators which already hold bitmap buffers.
     unsigned char* bgd_buf = (unsigned char*)kmalloc(4096);

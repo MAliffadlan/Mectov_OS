@@ -517,70 +517,14 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     detect_cpu();
     write_serial_string("[K] pci\n");
     pci_scan();
-    // Bus-mastering DMA for the IDE controller (v38.26): detect the BMIDE
-    // BAR + enable bus mastering, and route the controller's completion
-    // interrupt (IRQ14/15 -> INT 46/47) to the ATA driver. Must run after
-    // pci_scan and after the PIC/IOAPIC routing above.
-    write_serial_string("[K] ata_dma\n");
-    extern void ata_dma_init(void);
-    ata_dma_init();
-    extern void register_interrupt_handler(uint8_t n, isr_t handler);
-    extern void ata_dma_irq_primary(registers_t*);
-    extern void ata_dma_irq_secondary(registers_t*);
-    register_interrupt_handler(46, ata_dma_irq_primary);
-    register_interrupt_handler(47, ata_dma_irq_secondary);
-    // SATA (v38.50): bring up any AHCI controller next to the IDE one. Ports
-    // with disks become drives 4+ on the same sector API, so ext2/FAT32 and
-    // mount() work on SATA volumes unchanged. Absent controller = log only.
-    write_serial_string("[K] ahci\n");
-    extern void ahci_init(void);
-    ahci_init();
-    // USB 3.0 (v38.56): any xHCI controller + attached mass-storage. BOT
-    // units become drives 8+ on the same sector API — `mount /usb fat32 8`
-    // works on a USB stick exactly like the SATA flow. Absent controller
-    // or empty ports = log only. Must run after pci_scan and ahci_init.
-    write_serial_string("[K] xhci\n");
-    extern void xhci_init(void);
-    xhci_init();
-    // VirtIO-Blk (v38.78): transitional/legacy PCI block disks become
-    // drives 12+ on the same sector API (`mount /vblk fat32 12`). Absent
-    // device = log only. Must run after pci_scan (shares nothing with
-    // ahci/xhci — own queue memory, own lock, poll-only so no IRQ wiring).
-    write_serial_string("[K] virtio\n");
-    extern void virtio_blk_init(void);
-    virtio_blk_init();
-    // VirtIO-GPU (v38.115): a MODERN virtio-pci device — the legacy interface
-    // virtio_blk drives above does not exist for the gpu (measured: no I/O BAR
-    // at all, even with disable-modern=on). Optional device: present only when
-    // the run attaches one (MECTOV_GPU=1 ./run.sh, scripts/virtiogpu_test.py),
-    // and absent is a one-line log. Poll-only, own static rings, no IRQ.
-    extern void virtio_gpu_init(void);
-    virtio_gpu_init();
-    write_serial_string("[K] sb16\n");
-    extern void sb16_init(void);
-    sb16_init();
-    // v38.170: boot-time proof the extended SB16 API (play/pause/resume/
-    // mixer/state) works — runs right after init, guarded by sb16_available.
-    extern void sb16_selftest(void);
-    sb16_selftest();
-    write_serial_string("[K] rtl\n");
-    extern void init_rtl8139();
-    init_rtl8139();
-    // v38.170: Intel e1000/e1000e — the second NIC backend. Whichever of the
-    // two registers with the higher priority becomes the protocol layer's
-    // active backend (e1000e wins so a machine with both uses the Intel card;
-    // rtl8139 is the fallback when no Intel NIC is present).
-    write_serial_string("[K] e1000e\n");
-    extern void e1000e_init(void);
-    e1000e_init();
-    write_serial_string("[K] net\n");
-    extern void net_init();
-    net_init();
-    // IRQ-driven RX: wire the RTL8139 IRQ (INT 43) to the network layer.
-    // net_poll() stays as a fallback for shell busy-waits.
-    extern void register_interrupt_handler(uint8_t n, isr_t handler);
-    extern void net_irq_handler(registers_t*);
-    register_interrupt_handler(43, net_irq_handler);
+    // Block drivers (ATA/AHCI/xHCI/virtio-blk) register themselves through
+    // initcalls below; the drive API is owned by src/sys/block.c.
+    // VirtIO-GPU and SB16 also register through initcalls; no driver calls
+    // remain in kernel_main. virtio_gpu is optional (MECTOV_GPU=1) and SB16
+    // self-tests only when a card is present.
+    write_serial_string("[K] devices\n");
+    extern void device_init_all(void);
+    device_init_all();
     // init_serial already called at top of kernel_main
     write_serial_string("[K] uptime\n");
     init_uptime();

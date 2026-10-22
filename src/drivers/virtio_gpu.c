@@ -39,6 +39,7 @@
 #include "../include/virtio.h"      // VIRTIO_S_* status bits, VIRTQ_DESC_F_*
 #include "../include/pci.h"
 #include "../include/serial.h"
+#include "../include/initcall.h"
 #include "../include/utils.h"       // memset/memcpy
 
 #define VGPU_QSIZE_MAX   64         // control queue; we are strictly serial
@@ -804,3 +805,5 @@ void virtio_gpu_log_status(void) {
     }
     vgpu_log("\n");
 }
+
+INITCALL(virtio_gpu_init, 14);

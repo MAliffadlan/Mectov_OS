@@ -17,7 +17,7 @@
 // matching Windows behavior; mtools-created volumes (which use ~1-style short
 // names) are matched by their reassembled long name, not the generated 8.3.
 #include "../include/fat32.h"
-#include "../include/ata.h"
+#include "../include/block.h"
 #include "../include/utils.h"
 #include "../include/serial.h"
 #include "../include/vfs.h"
@@ -43,8 +43,8 @@ static void fat32_read_sectors(uint32_t lba, unsigned char* buf, int count) {
     // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
     int done = 0;
     while (done < count) {
-        int batch = ata_batch_limit(lba + done, count - done);
-        if (ata_read_sectors_drive(fat32_drive, lba + done, batch,
+        int batch = block_batch_limit(lba + done, count - done);
+        if (block_read(fat32_drive, lba + done, batch,
                                    buf + done * 512) != 0) {
             memset(buf + done * 512, 0, batch * 512);
         }
@@ -52,14 +52,14 @@ static void fat32_read_sectors(uint32_t lba, unsigned char* buf, int count) {
     }
 }
 // v38.159: returns 0 only when every run reached the medium. It used to be
-// void and dropped ata_write_sectors_drive()'s result, so a refused write
+// void and dropped block_write()'s result, so a refused write
 // looked like a successful one and the VFS/report layer said "stored".
 static int fat32_write_sectors(uint32_t lba, const unsigned char* buf, int count) {
     // Multi-sector PIO (v38.25): one command per up-to-16-sector run.
     int done = 0;
     while (done < count) {
-        int batch = ata_batch_limit(lba + done, count - done);
-        if (ata_write_sectors_drive(fat32_drive, lba + done, batch,
+        int batch = block_batch_limit(lba + done, count - done);
+        if (block_write(fat32_drive, lba + done, batch,
                                     buf + done * 512) != 0) {
             write_serial_string("[FAT32] sector write refused at LBA ");
             write_serial_hex(lba + done);
@@ -835,7 +835,7 @@ int fat32_init(int drive) {
     fat32_drive = drive;
 
     unsigned char b[512];
-    if (ata_read_sector_drive(drive, 0, b) != 0) {
+    if (block_read(drive, 0, 1, b) != 0) {
         write_serial_string("[FAT32] no drive\n");
         return -1;
     }

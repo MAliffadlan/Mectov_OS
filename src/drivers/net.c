@@ -5,6 +5,8 @@
 #include "../include/serial.h"
 #include "../include/entropy.h"   // get_random_u32() — unpredictable TCP ISN
 #include "../include/spinlock.h"
+#include "../include/device.h"
+#include "../include/initcall.h"
 
 // v38.169: the active NIC backend. net.c used to call the rtl8139 driver
 // directly (rtl8139_send_packet, rtl8139_poll_rx, rtl_mac), so adding any
@@ -60,6 +62,22 @@ static int net_backend_priority(const char* name) {
 // net_init() touches hardware). Equal priority keeps first-wins.
 void net_register_backend(net_backend_t* be) {
     if (be == NULL) return;
+
+    static device_t net_devices[4];
+    static int net_device_count;
+    if (be->present && net_device_count < 4) {
+        device_t* d = &net_devices[net_device_count++];
+        d->name = be->name;
+        d->cls = DEV_CLASS_NET;
+        d->instance = 0;
+        d->present = be->present;
+        d->irq = -1;
+        d->drive_base = 0;
+        d->drive_count = 0;
+        d->ops = be;
+        device_register(d);
+    }
+
     int mp = net_backend_priority(be->name);
     if (net_backend != NULL && net_backend != &noop_backend) {
         int cp = net_backend_priority(net_backend->name);
@@ -1521,6 +1539,7 @@ static void net_handle_frame(uint8_t* frame, uint32_t len) {
 // net_poll) sends the first DISCOVER; if no server answers, the static
 // defaults take over exactly as before (ARP -> net_ready).
 void net_init(void) {
+    register_interrupt_handler(43, net_irq_handler);
     if (!net_backend->present) return;
     uint32_t nf = spin_lock_irqsave(&net_lock);
     write_serial_string("[NET] init: starting DHCP client\n");
@@ -1670,3 +1689,5 @@ void net_send_ping(uint8_t* target_ip) {
     net_send_eth(gateway_mac, ETH_TYPE_IP, pkt, total);
     spin_unlock_irqrestore(&net_lock, nf);
 }
+
+INITCALL(net_init, 20);

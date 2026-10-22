@@ -8,7 +8,7 @@
 // ============================================================
 
 #include "../include/vfs.h"
-#include "../include/ata.h"
+#include "../include/block.h"
 #include "../include/utils.h"
 #include "../include/mem.h"
 #include "../include/ext2.h"
@@ -1481,7 +1481,7 @@ static int vfs_save_unlocked() {
     // v38.74: ata_write_sector() now reports failure (e.g. no disk attached —
     // floating-bus status 0x00/0xFF is detected up front in ata.c). Log once
     // and bail instead of grinding through every sector of the node table.
-    if (ata_write_sector(VFS_MAGIC_SECTOR, meta) < 0) {
+    if (block_write(0, VFS_MAGIC_SECTOR, 1, meta) < 0) {
         write_serial_string("[VFS] save failed: ATA write error (disk attached?)\n");
         return -1;
     }
@@ -1500,17 +1500,17 @@ static int vfs_save_unlocked() {
     return 0;
 }
 
-// The node table's batched writer. 128-sector pieces (ATA_BATCH_MAX, clamped
+// The node table's batched writer. 128-sector pieces (BLOCK_BATCH_MAX, clamped
 // again by ata_batch_limit at the 128-sector LBA boundary), zero-padded tail
 // not needed — VFS_NODE_SECTORS is a whole number of 512-byte node records.
 // Falls back to the old per-sector loop when the heap is unavailable (very
 // early boot), where the I/O is still correct, just slow.
 static int vfs_node_table_write(void) {
     unsigned char* p = (unsigned char*)fs_nodes;
-    unsigned char* wbuf = (unsigned char*)kmalloc(ATA_BATCH_MAX * 512);
+    unsigned char* wbuf = (unsigned char*)kmalloc(BLOCK_BATCH_MAX * 512);
     if (!wbuf) {
         for (int i = 0; i < VFS_NODE_SECTORS; i++) {
-            if (ata_write_sector(VFS_NODE_START + i, p + (i * 512)) < 0) {
+            if (block_write(0, VFS_NODE_START + i, 1, p + (i * 512)) < 0) {
                 write_serial_string("[VFS] save failed at node-table sector ");
                 write_serial_hex((uint32_t)i);
                 write_serial_string("\n");
@@ -1521,10 +1521,10 @@ static int vfs_node_table_write(void) {
     }
     int s = 0;
     while (s < VFS_NODE_SECTORS) {
-        int batch = ata_batch_limit((unsigned int)(VFS_NODE_START + s),
+        int batch = block_batch_limit((unsigned int)(VFS_NODE_START + s),
                                     VFS_NODE_SECTORS - s);
         memcpy(wbuf, p + s * 512, (uint32_t)batch * 512);
-        if (ata_write_sectors_drive(0, (unsigned int)(VFS_NODE_START + s),
+        if (block_write(0, (unsigned int)(VFS_NODE_START + s),
                                     batch, wbuf) < 0) {
             kfree(wbuf);
             write_serial_string("[VFS] save failed at node-table sector ");
@@ -1548,7 +1548,7 @@ static int vfs_load_unlocked() {
     unsigned char meta[512];
     // v38.74: honor the read status — with no disk this used to "succeed"
     // reading a 0x00-filled sector and then quietly rebuild over nothing.
-    if (ata_read_sector(VFS_MAGIC_SECTOR, meta) < 0) {
+    if (block_read(0, VFS_MAGIC_SECTOR, 1, meta) < 0) {
         write_serial_string("[VFS] load failed: ATA read error (disk attached?)\n");
         return 0;
     }
@@ -1573,7 +1573,7 @@ static int vfs_load_unlocked() {
     // Read node table
     unsigned char* p = (unsigned char*)fs_nodes;
     for (int i = 0; i < VFS_NODE_SECTORS; i++) {
-        if (ata_read_sector(VFS_NODE_START + i, p + (i * 512)) < 0) {
+        if (block_read(0, VFS_NODE_START + i, 1, p + (i * 512)) < 0) {
             write_serial_string("[VFS] load failed at node-table sector ");
             write_serial_hex((uint32_t)i);
             write_serial_string("\n");
@@ -3144,15 +3144,15 @@ static int vfs_read_file_unlocked(const char* path, char* buf, int max_size) {
     int secs_full = size / 512;
     int s = 0;
     while (s < secs_full) {
-        int batch = ata_batch_limit((unsigned int)(sector + s), secs_full - s);
-        ata_read_sectors_drive(0, (unsigned int)(sector + s), batch,
+        int batch = block_batch_limit((unsigned int)(sector + s), secs_full - s);
+        block_read(0, (unsigned int)(sector + s), batch,
                                (unsigned char*)buf + s * 512);
         s += batch;
     }
     int tail = size - secs_full * 512;
     if (tail > 0) {
         unsigned char tmp[512];
-        ata_read_sector_drive(0, (unsigned int)(sector + secs_full), tmp);
+        block_read(0, (unsigned int)(sector + secs_full), 1, tmp);
         memcpy(buf + secs_full * 512, tmp, tail);
     }
     
@@ -3251,15 +3251,15 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
                 int pfull = prime_size / 512;
                 int ps = 0;
                 while (ps < pfull) {
-                    int batch = ata_batch_limit((unsigned int)psector + ps, pfull - ps);
-                    ata_read_sectors_drive(0, (unsigned int)psector + ps, batch,
+                    int batch = block_batch_limit((unsigned int)psector + ps, pfull - ps);
+                    block_read(0, (unsigned int)psector + ps, batch,
                                            (unsigned char*)tmp + ps * 512);
                     ps += batch;
                 }
                 int ptail = prime_size - pfull * 512;
                 if (ptail > 0) {
                     unsigned char t2[512];
-                    ata_read_sector_drive(0, (unsigned int)psector + pfull, t2);
+                    block_read(0, (unsigned int)psector + pfull, 1, t2);
                     memcpy(tmp + pfull * 512, t2, ptail);
                 }
                 pcache_insert(node, tmp, prime_size);
@@ -3287,7 +3287,7 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
     // batches straight into the caller's buffer (v38.25).
     if (in_off > 0) {
         unsigned char tmp[512];
-        ata_read_sector_drive(0, (unsigned int)sector++, tmp);
+        block_read(0, (unsigned int)sector++, 1, tmp);
         int chunk = 512 - in_off;
         if (chunk > remaining) chunk = remaining;
         memcpy(buf + done, tmp + in_off, chunk);
@@ -3298,8 +3298,8 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
         int secs = remaining / 512;
         int s = 0;
         while (s < secs) {
-            int batch = ata_batch_limit((unsigned int)sector + s, secs - s);
-            ata_read_sectors_drive(0, (unsigned int)sector + s, batch,
+            int batch = block_batch_limit((unsigned int)sector + s, secs - s);
+            block_read(0, (unsigned int)sector + s, batch,
                                    (unsigned char*)buf + done + s * 512);
             s += batch;
         }
@@ -3310,7 +3310,7 @@ int vfs_read_file_offset(int node, int offset, char* buf, int len) {
     // Tail: the final partial sector.
     if (remaining > 0) {
         unsigned char tmp[512];
-        ata_read_sector_drive(0, (unsigned int)sector, tmp);
+        block_read(0, (unsigned int)sector, 1, tmp);
         memcpy(buf + done, tmp, remaining);
     }
     return len;
@@ -3453,20 +3453,20 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
     }
     
     // Write data sectors
-    // Multi-sector PIO (v38.25): write up to ATA_BATCH_MAX sectors per
+    // Multi-sector PIO (v38.25): write up to BLOCK_BATCH_MAX sectors per
     // command, zero-padding the partial tail sector inside the batch buffer.
     int secs = (size + 511) / 512;
     int s = 0;
     int io_failed = 0;   // v38.159: any refused sector fails the whole write
-    unsigned char* wbuf = (unsigned char*)kmalloc(ATA_BATCH_MAX * 512);
+    unsigned char* wbuf = (unsigned char*)kmalloc(BLOCK_BATCH_MAX * 512);
     if (wbuf) {
         while (s < secs) {
-            int batch = ata_batch_limit((unsigned int)(start_sector + s), secs - s);
+            int batch = block_batch_limit((unsigned int)(start_sector + s), secs - s);
             memset(wbuf, 0, batch * 512);
             int n = batch * 512;
             if (s * 512 + n > size) n = size - s * 512;
             if (n > 0) memcpy(wbuf, data + s * 512, n);
-            if (ata_write_sectors_drive(0, (unsigned int)(start_sector + s),
+            if (block_write(0, (unsigned int)(start_sector + s),
                                         batch, wbuf) != 0) {
                 io_failed = 1;
                 break;
@@ -3484,7 +3484,7 @@ static int vfs_write_file_unlocked(const char* path, const char* data, int size)
             memset(tmp, 0, 512);
             int chunk = remaining > 512 ? 512 : remaining;
             if (chunk > 0) memcpy(tmp, data + offset, chunk);
-            if (ata_write_sector((unsigned int)sector++, tmp) < 0) {
+            if (block_write(0, (unsigned int)sector++, 1, tmp) < 0) {
                 io_failed = 1;
                 break;
             }

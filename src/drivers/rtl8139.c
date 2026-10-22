@@ -6,6 +6,7 @@
 #include "../include/utils.h"
 #include "../include/serial.h"
 #include "../include/spinlock.h"
+#include "../include/initcall.h"
 
 uint8_t rtl_mac[6];
 int rtl_present = 0;
@@ -275,3 +276,5 @@ resync:
     rtl_exit(flags);
     return result;
 }
+
+INITCALL(init_rtl8139, 16);

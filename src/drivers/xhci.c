@@ -71,6 +71,9 @@
 
 #include "../include/xhci.h"
 #include "../include/ata.h"       // ata_batch_limit
+#include "../include/block.h"
+#include "../include/device.h"
+#include "../include/initcall.h"
 #include "../include/pci.h"
 #include "../include/mem.h"       // page_map for the BAR
 #include "../include/serial.h"
@@ -1624,3 +1627,25 @@ int usb_write_sectors(int drive, uint32_t lba, int count, const uint8_t* buf) {
     spin_unlock_irqrestore(&xhci_lock, xhci_eflags);
     return rc;
 }
+
+static const block_ops_t usb_block_ops = {
+    .read = usb_read_sectors,
+    .write = usb_write_sectors,
+};
+
+static device_t usb_block_device = {
+    .name = "usb",
+    .cls = DEV_CLASS_BLOCK,
+    .present = 0,
+    .irq = -1,
+    .drive_base = USB_DRIVE_BASE,
+    .drive_count = 4,
+    .ops = &usb_block_ops,
+};
+
+static void xhci_boot_init(void) {
+    xhci_init();
+    usb_block_device.present = usb_present();
+    block_register(&usb_block_device);
+}
+INITCALL(xhci_boot_init, 12);

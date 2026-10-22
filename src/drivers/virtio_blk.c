@@ -18,6 +18,9 @@
 #include "../include/virtio_blk.h"
 #include "../include/virtio.h"
 #include "../include/ata.h"      // ATA_BATCH_MAX, hdd_activity
+#include "../include/block.h"
+#include "../include/device.h"
+#include "../include/initcall.h"
 #include "../include/pci.h"
 #include "../include/serial.h"
 #include "../include/utils.h"    // memcpy/memset
@@ -332,3 +335,25 @@ int virtio_blk_write_sectors(int drive, uint32_t lba, int count, const uint8_t* 
     spin_unlock_irqrestore(&vblk_lock, vblk_eflags);
     return rc;
 }
+
+static const block_ops_t virtio_block_ops = {
+    .read = virtio_blk_read_sectors,
+    .write = virtio_blk_write_sectors,
+};
+
+static device_t virtio_block_device = {
+    .name = "virtio-blk",
+    .cls = DEV_CLASS_BLOCK,
+    .present = 0,
+    .irq = -1,
+    .drive_base = VIRTIO_BLK_BASE,
+    .drive_count = VIRTIO_BLK_MAX,
+    .ops = &virtio_block_ops,
+};
+
+static void virtio_blk_boot_init(void) {
+    virtio_blk_init();
+    virtio_block_device.present = virtio_blk_present();
+    block_register(&virtio_block_device);
+}
+INITCALL(virtio_blk_boot_init, 13);

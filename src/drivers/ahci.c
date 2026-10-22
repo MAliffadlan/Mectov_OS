@@ -18,6 +18,9 @@
 
 #include "../include/ahci.h"
 #include "../include/ata.h"      // ATA_BATCH_MAX, ata_batch_limit
+#include "../include/block.h"
+#include "../include/device.h"
+#include "../include/initcall.h"
 #include "../include/pci.h"
 #include "../include/mem.h"      // page_map for the BAR
 #include "../include/serial.h"
@@ -318,3 +321,25 @@ int ahci_write_sectors(int drive, uint32_t lba, int count, const uint8_t* buf) {
     spin_unlock_irqrestore(&ahci_lock, ahci_eflags);
     return rc;
 }
+
+static const block_ops_t ahci_block_ops = {
+    .read = ahci_read_sectors,
+    .write = ahci_write_sectors,
+};
+
+static device_t ahci_block_device = {
+    .name = "ahci",
+    .cls = DEV_CLASS_BLOCK,
+    .present = 0,
+    .irq = -1,
+    .drive_base = AHCI_DRIVE_BASE,
+    .drive_count = AHCI_MAX_PORTS,
+    .ops = &ahci_block_ops,
+};
+
+static void ahci_boot_init(void) {
+    ahci_init();
+    ahci_block_device.present = ahci_present();
+    block_register(&ahci_block_device);
+}
+INITCALL(ahci_boot_init, 11);

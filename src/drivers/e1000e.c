@@ -35,6 +35,7 @@
 #include "../include/serial.h"
 #include "../include/utils.h"     // memset / memcpy
 #include "../include/spinlock.h"
+#include "../include/initcall.h"
 
 uint8_t e1000e_mac[6];
 int     e1000e_present_flag = 0;
@@ -395,3 +396,5 @@ void e1000e_irq_handler(void) {
     // this exists so kernel.c can route the e1000e's own IRQ line to the same
     // net_irq_handler without a second dispatcher.
 }
+
+INITCALL(e1000e_init, 17);

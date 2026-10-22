@@ -4,6 +4,7 @@
 #include "../include/utils.h"
 #include "../include/serial.h"
 #include "../include/spinlock.h"
+#include "../include/initcall.h"
 
 // IDT registration
 extern void register_interrupt_handler(uint8_t n, void* handler);
@@ -548,3 +549,9 @@ void sb16_selftest(void) {
 
     write_serial_string("[SB16] selftest PASS (fmt/play/pause/resume/mixer/stop)\n");
 }
+
+static void sb16_boot_init(void) {
+    sb16_init();
+    sb16_selftest();
+}
+INITCALL(sb16_boot_init, 15);
