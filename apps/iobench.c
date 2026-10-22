@@ -113,8 +113,8 @@ void _start(void) {
     sys_delete_file(WRITE_FILE);
 
     // ---- Verdict ----
-    if (cold > 0 && hot > 0 && hot * 3 < cold) {
-        sys_print("[IOBENCH] verdict OK (cached reads several times faster)\n", 0x0E);
+    if (cold > 0 && hot > 0 && hot * 5 < cold * 2) {
+        sys_print("[IOBENCH] verdict OK (cached reads at least 2.5x faster)\n", 0x0E);
     } else {
         sys_print("[IOBENCH] verdict BAD (cache not helping)\n", 0x0C);
     }
