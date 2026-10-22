@@ -1,6 +1,6 @@
 # Mectov OS
 
-[![CI Boot Test](https://github.com/MAliffadlan/Mectov_OS/actions/workflows/build-boot-test.yml/badge.svg)](https://github.com/MAliffadlan/Mectov_OS/actions/workflows/build-boot-test.yml)
+[![CI Boot Test](https://github.com/MAliffadlan/Mectov_OS/actions/workflows/build-boot-test.yml/badge.svg?branch=main)](https://github.com/MAliffadlan/Mectov_OS/actions/workflows/build-boot-test.yml)
 
 A monolithic x86 kernel written from scratch in C and Assembly — no external libraries, no libc, no POSIX. Every byte runs directly on hardware: GRUB Multiboot boot, protected mode with paging, a graphical desktop with a floating-window manager, a real Unix process model, and an SMP scheduler that runs user tasks on all four CPU cores.
 
