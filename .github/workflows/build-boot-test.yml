@@ -16,6 +16,7 @@ on:
 #   gui            -> login/lock/paint/taskbar/startmenu/explorer/fbmap/hardening
 #   browser-net    -> browser HTTP + hostname/gateway + POSIX socket + poll/select
 #   browser-net-e1000e -> same network stack on the Intel e1000e NIC (v38.170)
+#   browser-net-virtio -> same network stack on the paravirtual virtio-net NIC (v38.174)
 #   doom-rust      -> windowed DOOM, Rust app, ASLR (2 boots), fsync/mmap/lseek
 #   quake3         -> ioquake3 engine core on the MECTOV_Q3=1 ISO variant
 #   storage        -> FAT32/mount/AHCI/xHCI/VirtIO/bigread-DMA/iocache/write-failure
@@ -439,6 +440,41 @@ jobs:
       - name: POSIX socket regression over e1000e (user-net + hostfwd, TCG)
         run: |
           python3 scripts/socktest.py --nic e1000e --timeout 300
+
+  browser-net-virtio:
+    # v38.174: the third net backend — virtio-net, driven through the LEGACY
+    # virtio-pci interface (disable-modern=on), the same transport virtio-blk
+    # uses. Unlike the two emulated cards this one is poll-only: no IRQ is
+    # wired, and net_poll() drains the receiveq. DHCP proves TX broadcast,
+    # RX, ARP and the slirp exchange; socktest proves TCP in both directions.
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-system-x86 \
+            python3-pil \
+            dosfstools
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: mectov-artifacts
+          path: .
+
+      - name: DHCP over virtio-net (TX/RX/ARP/slirp, TCG)
+        run: |
+          python3 scripts/dhcp_test.py --nic virtio-net --timeout 300
+
+      - name: POSIX socket regression over virtio-net (user-net + hostfwd, TCG)
+        run: |
+          python3 scripts/socktest.py --nic virtio-net --timeout 300
 
   doom-rust:
     needs: build

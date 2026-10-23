@@ -365,6 +365,12 @@
 // guard (-mstack-protector-guard=global; this kernel sets up no i386 TLS).
 // boot.asm seeds __stack_chk_guard from RDTSC before kernel_main, and
 // __stack_chk_fail runs the normal multi-core panic tail.
-#define OS_VERSION "38.173"
+//
+// v38.174: virtio-net, the third net_backend_t (after rtl8139 and e1000e) and
+// the first paravirtual one. Legacy virtio-pci transport reusing the virtio.h
+// constants that already carried VIRTIO_PCI_DEV_NET_LEGACY, two queues
+// (0=receiveq, 1=transmitq), poll-only like virtio-blk, and the 10-byte
+// virtio_net_hdr in front of every packet. Highest backend priority.
+#define OS_VERSION "38.174"
 
 #endif

@@ -34,6 +34,11 @@ MON_SOCK = "/tmp/mectov_sock_monitor.sock"
 ECHO_PORT = 9999        # host echo server the guest client connects to
 HOSTFWD_PORT = 15580    # host-side port forwarded to guest :8080
 
+# Friendly --nic names that need more than a bare model string. virtio-net is
+# driven through the LEGACY virtio-pci interface (the kernel has no MSI and
+# skips modern-only devices), so it must be attached with disable-modern=on.
+NIC_ALIASES = {"virtio-net": "virtio-net-pci,disable-modern=on"}
+
 LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 RUN_KEYS = ["r", "u", "n", "spc", "slash", "a", "p", "p", "s",
             "slash", "t", "c", "p", "s", "e", "r", "v", "e", "r", "dot", "m", "c", "t", "ret"]
@@ -96,7 +101,8 @@ def main():
     ap.add_argument("--iso", default="mectov.iso")
     ap.add_argument("--disk", default="disk.img")
     ap.add_argument("--ext2", default="ext2.img")
-    ap.add_argument("--nic", default="rtl8139", help="NIC model (rtl8139|e1000e)")
+    ap.add_argument("--nic", default="rtl8139",
+                    help="NIC model (rtl8139|e1000e|virtio-net)")
     args = ap.parse_args()
 
     for p in (SERIAL_LOG, MON_SOCK):
@@ -121,7 +127,7 @@ def main():
         # user networking: the guest reaches the host at 10.0.2.2; the host
         # reaches guest :8080 through the forwarded local port.
         "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{HOSTFWD_PORT}-:8080",
-        "-device", f"{args.nic},netdev=n0",
+        "-device", f"{NIC_ALIASES.get(args.nic, args.nic)},netdev=n0",
         "-drive", f"file={args.disk},format=raw,index=0,media=disk",
         "-drive", f"file={args.ext2},format=raw,index=1,media=disk",
         "-monitor", f"unix:{MON_SOCK},server,nowait",

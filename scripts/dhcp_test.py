@@ -28,6 +28,11 @@ import time
 SERIAL_LOG = "/tmp/mectov_dhcp_serial.log"
 MON_SOCK = "/tmp/mectov_dhcp_monitor.sock"
 
+# --nic names that need the -netdev/-device form rather than the `-net
+# nic,model=` shorthand: virtio-net is driven through the LEGACY virtio-pci
+# interface, so it must carry disable-modern=on.
+NIC_ALIASES = {"virtio-net": "virtio-net-pci,disable-modern=on"}
+
 LOGIN_KEYS = ["spc", "m", "e", "c", "t", "o", "v", "1", "2", "3", "ret"]
 
 
@@ -61,7 +66,8 @@ def main():
     ap.add_argument("--iso", default="mectov.iso")
     ap.add_argument("--disk", default="disk.img")
     ap.add_argument("--ext2", default="ext2.img")
-    ap.add_argument("--nic", default="rtl8139", help="NIC model (rtl8139|e1000e)")
+    ap.add_argument("--nic", default="rtl8139",
+                    help="NIC model (rtl8139|e1000e|virtio-net)")
     args = ap.parse_args()
 
     for p in (SERIAL_LOG, MON_SOCK):
@@ -73,6 +79,18 @@ def main():
     # NOTE: unlike the other tests this one NEEDS the NIC + user net: QEMU
     # slirp answers DHCP on 10.0.2.x. `-net none` tests verify the no-NIC
     # path (DHCP never runs there).
+    #
+    # The `-net nic,model=` shorthand cannot express a device property, and
+    # virtio-net must be attached with disable-modern=on (the kernel targets
+    # the legacy virtio-pci interface only). So virtio-net takes the
+    # -netdev/-device form; every other model keeps the shorthand EXACTLY as
+    # before, so existing rtl8139/e1000e runs are byte-identical.
+    if args.nic in NIC_ALIASES:
+        nic_args = ["-netdev", "user,id=n0",
+                    "-device", f"{NIC_ALIASES[args.nic]},netdev=n0"]
+    else:
+        nic_args = ["-net", f"nic,model={args.nic}", "-net", "user"]
+
     qemu_cmd = [
         "qemu-system-i386",
         "-cpu", "qemu32,+nx",
@@ -82,7 +100,7 @@ def main():
         "-smp", "4",
         "-display", "none",
         "-serial", f"file:{SERIAL_LOG}",
-        "-net", f"nic,model={args.nic}", "-net", "user",
+        *nic_args,
         "-drive", f"file={args.disk},format=raw,index=0,media=disk",
         "-drive", f"file={args.ext2},format=raw,index=1,media=disk",
         "-monitor", f"unix:{MON_SOCK},server,nowait",

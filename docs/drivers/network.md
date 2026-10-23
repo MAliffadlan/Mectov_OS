@@ -1,6 +1,16 @@
-# RTL8139 Network Stack & Web Gateway Proxy
+# Network Stack & Web Gateway Proxy
 
-Mectov OS includes a built-in Ethernet network stack (`src/drivers/net.c` & `src/drivers/rtl8139.c`) capable of real-time internet connectivity via QEMU user-mode networking.
+Mectov OS includes a built-in Ethernet network stack (`src/drivers/net.c`) capable of real-time internet connectivity via QEMU user-mode networking. The protocol layer is NIC-agnostic: since v38.169 it dispatches through a `net_backend_t` vtable (`src/include/net.h`) so a driver only supplies `send` / `poll_rx` / `irq_clear` / `get_mac`.
+
+Three backends exist:
+
+| Backend | File | Transport | RX |
+|---|---|---|---|
+| `rtl8139` | `src/drivers/rtl8139.c` | PCI, I/O ports, 8KB ring | IRQ 11 |
+| `e1000e` | `src/drivers/e1000e.c` | PCI, MMIO, descriptor rings | IRQ |
+| `virtio-net` | `src/drivers/virtio_net.c` | PCI legacy virtio (I/O BAR), two virtqueues | poll-only |
+
+Priority (`net_backend_priority()` in `src/drivers/net.c`): virtio-net 3 > e1000e 2 > rtl8139 1. Paravirtual costs no emulation, so a hypervisor that offers it should be used; first-wins among equal ranks.
 
 ---
 
@@ -16,7 +26,7 @@ Mectov OS includes a built-in Ethernet network stack (`src/drivers/net.c` & `src
 +--------------------------------------------------------------------+
 |  Ethernet Frame Layer (IEEE 802.3)                                 |
 +--------------------------------------------------------------------+
-|  RTL8139 PCI Driver (Bus Master DMA & Polling RX)                  |
+|  net_backend_t vtable (rtl8139 | e1000e | virtio-net)              |
 +--------------------------------------------------------------------+
 ```
 
@@ -33,7 +43,17 @@ Mectov OS includes a built-in Ethernet network stack (`src/drivers/net.c` & `src
      frames linearly past 8K (v38.79; reading the tail from ring offset 0
      served stale bytes and stalled bulk TCP transfers).
 
-2. **Network Address Defaults (QEMU Slirp)**:
+2. **Intel e1000e NIC (`src/drivers/e1000e.c`)**, v38.170:
+   - PCI `8086:100E` (82540EM) / `8086:10D3` (82574) / `8086:1533`.
+   - MMIO register access, RAL/RAH MAC autoloaded from the EEPROM at reset,
+     ring-based RX/TX with `RDT` treated as exclusive.
+   - Boot order is rtl8139 then e1000e; priority decides which one the
+     protocol layer actually dispatches through.
+
+3. **virtio-net (`src/drivers/virtio_net.c`)**, v38.174 — see the section
+   below.
+
+4. **Network Address Defaults (QEMU Slirp)**:
    - **Guest IP**: `10.0.2.15`
    - **Gateway IP**: `10.0.2.2`
    - **DNS Server**: `10.0.2.3`
@@ -87,3 +107,62 @@ The slot model is now POSIX-shaped:
   set_conn/accept` in fd.c manage the descriptors; `do_sys_read`/`write`,
   `fd_poll_events` (POLLOUT = established, POLLIN = data/EOF/acceptable)
   and `fd_release_global` (close tears the conn down) are socket-aware.
+
+---
+
+## 🔌 virtio-net (v38.174)
+
+The third backend and the first paravirtual one. It shares rings with the
+hypervisor instead of emulating a card, which is what a KVM guest would
+normally boot on. `net.h`'s vtable was introduced for exactly this — the
+protocol layer above it is untouched.
+
+**Attach:**
+
+```sh
+qemu-system-i386 ... -netdev user,id=n0 \
+    -device virtio-net-pci,disable-modern=on,netdev=n0
+```
+
+`disable-modern=on` is required: the kernel targets the **legacy**
+(transitional) virtio-pci interface — one I/O BAR, PIO registers, no MSI-X —
+for the same reason virtio-blk does (`src/include/virtio.h`). Modern-only
+devices (`0x1040+`) are skipped by the probe.
+
+**Transport**, mirroring `vblk_hw_init()` in `src/drivers/virtio_blk.c`:
+BAR0 must be an I/O BAR; enable I/O + bus master; status handshake
+(`ACK` → `DRIVER` → `FEATURES_OK` → `DRIVER_OK`); negotiate a minimal feature
+set (**MAC only**); lay out each ring from the device's own `QueueNum`
+(legacy has no size register — the device derives every ring address from the
+size it reports); publish it with `QUEUE_PFN`.
+
+**Two virtqueues** (§5.1.2): `0` = receiveq, `1` = transmitq. Each needs its
+own page-aligned ring block, because `QUEUE_PFN` is a frame number.
+
+**The 10-byte header is the bring-up landmine.** Every buffer in both
+directions begins with `virtio_net_hdr_t`:
+
+- TX descriptor length is `VNET_HDR_SIZE + frame_len`, not `frame_len`.
+- The RX used-ring length **includes** the header, so the Ethernet frame
+  starts at `buf + VNET_HDR_SIZE`.
+
+It is 10 bytes and not 12 because the driver negotiates neither
+`VIRTIO_NET_F_MRG_RXBUF` (which would append a 16-bit `num_buffers`) nor
+`VIRTIO_F_VERSION_1`. Negotiating either would silently shift every frame by
+two bytes.
+
+**Poll-only.** `avail.flags = VIRTQ_AVAIL_F_NO_INTERRUPT` keeps the device
+from raising INTx, and `net_poll()` drains up to four frames per call from the
+main loop through `net_backend->poll_rx()` — the same path rtl8139 and e1000e
+use as a fallback. **No IRQ is wired**; RX latency therefore follows how often
+`net_poll()` runs. If that ever proves too slow, the fix is to route the
+device's IRQ into `net_irq_handler`, not to change this design.
+
+**MAC** comes from the first 6 bytes of the legacy config space when
+`VIRTIO_NET_F_MAC` is offered (it always is under QEMU). If it is not, the
+driver synthesizes a deterministic locally-administered address rather than
+shipping `00:00:00:00:00:00`, which would make DHCP send a chaddr nobody owns.
+
+**Gates:** `scripts/dhcp_test.py --nic virtio-net` (broadcast TX, RX, ARP,
+DHCP) and `scripts/socktest.py --nic virtio-net` (TCP client, hostfwd
+PING/PONG, server accept). CI job `browser-net-virtio` runs both.

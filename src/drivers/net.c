@@ -44,13 +44,18 @@ static net_backend_t noop_backend = {
 net_backend_t* net_backend = &noop_backend;
 
 // Backend priority: a higher number wins the protocol layer's dispatch when
-// more than one NIC is alive. e1000e outranks rtl8139 so a machine with both
-// uses the Intel card; anything unknown ranks equal to rtl8139 (first wins
-// among equals, preserving the old behavior for one-NIC machines).
+// more than one NIC is alive. virtio-net outranks e1000e, which outranks
+// rtl8139: paravirtual costs no emulation, so it is the one to prefer when a
+// hypervisor offers it, and a real Intel card beats the emulated Realtek.
+// Anything unknown ranks equal to rtl8139 (first wins among equals,
+// preserving the old behavior for one-NIC machines).
+//
+// Adding virtio-net above e1000e is additive: e1000e-vs-rtl8139 is unchanged,
+// and no boot had a virtio NIC before v38.174.
 static int net_backend_priority(const char* name) {
-    if (name && name[0] == 'e' && name[1] == '1' && name[2] == '0' &&
-        name[3] == '0' && name[4] == '0' && name[5] == 'e' && name[6] == '\0')
-        return 2;
+    if (name == 0) return 1;                  // unnamed backend: lowest rank
+    if (strcmp(name, "virtio-net") == 0) return 3;
+    if (strcmp(name, "e1000e") == 0) return 2;
     return 1;
 }
 
