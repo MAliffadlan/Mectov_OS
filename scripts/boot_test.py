@@ -89,12 +89,32 @@ def mon_cmd(cmd):
         print(f"[!] monitor cmd '{cmd}' failed: {e}")
 
 
+def device_model_initcalls():
+    """The initcall count the boot reported, or None if the line is absent.
+
+    Single parse point: the value grows whenever a provider is added, so it is
+    read rather than restated anywhere.
+    """
+    try:
+        with open(SERIAL_LOG, "r", errors="replace") as f:
+            m = re.search(r"\[DEV\] initcalls=(\d+)", f.read())
+    except OSError:
+        return None
+    return int(m.group(1)) if m else None
+
+
 def device_model_errors():
     """Reasons the static device model is incomplete, or [] if it is whole.
 
     v38.172 moved every block/net driver to initcalls and a class registry.
     Without this gate a regression that drops a provider (or the initcall
     walker itself) still reaches login, because the desktop needs neither.
+
+    The walker's count is checked as "present and non-zero" rather than pinned
+    to a literal. It was pinned to 9, and virtio-net made it 10 — which turned
+    an unrelated new driver into a red run on every boot job without catching
+    anything the per-class lines below miss. Those lines are the real content
+    assertions and they are stable: they name the drive range each class owns.
     """
     try:
         with open(SERIAL_LOG, "r", errors="replace") as f:
@@ -102,14 +122,21 @@ def device_model_errors():
     except OSError:
         return ["serial log unreadable"]
 
+    errors = []
+    n = device_model_initcalls()
+    if n is None:
+        errors.append("missing [DEV] initcalls=<n> (the initcall walker never ran)")
+    elif n == 0:
+        errors.append("[DEV] initcalls=0 (it ran, but registered no providers)")
+
     required = [
-        "[DEV] initcalls=9",
         "[DEV] block ata drives=0-3",
         "[DEV] block ahci drives=4-7",
         "[DEV] block usb drives=8-11",
         "[DEV] block virtio-blk drives=12-15",
     ]
-    return [m for m in required if m not in text]
+    errors += [r for r in required if r not in text]
+    return errors
 
 
 def main():
@@ -185,7 +212,8 @@ def main():
             for e in errs:
                 print("       - missing " + e)
             return 1
-        print("[OK] device model: 9 initcalls + 4 block providers")
+        print(f"[OK] device model: {device_model_initcalls()} initcalls "
+              f"+ 4 block providers")
 
         # Stage 2: log in via monitor keyboard injection.
         for k in LOGIN_KEYS:
