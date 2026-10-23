@@ -22,7 +22,7 @@ Mectov OS is an x86 (i386) 32-bit monolithic operating system kernel written fro
 +-----------------------------------------------------------------------------+
 |  VBE Framebuffer  |  Double Buffer    |  Window Mgr    |  Desktop & Taskbar |
 +-----------------------------------------------------------------------------+
-|  RTL8139 NIC      |  Ethernet/IP/UDP  |  DNS/TCP/Proxy |  Ring 3 MCT Apps   |
+|  NIC backends     |  Ethernet/IP/UDP  |  DNS/TCP/Proxy |  Ring 3 MCT Apps   |
 +-----------------------------------------------------------------------------+
 |  PAGE_DEV Scanout |  FB_MAP/RELEASE   |  PAGE_NX W^X   |  PAE 3-level Paging|
 ```
@@ -43,7 +43,7 @@ Mectov OS is an x86 (i386) 32-bit monolithic operating system kernel written fro
    - **ACPI & APIC**: Locates RSDP/RSDT/MADT tables, maps Local APIC and I/O APIC regions, disables legacy 8259 PIC, and routes IRQs to APIC interrupts.
    - **SMP Initialization**: Executes INIT-SIPI-SIPI sequence to wake Application Processors (APs), loading per-core GDT/IDT/TSS.
    - **Interrupts & Timers**: Configures IDT gates, initializes PIT hardware timer (1000 Hz) and PS/2 Keyboard/Mouse drivers.
-   - **Networking & VFS**: Initializes ATA PIO driver, mounts Ext2/VFS virtual file system, detects PCI RTL8139 NIC, and sends ARP query to Gateway.
+   - **Networking & VFS**: Initializes ATA PIO driver, mounts Ext2/VFS virtual file system, probes the PCI NIC backends (rtl8139, e1000e, virtio-net — see [network.md](../drivers/network.md)), and sends ARP query to Gateway.
 
 3. **GUI Shell & Userland Startup**:
    - Enables interrupts (`sti`).
@@ -58,7 +58,7 @@ Mectov OS is an x86 (i386) 32-bit monolithic operating system kernel written fro
 * `kernel.c` — Main kernel entry point and initialization loop.
 * `boot.asm` — Multiboot assembly entry and stack allocation.
 * `src/sys/` — System management (GDT, IDT, Task Scheduler, VMM, PMM, ACPI, APIC, SMP, Syscalls, VFS, Ext2, FAT32, FB_MAP, device/block core).
-* `src/drivers/` — Hardware device drivers (VGA/VBE, Keyboard, Mouse, PIT Timer, RTL8139 NIC, ATA, AHCI, xHCI, SB16, Serial).
+* `src/drivers/` — Hardware device drivers (VGA/VBE, Keyboard, Mouse, PIT Timer, NIC backends: RTL8139 / e1000e / virtio-net, ATA, AHCI, xHCI, SB16, Serial).
 * `src/gui/` — Graphical user interface (Window Manager, Desktop, Taskbar, Login Screen).
 * `src/apps/` — Built-in Ring 0 & Ring 3 wrapper applications.
 * `apps/` — Userland Ring 3 executable sources (`.c`) compiled to `.mct` binaries.
@@ -71,7 +71,7 @@ Drivers register themselves through `device_register()` from a linker-section
 initcall (`INITCALL(fn, level)`), so `kernel.c` contains one
 `device_init_all()` call instead of a driver list. Levels preserve the old
 bring-up order (10 ATA DMA, 11 AHCI, 12 xHCI, 13 virtio-blk, 14 virtio-gpu,
-15 SB16, 16 rtl8139, 17 e1000e, 20 net). Boot prints `[DEV] initcalls=<n>` and
+15 SB16, 16 rtl8139, 17 e1000e, 18 virtio-net, 20 net). Boot prints `[DEV] initcalls=<n>` and
 one `[DEV] block|net <name> ...` line per registered device.
 
 Block devices register a drive range and `block_ops_t`; VFS/ext2/FAT32 call

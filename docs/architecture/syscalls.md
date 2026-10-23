@@ -46,7 +46,7 @@ Syscall handling is refactored into domain-specific sub-handlers to keep the ker
 | `21` | `SYS_WM_DRAW_PIXEL`| `syscall_gui` | Render pixel to window double buffer |
 | `22` | `SYS_WM_FLUSH` | `syscall_gui` | Present window buffer to linear VBE framebuffer |
 | `23` | `SYS_WM_GET_EVENT` | `syscall_gui` | Fetch keyboard/mouse input events for window |
-| `30` | `SYS_NET_SEND` | `syscall_net` | Transmit raw network packet via RTL8139 NIC |
+| `30` | `SYS_NET_SEND` | `syscall_net` | Transmit raw network packet via the active NIC backend (rtl8139 / e1000e / virtio-net) |
 | `31` | `SYS_NET_RECV` | `syscall_net` | Receive incoming network packet |
 | `32` | `SYS_DNS_LOOKUP` | `syscall_net` | Resolve domain name to IP address |
 | `33` | `SYS_TCP_CONNECT` | `syscall_net` | Establish TCP stream connection |

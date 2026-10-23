@@ -67,7 +67,7 @@ Justification, from the code:
 | kmalloc heap | mem.c | syscalls, loader, any kernel code | `heap_lock`, cli-first |
 | sem/futex tables | sync.c | syscalls | `sync_lock`, cli-first |
 | shared-memory segments | shm.c | syscalls | `shm_lock`, cli-first |
-| NIC TX/RX, ARP/TCP state | net.c, rtl8139.c | IRQ 43, main loop, net syscalls, shell fetch | `rtl_lock` + cli/sti wrappers |
+| NIC TX/RX, ARP/TCP state | net.c + rtl8139.c / e1000e.c / virtio_net.c | NIC IRQs, main loop (`net_poll`), net syscalls, shell fetch | `net_lock` over the shared protocol state, then the driver's own `rtl_lock` / `e1000e_lock` / `vnet_lock` — lock order is `net_lock` > driver lock. virtio-net is poll-only: no IRQ, drained by `net_poll` |
 | `win_queues[]`, `win_canvases[]` | syscall.c | main loop replay, GUI syscalls, input dispatch | `gui_canvas_lock` (irqsave) |
 | `wm_wins[]`, `wm_focused`, z-order | wm.c | main loop draw, GUI syscalls, task-exit cleanup | `wm_lock` (reentrant, NEW) |
 | `global_fds[]`, `pipes[]` | fd.c | VFS/file syscalls, fork fd-rewire, shell redirection | `fd_lock` (NEW) |

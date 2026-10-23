@@ -30,7 +30,7 @@ measurements that port produced, which are still a live to-do list.
 * **[AHCI / SATA Driver](drivers/ahci.md)** — Intel AHCI HBA (BAR5), single PRD via 64K bounce, LBA48 DMA EXT, poll PxCI; drives 4-7 on ATA API.
 * **[xHCI / USB 3.0 Driver](drivers/usb_xhci.md)** — QEMU qemu-xhci (BAR0), SuperSpeed/HS, BOT mass-storage drives 8+ on ATA API.
 * **[Ring 3 Scanout Takeover](drivers/fbmap.md)** — `SYS_FB_MAP`/`RELEASE`, `PAGE_DEV` device memory, logind-style auth, desktop suppression.
-* **[RTL8139 Network Stack](drivers/network.md)** — PCI detection, RTL8139 packet polling, Ethernet/ARP/IPv4/ICMP/UDP/DNS stack, and Host Web Proxy integration.
+* **[Network Stack](drivers/network.md)** — the `net_backend_t` vtable and its three NIC backends (RTL8139, Intel e1000e, paravirtual virtio-net), the Ethernet/ARP/IPv4/ICMP/UDP/DNS stack, DHCP, and Host Web Proxy integration.
 * **[Input & Audio Drivers](drivers/input_and_sound.md)** — PS/2 Keyboard and Mouse handlers, PC Speaker sound generation, and SB16 DAC support.
 * **[CMOS Real-Time Clock](drivers/rtc.md)** — the two-port 0x70/0x71 transaction (locked, with a UIP-bracketed burst), Status Register B's BCD/binary and 12/24-hour formats, and the two gates that cover them.
 

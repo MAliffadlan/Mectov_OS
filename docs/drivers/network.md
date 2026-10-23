@@ -47,8 +47,9 @@ Priority (`net_backend_priority()` in `src/drivers/net.c`): virtio-net 3 > e1000
    - PCI `8086:100E` (82540EM) / `8086:10D3` (82574) / `8086:1533`.
    - MMIO register access, RAL/RAH MAC autoloaded from the EEPROM at reset,
      ring-based RX/TX with `RDT` treated as exclusive.
-   - Boot order is rtl8139 then e1000e; priority decides which one the
-     protocol layer actually dispatches through.
+   - Boot order is rtl8139 (initcall 16) → e1000e (17) → virtio-net (18);
+     priority, not boot order, decides which one the protocol layer actually
+     dispatches through.
 
 3. **virtio-net (`src/drivers/virtio_net.c`)**, v38.174 — see the section
    below.
