@@ -89,6 +89,29 @@ def mon_cmd(cmd):
         print(f"[!] monitor cmd '{cmd}' failed: {e}")
 
 
+def device_model_errors():
+    """Reasons the static device model is incomplete, or [] if it is whole.
+
+    v38.172 moved every block/net driver to initcalls and a class registry.
+    Without this gate a regression that drops a provider (or the initcall
+    walker itself) still reaches login, because the desktop needs neither.
+    """
+    try:
+        with open(SERIAL_LOG, "r", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return ["serial log unreadable"]
+
+    required = [
+        "[DEV] initcalls=9",
+        "[DEV] block ata drives=0-3",
+        "[DEV] block ahci drives=4-7",
+        "[DEV] block usb drives=8-11",
+        "[DEV] block virtio-blk drives=12-15",
+    ]
+    return [m for m in required if m not in text]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timeout", type=int, default=240,
@@ -155,6 +178,14 @@ def main():
                 print("       - " + e)
             return 1
         print("[OK] frame allocator + kernel heap healthy")
+
+        errs = device_model_errors()
+        if errs:
+            print("[FAIL] device model incomplete:")
+            for e in errs:
+                print("       - missing " + e)
+            return 1
+        print("[OK] device model: 9 initcalls + 4 block providers")
 
         # Stage 2: log in via monitor keyboard injection.
         for k in LOGIN_KEYS:

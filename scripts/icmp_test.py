@@ -192,6 +192,11 @@ def main():
             return 1
         print("[OK] booted to login screen (no login needed for this test)")
 
+        if not wait_for_in_file(SERIAL_LOG, "[DEV] net rtl8139 present=1", 10):
+            print("[FAIL] the RTL8139 did not register as a NET device")
+            return 1
+        print("[OK] NIC registered as a NET device")
+
         # The static fallback marks the interface BOUND (dhcp_state), which is
         # what lets unicast frames past net_handle_ip's "for us?" gate.
         if not wait_for_in_file(SERIAL_LOG, "static config", 60):
