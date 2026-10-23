@@ -37,6 +37,7 @@ ISO = os.path.join(ROOT, "mectov.iso")
 # the CI workflow, and several suites share the workspace disk.img, so the
 # sequence is part of the contract.
 SUITES = [
+    ("ptr_trunc",        "ptr_trunc_audit.py",         30),
     ("boot",             "boot_test.py",              240),
     # Audit H6: a crafted native node table with a parent cycle made the
     # ancestor walk spin forever at boot. This suite patches a COPY of
@@ -363,8 +364,12 @@ def recreate_images():
 def run_suite(entry, index, total, verbose):
     name, script, timeout, extra, _ = entry
     log_path = os.path.join(LOG_DIR, name + ".log")
-    cmd = [sys.executable, os.path.join("scripts", script),
-           "--timeout", str(timeout)] + extra
+    # ptr_trunc_audit.py doesn't take --timeout (it's static analysis, not a QEMU test)
+    if script == "ptr_trunc_audit.py":
+        cmd = [sys.executable, os.path.join("scripts", script)] + extra
+    else:
+        cmd = [sys.executable, os.path.join("scripts", script),
+               "--timeout", str(timeout)] + extra
     print("[check] [%2d/%2d] %-16s ..." % (index, total, name), end="", flush=True)
     t0 = time.time()
     with open(log_path, "wb") as logf:
