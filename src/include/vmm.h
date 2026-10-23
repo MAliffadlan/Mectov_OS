@@ -44,11 +44,17 @@ uint32_t vmm_setup_user_stack(uint32_t page_dir, uint32_t stack_top);
 void vmm_free_address_space(uint32_t page_dir);
 
 // ---- Physical frame allocator (single source of truth) ----
-// One bitmap + refcount pair, owned by vmm.c, sized for PHYS_MAX_PAGES but
-// bounded at runtime by phys_init(total_pages) — the RAM size detected from
-// the multiboot header in kernel_main/init_mem. The old hardcoded 128MB
-// bitmap in vmm.c and the write-only mem_bitmap in mem.c are gone; every
-// physical-frame decision reads this one structure.
+// One allocator, owned by vmm.c, sized for PHYS_MAX_PAGES but bounded at
+// runtime by phys_init(total_pages) — the RAM size detected from the
+// multiboot header in kernel_main/init_mem. The old hardcoded 128MB bitmap
+// in vmm.c and the write-only mem_bitmap in mem.c are gone.
+//
+// Inside vmm.c the state is: a bitmap that records which frames are NOT on a
+// buddy free list, a per-frame order array (`frame_order[]`) that names the
+// order of each free block's head, per-order free lists, and
+// `frame_ref_count[]` for sharing (COW, SysV shm; 255 = pinned). Order-0
+// frames are served through a per-CPU cache in front of the buddy lists.
+// Callers only ever see frame_alloc()/frame_free(), which are unchanged.
 #define PHYS_MAX_PAGES (512 * 256)  // 512MB / 4KB ceiling for static bitmaps
 
 void phys_init(uint32_t total_pages);                    // called from init_mem
@@ -59,6 +65,32 @@ uint32_t phys_get_zero_page(void);                       // shared zero frame (p
 uint32_t frame_alloc(void);
 void frame_free(uint32_t paddr);
 extern uint8_t frame_ref_count[];
+
+// ---- Frame allocator statistics (/proc/meminfo) ----
+// The buddy allocator serves order-0 frames through a per-CPU cache, so the
+// interesting question at runtime is how much traffic each layer absorbs.
+// `cache_hits` counts allocations handed out of a CPU's local stock -- note
+// that a call which triggers its own refill still counts as a hit, so the
+// figure is "served locally", not "took no lock at all"; `buddy_allocs` is
+// the ones that fell through to the free lists (rare: a healthy system
+// refills in batches and then never touches them again). `refill_frames`
+// is the traffic that actually crossed the free-list boundary, and
+// `cache_frames` is how many frames the caches hold right now -- off the
+// free lists and counted as used, not lost memory. `overfree` counts
+// frame_free() calls on frames nobody owned; it should stay 0.
+typedef struct {
+    uint32_t cache_hits;    // frame_alloc served from the per-CPU cache
+    uint32_t buddy_allocs;  // frame_alloc that fell through to the buddy lists
+    uint32_t refill_frames; // frames pulled from buddy into caches
+    uint32_t cached_frees;  // frame_free parked in the per-CPU cache
+    uint32_t spilled_frees; // frame_free pushed back to the buddy lists
+    uint32_t coalesces;     // buddy blocks merged back upward
+    uint32_t oom;           // frame_alloc calls that found nothing free
+    uint32_t overfree;      // frame_free on a frame nobody owned (guarded)
+    uint32_t cache_frames;  // frames currently held across all caches
+} frame_alloc_stats_t;
+
+void phys_get_stats(frame_alloc_stats_t* out);
 
 // Map a virtual address to a physical frame in a specific address space
 // (page_dir = PDPT frame under PAE). flags is uint64 so PAGE_NX fits.

@@ -17,6 +17,7 @@
 #include "../include/spinlock.h"
 #include "../include/pcache.h"
 #include "../include/mount.h"
+#include "../include/vmm.h"      // phys_get_stats (meminfo frame-allocator line)
 #include "../include/entropy.h"   // get_random_bytes() for /dev/random
 
 // ---- Reentrant irqsave lock (kernel locking audit v38.4) ----
@@ -2978,6 +2979,42 @@ static int vfs_proc_read(const char* name, char* buf, int max_size) {
         proc_itoa(num, hs.magic_failures);
         proc_add(buf, &len, max_size, num);
         proc_add(buf, &len, max_size, " magic\n");
+        // Physical frame allocator: buddy free lists + per-CPU cache.
+        // FrameCached is memory sitting in the per-CPU stock (off the free
+        // lists but instantly reusable); FrameHit/FrameBuddy show how much
+        // traffic the local cache absorbed without touching vmm_lock.
+        {
+            frame_alloc_stats_t fs;   // declared in vmm.h, included above
+            phys_get_stats(&fs);
+            proc_add(buf, &len, max_size, "FrameCached: ");
+            proc_itoa(num, (int)fs.cache_frames);
+            proc_add(buf, &len, max_size, num);
+            proc_add(buf, &len, max_size, " frames\nFrameHit: ");
+            proc_itoa(num, (int)fs.cache_hits);
+            proc_add(buf, &len, max_size, num);
+            proc_add(buf, &len, max_size, " cache, ");
+            proc_itoa(num, (int)fs.buddy_allocs);
+            proc_add(buf, &len, max_size, num);
+            proc_add(buf, &len, max_size, " buddy, ");
+            proc_itoa(num, (int)fs.refill_frames);
+            proc_add(buf, &len, max_size, num);
+            proc_add(buf, &len, max_size, " refilled\nFrameFree: ");
+            proc_itoa(num, (int)fs.cached_frees);
+            proc_add(buf, &len, max_size, num);
+            proc_add(buf, &len, max_size, " cached, ");
+            proc_itoa(num, (int)fs.spilled_frees);
+            proc_add(buf, &len, max_size, num);
+            proc_add(buf, &len, max_size, " spilled, ");
+            proc_itoa(num, (int)fs.coalesces);
+            proc_add(buf, &len, max_size, num);
+            proc_add(buf, &len, max_size, " coalesced, ");
+            proc_itoa(num, (int)fs.oom);
+            proc_add(buf, &len, max_size, num);
+            proc_add(buf, &len, max_size, " oom, ");
+            proc_itoa(num, (int)fs.overfree);
+            proc_add(buf, &len, max_size, num);
+            proc_add(buf, &len, max_size, " over-free\n");
+        }
     } else if (strcmp(name, "cpuinfo") == 0) {
         char num[16];
         proc_add(buf, &len, max_size, "processor\t: 0\n");
