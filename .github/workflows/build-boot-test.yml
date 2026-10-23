@@ -68,6 +68,16 @@ jobs:
           make all32
           test -f myos.bin && echo "myos.bin built OK"
 
+      - name: Pointer-truncation ratchet
+        run: |
+          # ~30s, no QEMU: compiles src/**/*.c under a 64-bit flag set to
+          # surface `-Wpointer-to-int-cast` sites, then fails if the distinct
+          # count grew past the recorded baseline. Every site is correct at 32
+          # bits — the point is that a NEW one cannot land unnoticed. See
+          # docs/architecture/why-32bit.md for the categorisation of the
+          # existing ones (most are mandated by hardware or the int 0x80 ABI).
+          python3 scripts/ptr_trunc_audit.py --check
+
       - name: Build boot ISO
         run: |
           mkdir -p iso/boot/grub

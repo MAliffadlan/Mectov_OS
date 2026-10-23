@@ -4,7 +4,10 @@ Status: written 2026-10-06, when the 64-bit kernel was removed from the tree.
 
 This document replaces `x86_64_port.md`. That file was the audit and roadmap for
 the 64-bit kernel; the roadmap is dead, but the audit's central measurement is
-not — it is a live to-do list for the line that stayed.
+not — it still describes the line that stayed, and it was measured again below.
+(Audited 2026-10-23: the pointer-truncation count is not a to-do list after all —
+every site is 32-bit-correct, most are hardware-mandated, and the reason to keep
+counting is as a ratchet against new ones. See "What the port measured".)
 
 ## What the 64-bit kernel was
 
@@ -58,48 +61,59 @@ The 32-bit kernel is the one that runs, and it is the one that continues.
 ## What the port measured that still matters
 
 The port compiled every `src/**/*.c` under the 64-bit flag set and counted the
-warnings that only a 64-bit compiler can emit. Those warnings are still real on
-the 32-bit line — a cast that truncates today is a cast that corrupts memory the
-day anyone widens the type it feeds.
+warnings that only a 64-bit compiler can emit.
 
-Reproduce it (no build needed, no output written):
+**This section used to call them a to-do list. They are not one.** Audited
+2026-10-23, every site is correct at 32 bits — and the great majority are not
+oversights at all, they are what the hardware or the ABI *requires*:
+
+| cluster | sites | why 32-bit is mandatory, not a bug |
+|---|---|---|
+| `src/include/syscall.h` (inline `sys_*`) | 49 | the `int 0x80` ABI passes arguments in registers |
+| `src/sys/idt.c` | 35 | the x86 IDT gate format has 32-bit base fields |
+| `src/sys/task.c` (`esp`/`eip`) | 6 | ESP and EIP are 32-bit registers |
+| `src/sys/syscall.c` | 5 | TSS `esp0` is 32-bit; user-pointer validation |
+| `src/sys/mem.c` | 4 | `heap_panic` diagnostic arguments |
+| `src/sys/gdt.c` | 3 | GDT descriptor `base` is 32-bit by hardware format |
+| `src/drivers/sb16.c` | 2 | ISA DMA takes a **24-bit** physical address |
+| `src/drivers/smp.c` | 2 | AP trampoline parameters must live below 1 MB |
+| `gdb_stub.c`, `wm.c`, `panic.c`, `acpi.c`, `syscall_proc.c` | 7 | logging / diagnostics only |
+
+**Do not "fix" a cast in the mandated clusters by widening it to `uintptr_t`.**
+The IDT gate base, the GDT descriptor base, `esp0`, `esp`/`eip`, the ISA DMA
+address and the trampoline parameters are 32-bit *because the interface they
+feed is*, and writing 64 bits there would corrupt the structure rather than
+protect it. The remaining sites are diagnostics that print an address.
+
+So there is no live bug here, and the claim this section used to make — "a cast
+that truncates today corrupts memory the day anyone widens the type it feeds" —
+only bites if someone widens a type, which the 32-bit hardware line does not
+invite. What the count is actually good for is catching a *new*, careless
+truncation. `scripts/ptr_trunc_audit.py` does that and nothing else:
 
 ```bash
-FLAGS="-m64 -std=gnu99 -ffreestanding -O2 -march=x86-64 -mcmodel=kernel \
-       -mno-red-zone -fno-pie -fno-pic -mgeneral-regs-only"
-for f in $(git ls-files 'src/*.c'); do
-  gcc $FLAGS -Wpointer-to-int-cast -fdiagnostics-plain-output -c "$f" -o /dev/null 2>&1 |
-    grep pointer-to-int-cast
-done
+python3 scripts/ptr_trunc_audit.py          # report, and fail if the count grew
+python3 scripts/ptr_trunc_audit.py --list    # every site, path:line
+python3 scripts/ptr_trunc_audit.py --update  # print a new BASELINE line
 ```
 
-Measured on 2026-10-06, over 159 files: **632 warnings emitted, but only 112
-distinct source locations.** The gap is the inline `sys_*` wrappers in
-`src/include/syscall.h` — each one is re-reported by every translation unit that
-includes the header, so the per-file counts in a naive tally are inflated
-several times over. Count distinct `path:line`, not warnings.
+It is a **ratchet**: CI runs it in the `build` job, and it fails when the number
+of distinct sites rises above the recorded baseline. A fall is reported but does
+not fail — it is a fix, not a regression — with a note to lower the baseline so
+the next growth cannot hide in the slack.
 
-| file | distinct `-Wpointer-to-int-cast` sites |
-|---|---|
-| `src/include/syscall.h` (inline `sys_*` wrappers) | 49 |
-| `src/sys/idt.c` | 35 |
-| `src/sys/task.c` | 6 |
-| `src/sys/syscall.c` | 5 |
-| `src/sys/mem.c` | 4 |
-| `src/sys/gdt.c` | 3 |
-| `src/sys/smp.c`, `src/gui/wm.c`, `src/drivers/gdb_stub.c` | 2 each |
-| `src/sys/syscall_proc.c`, `panic.c`, `acpi.c`, `src/drivers/sb16.c` | 1 each |
+Measured 2026-10-23, over 165 files: **113 distinct sites** (696 raw warnings).
+The gap is the inline `sys_*` wrappers in `src/include/syscall.h`: each is
+re-reported by every translation unit that includes the header, so a per-file
+tally is inflated several times over. The script counts distinct `path:line`,
+never warnings, and filters the `In file included from` chains — matching those
+loosely is how a first attempt counted 388.
 
 The original audit recorded **301** on 2026-09-18, when `src/` was 149 files and
 predated the TLS engine, the Mini Browser, the FAT32 write path and the Quake III
-port. The per-file figures for `idt.c`, `mem.c`, `wm.c` and `smp.c` reproduce
-exactly; the totals grew because the code did.
-
-At 32 bits a truncating store is usually a no-op, so these are latent rather than
-live bugs — but they concentrate in exactly the structures where a truncation
-would silently become a wild pointer: `task_t`'s CR3 and page-directory fields,
-`idt`'s gate tables, and the fd and syscall argument paths. Worth an audit; not
-worth a second kernel.
+port. The 2026-10-06 pass recorded 112; the only site added since is a second one
+in `src/drivers/sb16.c`. The per-file figures for `idt.c`, `mem.c`, `wm.c` and
+`smp.c` reproduce exactly across all three passes.
 
 The port also left two pieces worth keeping as reference even without a 64-bit
 kernel: a kernel heap with magic + canary (`k64/heap64.c`) and a damage-rect
