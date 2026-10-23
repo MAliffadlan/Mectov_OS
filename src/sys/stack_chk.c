@@ -13,3 +13,11 @@ __attribute__((noreturn)) void __stack_chk_fail(void) {
     panic_finish();
     for (;;) __asm__ __volatile__("hlt");
 }
+
+// CI probe: noinline keeps the array in its own frame, and the volatile
+// writes keep the compiler from eliding the overflow. 20 bytes into a 16-byte
+// buffer overwrites the canary; the return check calls __stack_chk_fail.
+__attribute__((noinline)) void stack_chk_self_test(void) {
+    volatile char buf[16];
+    for (int i = 0; i < 20; i++) buf[i] = (char)i;
+}

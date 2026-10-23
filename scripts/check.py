@@ -210,6 +210,7 @@ SUITES = [
     ("rusthello",        "rusthello_test.py",         240),
     ("lseekfile",        "lseekfile_test.py",         240),
     ("panic",            "panic_test.py",             240),
+    ("canary",           "canary_test.py",            240),
     ("watchdog",         "watchdog_test.py",          240),
     ("watchdog_bsp",     "watchdog_bsp_test.py",      240),
     ("tlb_sd",           "tlb_sd_test.py",            240),
@@ -257,7 +258,7 @@ SUITES = [
 # tier: it needs the Terminal, so it costs minutes rather than seconds.
 QUICK = {"boot", "fork", "procfs", "jobcontrol", "fputest", "fuzz",
          "iocache", "app_smoke", "doom", "thread", "cond", "usb", "cpuid", "icmp",
-         "rtc", "rtc_decode"}
+         "rtc", "rtc_decode", "canary"}
 
 # debugfs is not needed to build the images, but scripts/doom_test.py's seed
 # pre-flight requires it (v38.161, audit F6) — list it here so a host without

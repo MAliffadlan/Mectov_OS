@@ -874,6 +874,13 @@ jobs:
           # (NMI-IPI snapshot), then reset so QEMU exits cleanly.
           python3 scripts/panic_test.py --timeout 240
 
+      - name: Stack canary + panic tail self-test (TCG)
+        run: |
+          # Boots with `canary_self_test`: a controlled 20-byte overflow into
+          # a 16-byte stack buffer must trip __stack_chk_fail, dump all 4
+          # cores, and halt. Without -fstack-protector-strong this fails.
+          python3 scripts/canary_test.py --timeout 240
+
   kvm:
     needs: build
     runs-on: ubuntu-latest

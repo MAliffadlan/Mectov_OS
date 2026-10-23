@@ -53,6 +53,11 @@ int panic_reboot_enabled(void);
 // so the in-kernel GDB stub never listens on COM2.
 int cmdline_nogdb(void);
 
+// CI self-test: when booted with `canary_self_test`, kernel_main overflows a
+// stack buffer after driver bring-up so the stack protector's panic path is
+// exercised end to end (scripts/canary_test.py).
+int cmdline_canary_self_test(void);
+
 // CI self-test: when booted with `panic_self_test`, triggers a deliberate
 // kernel panic once the desktop loop is running (so all APs are up), so the
 // panic dump + reboot path is exercised end to end. Called from the main

@@ -18,6 +18,7 @@
 #include "src/include/wm.h"
 #include "src/include/desktop.h"
 #include "src/include/taskbar.h"
+#include "src/include/stack_chk.h"
 #include "src/include/login.h"
 #include "src/include/task.h"
 #include "src/include/pci.h"
@@ -525,6 +526,11 @@ void kernel_main(uint32_t magic, uint32_t addr) {
     write_serial_string("[K] devices\n");
     extern void device_init_all(void);
     device_init_all();
+    extern int cmdline_canary_self_test(void);
+    if (cmdline_canary_self_test()) {
+        write_serial_string("[CANARY] self-test\n");
+        stack_chk_self_test();
+    }
     // init_serial already called at top of kernel_main
     write_serial_string("[K] uptime\n");
     init_uptime();

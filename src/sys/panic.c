@@ -31,6 +31,7 @@ static panic_cpu_state_t panic_states[PANIC_MAX_CORES];
 static volatile int panic_dumping = 0;
 static int panic_reboot_mode = 0;
 static int panic_self_test_mode = 0;
+static int canary_self_test_mode = 0;
 static int cmdline_nogdb_mode = 0;
 
 // ---- Boot command line ----
@@ -58,6 +59,7 @@ void panic_parse_cmdline(const char* cmd) {
     if (!cmd) return;
     if (has_word(cmd, "panic=reboot")) panic_reboot_mode = 1;
     if (has_word(cmd, "panic_self_test")) panic_self_test_mode = 1;
+    if (has_word(cmd, "canary_self_test")) canary_self_test_mode = 1;
     // nogdb (v38.53): boot with the in-kernel GDB stub disabled. The stub is
     // an unauthenticated dev backdoor over COM2 by design; this lets a
     // paranoid run (or a hardened config) turn it off entirely.
@@ -66,6 +68,7 @@ void panic_parse_cmdline(const char* cmd) {
 
 int panic_reboot_enabled(void) { return panic_reboot_mode; }
 int cmdline_nogdb(void) { return cmdline_nogdb_mode; }
+int cmdline_canary_self_test(void) { return canary_self_test_mode; }
 
 // ---- NMI handler ----
 // Registered on vector 2 (idt.c). During a panic dump it records this core's
