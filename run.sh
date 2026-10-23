@@ -248,9 +248,19 @@ esac
 #   MECTOV_DISPLAY=sdl MECTOV_Q3=1 ./run.sh
 # (passes through ./quake.sh too, which execs run.sh with the environment).
 DISPLAY_ARGS="-display ${MECTOV_DISPLAY:-gtk}"
-# NIC model (v38.170, opt-in): MECTOV_NIC=e1000e attaches the Intel e1000e
-# device (the kernel's e1000e driver probes device 0x10D3). Default rtl8139
-# keeps plain boots exactly as before.
+# NIC model (v38.170, v38.174): MECTOV_NIC=rtl8139 (default) | e1000e |
+# virtio-net. rtl8139 and e1000e use the `-net nic,model=` shorthand exactly
+# as before; virtio-net cannot, because the kernel drives the LEGACY
+# virtio-pci interface and so the device must carry disable-modern=on — and
+# the shorthand has no syntax for a device property. It therefore takes the
+# -netdev/-device form. Both forms give the same slirp 10.0.2.x network, so
+# nothing else in the launch changes.
+case "${MECTOV_NIC:-rtl8139}" in
+    virtio-net)
+        NET_ARGS="-netdev user,id=n0 -device virtio-net-pci,disable-modern=on,netdev=n0" ;;
+    *)
+        NET_ARGS="-net nic,model=${MECTOV_NIC:-rtl8139} -net user" ;;
+esac
 run_qemu() {
     qemu-system-i386 $KVM_FLAGS \
     -vga std \
@@ -259,7 +269,7 @@ run_qemu() {
     -smp "$SMP" \
     $DISPLAY_ARGS \
     $AUDIO_ARGS \
-    -net nic,model=${MECTOV_NIC:-rtl8139} -net user \
+    $NET_ARGS \
     -chardev socket,id=char0,host=127.0.0.1,port=45454,server=on,wait=off,logfile=serial_debug.log -serial chardev:char0 \
     -drive file=disk.img,format=raw,index=0,media=disk \
     -drive file=ext2.img,format=raw,index=1,media=disk \
