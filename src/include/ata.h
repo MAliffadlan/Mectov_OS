@@ -33,7 +33,6 @@ void ata_dma_irq_secondary(registers_t* r);
 // the per-sector command setup + BSY latency. `count` is clamped to
 // ATA_BATCH_MAX and never crosses the 128-sector LBA boundary. Returns 0 on
 // success, -1 on error. buf must hold count*512 bytes.
-#define ATA_BATCH_MAX 128
 int ata_read_sectors_drive(int drive, unsigned int lba, int count, unsigned char* b);
 int ata_write_sectors_drive(int drive, unsigned int lba, int count, const unsigned char* b);
 // The batch size a caller should actually hand to a multi-sector command:
