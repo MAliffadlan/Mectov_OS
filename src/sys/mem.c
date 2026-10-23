@@ -249,6 +249,14 @@ void paging_init(uint32_t fb_paddr, uint32_t fb_size) {
     // bitmap now sized from the multiboot RAM report, the fb (which sits at
     // ~4GB on QEMU, but can be lower on real hardware) must never be handed
     // out as a free frame.
+    //
+    // This is the one call site that reserves a region AFTER the allocator's
+    // free lists exist (phys_init builds them before paging runs), so
+    // phys_reserve_region() has to unlink the frames from the lists, not just
+    // mark them — it rebuilds the lists from the bitmap to do so, and pins the
+    // frames at refcount 255 so no stray frame_free() can release MMIO back
+    // into the allocator. On QEMU the fb is above RAM and the whole call is a
+    // no-op; on hardware where it lands inside RAM it is load-bearing.
     phys_reserve_region(fb_paddr, fb_size);
 
     // Map the PCI MMIO window (includes both APICs) — strongly uncached.

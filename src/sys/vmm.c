@@ -6,6 +6,7 @@
 #include "../include/acpi.h"   // smp_cpu_count / smp_lapic_ids (TLB shootdown)
 #include "../include/apic.h"   // apic_get_id / apic_send_fixed_ipi / smp_lapic_addr
 #include "../include/panic.h"  // panic_finish (tlb_self_test exit)
+#include "../include/task.h"   // task_get_cid() for per-CPU cache
 
 static spinlock_t vmm_lock = SPINLOCK_INIT;
 
@@ -26,8 +27,133 @@ static spinlock_t vmm_lock = SPINLOCK_INIT;
 // so a machine with 256MB or 512MB gets allocatable frames above 128MB.
 // ============================================================
 
-// One static bitmap for the whole system
+// ============================================================
+// Buddy Allocator for Physical Frame Management
+// ============================================================
+// Orders 0-9: 4KB (1 page) to 2MB (512 pages)
+// Free blocks tracked via doubly-linked lists, one per order.
+// Metadata stored in-place in the first 8 bytes of each free frame.
+//
+// Allocation is a constant 10-way probe of the per-order heads (the smallest
+// non-empty order wins) plus O(order) splits, so it does not scan memory at
+// all — against the old allocator's worst case of walking 131k bits. Freeing
+// coalesces eagerly: O(order) merges. The ceiling is the same order-9 block
+// the allocator can describe, so the probe never grows with RAM size.
+
+#define BUDDY_MAX_ORDER 9
+#define BUDDY_ORDERS (BUDDY_MAX_ORDER + 1)
+#define BUDDY_ALLOCATED 0xFF
+// A frame parked in a per-CPU cache. Distinct from BUDDY_ALLOCATED so a
+// second frame_free() of the same frame is detectable: the cache owns the
+// frame, no caller does. Neither value is a valid order, so the coalescing
+// guard already refuses to merge with either.
+#define BUDDY_CACHED 0xFE
+
+// Pinned frames are never released: the shared zero page, and every region
+// phys_reserve_region() kept out of the allocator (the framebuffer and any
+// other MMIO the kernel maps). refcount 255 is unreachable by the COW/shm
+// bump paths (they stop below 255), so it is a safe "do not touch" marker.
+#define FRAME_PINNED 255
+
+// Free list node stored in-place in free frames
+typedef struct buddy_node {
+    struct buddy_node* next;
+    struct buddy_node* prev;
+} buddy_node_t;
+
+// Per-order free list heads
+static buddy_node_t* buddy_free_lists[BUDDY_ORDERS];
+
+// ============================================================
+// Per-CPU Frame Cache
+// ============================================================
+// Fast path for single-frame allocation: each CPU keeps a small local stock
+// of frames so a burst (COW fault storm after fork, page-table build during
+// clone) does not take the global vmm_lock once per frame.
+//
+// Accepted trade-off: a cache is never drained, so a CPU that has ever
+// allocated holds up to PERCPU_CACHE_SIZE frames until it is asked for them
+// again. System-wide that is at most MAX_CORES x 32 frames (2MB), and it is
+// what makes the fast path lock-free. The cost is a producer/consumer split
+// (free on CPU A, allocate on CPU B): B drains the free lists while A sits on
+// stock, so B can report OOM with frames parked on A. Acceptable on this
+// kernel's guest sizes; a drain-at-idle hook or a global cached-frame cap is
+// the fix if it ever bites.
+//
+// A parked frame is NOT free. It carries BUDDY_CACHED in frame_order[] and 1
+// in frame_ref_count[], so the buddy core can neither hand it out nor
+// coalesce with it (BUDDY_CACHED is not a valid order), and it still counts
+// in phys_used_count. It is held by a CPU instead of by a caller. Only when
+// the cache overflows does a frame go back to the free lists, where
+// buddy_free_locked drops it to refcount 0 and uncounts it.
+//
+// Lock order is one-way: vmm_lock -> cache lock, never the reverse. On the
+// common paths the cache lock is dropped before vmm_lock is taken, so the
+// two are not held together at all.
+//
+// The old bitmap allocator absorbed a double frame_free() because its
+// refcount>0 test turned the second free into a no-op. That guard is kept:
+// frame_free() claims a frame by writing BUDDY_CACHED *under vmm_lock* before
+// the frame is parked, so a second free of the same frame — including one
+// racing on another core, since the claim is serialized by vmm_lock — sees
+// the marker and stops instead of parking the frame twice.
+
+#define PERCPU_CACHE_SIZE 32
+#define PERCPU_REFILL_THRESHOLD 8
+#define PERCPU_REFILL_BATCH 16
+#define PERCPU_FLUSH_KEEP (PERCPU_CACHE_SIZE / 2)
+
+typedef struct {
+    uint32_t frames[PERCPU_CACHE_SIZE];  // physical addresses
+    int count;                           // frames currently held
+    spinlock_t lock;                     // per-CPU: near-zero contention
+} percpu_frame_cache_t;
+
+static percpu_frame_cache_t percpu_caches[MAX_CORES];
+
+// Allocator statistics. The per-CPU counters live in per-CPU slots so each
+// core only ever writes its own — no atomics, no lock, no false sharing with
+// a peer's counter (the existing per-CPU patterns — watchdog heartbeats,
+// TLB shootdown acks — use the same shape). phys_get_stats() sums them.
+static uint32_t stat_cache_hits[MAX_CORES];
+static uint32_t stat_buddy_allocs[MAX_CORES];
+static uint32_t stat_refill_frames[MAX_CORES];
+static uint32_t stat_cached_frees[MAX_CORES];
+static uint32_t stat_spilled_frees[MAX_CORES];
+// These two are only ever touched under vmm_lock, so plain globals suffice.
+static uint32_t stat_coalesces;
+static uint32_t stat_oom;
+static uint32_t stat_overfree;   // frame_free() on a frame nobody owns
+
+static inline int this_cid(void) {
+    int cid = task_get_cid();
+    if (cid < 0 || cid >= MAX_CORES) cid = 0;   // clamp before AP bring-up
+    return cid;
+}
+
+// Buddy core, defined below; the per-CPU cache calls back into them.
+static uint32_t buddy_alloc_locked(void);
+static void buddy_free_locked(uint32_t paddr);
+// Free-list construction, defined below with the rest of the buddy layer.
+// phys_reserve_region() needs both, and it runs before those definitions.
+static int buddy_lists_built = 0;
+static void buddy_rebuild_lists(void);
+
+// Boot-time sanity check for the frame allocator (defined after the
+// allocator itself; called at the end of phys_init).
+static void phys_allocator_self_test(void);
+
+// Bitmap for initialization (16k bytes: one bit per frame)
 static uint8_t frame_bitmap[PHYS_MAX_PAGES / 8];
+
+// Per-frame order tracking (131k bytes: one byte per frame). A byte is
+// meaningful only when the frame is the head of a free block, where it holds
+// that block's order (0-9). Otherwise it is BUDDY_ALLOCATED (0xFF, held by a
+// caller or reserved) or BUDDY_CACHED (0xFE, parked in a per-CPU cache).
+// Interior frames of a multi-frame block keep stale values; nothing reads
+// them, because coalescing only ever inspects a block's aligned head.
+static uint8_t frame_order[PHYS_MAX_PAGES];
+
 uint8_t frame_ref_count[PHYS_MAX_PAGES];
 static uint32_t phys_total_pages = 0;   // actual RAM / 4KB, from multiboot
 // v38.100: reservation is adaptive — nominal KERNEL_RESERVED_PAGES capped at
@@ -45,9 +171,18 @@ static int vmm_initialized = 0;
 // a writable alias) and frame_free() ignores it outright.
 static uint32_t phys_zero_page = 0;
 
-// Kernel + heap region (first 48MB) is reserved; the define lives in mem.h so
-// task.c (mmap/munmap frame checks) shares the same bound.
-
+// ---- Frame bitmap: "this frame is NOT on a buddy free list" ----
+//
+// A set bit means the frame is out of the free lists — it is live, parked in
+// a per-CPU cache, or reserved (kernel region, zero page, framebuffer/MMIO).
+// A clear bit means the buddy allocator owns it and it sits on some order's
+// free list.
+//
+// This is authoritative, not advisory: phys_reserve_region() relies on it to
+// decide what still needs removing, and buddy_rebuild_lists() reconstructs
+// the free lists from it alone. So it must be maintained by the allocator:
+// buddy_alloc_locked() sets the bit, buddy_free_locked() clears it. A frame's
+// bit and its membership in a free list are always changed together.
 static void bitmap_set(int idx) {
     frame_bitmap[idx / 8] |= (1 << (idx % 8));
 }
@@ -56,6 +191,73 @@ static void bitmap_clear(int idx) {
 }
 static int bitmap_test(int idx) {
     return (frame_bitmap[idx / 8] >> (idx % 8)) & 1;
+}
+
+// ---- Buddy allocator helpers ----
+
+static inline uint32_t buddy_address(uint32_t frame_idx, int order) {
+    return frame_idx ^ (1u << order);
+}
+
+static inline int is_aligned_to_order(uint32_t frame_idx, int order) {
+    return (frame_idx & ((1u << order) - 1)) == 0;
+}
+
+static void buddy_list_add(uint32_t frame_idx, int order) {
+    uint32_t paddr = frame_idx * 4096;
+    buddy_node_t* node = (buddy_node_t*)(uintptr_t)paddr;
+
+    node->next = buddy_free_lists[order];
+    node->prev = NULL;
+
+    if (buddy_free_lists[order]) {
+        buddy_free_lists[order]->prev = node;
+    }
+    buddy_free_lists[order] = node;
+    frame_order[frame_idx] = (uint8_t)order;
+}
+
+static void buddy_list_remove(uint32_t frame_idx, int order) {
+    uint32_t paddr = frame_idx * 4096;
+    buddy_node_t* node = (buddy_node_t*)(uintptr_t)paddr;
+
+    if (node->prev) {
+        node->prev->next = node->next;
+    } else {
+        buddy_free_lists[order] = node->next;
+    }
+
+    if (node->next) {
+        node->next->prev = node->prev;
+    }
+
+    frame_order[frame_idx] = BUDDY_ALLOCATED;
+}
+
+// Initialize the buddy layer from the bitmap state phys_init has built up.
+// Called by phys_init() after the kernel reservation and zero page are
+// marked. Only frame_order[] is seeded here; the free lists themselves are
+// built by the first allocation (buddy_rebuild_lists), because linking a free
+// block writes its node pointers into the frame itself and that pass touches
+// every free page.
+//
+// That build does NOT actually wait for paging: phys_allocator_self_test()
+// allocates, and it runs at the end of phys_init. So by the time
+// paging_init() calls phys_reserve_region() for the framebuffer, the free
+// lists exist — which is exactly why phys_reserve_region() cannot rely on
+// setting a bitmap bit and must rebuild them instead.
+static void buddy_init(void) {
+    // Initialize free list heads (empty until first alloc)
+    for (int i = 0; i <= BUDDY_MAX_ORDER; i++) {
+        buddy_free_lists[i] = NULL;
+    }
+
+    // The bitmap already marks the kernel region and the zero page, so it
+    // alone tells us which frames start out free. Anything outside
+    // phys_total_pages is left BUDDY_ALLOCATED and never indexed.
+    for (uint32_t i = 0; i < phys_total_pages; i++) {
+        frame_order[i] = bitmap_test(i) ? BUDDY_ALLOCATED : 0;
+    }
 }
 
 // Called exactly once, from init_mem(), with the RAM size reported by the
@@ -144,6 +346,26 @@ void phys_init(uint32_t total_pages) {
             break;
         }
     }
+
+    // Initialize buddy allocator from current bitmap state
+    buddy_init();
+
+    // Initialize per-CPU caches
+    for (int i = 0; i < MAX_CORES; i++) {
+        percpu_caches[i].count = 0;
+        percpu_caches[i].lock = (spinlock_t)SPINLOCK_INIT;
+    }
+
+    write_serial_string("[PHYS] buddy allocator initialized (orders 0-");
+    write_serial_hex(BUDDY_MAX_ORDER);
+    write_serial_string(").\n");
+    write_serial_string("[PHYS] per-CPU caches ready: ");
+    write_serial_hex(PERCPU_CACHE_SIZE);
+    write_serial_string(" frames x ");
+    write_serial_hex(MAX_CORES);
+    write_serial_string(" CPUs.\n");
+
+    phys_allocator_self_test();
 }
 
 // The shared zero page (0 if the allocator could not reserve one).
@@ -159,6 +381,15 @@ uint32_t phys_reserved_bytes(void) { return phys_reserved_pages * 4096u; }
 // Mark a physical region (e.g. the framebuffer, MMIO) as in use so the
 // allocator never hands it out. Called from paging_init() with the framebuffer
 // address/size once they are known. Safe to call before/after phys_init.
+//
+// This runs AFTER phys_init has already built the free lists (the boot
+// self-test forces the first allocation), so setting the bitmap bit is not
+// enough on its own: the frames may still be linked inside free blocks, and
+// the reservation starts at an arbitrary frame that can sit in the MIDDLE of
+// a coalesced block whose head carries the order. frame_order[] cannot
+// describe such an interior frame, so rather than trying to unlink it, the
+// free lists are rebuilt from the bitmap — the one structure that is
+// authoritative for every frame. The cost is O(frames), paid once, at boot.
 void phys_reserve_region(uint32_t start, uint32_t len) {
     if (start == 0 || len == 0) return;
     uint32_t eflags;
@@ -167,10 +398,24 @@ void phys_reserve_region(uint32_t start, uint32_t len) {
     uint32_t first = start / 4096;
     uint32_t last = (start + len + 4095) / 4096;
     if (last > phys_total_pages) last = phys_total_pages;
+    int stole_from_free = 0;
     for (uint32_t i = first; i < last; i++) {
-        if (frame_ref_count[i] == 0) phys_used_count++;  // overlapping reserves count once
+        if (!bitmap_test(i)) {
+            // Was on a buddy free list until now, so it moves into "used".
+            // A frame already reserved stays counted once.
+            phys_used_count++;
+            stole_from_free = 1;
+        }
         bitmap_set(i);
-        frame_ref_count[i] = 1;
+        // Pinned: the framebuffer/MMIO must never be releasable by a stray
+        // frame_free(), which would put it into a cache and hand it to a
+        // process as ordinary writable memory.
+        frame_ref_count[i] = FRAME_PINNED;
+    }
+    // Only needed if the lists exist; if they are built later, the bitmap
+    // already excludes these frames.
+    if (stole_from_free && buddy_lists_built) {
+        buddy_rebuild_lists();
     }
     spin_unlock(&vmm_lock);
     __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
@@ -210,45 +455,672 @@ void vmm_init(void) {
 void vmm_lock_acquire_irq(void) { spin_lock(&vmm_lock); }
 void vmm_lock_release_irq(void) { spin_unlock(&vmm_lock); }
 
-uint32_t frame_alloc(void) {
+// Rebuild every free list from scratch, using the bitmap as the authority on
+// what is free. Every free frame becomes its own order-0 block, so this
+// necessarily discards any coalescing done so far — that is the price of
+// being able to reserve an arbitrary frame range after the lists exist
+// (phys_reserve_region), and it is paid once, at boot.
+//
+// Caller must hold vmm_lock.
+static void buddy_rebuild_lists(void) {
+    for (int o = 0; o <= BUDDY_MAX_ORDER; o++) {
+        buddy_free_lists[o] = NULL;
+    }
+    for (uint32_t i = phys_reserved_pages; i < phys_total_pages; i++) {
+        if (!bitmap_test(i)) {
+            buddy_list_add(i, 0);
+        }
+    }
+    buddy_lists_built = 1;
+}
+
+// Buddy allocator core (called by cache refill and fallback path)
+// Caller must hold vmm_lock
+static uint32_t buddy_alloc_locked(void) {
+    // Lazy build on the first allocation; see buddy_init for why this is
+    // deferred rather than done up front.
+    if (!buddy_lists_built) {
+        buddy_rebuild_lists();
+    }
+
+    // Always allocate order-0 (single 4KB frame)
+    int order = 0;
+
+    // Find smallest available block >= order
+    int current_order = order;
+    while (current_order <= BUDDY_MAX_ORDER && !buddy_free_lists[current_order]) {
+        current_order++;
+    }
+
+    // Out of memory. Not counted here: frame_alloc() probes twice (cache
+    // refill, then this direct call) and counts the failure once at the call
+    // site, so a single exhausted allocation does not read as two.
+    if (current_order > BUDDY_MAX_ORDER) {
+        return 0;
+    }
+
+    // Remove block from free list
+    uint32_t frame_idx = ((uintptr_t)buddy_free_lists[current_order]) / 4096;
+    buddy_list_remove(frame_idx, current_order);
+
+    // Split larger blocks down to requested order
+    while (current_order > order) {
+        current_order--;
+        uint32_t buddy_idx = frame_idx + (1u << current_order);
+        buddy_list_add(buddy_idx, current_order);
+    }
+
+    // Out of the free lists (buddy_list_remove already set frame_order) and
+    // counted as used: the frame is going into a cache or straight to a
+    // caller, and either way it is off the free lists. A frame parked in a
+    // cache is therefore "used" for as long as it sits there, which is what
+    // /proc/meminfo's FrameCached explains.
+    bitmap_set(frame_idx);
+    frame_ref_count[frame_idx] = 1;
+    phys_used_count++;
+
+    return frame_idx * 4096;
+}
+
+// ============================================================
+// Per-CPU Cache Operations
+// ============================================================
+// See the lock-order note above the cache structure. Every critical section
+// here holds only the cache lock and calls nothing that could take another
+// lock; the refill and spill paths explicitly drop it before touching
+// vmm_lock.
+
+static inline percpu_frame_cache_t* this_cpu_cache(void) {
+    return &percpu_caches[this_cid()];
+}
+
+// Pull a batch of order-0 frames out of the buddy allocator into `out`.
+// Returns how many were obtained. Acquires vmm_lock; the cache lock must
+// NOT be held by the caller.
+static int percpu_fetch_batch(uint32_t* out, int want) {
+    int n = 0;
     uint32_t eflags;
     __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
     spin_lock(&vmm_lock);
-    for (uint32_t i = phys_reserved_pages; i < phys_total_pages; i++) {
-        if (!bitmap_test(i)) {
-            bitmap_set(i);
-            frame_ref_count[i] = 1;
-            phys_used_count++;
-            spin_unlock(&vmm_lock);
-            __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
-            return (uint32_t)i * 4096;
-        }
+    for (int i = 0; i < want; i++) {
+        uint32_t paddr = buddy_alloc_locked();
+        if (paddr == 0) break;
+        out[n++] = paddr;
     }
     spin_unlock(&vmm_lock);
     __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
-    write_serial_string("[VMM] OUT OF PHYSICAL FRAMES!\n");
-    return 0;
+    stat_refill_frames[this_cid()] += (uint32_t)n;
+    return n;
 }
 
-void frame_free(uint32_t paddr) {
-    if (paddr == 0) return;
-    if (paddr == phys_zero_page) return;  // pinned shared zero page, never freed
-    uint32_t eflags;
-    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+// Top the cache up when it runs low. Called with the cache lock held;
+// drops it for the duration of the buddy refill so the two locks are
+// never nested in the wrong order, then re-acquires it. On return the
+// cache lock IS held and `*eflags` holds the state to restore.
+//
+// Every frame pulled from the buddy lands in exactly one place: either
+// the cache or back in the buddy free lists. Nothing is ever dropped on
+// the floor and nothing is ever counted twice.
+static void percpu_cache_refill(percpu_frame_cache_t* cache, uint32_t* eflags) {
+    if (cache->count >= PERCPU_REFILL_THRESHOLD) return;   // still stocked
+
+    // Drop the cache lock before touching vmm_lock (one-way lock order).
+    spin_unlock_irqrestore(&cache->lock, *eflags);
+
+    uint32_t batch[PERCPU_REFILL_BATCH];
+    int got = percpu_fetch_batch(batch, PERCPU_REFILL_BATCH);
+
+    // Sort the batch: what fits stays, the rest goes back. The cache can
+    // only be full here if another core shares this cache (LAPIC ids are
+    // masked to MAX_CORES, so that needs more cores than the mask holds).
+    uint32_t surplus[PERCPU_REFILL_BATCH];
+    int dropped = 0;
+
+    *eflags = spin_lock_irqsave(&cache->lock);
+    for (int i = 0; i < got; i++) {
+        if (cache->count < PERCPU_CACHE_SIZE) {
+            cache->frames[cache->count++] = batch[i];
+        } else {
+            surplus[dropped++] = batch[i];
+        }
+    }
+    spin_unlock_irqrestore(&cache->lock, *eflags);
+
+    if (dropped > 0) {
+        uint32_t vflags;
+        __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(vflags));
+        spin_lock(&vmm_lock);
+        for (int i = 0; i < dropped; i++) buddy_free_locked(surplus[i]);
+        spin_unlock(&vmm_lock);
+        __asm__ __volatile__("push %0; popfl" : : "r"(vflags));
+    }
+
+    // The caller (percpu_cache_alloc) expects the cache lock held on return.
+    *eflags = spin_lock_irqsave(&cache->lock);
+}
+
+// Fast path: hand out one frame from this CPU's cache. Returns 0 only
+// when the buddy allocator is genuinely out of memory.
+static uint32_t percpu_cache_alloc(void) {
+    percpu_frame_cache_t* cache = this_cpu_cache();
+    uint32_t eflags = spin_lock_irqsave(&cache->lock);
+
+    if (cache->count < PERCPU_REFILL_THRESHOLD) {
+        percpu_cache_refill(cache, &eflags);   // lock still held on return
+    }
+
+    uint32_t paddr = 0;
+    if (cache->count > 0) {
+        paddr = cache->frames[--cache->count];
+        stat_cache_hits[this_cid()]++;
+        // Back in a caller's hands: no longer parked. This byte is what
+        // lets a stray frame_free() tell "owned by a caller" from "sitting
+        // in a cache" without taking vmm_lock here — the whole point of the
+        // cache. Safe without a lock because a parked frame has exactly one
+        // owner (this cache), and nothing else writes this byte meanwhile.
+        frame_order[paddr / 4096] = BUDDY_ALLOCATED;
+    }
+
+    spin_unlock_irqrestore(&cache->lock, eflags);
+    return paddr;
+}
+
+// Push a frame back into this CPU's cache. When the cache is full, half
+// of it (plus this frame) is handed back to the buddy allocator in one
+// critical section, so a steady free stream costs one vmm_lock per ~16
+// frees instead of one per free.
+static void percpu_cache_free(uint32_t paddr) {
+    percpu_frame_cache_t* cache = this_cpu_cache();
+    uint32_t eflags = spin_lock_irqsave(&cache->lock);
+
+    if (cache->count < PERCPU_CACHE_SIZE) {
+        cache->frames[cache->count++] = paddr;
+        // Marked parked so a stray frame_free() of this paddr is seen as an
+        // over-free rather than treating the frame as caller-owned.
+        frame_order[paddr / 4096] = BUDDY_CACHED;
+        stat_cached_frees[this_cid()]++;
+        spin_unlock_irqrestore(&cache->lock, eflags);
+        return;
+    }
+
+    // Full: spill the tail of the cache (keeping half) plus this frame.
+    uint32_t spill[PERCPU_CACHE_SIZE + 1];
+    int n = 0;
+    while (cache->count > PERCPU_FLUSH_KEEP) {
+        spill[n++] = cache->frames[--cache->count];
+    }
+    spill[n++] = paddr;
+    stat_spilled_frees[this_cid()] += (uint32_t)n;
+    spin_unlock_irqrestore(&cache->lock, eflags);
+
+    uint32_t vflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(vflags));
     spin_lock(&vmm_lock);
-    uint32_t idx = paddr / 4096;
-    if (idx >= phys_reserved_pages && idx < phys_total_pages) {
-        if (frame_ref_count[idx] > 0) {
-            frame_ref_count[idx]--;
-            if (frame_ref_count[idx] == 0) {
-                bitmap_clear(idx);
-                phys_used_count--;
+    for (int i = 0; i < n; i++) buddy_free_locked(spill[i]);
+    spin_unlock(&vmm_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(vflags));
+}
+
+// Boot-time self-test for the frame allocator.
+//
+// The failure this guards against is silent: if the buddy bookkeeping is
+// wrong, the same frame can be handed to two owners and the corruption only
+// surfaces later as a random kernel crash. Counting "did we allocate
+// something" proves nothing, so the test checks the property that actually
+// rules double-ownership out:
+//
+//   The free lists are a PARTITION of exactly the frames the bitmap calls
+//   free — every free frame is on exactly one list, at the head of a block
+//   aligned to that list's order and carrying that order, no frame appears
+//   twice, and no free-listed frame overlaps a live/cached/reserved one.
+//
+// A wrong merge, an unlinked frame, or a frame left in a cache AND on a free
+// list all break that partition, so one scan catches all three. A second
+// scan after the stress below verifies it still holds once the allocator has
+// split, merged, parked and spilled real traffic.
+//
+// Runs before paging_init, so every frame address is a direct physical
+// access; nothing here dereferences a frame's contents.
+#define SELFTEST_CHURN 128
+
+// Scratch for the partition scan: bit set = frame seen on a free list.
+// BSS, not stack — 16KB would not fit an early-boot frame.
+static uint8_t selftest_seen[PHYS_MAX_PAGES / 8];
+
+static void selftest_fail(const char* what) {
+    write_serial_string("[PHYS] selftest FAIL: ");
+    write_serial_string(what);
+    write_serial_string("\n");
+}
+
+// Walk every free list and confirm it partitions the bitmap's free set.
+// Returns NULL when the invariant holds, else a description of what broke.
+// Caller must hold vmm_lock (or be single-threaded, as at boot).
+static const char* selftest_check_partition(void) {
+    memset(selftest_seen, 0, sizeof(selftest_seen));
+    uint32_t scanned = 0;
+
+    for (int order = 0; order <= BUDDY_MAX_ORDER; order++) {
+        for (buddy_node_t* n = buddy_free_lists[order]; n != NULL; n = n->next) {
+            // A corrupted list can point at itself; cap the walk so a bug
+            // reports instead of hanging the boot.
+            if (++scanned > phys_total_pages) return "free list too long";
+
+            uint32_t head = (uint32_t)((uintptr_t)n / 4096);
+            if (head < phys_reserved_pages || head >= phys_total_pages)
+                return "block head outside RAM";
+            if ((uint32_t)frame_order[head] != (uint32_t)order)
+                return "block head has wrong order";
+            if (!is_aligned_to_order(head, order))
+                return "block head not aligned to its order";
+
+            for (uint32_t k = 0; k < (1u << order); k++) {
+                uint32_t f = head + k;
+                if (f >= phys_total_pages) return "block runs past RAM";
+                if (bitmap_test(f)) return "free-listed frame marked used";
+                if ((selftest_seen[f / 8] >> (f % 8)) & 1)
+                    return "frame is on two free lists";
+                selftest_seen[f / 8] |= (uint8_t)(1 << (f % 8));
             }
         }
     }
+
+    // Anything the bitmap calls free must have been found on a list.
+    for (uint32_t f = phys_reserved_pages; f < phys_total_pages; f++) {
+        int on_list = (selftest_seen[f / 8] >> (f % 8)) & 1;
+        if (!on_list && !bitmap_test(f)) return "free frame on no list";
+    }
+    return NULL;
+}
+
+// Push every parked frame back into the buddy free lists, so the used-frame
+// count can be compared exactly instead of within a cache's worth of slack.
+static void selftest_flush_caches(void) {
+    for (int c = 0; c < MAX_CORES; c++) {
+        percpu_frame_cache_t* cache = &percpu_caches[c];
+        uint32_t frames[PERCPU_CACHE_SIZE];
+        uint32_t eflags = spin_lock_irqsave(&cache->lock);
+        int n = cache->count;
+        for (int i = 0; i < n; i++) frames[i] = cache->frames[i];
+        cache->count = 0;
+        spin_unlock_irqrestore(&cache->lock, eflags);
+        if (n == 0) continue;
+
+        // Counted as spilled so the stats ledger stays complete: these
+        // frames left a cache for the free lists, exactly what that counter
+        // means. Without this, the boot test would silently unbalance the
+        // counters and every later reconciliation would be off by a constant.
+        stat_spilled_frees[this_cid()] += (uint32_t)n;
+
+        uint32_t vflags;
+        __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(vflags));
+        spin_lock(&vmm_lock);
+        for (int i = 0; i < n; i++) buddy_free_locked(frames[i]);
+        spin_unlock(&vmm_lock);
+        __asm__ __volatile__("push %0; popfl" : : "r"(vflags));
+    }
+}
+
+static void phys_allocator_self_test(void) {
+    // --- 1. Fast path: distinct frames, free then reuse ----------------
+    uint32_t a = frame_alloc();
+    uint32_t b = frame_alloc();
+    if (a == 0 || b == 0 || a == b) {
+        selftest_fail("alloc returned bad frames");
+        return;
+    }
+    frame_free(b);
+    uint32_t c = frame_alloc();
+    if (c == a) {
+        selftest_fail("handed out a live frame");
+        return;
+    }
+    frame_free(a);
+    frame_free(c);
+
+    // --- 2. Over-free must be inert, not corrupting --------------------
+    // Freeing a frame nobody owns used to be a no-op; it must stay one, or
+    // the frame ends up parked twice and goes to two callers.
+    //
+    // Note on the accounting being asserted here: a parked frame is already
+    // counted as used (it was counted when the refill pulled it off the free
+    // list), so parking, and the next hand-out from the cache, move a frame
+    // between "live" and "parked" without moving phys_used_count at all. The
+    // count only changes when a frame crosses the free-list boundary. So the
+    // over-free must leave it exactly where it was.
+    uint32_t used_before_probe = phys_get_used_pages();
+    uint32_t d = frame_alloc();
+    if (d == 0) {
+        selftest_fail("alloc failed before over-free probe");
+        return;
+    }
+    frame_free(d);                 // parked: count unchanged
+    uint32_t overfree_before = stat_overfree;
+    frame_free(d);                 // second free: must do nothing
+    uint32_t overfree_after = stat_overfree;
+    if (overfree_after != overfree_before + 1) {
+        selftest_fail("double free was not detected");
+        return;
+    }
+    if (phys_get_used_pages() != used_before_probe) {
+        selftest_fail("double free moved the used count");
+        return;
+    }
+    // If the over-free had parked d a second time, the cache would hold two
+    // copies of it and these two pops would both return d. (One of them
+    // legitimately IS d: the cache is LIFO and d was just parked.)
+    uint32_t e = frame_alloc();
+    uint32_t f = frame_alloc();
+    if (e == 0 || f == 0 || e == f) {
+        selftest_fail("over-free put a frame into circulation twice");
+        return;
+    }
+    frame_free(e);
+    frame_free(f);
+
+    // --- 3. Churn: no frame may ever be handed out twice ---------------
+    // Flush first so the baseline below has an empty cache and the final
+    // comparison can be exact rather than within one cache's worth of slack.
+    selftest_flush_caches();
+    uint32_t used_before = phys_get_used_pages();
+
+    static uint32_t batch[SELFTEST_CHURN];
+    for (int i = 0; i < SELFTEST_CHURN; i++) {
+        batch[i] = frame_alloc();
+        if (batch[i] == 0) {
+            selftest_fail("churn alloc failed");
+            return;
+        }
+        for (int j = 0; j < i; j++) {
+            if (batch[i] == batch[j]) {
+                selftest_fail("duplicate frame handed out");
+                return;
+            }
+        }
+    }
+
+    // Partition must hold with 128 frames live.
+    const char* bad = selftest_check_partition();
+    if (bad) {
+        selftest_fail(bad);
+        return;
+    }
+
+    for (int i = 0; i < SELFTEST_CHURN; i++) frame_free(batch[i]);
+
+    // Every frame is back on a free list once the caches are flushed, so the
+    // used count must return EXACTLY to the post-flush baseline. A leak of a
+    // single frame shows up now; the old check allowed a whole cache.
+    selftest_flush_caches();
+    uint32_t used_after = phys_get_used_pages();
+    if (used_after != used_before) {
+        write_serial_string("[PHYS] selftest FAIL: frames leaked, used ");
+        write_serial_hex(used_before);
+        write_serial_string(" -> ");
+        write_serial_hex(used_after);
+        write_serial_string("\n");
+        return;
+    }
+
+    bad = selftest_check_partition();
+    if (bad) {
+        selftest_fail(bad);
+        return;
+    }
+
+    // --- 4. Buddy layer: coalescing must produce real high-order blocks --
+    // Driven directly, so the frees reach the free lists instead of being
+    // absorbed by a cache. Allocate an aligned run, free it, and require
+    // that a block of at least the run's order reappears: the merge guard
+    // is what makes that possible, and nothing weaker tests it.
+    const int N = 4;                        // 16 frames = 64KB
+    uint32_t run[1 << N];
+    uint32_t vflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(vflags));
+    spin_lock(&vmm_lock);
+
+    uint32_t coalesces_before = stat_coalesces;
+    int got = 0;
+    for (int i = 0; i < (1 << N); i++) {
+        run[i] = buddy_alloc_locked();
+        if (run[i] == 0) break;
+        got++;
+    }
+    for (int i = 0; i < got; i++) buddy_free_locked(run[i]);
+    uint32_t coalesces_delta = stat_coalesces - coalesces_before;
+    uint32_t still_serves = buddy_alloc_locked();
+    if (still_serves) buddy_free_locked(still_serves);
+
+    // Did a high-order block actually come back? Only possible via merging.
+    int max_order = -1;
+    for (int o = BUDDY_MAX_ORDER; o >= 0; o--) {
+        if (buddy_free_lists[o]) { max_order = o; break; }
+    }
+    const char* bad2 = selftest_check_partition();
+    spin_unlock(&vmm_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(vflags));
+
+    if (got < (1 << N)) {
+        selftest_fail("buddy alloc exhausted during run test");
+        return;
+    }
+    if (still_serves == 0) {
+        selftest_fail("buddy empty after freeing the run");
+        return;
+    }
+    if (bad2) {
+        selftest_fail(bad2);
+        return;
+    }
+
+    frame_alloc_stats_t st;
+    phys_get_stats(&st);
+    if (max_order < 1) {
+        // The run need not land aligned, so this is not proof of a bug --
+        // but it does mean this boot exercised no merge at all, and saying
+        // "PASS" would overstate what was checked.
+        write_serial_string("[PHYS] selftest PASS, coalesce unproven\n");
+        return;
+    }
+    write_serial_string("[PHYS] selftest PASS (partition ok, max order ");
+    write_serial_hex((uint32_t)max_order);
+    write_serial_string(", ");
+    write_serial_hex(coalesces_delta);
+    write_serial_string(" merges, ");
+    write_serial_hex(st.overfree);
+    write_serial_string(" over-free caught)\n");
+}
+
+uint32_t frame_alloc(void) {
+    // Fast path: try per-CPU cache first
+    uint32_t paddr = percpu_cache_alloc();
+    if (paddr != 0) return paddr;
+
+    // Slow path: allocate directly from buddy (cache was empty and refill failed)
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&vmm_lock);
+
+    paddr = buddy_alloc_locked();
+    if (paddr != 0) {
+        stat_buddy_allocs[this_cid()]++;
+        // This frame bypasses the cache, so it is handed straight to the
+        // caller: live from here (buddy_alloc_locked already counted it).
+    } else {
+        // The cache refill already probed the free lists and came up empty,
+        // so this second probe failing means the system is genuinely out of
+        // frames. Counted here, once per failed frame_alloc() call, rather
+        // than inside buddy_alloc_locked where the two probes would each
+        // bump it.
+        stat_oom++;
+        write_serial_string("[VMM] OUT OF PHYSICAL FRAMES!\n");
+    }
+
+    spin_unlock(&vmm_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+
+    return paddr;
+}
+
+// Return a released frame to the free lists and merge it as far up as its
+// buddies allow. Callers: percpu_cache_free's spill path (the cache was
+// full), percpu_cache_refill's surplus path (a refill overshot), and
+// selftest_flush_caches. Caller must hold vmm_lock.
+static void buddy_free_locked(uint32_t paddr) {
+    uint32_t idx = paddr / 4096;
+
+    // Bounds check
+    if (idx < phys_reserved_pages || idx >= phys_total_pages) {
+        return;
+    }
+
+    // Only reached on frames the caller has already disowned: frame_free()
+    // dropped the last reference (leaving refcount 1 while the frame sat in
+    // a cache), or a refill surplus is being handed straight back. So this
+    // is the point where the frame stops counting as used and re-enters the
+    // free lists. Refuse anything that is not actually being released.
+    if (frame_ref_count[idx] >= FRAME_PINNED) return;
+
+    frame_ref_count[idx] = 0;
+    if (phys_used_count > 0) phys_used_count--;
+    bitmap_clear(idx);   // back on a free list from here
+
+    // Start coalescing at order 0
+    int order = 0;
+    uint32_t current_idx = idx;
+
+    // Eagerly coalesce with buddies
+    while (order < BUDDY_MAX_ORDER) {
+        uint32_t buddy_idx = buddy_address(current_idx, order);
+
+        // Merge only if the buddy really is a free block of this order.
+        // `frame_order[buddy_idx] != order` is the load-bearing test: a
+        // block head carries its own order, so anything else — including
+        // BUDDY_ALLOCATED (0xFF) and BUDDY_CACHED (0xFE), neither of which
+        // is a valid order — means "not a free block of this order".
+        if (buddy_idx < phys_reserved_pages ||
+            buddy_idx >= phys_total_pages ||
+            frame_order[buddy_idx] != order ||
+            !is_aligned_to_order(current_idx < buddy_idx ? current_idx : buddy_idx, order + 1)) {
+            break;
+        }
+
+        // Remove buddy from its free list
+        buddy_list_remove(buddy_idx, order);
+
+        // Move to lower-addressed block for next iteration
+        if (buddy_idx < current_idx) {
+            current_idx = buddy_idx;
+        }
+
+        order++;
+    }
+
+    // Add the (possibly coalesced) block to free list
+    buddy_list_add(current_idx, order);
+    stat_coalesces += (uint32_t)order;   // merges performed on the way up
+}
+
+// Snapshot the allocator counters for /proc/meminfo. Per-CPU slots are
+// summed here; a torn read of another core's counter can only ever make
+// the reported total one operation stale, which is fine for stats.
+void phys_get_stats(frame_alloc_stats_t* out) {
+    if (!out) return;
+    out->cache_hits = 0;
+    out->buddy_allocs = 0;
+    out->refill_frames = 0;
+    out->cached_frees = 0;
+    out->spilled_frees = 0;
+    out->coalesces = 0;
+    out->oom = 0;
+    out->overfree = 0;
+    out->cache_frames = 0;
+
+    for (int i = 0; i < MAX_CORES; i++) {
+        out->cache_hits += stat_cache_hits[i];
+        out->buddy_allocs += stat_buddy_allocs[i];
+        out->refill_frames += stat_refill_frames[i];
+        out->cached_frees += stat_cached_frees[i];
+        out->spilled_frees += stat_spilled_frees[i];
+        out->cache_frames += (uint32_t)percpu_caches[i].count;
+    }
+
+    // Under vmm_lock: a coherent view of the counters the buddy core owns.
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&vmm_lock);
+    out->coalesces = stat_coalesces;
+    out->oom = stat_oom;
+    out->overfree = stat_overfree;
     spin_unlock(&vmm_lock);
     __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
 }
+
+// Release one reference to a frame. Everything that decides whether the
+// frame actually leaves a caller's hands happens under vmm_lock, and the
+// decision to release is recorded (BUDDY_CACHED) before the lock is dropped:
+// that is what makes a second free of the same frame a no-op on this core,
+// and what serializes two cores racing to free the last reference.
+void frame_free(uint32_t paddr) {
+    if (paddr == 0) return;
+    if (paddr == phys_zero_page) return;  // pinned shared zero page
+
+    // Handle refcount decrement under lock (COW, SysV shm)
+    uint32_t eflags;
+    __asm__ __volatile__("pushfl; pop %0; cli" : "=r"(eflags));
+    spin_lock(&vmm_lock);
+
+    uint32_t idx = paddr / 4096;
+
+    // Bounds check
+    if (idx < phys_reserved_pages || idx >= phys_total_pages) {
+        spin_unlock(&vmm_lock);
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return;
+    }
+
+    // Nobody owns this frame: it is already parked in a cache, or its
+    // refcount already reached zero. Freeing it again would park the same
+    // frame twice and hand it to two callers. Counted, so a real over-free
+    // shows up in /proc/meminfo instead of corrupting silently.
+    if (frame_order[idx] == BUDDY_CACHED || frame_ref_count[idx] == 0) {
+        stat_overfree++;
+        spin_unlock(&vmm_lock);
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return;
+    }
+
+    // Pinned: the zero page and any phys_reserve_region() range (framebuffer,
+    // MMIO). Releasing one would put device memory into a cache and hand it
+    // to a process as ordinary writable memory.
+    if (frame_ref_count[idx] >= FRAME_PINNED) {
+        spin_unlock(&vmm_lock);
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return;
+    }
+
+    // Still shared (COW copy, SysV shm attach, fork clone): drop one
+    // reference and leave the frame in place.
+    if (frame_ref_count[idx] > 1) {
+        frame_ref_count[idx]--;
+        spin_unlock(&vmm_lock);
+        __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+        return;
+    }
+
+    // Last reference. Claim the frame here, under the lock, by marking it
+    // parked — after this point no other free() can decide the same thing
+    // about it. The refcount stays 1 and phys_used_count is untouched: a
+    // cached frame still counts as used until it is actually spilled back to
+    // the free lists (buddy_free_locked), so the bookkeeping needs no lock
+    // on the cache's fast paths.
+    frame_order[idx] = BUDDY_CACHED;
+    spin_unlock(&vmm_lock);
+    __asm__ __volatile__("push %0; popfl" : : "r"(eflags));
+
+    percpu_cache_free(paddr);
+}
+
 
 // ============================================================
 // Page directory management

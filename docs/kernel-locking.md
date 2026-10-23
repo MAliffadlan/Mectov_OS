@@ -40,6 +40,15 @@ task_lock  >  vmm_lock            (fork clones address space under task_lock)
 vmm / heap / sync / kbd / clipboard / net (rtl_lock) / shm / pcache — leaf locks
 ```
 
+`vmm_lock` and the per-CPU frame-cache locks (`percpu_caches[].lock`,
+vmm.c) are never held at the same time: every path drops the cache lock
+before taking `vmm_lock` (`percpu_cache_refill`, `percpu_cache_free`,
+`selftest_flush_caches`), so the two cannot deadlock against each other.
+Where a path touches both it takes `vmm_lock` first, making the nominal
+order `vmm_lock` > frame-cache lock. The cache lock is a leaf in every
+respect — it guards only `percpu_caches[].count` / `[] .frames[]`, and
+nothing is called while it is held.
+
 `blkcache_lock` (v38.62, blkcache.c) sits between vfs_lock and ata_lock:
 its read-miss path in the ata.c wrappers holds it across the real ATA op
 (nests blkcache_lock > ata_lock; the ATA layer serializes every transfer
@@ -63,7 +72,8 @@ Justification, from the code:
 | Structure | File | Access contexts | Protection |
 |---|---|---|---|
 | `tasks[]`, runqueues, `current_task[]` | task.c | timer IRQ (schedule), syscalls (kill/waitpid/setpgid), fork/exec | `task_lock`, cli-first |
-| frame bitmap, `frame_ref_count[]` | vmm.c | syscalls, fork/exec, **#PF handler (COW)** | `vmm_lock`; #PF reads locked via `vmm_lock_acquire_irq()` |
+| frame bitmap, `frame_order[]`, `frame_ref_count[]`, buddy free lists | vmm.c | syscalls, fork/exec, **#PF handler (COW)** | `vmm_lock`; #PF reads locked via `vmm_lock_acquire_irq()`. The bitmap is authoritative for "on a free list" and is written only together with list membership |
+| per-CPU frame cache (`percpu_caches[]`) | vmm.c | syscalls, fork/exec, #PF handler (COW) | each cache's own `lock`; `vmm_lock` is taken with the cache lock **released** (never nested) |
 | kmalloc heap | mem.c | syscalls, loader, any kernel code | `heap_lock`, cli-first |
 | sem/futex tables | sync.c | syscalls | `sync_lock`, cli-first |
 | shared-memory segments | shm.c | syscalls | `shm_lock`, cli-first |
