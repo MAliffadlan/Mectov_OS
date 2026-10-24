@@ -6,6 +6,7 @@
 #include "../include/mem.h"      // PAGE_PRESENT/PAGE_RW (the HPET MMIO map)
 #include "../include/rtc.h"
 #include "../include/serial.h"   // write_serial() (locked — multi-CPU safe)
+#include "../include/speaker.h"  // speaker_tick() (non-blocking tone deadline)
 #include "../include/entropy.h"   // entropy_add() — kernel CSPRNG feed
 #include "../include/watchdog.h"  // per-core heartbeat + hard-lockup detector
 
@@ -299,6 +300,11 @@ static void timer_handler(registers_t* regs) {
     // The counter is MILLISECONDS, not IRQ ticks (v38.80): every consumer
     // from Ring 3 timeouts to uptime keeps 1 kHz-era arithmetic unchanged.
     timer_ticks += TIMER_MS_PER_TICK;
+
+    // Switch the PC speaker off once a non-blocking tone's deadline passes.
+    // BSP-only, right after the counter advances, so the deadline comparison
+    // reads an up-to-date tick count and only one core ever touches the port.
+    speaker_tick();
 
     // AP tick insurance (v38.90): KVM's APIC-timer virtualization can lose
     // an AP's LAPIC arming when the AP programs INIT then HLTs immediately

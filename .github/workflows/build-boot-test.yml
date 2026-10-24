@@ -307,6 +307,25 @@ jobs:
           # format, pause/resume, mixer + volume round-trips, state query.
           python3 scripts/sb16_selftest.py --timeout 180
 
+      - name: PC-speaker tone deadline gate (host, no QEMU)
+        run: |
+          # Compiles the shipped src/drivers/speaker.c against a fake PIT and
+          # moves the ms clock by hand: the frequency must reach the PIT, and a
+          # — in both directions of it, where a bare `get_ticks() >=
+          # tone_off_ms` cuts the note one tick in or sounds it for ~49 days.
+          # It also reproduces an IRQ arriving between a replacement pitch and
+          # its new deadline, and checks legacy nada()/beep() cancellation.
+          python3 scripts/spk_deadline_test.py
+
+      - name: SYS_PLAY_SOUND ABI regression (TCG)
+        run: |
+          # Runs /apps/spk_test.mct. SYS_PLAY_SOUND was a branch that set
+          # eax=0 and returned — apps/snake.c, flappy.c and volume.c have been
+          # calling a no-op for their sound effects. This asserts every call
+          # now answers: 0 in range (both edges), -1 outside it, and a 3000 ms
+          # note returns immediately instead of freezing the game loop.
+          python3 scripts/spk_test.py --timeout 300
+
   gui:
     needs: build
     runs-on: ubuntu-latest

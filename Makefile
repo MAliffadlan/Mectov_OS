@@ -225,6 +225,7 @@ $(OBJ_DIR)/nxtest_mct.o \
        $(OBJ_DIR)/lseekfiledemo_mct.o \
        $(OBJ_DIR)/pollselectdemo_mct.o \
        $(OBJ_DIR)/pty_test_mct.o \
+       $(OBJ_DIR)/spk_test_mct.o \
        $(OBJ_DIR)/fat32demo_mct.o \
        $(OBJ_DIR)/wfiledemo_mct.o \
        $(OBJ_DIR)/rtc_stress_mct.o \
@@ -381,6 +382,9 @@ mplayer.mct: apps/mplayer.c $(MCT_LIBC_H)
 
 pty_test.mct: apps/pty_test.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/pty_test.c pty_test.mct
+
+spk_test.mct: apps/spk_test.c $(MCT_LIBC_H)
+	python3 scripts/build_mct.py apps/spk_test.c spk_test.mct
 
 terminal_pty.mct: apps/terminal_pty.c $(MCT_LIBC_H)
 	python3 scripts/build_mct.py apps/terminal_pty.c terminal_pty.mct
@@ -626,6 +630,9 @@ $(OBJ_DIR)/pollselectdemo_mct.o: pollselectdemo.mct | $(OBJ_DIR)
 
 $(OBJ_DIR)/pty_test_mct.o: pty_test.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 pty_test.mct $(OBJ_DIR)/pty_test_mct.o
+
+$(OBJ_DIR)/spk_test_mct.o: spk_test.mct | $(OBJ_DIR)
+	objcopy -I binary -O elf32-i386 -B i386 spk_test.mct $(OBJ_DIR)/spk_test_mct.o
 
 $(OBJ_DIR)/fat32demo_mct.o: fat32demo.mct | $(OBJ_DIR)
 	objcopy -I binary -O elf32-i386 -B i386 fat32demo.mct $(OBJ_DIR)/fat32demo_mct.o

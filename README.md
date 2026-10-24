@@ -346,7 +346,7 @@ All syscalls are invoked via `int 0x80` (trap gate). Registers: `EAX` = number, 
 |---|------|-------------|
 | 32 | SYS_PIPE | Create pipe pair. EBX=pipefd[2] |
 | 33 | SYS_GET_TIME | RTC time. EBX=rtc_time_t* |
-| 34 | SYS_PLAY_SOUND | Tone. EBX=freq, ECX=ms |
+| 34 | SYS_PLAY_SOUND | Non-blocking PC-speaker tone. EBX=freq Hz (20–20000), ECX=duration ms (0–5000) → 0 accepted, -1 refused; 0 ms is immediate silence |
 | 35 | SYS_GET_SYSINFO | Hardware + stats incl. per-core load |
 | 36–38 | SYS_GET_PCI_INFO / LIST_DIR / STAT_FILE | PCI, directory, file info |
 
