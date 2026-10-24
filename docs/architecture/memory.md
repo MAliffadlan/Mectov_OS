@@ -79,11 +79,17 @@ means no-execute.
   Two probes cover the policy, one QEMU boot each (`scripts/nxtest.py`):
   `apps/nxtest.mct` places a `ret` on its stack and `apps/mmapnx.mct` places
   one in an `mmap`'d page; each asserts the fetch fault and the SIGSEGV.
-- **Known gap (v38.164 audit)**: two other sites *intend* PAGE_NX but store
-  it in a `uint32_t`, so the assignment truncates to 0 and no NX is applied —
-  the fault-in argument page (`syscall.c`, `SYS_...FAULTIN`) and the
-  framebuffer window (`task.c`). Neither is covered by a probe. Fixing them
-  means widening those two locals to `uint64_t`.
+- **NX gaps closed (v38.164) — kept as a warning about the shape of the bug.**
+  This bullet used to record two sites that *intended* PAGE_NX but stored it in
+  a `uint32_t`, so the assignment truncated bit 63 to 0 and no NX was applied:
+  the fault-in argument page and the framebuffer window. Both are fixed — the
+  fault-in paths in `syscall.c` (heap and stack windows each) and `SYS_FB_MAP`
+  in `task.c` now build their flags as `uint64_t` with an explicit
+  `| PAGE_NX` guarded by `paging_nx_enabled()`. Both are covered by probes
+  registered in the battery (`nxtest` for the W^X policy, `fbmap` for the
+  framebuffer window). The entry stays because the failure mode is the one this
+  document exists to warn about: **a `uint32_t` local silently drops a
+  `uint64_t` flag, the mapping succeeds, and nothing logs anything.**
 - **Fork fix found during migration**: the old clone path re-allocated a
   fresh PT for every kernel-region PDE and overwrote the copy
   `vmm_create_address_space` had just made — leaking ~120 frames (≈0.5MB)
@@ -126,15 +132,24 @@ harnesses use:
   0x80000001. Both now gate on the maximum leaf first, and
   `scripts/cpuid_test.py` (CI, `boot-core`) fails if the check is removed —
   verified by reintroducing the bug and watching the suite catch it.
-- **gcc's `-fstack-protector` is not usable on this kernel.** i386 gcc
-  supports exactly one guard location, `%gs:0x14`, and `%gs` here is the
-  per-task TLS segment whose base is the user TCB — offset 0x14 lands inside
-  the app-visible scratch area (`MCT_TLS_SCRATCH_OFFSET = 16`). There is no
-  `-mstack-protector-guard=` option for i386 that avoids this. Doing it
-  properly needs a per-CPU kernel canary loaded at the three Ring 0 entry
-  points (`irq_common_stub`, `isr_common_stub`, `isr128`) — the most
-  safety-critical code in the kernel. Not attempted; the heap already carries
-  magic + canary (`sys/mem.c`), the stack does not.
+- **Stack canaries are implemented (v38.173) — this section used to say they
+  were not, and that was wrong by the time anyone read it.** The kernel C is
+  built with `-fstack-protector-strong -mstack-protector-guard=global`, so the
+  guard is a plain global (`__stack_chk_guard`, `src/sys/stack_chk.c`) instead
+  of i386 gcc's only TLS-relative guard location, `%gs:0x14` — which really is
+  unusable here, because `%gs` is this kernel's per-task TLS segment whose base
+  is the user TCB, so offset 0x14 lands in the app-visible scratch area
+  (`MCT_TLS_SCRATCH_OFFSET = 16`). `boot.asm` seeds the guard from RDTSC before
+  `kernel_main` (`stack_chk.c` carries a fixed initializer only so a loader
+  that bypasses `boot.asm` still gets one), and `__stack_chk_fail` prints
+  `[KERNEL PANIC] STACK SMASHING DETECTED` and runs the normal multi-core panic
+  tail. `stack_chk_self_test()` deliberately overruns a 16-byte buffer with 20
+  bytes to trip it, so the mechanism has a probe rather than a claim.
+  **Remaining limit:** it is ONE guard for the whole kernel — not per-task and
+  not per-CPU — so a single disclosure of the value defeats it everywhere.
+  Closing that means a per-CPU canary reloaded at the three Ring 0 entry points
+  (`irq_common_stub`, `isr_common_stub`, `isr128`), which is still not
+  attempted, and it protects return addresses only, not arbitrary corruption.
 - **Still missing**: kernel ASLR (the image is linked at a fixed 1 MB,
-  `linker.ld`), stack canaries outside the heap, SMAP, and any form of
-  page-out — exhaustion is an OOM, never a swap.
+  `linker.ld`), SMAP, and any form of page-out — exhaustion is an OOM, never a
+  swap. (Stack canaries left this list in v38.173; see above.)
