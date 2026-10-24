@@ -78,7 +78,7 @@ typedef struct {
 #define SYS_IPC_TRY_RECV   28  // EBX=qid, ECX=type_out, EDX=data_out, ESI=len_out → return 0/-1
 
 #define SYS_GET_TIME       33  // EBX=rtc_time_t* ptr
-#define SYS_PLAY_SOUND     34  // EBX=freq, ECX=duration_ms
+#define SYS_PLAY_SOUND     34  // EBX=freq Hz (20..20000), ECX=duration_ms (0..5000) -> 0 ok / -1 rejected
 #define SYS_GET_SYSINFO    35  // EBX=sysinfo_t* ptr
 #define SYS_GET_PCI_INFO   36  // EBX=pci_device_t* ptr, ECX=max_count -> returns count
 #define SYS_LIST_DIR       37  // EBX=dir_entry_t* array, ECX=max_count, EDX=parent_node -> returns count
@@ -703,8 +703,15 @@ static inline mouse_state_t sys_get_mouse(void) {
 static inline void sys_get_time(rtc_time_t* out_time) {
     __asm__ __volatile__ ("int $0x80" : : "a"(SYS_GET_TIME), "b"(out_time) : "memory");
 }
-static inline void sys_play_sound(int freq, int duration_ms) {
-    __asm__ __volatile__ ("int $0x80" : : "a"(SYS_PLAY_SOUND), "b"(freq), "c"(duration_ms) : "memory");
+// Returns the verdict, not void: the call is non-blocking and can be refused,
+// so a caller that cannot see the result cannot tell a rejected tone from a
+// played one. 0 = playing, -1 = refused (arguments out of range).
+static inline int sys_play_sound(int freq, int duration_ms) {
+    int ret;
+    __asm__ __volatile__ ("int $0x80" : "=a"(ret)
+                          : "a"(SYS_PLAY_SOUND), "b"(freq), "c"(duration_ms)
+                          : "memory");
+    return ret;
 }
 static inline void sys_set_volume(int vol) {
     __asm__ __volatile__ ("int $0x80" : : "a"(SYS_SET_VOLUME), "b"(vol) : "memory");

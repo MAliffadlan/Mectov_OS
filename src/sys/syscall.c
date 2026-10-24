@@ -678,7 +678,33 @@ static void syscall_handler(registers_t* regs) {
         }
 
         // ----- SYS_PLAY_SOUND (34) -----
+        // EBX = frequency in Hz, ECX = duration in ms, the ABI syscall.h has
+        // always documented. This branch used to be a bare `regs->eax = 0`: a
+        // syscall that advertised a working beep and did nothing at all, which
+        // is the worst of both — an app cannot tell it apart from a mute card.
+        // apps/snake.c, apps/flappy.c and apps/volume.c have been calling it
+        // for their sound effects all along, silently.
+        //
+        // It is NON-BLOCKING (speaker_tone), not the blocking nada() the shell
+        // builtins use: every caller is a game loop firing an effect and
+        // carrying on, and snake's game-over note is 500 ms — a blocking call
+        // would freeze the game for exactly that long.
+        //
+        // Out-of-range arguments are REJECTED rather than clamped, matching
+        // task_setrlimit's rule (v38.88): a caller must never observe a sound
+        // it did not ask for. The lower frequency bound is load-bearing, not
+        // cosmetic — play_sound() divides 1193180 by the frequency and stores
+        // the 16-bit quotient, so anything below ~19 Hz overflows the divisor
+        // and the PIT plays a different pitch entirely.
         case SYS_PLAY_SOUND: {
+            int32_t freq = (int32_t)regs->ebx;
+            int32_t dur  = (int32_t)regs->ecx;
+            if (freq < 20 || freq > 20000 || dur < 0 || dur > 5000) {
+                regs->eax = (uint32_t)-1;
+                break;
+            }
+            extern void speaker_tone(int freq, int duration_ms);
+            speaker_tone(freq, dur);
             regs->eax = 0;
             break;
         }

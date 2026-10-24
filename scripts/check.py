@@ -99,6 +99,17 @@ SUITES = [
     # can present binary mode, 12-hour mode and an update landing mid-burst.
     ("rtc",              "rtc_test.py",               300),
     ("rtc_decode",       "rtc_decode_test.py",         60),
+    # The PC-speaker tone (SYS_PLAY_SOUND) is also TWO gates. The guest one
+    # (spk) proves the syscall WIRING: it used to be a branch that set eax=0
+    # and nothing else, so only a Ring 3 caller can tell that the arguments
+    # now reach the driver and its verdict comes back. The host one
+    # (spk_deadline) proves what Ring 3 cannot see — that the frequency really
+    # reaches the PIT, and that the non-blocking note ends at its deadline
+    # across the 32-bit ms wrap, which needs the clock moved by hand. It also
+    # reproduces an IRQ between a replacement pitch and its deadline, and
+    # checks that legacy blocking notes cancel the previous deadline.
+    ("spk",              "spk_test.py",               300),
+    ("spk_deadline",     "spk_deadline_test.py",       60),
     # ioquake3 engine-core port (v38.99). Needs the MECTOV_Q3=1 ISO variant,
     # so it never runs in the default battery — invoke via `make check-q3`
     # (or --only q3 after building that ISO); CI has a dedicated job.
@@ -259,7 +270,7 @@ SUITES = [
 # tier: it needs the Terminal, so it costs minutes rather than seconds.
 QUICK = {"boot", "fork", "procfs", "jobcontrol", "fputest", "fuzz",
          "iocache", "app_smoke", "doom", "thread", "cond", "usb", "cpuid", "icmp",
-         "rtc", "rtc_decode", "canary"}
+         "rtc", "rtc_decode", "spk_deadline", "canary"}
 
 # debugfs is not needed to build the images, but scripts/doom_test.py's seed
 # pre-flight requires it (v38.161, audit F6) — list it here so a host without

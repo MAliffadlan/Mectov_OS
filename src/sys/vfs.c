@@ -784,6 +784,11 @@ void vfs_init() {
         extern uint8_t _binary_pty_test_mct_end[];
         changed += vfs_update_file_if_needed("apps/pty_test.mct", (const char*)_binary_pty_test_mct_start, _binary_pty_test_mct_end - _binary_pty_test_mct_start);
 
+        // SYS_PLAY_SOUND ABI test (scripts/spk_test.py)
+        extern uint8_t _binary_spk_test_mct_start[];
+        extern uint8_t _binary_spk_test_mct_end[];
+        changed += vfs_update_file_if_needed("apps/spk_test.mct", (const char*)_binary_spk_test_mct_start, _binary_spk_test_mct_end - _binary_spk_test_mct_start);
+
         // FAT32 demo app (exercises the drive-3 FAT32 filesystem)
         extern uint8_t _binary_fat32demo_mct_start[];
         extern uint8_t _binary_fat32demo_mct_end[];
@@ -1134,6 +1139,12 @@ void vfs_init() {
     extern uint8_t _binary_pty_test_mct_end[];
     vfs_create_file("apps/pty_test.mct");
     vfs_write_file("apps/pty_test.mct", (const char*)_binary_pty_test_mct_start, _binary_pty_test_mct_end - _binary_pty_test_mct_start);
+
+    // SYS_PLAY_SOUND ABI test (scripts/spk_test.py)
+    extern uint8_t _binary_spk_test_mct_start[];
+    extern uint8_t _binary_spk_test_mct_end[];
+    vfs_create_file("apps/spk_test.mct");
+    vfs_write_file("apps/spk_test.mct", (const char*)_binary_spk_test_mct_start, _binary_spk_test_mct_end - _binary_spk_test_mct_start);
 
     extern uint8_t _binary_fat32demo_mct_start[];
     extern uint8_t _binary_fat32demo_mct_end[];
